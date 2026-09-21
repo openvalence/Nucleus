@@ -113,7 +113,7 @@ def run(args):
     inst = os.urandom(8)
     sp.send_frame(ws, sp.FRAME["HELLO"], 0,
                   sp.build_hello("probe", "lag_probe.py", inst,
-                                 publishes=[(sp.CH_MOTION_INPUT, 100.0)], token=token))
+                                 publishes=[(sp.CH_MOTION_SEGMENT, 50.0) if args.segments else (sp.CH_MOTION_INPUT, 100.0)], token=token))
     welcome = None
     deadline = time.time() + 5.0
     while time.time() < deadline:
@@ -166,7 +166,12 @@ def run(args):
     sent = []   # (t_local_s, target_norm)
     rx = []     # (t_local_s, pos_mm, tgt_mm, raw_mm, t_hub_send_estimate_s)
 
-    period = 1.0 / args.rate
+    # --segments is the MFP-shaped path (0x2101): one timed segment every
+    # --seg-ms, scheduled --lookahead-ms ahead the way the plugin does, whose
+    # target is the sine at the segment's END. The "sent" series then carries
+    # the INTENDED time of each target, so sent->pos is lag against the
+    # timeline the sender meant, which is what a user compares MFP to.
+    period = (args.seg_ms / 1000.0) if args.segments else (1.0 / args.rate)
     t_start = time.time()
     t_end = t_start + args.seconds
     next_tx = t_start
@@ -175,12 +180,20 @@ def run(args):
         if now >= next_tx:
             next_tx += period
             t = now - t_start
-            target = args.center + args.amp * math.sin(2.0 * math.pi * args.freq * t)
-            vel = args.amp * 2.0 * math.pi * args.freq * math.cos(2.0 * math.pi * args.freq * t)
-            t_base = (sp.client_now_us() + offset_us) & 0xFFFFFFFF
-            sp.send_frame(ws, sp.FRAME["STREAM"], sp.CH_MOTION_INPUT,
-                          sp.encode_stream_bundle(t_base, [(0, target, vel)]))
-            sent.append((now, target))
+            if args.segments:
+                lead = (args.lookahead_ms + args.seg_ms) / 1000.0
+                target = args.center + args.amp * math.sin(2.0 * math.pi * args.freq * (t + lead))
+                t_base = (sp.client_now_us() + offset_us + int(args.lookahead_ms * 1000)) & 0xFFFFFFFF
+                sp.send_frame(ws, sp.FRAME["STREAM"], sp.CH_MOTION_SEGMENT,
+                              sp.encode_segment_bundle(t_base, [(0, target, args.seg_ms, None)]))
+                sent.append((now + lead, target))
+            else:
+                target = args.center + args.amp * math.sin(2.0 * math.pi * args.freq * t)
+                vel = args.amp * 2.0 * math.pi * args.freq * math.cos(2.0 * math.pi * args.freq * t)
+                t_base = (sp.client_now_us() + offset_us) & 0xFFFFFFFF
+                sp.send_frame(ws, sp.FRAME["STREAM"], sp.CH_MOTION_INPUT,
+                              sp.encode_stream_bundle(t_base, [(0, target, vel)]))
+                sent.append((now, target))
         # Drain whatever is waiting without blocking past the next send.
         got = sp.recv_frame(ws, min(next_tx, t_end))
         if got is None:
@@ -262,6 +275,12 @@ def main():
     ap.add_argument("--window", type=float, nargs=2, metavar=("MIN", "MAX"),
                     help="config-set the stroke window to MIN..MAX mm first, and "
                          "use its span for --span-mm")
+    ap.add_argument("--segments", action="store_true",
+                    help="drive 0x2101 timed segments the way the MFP plugin does, "
+                         "instead of 0x2100 bare points")
+    ap.add_argument("--seg-ms", type=float, default=100.0, help="segment duration, ms")
+    ap.add_argument("--lookahead-ms", type=float, default=120.0,
+                    help="schedule each segment this far ahead of now (the plugin's SegLookaheadMs)")
     ap.add_argument("--force-home", type=float, metavar="STROKE",
                     help="send home op 2 with this stroke first (RFC-025 bench op)")
     return run(ap.parse_args())
