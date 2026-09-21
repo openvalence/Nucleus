@@ -28,6 +28,8 @@ tools/*
 !tools/canon_lint.py
 # the motion acceptance instrument; val-091.4/.8 stamps cite it
 !tools/lp_leg_capture.py
+!tools/lp_scope.py
+!tools/lp_stream_capture.py
 
 # Claude Code config is COMMITTED (hooks/rules survive a clone, like
 # canon_lint). Only host/session-local state stays out.
