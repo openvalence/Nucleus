@@ -1,5 +1,5 @@
 """Capture streamed motion on the DHO4204 and compare it to the sine the probe sent.
-The instrument for val-091.11: slopsync_probe.py --stream drives 0x2100 with
+The instrument for val-091.11: valence_probe.py --stream drives 0x2100 with
 target = 0.5 + 0.35 sin(2 pi 0.8 t) over the configured window, at 50 Hz.
 This decodes the quadrature edges to a signed position, fits a sine at that
 frequency, and reports amplitude, phase, residual and edge-interval stats.

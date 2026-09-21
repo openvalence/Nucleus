@@ -1,6 +1,6 @@
 #pragma once
 
-// ValenceCatalog -- builds this device's SlopSync channel catalog (SPEC §8.1).
+// ValenceCatalog -- builds this device's Valence channel catalog (SPEC §8.1).
 //
 // Constraints:
 //   Hardware-free and library-only: nothing here may include an IDF or board
@@ -26,22 +26,25 @@
 //   changing the hub in lockstep.
 //   Wire sizes are noted per entry so a budget overrun is caught by eye;
 //   there is no packed struct to static_assert against.
-// See: SlopSync spec/AUTHORING.md ("you want X on screen -> you author Y" —
+// See: Valence spec/AUTHORING.md ("you want X on screen -> you author Y" —
 // read it BEFORE editing annotations here), SPEC.md and registry.yaml
-// (SlopSync repo), docs/slopsync/CHANNEL-MAP.md (channel id grid /
+// (Valence repo), docs/valence/CHANNEL-MAP.md (channel id grid /
 // renumber history).
+// Every SlopSyncHubService.cpp and SlopDriveHubDelegate reference below is a
+// citation of the ARCHIVED S3-era reference repo (SlopDrive-32), never a file
+// in this tree; this board's twin of that code is ValenceHub.cpp.
 
 #include <cstdint>
 
-#include "slopsync/channel/catalog.hpp"
-#include "slopsync/channel/log_channel.hpp"
-#include "slopsync/channel/safety_events_channel.hpp"
-#include "slopsync/channel/trust_channels.hpp"
+#include "valence/channel/catalog.hpp"
+#include "valence/channel/log_channel.hpp"
+#include "valence/channel/safety_events_channel.hpp"
+#include "valence/channel/trust_channels.hpp"
 
 namespace valence {
 
 // Device-catalog channel ids. The reserved 0x0001-0x0007 range is owned by
-// the registry (slopsync::channels::); everything >=0x0080 is this device's
+// the registry (valence::channels::); everything >=0x0080 is this device's
 // own allocation. Named here so buildValenceCatalog() AND the telemetry
 // publisher in SlopSyncHubService reference ONE definition — a literal in
 // only one of the two would be a silent wire mismatch.
@@ -50,7 +53,7 @@ namespace valence {
 // S=member (member 0 = family master; a twin channel across class bands
 // sharing domain+family+member is a MIRROR; family 0xF = admin/meta).
 // Per-line `(was 0xXXXX)` names the immediately preceding id — full renumber
-// history lives in docs/slopsync/CHANNEL-MAP.md's generated table, not here.
+// history lives in docs/valence/CHANNEL-MAP.md's generated table, not here.
 // A renumber moves the etag, which is the designed re-fetch mechanism, not a
 // break; 0x0080-0x7FFF is device-allocated space per the registry.
 namespace ch {
@@ -86,7 +89,7 @@ inline constexpr uint16_t sm_waveform    = 0x1122;  // STATE·motion, family 2 m
 // the planner. Family 2 is vmotion's; a drive register that happens to be
 // spelled "acceleration" is a different subsystem and gets its own writer.
 inline constexpr uint16_t drive_tune     = 0x1130;  // STATE·motion, family 3 member 0 (master)
-// ---- Advanced pattern — off the dead /api/pattern HTTP surface, onto SlopSync
+// ---- Advanced pattern — off the dead /api/pattern HTTP surface, onto Valence
 // Same flattened-entry budget split as 0x008B/C/D. AdvancedPattern.h's real
 // parameter set is 8 base controls (advpat::Settings) plus a 6-field cyclic
 // Modifier per base control (advpat::BASE_COUNT = 6), 44 settings total. A
@@ -148,7 +151,7 @@ inline constexpr uint8_t kPresetPayloadBytes = 40;
 inline constexpr uint8_t kApBaseCount = 6;
 
 // ---- motion-anomaly EVENT: the `body` (40) sub-map keys ---------------------
-// These are the CHANNEL'S OWN schema keys, exactly as slopsync::safety_body is
+// These are the CHANNEL'S OWN schema keys, exactly as valence::safety_body is
 // for 0x000E — that is the v1.0 EVENT grammar (registry key 40's own note: with
 // kind-specific fields at the TOP level, every device-authored EVENT channel
 // would need a registry PR to name its own fields). This channel is the first
@@ -250,15 +253,15 @@ inline constexpr float jerk_max   = 50000000.0f;  // MAX_JERK_MM_S3
 //
 // `feat` gates the FEATURE-DEPENDENT entries (see DeviceFeatures). It defaults
 // to all-false, so an existing call site keeps the minimal catalog.
-inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}) {
-    using slopsync::AccessLevel;
-    using slopsync::CborFieldType;
-    using slopsync::ChannelClass;
-    using slopsync::Direction;
-    using slopsync::PackedFieldType;
-    using slopsync::Priority;
-    using slopsync::SettingDefault;
-    namespace roles = slopsync::field_roles;
+inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {}) {
+    using valence::AccessLevel;
+    using valence::CborFieldType;
+    using valence::ChannelClass;
+    using valence::Direction;
+    using valence::PackedFieldType;
+    using valence::Priority;
+    using valence::SettingDefault;
+    namespace roles = valence::field_roles;
 
     c.clear();
 
@@ -274,7 +277,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     // critical-priority snapshot rather than a legacy HTTP endpoint. Written
     // via 0x0005 ops override_on/off + bypass_on/off. Append-only: bytes 0..7
     // keep their meaning and offsets exactly.
-    c.addEntry({.id = slopsync::channels::safety, .name = "safety",
+    c.addEntry({.id = valence::channels::safety, .name = "safety",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::critical});
@@ -293,7 +296,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     // ascending source order, 20 bytes total. Each pair is one arbiter source
     // (0 manual, 1 tcode, 2 pattern, 3 ossm) and the session id that owns it
     // (0 = unowned).  [20 B]
-    c.addEntry({.id = slopsync::channels::control_owner, .name = "control-owner",
+    c.addEntry({.id = valence::channels::control_owner, .name = "control-owner",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::critical});
@@ -336,7 +339,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     // one outright). Its access is `control`, the strict side, so wire value 0
     // is never the cheapest thing on this channel to reach; it NACKs
     // UNSUPPORTED_OP at the delegate regardless.
-    c.addEntry({.id = slopsync::channels::safety_intents, .name = "safety-intents",
+    c.addEntry({.id = valence::channels::safety_intents, .name = "safety-intents",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::watch, .maxRateHz = 20.0f,
                 .defaultPriority = Priority::critical});
@@ -358,7 +361,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
 
     // ---- "hub-status" — STATE, background, 1 Hz -----------------------------
     // Slow health telemetry.  [4+4+1+1 = 10 B]
-    c.addEntry({.id = slopsync::channels::hub_status, .name = "hub-status",
+    c.addEntry({.id = valence::channels::hub_status, .name = "hub-status",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
                 .defaultPriority = Priority::background});
@@ -378,7 +381,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
 
     // ---- "session-events" — EVENT, watch ------------------------------------
     // Payload keys match Hub::emitTakeoverEvent(): {1:"source", 2:"session"}.
-    c.addEntry({.id = slopsync::channels::session_events, .name = "session-events",
+    c.addEntry({.id = valence::channels::session_events, .name = "session-events",
                 .cls = ChannelClass::EVENT, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal});
@@ -397,12 +400,12 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     // (limits::log_replay_depth_default = 32) — a client that connects AFTER a
     // fault still sees what happened, which is the one sanctioned exception to
     // §9.4's no-replay rule.
-    if (!slopsync::addLogChannel(c)) return false;
+    if (!valence::addLogChannel(c)) return false;
 
     // ---- the TRUST ADMINISTRATION surface -----------------------------------
     // session-admin, pending-pairing, pairing-events, and the paired-devices
     // store + its roster, all in the canonical shapes the library declares
-    // (lib/slopsync/include/slopsync/channel/trust_channels.hpp). Declared as a
+    // (lib/valence/include/valence/channel/trust_channels.hpp). Declared as a
     // group and by the library's own builders rather than hand-authored here,
     // because these are SPEC-CORE channels: hub and client cannot negotiate
     // their shapes, so a device that re-authored them slightly differently
@@ -414,13 +417,13 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     // way to approve anything. The trust ledger's store_id (1) is discovered by
     // the hub FROM this descriptor — the catalog is self-describing, and a
     // store number is agreed by being published rather than legislated.
-    if (!slopsync::addTrustChannels(c)) return false;
+    if (!valence::addTrustChannels(c)) return false;
 
     // ---- "safety-events" — EVENT, critical, watch ---------------------------
     // The §9.4 EVENT TWIN of the safety latch (0x0003). §5.5/§11.2 require the
     // hub to emit it. Same access and priority as its STATE twin: an edge
     // nobody may be denied and nobody's may be shed.
-    if (!slopsync::addSafetyEventsChannel(c)) return false;
+    if (!valence::addSafetyEventsChannel(c)) return false;
 
     // ---- "motion" — STATE, elevated, 60 Hz ----------------------------------
     // The live carriage snapshot. scale 100 on positions = 10µm wire units;
@@ -444,8 +447,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 60.0f,
                 .defaultPriority = Priority::elevated,
-                .hasCategory = true, .category = slopsync::ui_categories::motion,
-                .hasRank = true, .rank = slopsync::ui_ranks::hero});
+                .hasCategory = true, .category = valence::ui_categories::motion,
+                .hasRank = true, .rank = valence::ui_ranks::hero});
     // PLANNED, not actual, since the RP2350 took the plan (sd-4k1.4): this is
     // the coprocessor's RENDERED position, which IS the machine's position
     // truth (docs/rp-motion-port.md). The drive encoder is its AUDITOR and
@@ -453,24 +456,24 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     c.addLayoutField({.name = "pos_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
                       .desc = "Where the carriage is, as the motion processor rendered it.",
                       .role = roles::telemetry_position,
-                      .hasRank = true, .rank = slopsync::ui_ranks::hero,
-                      .hasProvenance = true, .provenance = slopsync::value_provenance::planned,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
+                      .hasRank = true, .rank = valence::ui_ranks::hero,
+                      .hasProvenance = true, .provenance = valence::value_provenance::planned,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
     c.addLayoutField({.name = "tgt_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
                       .desc = "Where the motion planner is currently driving to.",
                       .role = roles::telemetry_target,
-                      .hasRank = true, .rank = slopsync::ui_ranks::hero,
-                      .hasProvenance = true, .provenance = slopsync::value_provenance::planned,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
+                      .hasRank = true, .rank = valence::ui_ranks::hero,
+                      .hasProvenance = true, .provenance = valence::value_provenance::planned,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
     c.addLayoutField({.name = "speed",    .type = PackedFieldType::i16, .unit = "mm/s", .scale = 10.0f,
                       .desc = "Live carriage speed; sign is the direction of travel.",
                       .role = roles::telemetry_velocity,
-                      .hasRank = true, .rank = slopsync::ui_ranks::hero,
-                      .hasProvenance = true, .provenance = slopsync::value_provenance::actual,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s});
+                      .hasRank = true, .rank = valence::ui_ranks::hero,
+                      .hasProvenance = true, .provenance = valence::value_provenance::actual,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
     c.addBitfieldField({.name = "flags", .type = PackedFieldType::bitfield8, .unit = "flag", .scale = 1.0f,
                         .desc = "Live machine mode bits.",
-                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"homed", "homing", "gen_running", "paused", "override", "estop", "stream"});
     c.addLayoutField({.name = "raw_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
                       // No registry role fits a demand-provenance position on a
@@ -480,9 +483,9 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                       // model/format.js labelFor).
                       .desc = "Asked position, as the controlling input sent it, mapped into "
                               "the stroke window before the planner shaped it.",
-                      .hasRank = true, .rank = slopsync::ui_ranks::diagnostic,
-                      .hasProvenance = true, .provenance = slopsync::value_provenance::demand,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
+                      .hasRank = true, .rank = valence::ui_ranks::diagnostic,
+                      .hasProvenance = true, .provenance = valence::value_provenance::demand,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
     };
 
     // ---- "machine-config" — STATE, normal, on-change ------------------------
@@ -512,9 +515,9 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = slopsync::ui_categories::limits,
+                .hasCategory = true, .category = valence::ui_categories::limits,
                 .hasSettingChannel = true, .settingChannel = ch::config_set,
-                .hasRank = true, .rank = slopsync::ui_ranks::control});
+                .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "window_min",  .type = PackedFieldType::f32, .unit = "mm",    .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm,
                       .dflt = SettingDefault::ofFloat(factory::window_min),
@@ -523,8 +526,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                               "mapped into the window between this and the front limit.",
                       .role = roles::window_min, .step = 1.0f,
                       .settingKey = 1, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
     c.addLayoutField({.name = "window_max",  .type = PackedFieldType::f32, .unit = "mm",    .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm,
                       .dflt = SettingDefault::ofFloat(factory::window_max),
@@ -533,8 +536,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                               "machine never moves past it.",
                       .role = roles::window_max, .step = 1.0f,
                       .settingKey = 2, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
     c.addLayoutField({.name = "user_speed",  .type = PackedFieldType::f32, .unit = "mm/s",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max,
                       .dflt = SettingDefault::ofFloat(factory::user_speed),
@@ -543,8 +546,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                               "it is a ceiling, not a target.",
                       .role = roles::limit_user_speed, .step = 1.0f,
                       .settingKey = 3, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
     c.addLayoutField({.name = "user_accel",  .type = PackedFieldType::f32, .unit = "mm/s2", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max,
                       .dflt = SettingDefault::ofFloat(factory::user_accel),
@@ -553,8 +556,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                               "feels softer at the start and end of every move.",
                       .role = roles::limit_user_accel, .step = 10.0f,
                       .settingKey = 4, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s2});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm_s2});
     c.addLayoutField({.name = "input_speed", .type = PackedFieldType::f32, .unit = "mm/s",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max,
                       .dflt = SettingDefault::ofFloat(factory::input_speed),
@@ -563,8 +566,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                               "scripts and live streams. This is your top-speed safety limit.",
                       .role = roles::limit_input_speed, .step = 10.0f,
                       .settingKey = 5, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
     c.addLayoutField({.name = "input_accel", .type = PackedFieldType::f32, .unit = "mm/s2", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max,
                       .dflt = SettingDefault::ofFloat(factory::input_accel),
@@ -573,8 +576,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                               "content, lower it if the machine feels harsh.",
                       .role = roles::limit_input_accel, .step = 100.0f,
                       .settingKey = 6, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s2});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm_s2});
     c.addLayoutField({.name = "max_rail",    .type = PackedFieldType::f32, .unit = "mm",    .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::rail_min, .max = ceiling::rail_mm,
                       .dflt = SettingDefault::ofFloat(factory::max_rail),
@@ -583,8 +586,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                               "your rail's real length (e.g. 2000mm+ for a 2m rail).",
                       .role = roles::geometry_max_travel, .step = 1.0f,
                       .settingKey = 8, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
     c.addLayoutField({.name = "input_jerk",  .type = PackedFieldType::f32, .unit = "mm/s3", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::jerk_min, .max = ceiling::jerk_max,
                       .dflt = SettingDefault::ofFloat(factory::input_jerk),
@@ -592,10 +595,10 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                       .desc = "How abruptly machine-driven motion may change its acceleration. "
                               "Protects the mechanics; it is not a smoothing knob.",
                       .role = roles::limit_input_jerk, .step = 1000.0f,
-                      .settingKey = 7, .flags = slopsync::setting_flags::advanced,
+                      .settingKey = 7, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::advanced,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s3});
+                      .hasRank = true, .rank = valence::ui_ranks::advanced,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm_s3});
     // DYNAMIC ENABLED STATE. Bit i gates the i-th SETTING-ANNOTATED field of
     // this layout, in layout order:
     //   0 window_min  1 window_max  2 user_speed  3 user_accel
@@ -611,7 +614,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                         .scale = 1.0f,
                         .desc = "Which of these settings the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"window_min", "window_max", "user_speed", "user_accel",
                         "input_speed", "input_accel", "max_rail", "input_jerk"});
     // measured_stroke (field 10, byte 33): THE REAL HOMING MEASUREMENT,
@@ -628,8 +631,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                       .desc = "Usable stroke length sensorless homing actually measured between the "
                               "two hard stops. Zero until the first successful home.",
                       .role = roles::geometry_measured_travel,
-                      .hasRank = true, .rank = slopsync::ui_ranks::detail,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
+                      .hasRank = true, .rank = valence::ui_ranks::detail,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
     };
 
     // ---- "pattern-state" — STATE, normal, on-change -------------------------
@@ -658,9 +661,9 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = slopsync::ui_categories::control,
+                .hasCategory = true, .category = valence::ui_categories::control,
                 .hasSettingChannel = true, .settingChannel = ch::pattern_cmd,
-                .hasRank = true, .rank = slopsync::ui_ranks::control});
+                .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "running",   .type = PackedFieldType::u8,  .unit = "",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofBool(false),
@@ -669,7 +672,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                               "machine.",
                       .role = roles::pattern_running,
                       .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control});
+                      .hasRank = true, .rank = valence::ui_ranks::control});
     c.addSelectField({.name = "pattern",   .type = PackedFieldType::u8,  .unit = "",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 6.0f,
                       .dflt = SettingDefault::ofInt(0),
@@ -677,7 +680,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                       .desc = "Which stroke pattern the generator plays.",
                       .role = roles::pattern_select,
                       .step = 1.0f, .settingKey = 2, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control},
+                      .hasRank = true, .rank = valence::ui_ranks::control},
                      {"Simple Stroke", "Teasing Pounding", "Robo Stroke", "Half'n'Half",
                       "Deeper", "Stop'n'Go", "Insist"});
     c.addLayoutField({.name = "speed",     .type = PackedFieldType::f32, .unit = "%", .scale = 1.0f,
@@ -688,8 +691,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                               "Bounded by the machine-driven speed limit.",
                       .role = roles::pattern_speed,
                       .step = 1.0f, .settingKey = 3, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
     c.addLayoutField({.name = "depth",     .type = PackedFieldType::f32, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(0.0f),
@@ -697,8 +700,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                       .desc = "How far into the stroke window the pattern reaches.",
                       .role = roles::pattern_depth,
                       .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
     c.addLayoutField({.name = "stroke",    .type = PackedFieldType::f32, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(0.0f),
@@ -706,8 +709,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                       .desc = "Length of each stroke, as a percentage of the available depth.",
                       .role = roles::pattern_stroke,
                       .step = 1.0f, .settingKey = 5, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
     c.addLayoutField({.name = "sensation", .type = PackedFieldType::f32, .unit = "",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(50.0f),
@@ -716,7 +719,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                               "the pattern you picked.",
                       .role = roles::pattern_sensation,
                       .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control});
+                      .hasRank = true, .rank = valence::ui_ranks::control});
     // Bit i gates the i-th setting-annotated field above:
     //   0 running  1 pattern  2 speed  3 depth  4 stroke  5 sensation
     //   6 background_run (see its own field comment for why its bit is
@@ -730,7 +733,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                         .scale = 1.0f,
                         .desc = "Which pattern controls the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"running", "pattern", "speed", "depth", "stroke", "sensation", "background_run"});
     // `source.background_run` — appended after enabled_mask, settingKey 7
     // (append-only, never inserted before an existing field). Bit 6 of the
@@ -747,7 +750,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                               "it; on leaves it running, stoppable via Stop/E-Stop.",
                       .role = roles::source_background_run,
                       .step = 1.0f, .settingKey = 7, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control});
+                      .hasRank = true, .rank = valence::ui_ranks::control});
     };
 
     // ---- "odometer" — STATE, background, 1 Hz -------------------------------
@@ -763,8 +766,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::ui_categories::system,
-                .hasRank = true, .rank = slopsync::ui_ranks::diagnostic});
+                .hasCategory = true, .category = valence::ui_categories::system,
+                .hasRank = true, .rank = valence::ui_ranks::diagnostic});
     // aspect/scope: every field here is a session-scope figure (RENDERING.md
     // §5.2 scope=session is the default, set explicitly per the honesty rule
     // — §5.4 "scope MUST always be displayed or unambiguously implied").
@@ -772,33 +775,33 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     // peak_mm_s, its companion-instrument tag (§5.4).
     c.addLayoutField({.name = "strokes",    .type = PackedFieldType::u32, .unit = "",     .scale = 1.0f,
                       .group = "Session", .desc = "Direction reversals counted this session.",
-                      .hasAspect = true, .aspect = slopsync::value_aspects::total,
-                      .hasScope = true, .scope = slopsync::value_scopes::session,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::count});
+                      .hasAspect = true, .aspect = valence::value_aspects::total,
+                      .hasScope = true, .scope = valence::value_scopes::session,
+                      .hasUnitId = true, .unitId = valence::unit_ids::count});
     c.addLayoutField({.name = "distance_m", .type = PackedFieldType::f32, .unit = "m",    .scale = 1.0f,
                       .group = "Session", .desc = "Total distance the carriage has traveled this session.",
-                      .hasAspect = true, .aspect = slopsync::value_aspects::total,
-                      .hasScope = true, .scope = slopsync::value_scopes::session});
+                      .hasAspect = true, .aspect = valence::value_aspects::total,
+                      .hasScope = true, .scope = valence::value_scopes::session});
                       // unit_id deliberately absent: unit_ids has no meters (only mm, id 0) and
                       // reporting mm here would misstate the physical unit — falls back to the
                       // "m" string label (the honest, documented unit_ids gap).
     c.addLayoutField({.name = "peak_mm_s",  .type = PackedFieldType::f32, .unit = "mm/s", .scale = 1.0f,
                       .group = "Session", .desc = "Fastest the carriage moved this session.",
-                      .hasAspect = true, .aspect = slopsync::value_aspects::peak,
-                      .hasScope = true, .scope = slopsync::value_scopes::session,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s});
+                      .hasAspect = true, .aspect = valence::value_aspects::peak,
+                      .hasScope = true, .scope = valence::value_scopes::session,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
     c.addLayoutField({.name = "energy_wh",  .type = PackedFieldType::f32, .unit = "Wh",   .scale = 1.0f,
                       .group = "Session", .desc = "Electrical energy drawn this session. Zero if this "
                                                   "machine has no power monitor.",
-                      .hasAspect = true, .aspect = slopsync::value_aspects::total,
-                      .hasScope = true, .scope = slopsync::value_scopes::session,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::wh});
+                      .hasAspect = true, .aspect = valence::value_aspects::total,
+                      .hasScope = true, .scope = valence::value_scopes::session,
+                      .hasUnitId = true, .unitId = valence::unit_ids::wh});
     c.addLayoutField({.name = "session_ms", .type = PackedFieldType::u32, .unit = "ms",   .scale = 1.0f,
                       .group = "Session", .desc = "Time since boot, or since the session counters were "
                                                   "last reset.",
-                      .hasAspect = true, .aspect = slopsync::value_aspects::total,
-                      .hasScope = true, .scope = slopsync::value_scopes::session,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::ms});
+                      .hasAspect = true, .aspect = valence::value_aspects::total,
+                      .hasScope = true, .scope = valence::value_scopes::session,
+                      .hasUnitId = true, .unitId = valence::unit_ids::ms});
     };
 
     // ---- "motion-input" — STREAM, c2h, control, ≤333 Hz ---------------------
@@ -818,10 +821,10 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .access = AccessLevel::control, .maxRateHz = 333.0f,
                 .defaultPriority = Priority::elevated,
                 // ui_categories::control's own note names "streams" explicitly.
-                .hasCategory = true, .category = slopsync::ui_categories::control,
-                .hasRank = true, .rank = slopsync::ui_ranks::control});
+                .hasCategory = true, .category = valence::ui_categories::control,
+                .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "target_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::normalized});
+                      .hasUnitId = true, .unitId = valence::unit_ids::normalized});
     c.addLayoutField({.name = "vel_norm",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
                       // unit_id left absent for vel_norm: unit_ids has no "normalized/s" variant
                       // (a documented gap, same class as the sm_limits override fields below).
@@ -860,13 +863,13 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STREAM, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 50.0f,
                 .defaultPriority = Priority::elevated,
-                .hasCategory = true, .category = slopsync::ui_categories::control,
-                .streamKind = slopsync::stream_kinds::segments,
-                .hasRank = true, .rank = slopsync::ui_ranks::control});
+                .hasCategory = true, .category = valence::ui_categories::control,
+                .streamKind = valence::stream_kinds::segments,
+                .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "target_norm",  .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::normalized});
+                      .hasUnitId = true, .unitId = valence::unit_ids::normalized});
     c.addLayoutField({.name = "duration_ms",  .type = PackedFieldType::u16, .unit = "ms",     .scale = 1.0f,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::ms});
+                      .hasUnitId = true, .unitId = valence::unit_ids::ms});
     c.addLayoutField({.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
     };
 
@@ -892,8 +895,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 45.0f,
                 .defaultPriority = Priority::elevated,
-                .hasCategory = true, .category = slopsync::ui_categories::tuning,
-                .hasRank = true, .rank = slopsync::ui_ranks::diagnostic});
+                .hasCategory = true, .category = valence::ui_categories::tuning,
+                .hasRank = true, .rank = valence::ui_ranks::diagnostic});
     c.addBitfieldField({.name = "flags", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .group = "Active plan",
@@ -955,8 +958,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
                     .access = AccessLevel::watch, .maxRateHz = 10.0f,
                     .defaultPriority = Priority::background,
-                    .hasCategory = true, .category = slopsync::ui_categories::system,
-                    .hasRank = true, .rank = slopsync::ui_ranks::diagnostic});
+                    .hasCategory = true, .category = valence::ui_categories::system,
+                    .hasRank = true, .rank = valence::ui_ranks::diagnostic});
         c.addLayoutField({.name = "bus_mV",  .type = PackedFieldType::u16, .unit = "V", .scale = 1000.0f,
                           .group = "Power", .desc = "DC bus voltage feeding the motor drive.",
                           .role = roles::telemetry_power_bus});
@@ -976,7 +979,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
 
     // ---- "vmotion-diag" — STATE, background, 1 Hz ------------------------
     // Plan counts, the per-kind anomaly breakdown, the on-device plan-time
-    // bench, and the SlopSync stream-ingress counters.
+    // bench, and the Valence stream-ingress counters.
     //
     // The per-kind counters are eleven NAMED fields rather than one array: a
     // generic client renders named fields with no per-device knowledge.
@@ -997,8 +1000,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::ui_categories::tuning,
-                .hasRank = true, .rank = slopsync::ui_ranks::diagnostic});
+                .hasCategory = true, .category = valence::ui_categories::tuning,
+                .hasRank = true, .rank = valence::ui_ranks::diagnostic});
     c.addLayoutField({.name = "plans",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Planner", .desc = "Motion plans computed successfully."});
     c.addLayoutField({.name = "failures", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
@@ -1036,7 +1039,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     // no renderer draws a permanent zero (sd-djg).
     c.addLayoutField({.name = "anom_waveform_centered",   .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies", .desc = "A shortened stroke was re-centered on its midpoint.",
-                      .hasRank = true, .rank = slopsync::ui_ranks::hidden});
+                      .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "anom_handoff_bounded",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies",
                       .desc = "A sender asked to arrive at a speed the next segment could not "
@@ -1056,7 +1059,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     c.addLayoutField({.name = "plan_us_avg",  .type = PackedFieldType::f32, .unit = "us", .scale = 1.0f,
                       .group = "Plan time", .desc = "Smoothed average plan time."});
     c.addLayoutField({.name = "sync_bundles",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Stream ingress", .desc = "Motion bundles accepted over SlopSync."});
+                      .group = "Stream ingress", .desc = "Motion bundles accepted over Valence."});
     c.addLayoutField({.name = "sync_samples",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Stream ingress", .desc = "Motion samples decoded from those bundles."});
     c.addLayoutField({.name = "sync_enqueued", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
@@ -1099,8 +1102,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::EVENT, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = slopsync::ui_categories::tuning,
-                .hasRank = true, .rank = slopsync::ui_ranks::diagnostic});
+                .hasCategory = true, .category = valence::ui_categories::tuning,
+                .hasRank = true, .rank = valence::ui_ranks::diagnostic});
     c.addSelectSchemaField({.key = anom_body::kind, .name = "kind", .type = CborFieldType::uint_t,
                             .unit = "",
                             .desc = "What the motion core had to do differently, and why."},
@@ -1156,9 +1159,9 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::elevated,
-                .hasCategory = true, .category = slopsync::ui_categories::tuning,
+                .hasCategory = true, .category = valence::ui_categories::tuning,
                 .hasSettingChannel = true, .settingChannel = ch::modes_set,
-                .hasRank = true, .rank = slopsync::ui_ranks::advanced});
+                .hasRank = true, .rank = valence::ui_ranks::advanced});
     // RETIRED — see the entry comment above. Plain reserved byte, no
     // options/group/default/setting_key: nothing should render this. The
     // publisher still writes the driver's (inert) getBlendMode() value here
@@ -1182,9 +1185,9 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                       .group = "Motion behavior",
                       .desc = "Stops a smoothed curve from bulging past the points it was given. "
                               "Costs a little smoothness to remove overshoot micromotion.",
-                      .settingKey = 4, .flags = slopsync::setting_flags::advanced,
+                      .settingKey = 4, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::hidden},
+                      .hasRank = true, .rank = valence::ui_ranks::hidden},
                      {"off", "on"});
     // Bit i gates the i-th setting-annotated field, same rule as 0x0081.
     // Neither reserved byte carries a setting_key, so overshoot_clamp,
@@ -1194,7 +1197,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                         .scale = 1.0f,
                         .desc = "Which of these the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"overshoot_clamp", "motion_backend", "home_style"});
     // Which path actually drives the motor. restart_required is the whole
     // contract: the backend is bound once at boot before anything touches the
@@ -1210,10 +1213,10 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                       .desc = "Which path drives the motor: step/dir pulses, RS485 setpoints, "
                               "or a quadrature the drive follows. Takes effect at the next boot.",
                       .settingKey = 5,
-                      .flags = uint8_t(slopsync::setting_flags::advanced |
-                                       slopsync::setting_flags::restart_required),
+                      .flags = uint8_t(valence::setting_flags::advanced |
+                                       valence::setting_flags::restart_required),
                       .hasSettingKey = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::advanced},
+                      .hasRank = true, .rank = valence::ui_ranks::advanced},
                      {"step-dir", "modbus", "quadrature"});
     // Live-applied, no restart: read fresh at the start of every homing cycle.
     // Only the Modbus backend honors it; step/dir mode always runs its own
@@ -1223,14 +1226,14 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                       .group = "Motion behavior",
                       .desc = "How the machine finds home: feel for the hard stops itself, or "
                               "hand the whole cycle to the drive.",
-                      .settingKey = 6, .flags = slopsync::setting_flags::advanced,
+                      .settingKey = 6, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::advanced},
+                      .hasRank = true, .rank = valence::ui_ranks::advanced},
                      {"sensorless sweep", "drive built-in"});
     };
 
     // ---- "vmotion-*" — STATE, tuning -------------------------------------
-    // The motion engine's live-tune surface. No controls outside SlopSync.
+    // The motion engine's live-tune surface. No controls outside Valence.
     //
     // THREE CHANNELS, ONE TAB. A settings channel is capped at 8 settings
     // because its enabled_mask is a bitfield8 and bit i gates the i-th
@@ -1252,32 +1255,32 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::ui_categories::tuning,
+                .hasCategory = true, .category = valence::ui_categories::tuning,
                 .hasSettingChannel = true, .settingChannel = ch::sm_set,
-                .hasRank = true, .rank = slopsync::ui_ranks::advanced});
+                .hasRank = true, .rank = valence::ui_ranks::advanced});
     c.addLayoutField({.name = "jmax_ovr", .type = PackedFieldType::f32, .unit = "1/s3", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2000000.0f,
                       .dflt = SettingDefault::ofFloat(0.0f), .group = "Ceiling overrides",
                       .desc = "Jerk ceiling for the planner. 0 derives it from the machine limits.",
                       .role = "", .step = 1000.0f,
-                      .settingKey = 1, .flags = slopsync::setting_flags::advanced,
+                      .settingKey = 1, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "vmax_ovr", .type = PackedFieldType::f32, .unit = "1/s", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 20.0f,
                       .dflt = SettingDefault::ofFloat(0.0f), .group = "Ceiling overrides",
                       .desc = "Speed ceiling override, normalized. 0 derives it from the mm limits.",
-                      .settingKey = 2, .flags = slopsync::setting_flags::advanced,
+                      .settingKey = 2, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true});
     c.addLayoutField({.name = "amax_ovr", .type = PackedFieldType::f32, .unit = "1/s2", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 500.0f,
                       .dflt = SettingDefault::ofFloat(0.0f), .group = "Ceiling overrides",
                       .desc = "Acceleration ceiling override, normalized. 0 derives it from the mm limits.",
-                      .settingKey = 3, .flags = slopsync::setting_flags::advanced,
+                      .settingKey = 3, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"jmax_ovr", "vmax_ovr", "amax_ovr"});
     };
 
@@ -1297,55 +1300,55 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::ui_categories::tuning,
+                .hasCategory = true, .category = valence::ui_categories::tuning,
                 .hasSettingChannel = true, .settingChannel = ch::sm_set,
-                .hasRank = true, .rank = slopsync::ui_ranks::advanced});
+                .hasRank = true, .rank = valence::ui_ranks::advanced});
     c.addSelectField({.name = "chase_ff", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(1), .group = "Sample streams",
                       .desc = "Aim at where the sender is heading, not just where it last was.",
-                      .settingKey = 6, .flags = slopsync::setting_flags::advanced,
+                      .settingKey = 6, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addSelectField({.name = "chase_accel_ff", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(1), .group = "Sample streams",
                       .desc = "Also match how the sender's speed is changing, not just its speed.",
-                      .settingKey = 7, .flags = slopsync::setting_flags::advanced,
+                      .settingKey = 7, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addLayoutField({.name = "chase_gain", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.5f,
                       .dflt = SettingDefault::ofFloat(0.9f), .group = "Sample streams",
                       .desc = "Damping on the speed estimate. Lower is steadier, higher is more responsive.",
-                      .step = 0.05f, .settingKey = 8, .flags = slopsync::setting_flags::advanced,
+                      .step = 0.05f, .settingKey = 8, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "chase_lookahead", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f,
                       .dflt = SettingDefault::ofFloat(3.0f), .group = "Sample streams",
                       .desc = "How far ahead to aim, in stream intervals. Too far overshoots at turns.",
-                      .step = 0.5f, .settingKey = 9, .flags = slopsync::setting_flags::advanced,
+                      .step = 0.5f, .settingKey = 9, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "chase_dense_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 10.0f, .max = 500.0f,
                       .dflt = SettingDefault::ofFloat(60.0f), .group = "Sample streams",
                       .desc = "Streams faster than this count as dense and get predictive aiming.",
-                      .settingKey = 10, .flags = slopsync::setting_flags::advanced,
+                      .settingKey = 10, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true});
     c.addSelectField({.name = "chase_aim_extrap", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(1), .group = "Sample streams",
                       .desc = "Second-order aiming. Sharper tracking, but can overshoot at turn points.",
-                      .settingKey = 11, .flags = slopsync::setting_flags::advanced,
+                      .settingKey = 11, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addLayoutField({.name = "handoff_k", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f,
                       .dflt = SettingDefault::ofFloat(1.5f), .group = "Sample streams",
                       .desc = "Bound on handoff speed between moves, as a multiple of the chord.",
-                      .step = 0.1f, .settingKey = 12, .flags = slopsync::setting_flags::advanced,
+                      .step = 0.1f, .settingKey = 12, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"chase_ff", "chase_accel_ff", "chase_gain", "chase_lookahead",
                         "chase_dense_ms", "chase_aim_extrap", "handoff_k"});
     };
@@ -1356,12 +1359,12 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::ui_categories::tuning,
+                .hasCategory = true, .category = valence::ui_categories::tuning,
                 .hasSettingChannel = true, .settingChannel = ch::sm_set,
                 // Unlike its sm_limits/sm_chase siblings, none of these fields carry
                 // setting_flags::advanced in code — rank matches that: control, not
                 // advanced, so it stays visible without an advanced-affordance gate.
-                .hasRank = true, .rank = slopsync::ui_ranks::control});
+                .hasRank = true, .rank = valence::ui_ranks::control});
     c.addSelectField({.name = "curve_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0), .group = "Curve",
                       .desc = "Rebuild the sender's curve as sent, or force one smoothness family.",
@@ -1406,7 +1409,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"curve_policy", "infeasible_policy", "smooth_budget",
                         "amplitude_budget", "blend_steps", "settle_grace_ms"});
     };
@@ -1422,9 +1425,9 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::ui_categories::hardware,
+                .hasCategory = true, .category = valence::ui_categories::hardware,
                 .hasSettingChannel = true, .settingChannel = ch::drive_set,
-                .hasRank = true, .rank = slopsync::ui_ranks::control});
+                .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "accel_reg", .type = PackedFieldType::u32, .unit = "rpm/s",
                       .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 60098.0f,
@@ -1447,7 +1450,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"accel_reg"});
     };
 
@@ -1472,72 +1475,72 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = slopsync::ui_categories::control,
+                .hasCategory = true, .category = valence::ui_categories::control,
                 .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd,
-                .hasRank = true, .rank = slopsync::ui_ranks::control});
+                .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "ap_mode", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofBool(false),
                       .group = "Advanced pattern",
                       .desc = "Drive the generator with Advanced mode instead of the classic patterns.",
                       .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control});
+                      .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "master", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Advanced pattern",
                       .desc = "Overall stroke speed. 0 holds position.",
                       .step = 1.0f, .settingKey = 2, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
     c.addLayoutField({.name = "max_depth", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(10),
                       .group = "Depth window",
                       .desc = "Deepest point of the stroke (the in-stroke target).",
                       .step = 1.0f, .settingKey = 3, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
     c.addLayoutField({.name = "min_depth", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Depth window",
                       .desc = "Shallowest point of the stroke (the out-stroke target).",
                       .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
     c.addLayoutField({.name = "in_speed", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(100),
                       .group = "Speed",
                       .desc = "In-stroke speed, as a percentage of master speed.",
                       .step = 1.0f, .settingKey = 5, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
     c.addLayoutField({.name = "out_speed", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(100),
                       .group = "Speed",
                       .desc = "Out-stroke speed, as a percentage of master speed.",
                       .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
     c.addLayoutField({.name = "in_accel", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(40),
                       .group = "Acceleration",
                       .desc = "How hard the in-stroke accelerates.",
                       .step = 1.0f, .settingKey = 7, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
     c.addLayoutField({.name = "out_accel", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(40),
                       .group = "Acceleration",
                       .desc = "How hard the out-stroke accelerates.",
                       .step = 1.0f, .settingKey = 8, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::control,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
     // Bit i gates the i-th setting-annotated field above, same rule as 0x0082.
     // GENUINELY dynamic, and genuinely NARROWER than 0x0082's: unlike `running`
     // on 0x0102, none of these 8 setters is gated on `homed` (PatternEngine::
@@ -1550,7 +1553,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                         .scale = 1.0f,
                         .desc = "Which of these the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"ap_mode", "master", "max_depth", "min_depth", "in_speed", "out_speed",
                         "in_accel", "out_accel"});
     };
@@ -1583,63 +1586,63 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
                     .access = AccessLevel::watch, .maxRateHz = 0.0f,
                     .defaultPriority = Priority::background,
-                    .hasCategory = true, .category = slopsync::ui_categories::control,
+                    .hasCategory = true, .category = valence::ui_categories::control,
                     .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd,
                     // rank = advanced at BOTH entry and field level — this whole
                     // channel IS the deep-customization layer under the 8 base
                     // controls (see the comment above), and every field it declares
                     // already carries setting_flags::advanced.
-                    .hasRank = true, .rank = slopsync::ui_ranks::advanced});
+                    .hasRank = true, .rank = valence::ui_ranks::advanced});
         c.addLayoutField({.name = "amplitude", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                           .dflt = SettingDefault::ofInt(100), .group = group,
                           .desc = "Modulation strength; 100 = off.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 0),
-                          .flags = slopsync::setting_flags::advanced,
+                          .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
-                          .hasRank = true, .rank = slopsync::ui_ranks::advanced,
-                          .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                          .hasRank = true, .rank = valence::ui_ranks::advanced,
+                          .hasUnitId = true, .unitId = valence::unit_ids::percent});
         c.addLayoutField({.name = "in_step", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(1), .group = group,
                           .desc = "Strokes ramping into the modulation.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 1),
-                          .flags = slopsync::setting_flags::advanced,
+                          .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
-                          .hasRank = true, .rank = slopsync::ui_ranks::advanced});
+                          .hasRank = true, .rank = valence::ui_ranks::advanced});
         c.addLayoutField({.name = "in_wait", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
                           .desc = "Strokes held at full modulation.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 2),
-                          .flags = slopsync::setting_flags::advanced,
+                          .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
-                          .hasRank = true, .rank = slopsync::ui_ranks::advanced});
+                          .hasRank = true, .rank = valence::ui_ranks::advanced});
         c.addLayoutField({.name = "out_step", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(1), .group = group,
                           .desc = "Strokes ramping back out.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 3),
-                          .flags = slopsync::setting_flags::advanced,
+                          .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
-                          .hasRank = true, .rank = slopsync::ui_ranks::advanced});
+                          .hasRank = true, .rank = valence::ui_ranks::advanced});
         c.addLayoutField({.name = "out_wait", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
                           .desc = "Strokes resting before the cycle repeats.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 4),
-                          .flags = slopsync::setting_flags::advanced,
+                          .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
-                          .hasRank = true, .rank = slopsync::ui_ranks::advanced});
+                          .hasRank = true, .rank = valence::ui_ranks::advanced});
         c.addLayoutField({.name = "offset", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
                           .desc = "Phase shift of the cycle.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 5),
-                          .flags = slopsync::setting_flags::advanced,
+                          .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
-                          .hasRank = true, .rank = slopsync::ui_ranks::advanced,
-                          .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
+                          .hasRank = true, .rank = valence::ui_ranks::advanced,
+                          .hasUnitId = true, .unitId = valence::unit_ids::percent});
         // Same honesty note as 0x008E: no setter here checks `homed` either
         // (setApModifier has no gate beyond the delegate's e-stop check), so
         // the mask tracks e-stop alone.
@@ -1647,7 +1650,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                             .scale = 1.0f,
                             .desc = "Which of these the machine will accept right now.",
                             .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
                            {"amplitude", "in_step", "in_wait", "out_step", "out_wait", "offset"});
     };
     // The six invocations move to the final ascending-id call sequence below
@@ -1673,8 +1676,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STORE, .dir = Direction::h2c,
                 .access = AccessLevel::control, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::ui_categories::library,
-                .hasRank = true, .rank = slopsync::ui_ranks::detail});
+                .hasCategory = true, .category = valence::ui_categories::library,
+                .hasRank = true, .rank = valence::ui_ranks::detail});
     c.addStoreDescriptor({.storeId = 2, .kind = "pattern.frayd",
                           .capacity = kPresetCapacity,
                           .perItemMax = kPresetPayloadBytes,
@@ -1698,9 +1701,9 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::ui_categories::library,
+                .hasCategory = true, .category = valence::ui_categories::library,
                 .hasSettingChannel = true, .settingChannel = ch::pattern_presets_cmd,
-                .hasRank = true, .rank = slopsync::ui_ranks::detail});
+                .hasRank = true, .rank = valence::ui_ranks::detail});
     c.addLayoutField({.name = "generation", .type = PackedFieldType::u16, .unit = "count", .scale = 1.0f});
     c.addLayoutField({.name = "count",      .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
     c.addLayoutField({.name = "capacity",   .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
@@ -1724,13 +1727,13 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .defaultPriority = Priority::critical,
                 // THE primary positional command — the machine's face, same rank
                 // as motion's own hero fields it commands.
-                .hasCategory = true, .category = slopsync::ui_categories::control,
-                .hasRank = true, .rank = slopsync::ui_ranks::hero});
+                .hasCategory = true, .category = valence::ui_categories::control,
+                .hasRank = true, .rank = valence::ui_ranks::hero});
     c.addSchemaField({.key = 1, .name = "position", .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2000.0f,
                       .role = roles::command_position,
-                      .hasRank = true, .rank = slopsync::ui_ranks::hero,
-                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
+                      .hasRank = true, .rank = valence::ui_ranks::hero,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
     c.addSchemaField({.key = 2, .name = "bypass", .type = CborFieldType::bool_t, .unit = ""});
     };
 
@@ -1780,8 +1783,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 20.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = slopsync::ui_categories::control,
-                .hasRank = true, .rank = slopsync::ui_ranks::control});
+                .hasCategory = true, .category = valence::ui_categories::control,
+                .hasRank = true, .rank = valence::ui_ranks::control});
     // Bounds mirror the 0x0082 twin (see the config-set note above for why the
     // prose lives only on the STATE side).
     c.addSchemaField({.key = 1, .name = "running",   .type = CborFieldType::bool_t, .unit = ""});
@@ -1825,8 +1828,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
                 .defaultPriority = Priority::normal,
                 // ui_categories::hardware's own note names "homing" explicitly.
-                .hasCategory = true, .category = slopsync::ui_categories::hardware,
-                .hasRank = true, .rank = slopsync::ui_ranks::control});
+                .hasCategory = true, .category = valence::ui_categories::hardware,
+                .hasRank = true, .rank = valence::ui_ranks::control});
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                             .role = "action.home"},
                            {"reserved", "home", "force_home", "clear_override"},
@@ -1845,7 +1848,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     // NOT cfg_gen-bumping and NOT persisted here — each op routes to the same
     // WebUI::handleCommand path the legacy plane used, which owns whatever
     // persistence each mode has. Routing them anywhere else would give
-    // SlopSync a second, divergent idea of what "blend mode" means.
+    // Valence a second, divergent idea of what "blend mode" means.
     //
     // 5 Hz because these are human dropdown changes, not a control loop. The
     // bounds are the enum ranges the catalog's own option arrays declare, so a
@@ -1865,7 +1868,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     //
     // KEY 2 IS ALSO DELIBERATELY UNUSED. It briefly held "transport" (the WS/
     // SER/BT/DONGLE/OSSM input-source selector) before that setting was
-    // retired: SlopSync is now the only way in, the hub listens on WebSocket
+    // retired: Valence is now the only way in, the hub listens on WebSocket
     // and BLE by default, and OSSM-BLE is gone. The C5 dongle may return one
     // day, but as a transport the hub simply HAS, not a mode an operator picks.
     //
@@ -1955,7 +1958,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     // The device ACTIONS that are not settings and not motion: clear a driver
     // fault, persist config, kick off a servo register scan. They were HTTP
     // writers (/api/clearfault, WS_OP_SAVE, POST /api/servo {"scan":true});
-    // "no controls outside SlopSync" retires all three.
+    // "no controls outside Valence" retires all three.
     //
     // An op SELECT rather than one channel per verb, exactly like 0x0103 home:
     // these are rare, human-initiated, and share a shape. 2 Hz because a human
@@ -1968,8 +1971,8 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                 .defaultPriority = Priority::normal,
                 // clear_fault/servo_scan are hardware-adjacent (2 of 3 ops);
                 // save_config rides along on the same rare-admin-action channel.
-                .hasCategory = true, .category = slopsync::ui_categories::hardware,
-                .hasRank = true, .rank = slopsync::ui_ranks::control});
+                .hasCategory = true, .category = valence::ui_categories::hardware,
+                .hasRank = true, .rank = valence::ui_ranks::control});
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                             .role = "action.admin"},
                            {"reserved", "clear_fault", "save_config", "servo_scan"},

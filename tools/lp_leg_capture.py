@@ -10,7 +10,8 @@ swapped emitter table decode identically. Pass ORIGIN and read the identity
 line before trusting any polarity claim from this tool.
 
 NEVER switch this instrument to 50 ohm and never touch the :CALibration tree;
-both can destroy it (SlopDrive-32/docs/reference/rigol-dho4204-scope-guide.md).
+both can destroy it (archived SlopDrive-32 repo,
+docs/reference/rigol-dho4204-scope-guide.md).
 
 Three measured traps are built in here, each of which produced a convincing
 false result before it was caught (bd val-091.4):

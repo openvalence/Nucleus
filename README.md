@@ -7,10 +7,10 @@ Three names, three things:
 
 - **OSSM Flagship** -- the PCB.
 - **Valence Drive** -- this firmware.
-- **Valence** -- the protocol it speaks. Still spelled SlopSync in the spec,
-  which is developed in the sibling `SlopSync` repo and consumed here
-  READ-ONLY, pinned by sha in `slopsync.pin`. The rename is a future RFC:
-  nothing wire-visible is respelled from this repo.
+- **Valence** -- the protocol it speaks. It is developed in the sibling
+  `Valence` repo and consumed here READ-ONLY, pinned by sha in `valence.pin`.
+  Wire-visible names landed upstream with RFC-060; this repo follows the pin,
+  and never edits the spec to match its code.
 
 ## The boards
 
@@ -50,7 +50,7 @@ delete `.pio`.** That trap and the rest are in
 
 ## The machine repo
 
-`../SlopDrive-32` is the retired three-board machine (ESP32-S3 + ESP32-C5 +
+`../SlopDrive-32` is the archived three-board machine (ESP32-S3 + ESP32-C5 +
 RP2350) and stays where it is. It is the reference this board is measured
 against and the case file for every trap this firmware does not inherit: the
 UART bridge, the AsyncTCP lifetime hunt, the heap-corruption record. Its rules

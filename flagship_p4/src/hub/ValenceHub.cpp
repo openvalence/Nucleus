@@ -1,4 +1,4 @@
-// ValenceHub -- composition root for the SlopSync hub on the P4
+// ValenceHub -- composition root for the Valence hub on the P4
 // Constraints:
 // - See ValenceHub.h for the single-task, PSRAM and construction-order rules.
 // - Every static_assert below pins ValenceCatalog.h's hand-mirrored defaults
@@ -25,7 +25,7 @@
 //   100,000-cycle endurance floor is then ~97 days of config being changed
 //   without pause -- on ONE page, before NVS wear-levels across the others. A
 //   slider drag is one write, not one per frame.
-// See: SlopSync SPEC.md §4.2, §6.3, §9.1, §9.3
+// See: Valence SPEC.md §4.2, §6.3, §9.1, §9.3
 
 #include "ValenceHub.h"
 
@@ -53,7 +53,7 @@
 #include "motion/ValenceMotion.h"
 #include "valence_config.h"
 
-#include "slopsync/util/byte_io.hpp"
+#include "valence/util/byte_io.hpp"
 
 namespace valence {
 
@@ -72,15 +72,15 @@ static_assert(ceiling::jerk_max    == MAX_JERK_MM_S3,              "catalog jerk
 
 namespace {
 
-using slopsync::AccessLevel;
-using slopsync::IntentValue;
-using slopsync::IntentValueMap;
-using slopsync::NackCode;
-using Ret = slopsync::Result<IntentValueMap, NackCode>;
+using valence::AccessLevel;
+using valence::IntentValue;
+using valence::IntentValueMap;
+using valence::NackCode;
+using Ret = valence::Result<IntentValueMap, NackCode>;
 
 constexpr const char* kTag = "hub";
 
-// The SlopSync socket. 82 on every machine in this ecosystem; /uitoken rides
+// The Valence socket. 82 on every machine in this ecosystem; /uitoken rides
 // plain HTTP on 80 regardless (see ValenceUiToken.h).
 constexpr uint16_t kWsPort = 82;
 
@@ -111,11 +111,11 @@ float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : 
 // Free functions over a caller-owned buffer and a caller-owned cursor, not a
 // writer object: a cursor that HELD the span would be a borrowed member, which
 // the safe subset forbids outright (cpp-safety.md).
-void packU8(std::span<std::byte> o, size_t& n, uint8_t v)   { n += slopsync::putU8(o.subspan(n), v); }
-void packU16(std::span<std::byte> o, size_t& n, uint16_t v) { n += slopsync::putU16(o.subspan(n), v); }
+void packU8(std::span<std::byte> o, size_t& n, uint8_t v)   { n += valence::putU8(o.subspan(n), v); }
+void packU16(std::span<std::byte> o, size_t& n, uint16_t v) { n += valence::putU16(o.subspan(n), v); }
 void packI16(std::span<std::byte> o, size_t& n, int16_t v)  { packU16(o, n, uint16_t(v)); }
-void packU32(std::span<std::byte> o, size_t& n, uint32_t v) { n += slopsync::putU32(o.subspan(n), v); }
-void packF32(std::span<std::byte> o, size_t& n, float v)    { n += slopsync::putF32(o.subspan(n), v); }
+void packU32(std::span<std::byte> o, size_t& n, uint32_t v) { n += valence::putU32(o.subspan(n), v); }
+void packF32(std::span<std::byte> o, size_t& n, float v)    { n += valence::putF32(o.subspan(n), v); }
 
 // A packed field's wire value is value*scale, SATURATED at the type. Saturating
 // beats wrapping: a position past the top of a u16 reads as the far end of the
@@ -133,14 +133,14 @@ int16_t wireI16(float v, float scale) {
     return int16_t(x >= 0.0f ? x + 0.5f : x - 0.5f);
 }
 
-const slopsync::IntentValueField* findField(const IntentValueMap& m, uint8_t key) {
+const valence::IntentValueField* findField(const IntentValueMap& m, uint8_t key) {
     for (uint32_t i = 0; i < m.count; ++i) {
         if (m.fields[i].key == key) return &m.fields[i];
     }
     return nullptr;
 }
 
-float fieldF32(const slopsync::IntentValueField* f, float dflt) {
+float fieldF32(const valence::IntentValueField* f, float dflt) {
     if (!f) return dflt;
     switch (f->value.kind) {
         case IntentValue::Kind::F32:  return f->value.f32_val;
@@ -150,7 +150,7 @@ float fieldF32(const slopsync::IntentValueField* f, float dflt) {
     }
 }
 
-uint64_t fieldU64(const slopsync::IntentValueField* f, uint64_t dflt) {
+uint64_t fieldU64(const valence::IntentValueField* f, uint64_t dflt) {
     if (!f) return dflt;
     switch (f->value.kind) {
         case IntentValue::Kind::U64: return f->value.u64_val;
@@ -257,7 +257,7 @@ void saveStoredConfig(const StoredConfig& cfg, uint16_t gen) {
 // with real behavior. Every other channel the catalog advertises is either
 // hub-owned (safety latch, pairing, session admin) or gated out by
 // has_motion=false.
-class ValenceDelegate final : public slopsync::HubDelegate {
+class ValenceDelegate final : public valence::HubDelegate {
 public:
     void bindMinter(ValenceUiTokenMinter* m) { _minter = m; }
 
@@ -455,7 +455,7 @@ public:
     // own 0x2100 (4 B point) / 0x2101 (6 B timed segment) field order -- the
     // same convention the publishers above encode with.
     void onStreamBundle(uint16_t channel_id, uint32_t session_id,
-                        const slopsync::BundleView& bundle) override {
+                        const valence::BundleView& bundle) override {
         const bool isSegment = (channel_id == ch::motion_segment);
         if (channel_id != ch::motion_input && !isSegment) return;
 
@@ -483,7 +483,7 @@ public:
             if (delta < 0) delta = 0;
 
             const auto sample = bundle.sample(i);
-            const float norm = float(slopsync::getU16(sample.subspan(0, 2))) / 10000.0f;
+            const float norm = float(valence::getU16(sample.subspan(0, 2))) / 10000.0f;
 
             MotionIntent in;
             in.source    = MotionSource::Stream;
@@ -491,8 +491,8 @@ public:
             in.anchor_us = uint64_t(now64 + int64_t(delta));
 
             if (isSegment) {
-                const uint16_t durMs = slopsync::getU16(sample.subspan(2, 2));
-                const int16_t endV = int16_t(slopsync::getU16(sample.subspan(4, 2)));
+                const uint16_t durMs = valence::getU16(sample.subspan(2, 2));
+                const int16_t endV = int16_t(valence::getU16(sample.subspan(4, 2)));
                 if (durMs == 0) { ++dropped; continue; }  // durationless points belong on 0x2100
                 in.duration_us  = uint32_t(durMs) * 1000u;
                 in.curve_family = curveFamily;
@@ -503,7 +503,7 @@ public:
                     in.has_end_vel  = true;
                 }
             } else {
-                const int16_t vel = int16_t(slopsync::getU16(sample.subspan(2, 2)));
+                const int16_t vel = int16_t(valence::getU16(sample.subspan(2, 2)));
                 in.end_vel_mm_s = float(vel) / 1000.0f * (_cfg.window_max - _cfg.window_min);
                 in.has_end_vel  = (vel != 0);
             }
@@ -518,7 +518,7 @@ public:
         }
     }
 
-    void bindHub(slopsync::Hub* h) { _hub = h; }
+    void bindHub(valence::Hub* h) { _hub = h; }
     bool takeClearLatch() {
         const bool v = _clearLatch;
         _clearLatch = false;
@@ -554,7 +554,7 @@ private:
     // applyIntent runs inside the hub's own intent dispatch.
     bool _clearLatch = false;
     ValenceUiTokenMinter* _minter = nullptr;
-    slopsync::Hub* _hub = nullptr;
+    valence::Hub* _hub = nullptr;
 };
 
 // ---- the PSRAM-resident box --------------------------------------------------
@@ -567,11 +567,11 @@ private:
 // 82 KB): the producer is the httpd TASK, never an ISR, so external memory is
 // legal here. Do not move ISR-reachable state here by analogy.
 struct HubBox {
-    slopsync::Catalog32 catalog{};
+    valence::Catalog32 catalog{};
     EspClock clock{};
     EspRandom rng{};
     ValenceDelegate delegate{};
-    std::optional<slopsync::Hub> hub{};
+    std::optional<valence::Hub> hub{};
     ValenceWsPort port{};
     ValenceUiTokenMinter minter{};
 };
@@ -596,7 +596,7 @@ std::atomic<int8_t> g_linkRssi{0};
 // EVERY STATE channel the catalog advertises is published here at boot with
 // its truthful at-rest value. An advertised-but-never-published STATE channel
 // leaves a subscriber holding "no idea" where the protocol promised it a
-// value, and SlopDeck sits at 'syncing' forever with nothing to report.
+// value, and Phosphor sits at 'syncing' forever with nothing to report.
 // The hub seeds 0x0003 safety, 0x000A pending-pairing and 0x000D roster
 // itself (hub_impl.hpp's constructor); these are the rest.
 
@@ -608,10 +608,10 @@ void publishControlOwner() {
     std::array<std::byte, 20> buf{};
     std::span<std::byte> s(buf);
     for (uint8_t i = 0; i < 4; ++i) {
-        slopsync::putU8(s.subspan(size_t(i) * 5, 1), i);
-        slopsync::putU32(s.subspan(size_t(i) * 5 + 1, 4), 0);
+        valence::putU8(s.subspan(size_t(i) * 5, 1), i);
+        valence::putU32(s.subspan(size_t(i) * 5 + 1, 4), 0);
     }
-    g_box->hub->publishState(slopsync::channels::control_owner, s);
+    g_box->hub->publishState(valence::channels::control_owner, s);
 }
 
 void publishHubStatus() {
@@ -622,12 +622,12 @@ void publishHubStatus() {
 
     std::array<std::byte, 14> buf{};
     std::span<std::byte> s(buf);
-    slopsync::putU32(s.subspan(0, 4), uint32_t(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
-    slopsync::putU32(s.subspan(4, 4), uint32_t(esp_timer_get_time() / 1000000));
-    slopsync::putU8(s.subspan(8, 1), uint8_t(rssi));
-    slopsync::putU8(s.subspan(9, 1), uint8_t(g_box->hub->sessionCount()));
-    slopsync::putU32(s.subspan(10, 4), g_box->hub->logDropped());
-    g_box->hub->publishState(slopsync::channels::hub_status, s);
+    valence::putU32(s.subspan(0, 4), uint32_t(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+    valence::putU32(s.subspan(4, 4), uint32_t(esp_timer_get_time() / 1000000));
+    valence::putU8(s.subspan(8, 1), uint8_t(rssi));
+    valence::putU8(s.subspan(9, 1), uint8_t(g_box->hub->sessionCount()));
+    valence::putU32(s.subspan(10, 4), g_box->hub->logDropped());
+    g_box->hub->publishState(valence::channels::hub_status, s);
 }
 
 void publishMachineConfig() {
@@ -635,24 +635,24 @@ void publishMachineConfig() {
     const StoredConfig& c = g_box->delegate.config();
     std::array<std::byte, 37> buf{};
     std::span<std::byte> s(buf);
-    slopsync::putF32(s.subspan(0, 4), c.window_min);
-    slopsync::putF32(s.subspan(4, 4), c.window_max);
-    slopsync::putF32(s.subspan(8, 4), c.user_speed);
-    slopsync::putF32(s.subspan(12, 4), c.user_accel);
-    slopsync::putF32(s.subspan(16, 4), c.input_speed);
-    slopsync::putF32(s.subspan(20, 4), c.input_accel);
-    slopsync::putF32(s.subspan(24, 4), c.max_rail);
-    slopsync::putF32(s.subspan(28, 4), c.input_jerk);
+    valence::putF32(s.subspan(0, 4), c.window_min);
+    valence::putF32(s.subspan(4, 4), c.window_max);
+    valence::putF32(s.subspan(8, 4), c.user_speed);
+    valence::putF32(s.subspan(12, 4), c.user_accel);
+    valence::putF32(s.subspan(16, 4), c.input_speed);
+    valence::putF32(s.subspan(20, 4), c.input_accel);
+    valence::putF32(s.subspan(24, 4), c.max_rail);
+    valence::putF32(s.subspan(28, 4), c.input_jerk);
     // enabled_mask: all eight limits are writable at all times on this hub.
     // Nothing refuses a config-set; out-of-range values clamp, which is what
     // min/max is for. A bit held low here would gray a control the machine
     // would in fact accept.
-    slopsync::putU8(s.subspan(32, 1), 0xFF);
+    valence::putU8(s.subspan(32, 1), 0xFF);
     // measured_stroke: 0 means NOT MEASURED. force_home ASSERTS a stroke that
     // nothing measured, and the arbiter's rail is where that assertion lives;
     // reporting it here would dress an assertion as a measurement. This board
     // has no way to measure a stroke, so the field is 0 forever.
-    slopsync::putF32(s.subspan(33, 4), 0.0f);
+    valence::putF32(s.subspan(33, 4), 0.0f);
     g_box->hub->publishState(ch::machine_config, s);
     g_lastPublishedCfg = c;
     g_cfgEverSent = true;
@@ -936,7 +936,7 @@ void hubTask(void*) {
 
 // ---- public surface ----------------------------------------------------------
 
-slopsync::Hub* hub() { return (g_box && g_box->hub) ? &*g_box->hub : nullptr; }
+valence::Hub* hub() { return (g_box && g_box->hub) ? &*g_box->hub : nullptr; }
 
 void hubSetLinkRssi(int8_t rssi) { g_linkRssi.store(rssi, std::memory_order_relaxed); }
 
@@ -1007,7 +1007,7 @@ bool hubBegin() {
     }
     if (g_box->hub->catalogEncodedBytes() == 0) {
         SLOGE(kTag, "catalog encoded to ZERO bytes -- it did not fit the hub scratch (%u B)",
-              unsigned(slopsync::Hub::catalogScratchCapacity()));
+              unsigned(valence::Hub::catalogScratchCapacity()));
         vlog::drainToSinks();
         return false;
     }
@@ -1034,7 +1034,7 @@ bool hubBegin() {
     auto etag = g_box->hub->catalogEtag();
     SLOGI(kTag, "catalog: %u entries, %u B encoded (scratch %u B)",
           unsigned(g_box->catalog.count), unsigned(g_box->hub->catalogEncodedBytes()),
-          unsigned(slopsync::Hub::catalogScratchCapacity()));
+          unsigned(valence::Hub::catalogScratchCapacity()));
     SLOGI(kTag, "catalog etag: %02x%02x%02x%02x%02x%02x%02x%02x",
           unsigned(etag[0]), unsigned(etag[1]), unsigned(etag[2]), unsigned(etag[3]),
           unsigned(etag[4]), unsigned(etag[5]), unsigned(etag[6]), unsigned(etag[7]));
@@ -1054,7 +1054,7 @@ bool hubBegin() {
 
     // Stack: internal by construction (plain xTaskCreatePinnedToCore). The size
     // and the measurement that set it live on kHubTaskStackBytes in ValenceHub.h.
-    if (xTaskCreatePinnedToCore(hubTask, "SlopHub", kHubTaskStackBytes, nullptr, 5,
+    if (xTaskCreatePinnedToCore(hubTask, "ValenceHub", kHubTaskStackBytes, nullptr, 5,
                                 &g_hubTask, 1) != pdPASS) {
         SLOGE(kTag, "hub task create failed");
         vlog::drainToSinks();

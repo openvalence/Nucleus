@@ -1,7 +1,7 @@
 {
   "name": "VGlow",
   "version": "0.1.0",
-  "description": "SlopDrive ecosystem status-LED engine: semantic states, priority layering, animated transitions, and a liveness-gated heartbeat (LEDs freeze when the system does). Hardware-free core + thin ESP32 drivers.",
+  "description": "Valence ecosystem status-LED engine: semantic states, priority layering, animated transitions, and a liveness-gated heartbeat (LEDs freeze when the system does). Hardware-free core + thin ESP32 drivers.",
   "keywords": ["led", "neopixel", "status", "esp32", "vglow"],
   "license": "MIT",
   "frameworks": "*",

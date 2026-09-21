@@ -1,9 +1,9 @@
 #pragma once
 
-// ValenceHub -- the SlopSync composition root on the P4: catalog, clock, rng,
+// ValenceHub -- the Valence composition root on the P4: catalog, clock, rng,
 // delegate, the Hub itself, and the one task that pumps it
 // Constraints:
-// - THE HUB IS SINGLE-TASK BY CONTRACT (T5). Every slopsync::Hub method is
+// - THE HUB IS SINGLE-TASK BY CONTRACT (T5). Every valence::Hub method is
 //   called from the hub task and nowhere else; there is no mutex and none is
 //   wanted. Transports marshal their own callbacks across (ValenceWsPort).
 // - The Hub and the Catalog32 live in PSRAM via placement-new (T2): a ~22 KB
@@ -18,11 +18,11 @@
 //   limit set (architecture.md section 2). hubBegin() therefore runs AFTER
 //   motionBegin(): the boot publish of every motion STATE channel reads the
 //   census, and a hub that came up first would seed them from a dead struct.
-// See: SlopSync SPEC.md §6, §8, §9; ValenceCatalog.h
+// See: Valence SPEC.md §6, §8, §9; ValenceCatalog.h
 
 #include <cstdint>
 
-#include "slopsync/hub/hub.hpp"
+#include "valence/hub/hub.hpp"
 
 namespace valence {
 
@@ -31,7 +31,7 @@ namespace valence {
 // reported total can never drift from the allocated one.
 //
 // RAISED 8,192 -> 16,384 ON A MEASUREMENT, not on taste. Under the val-091.9
-// workload (a SlopDeck session live, one full probe run, a motion bench cycle)
+// workload (a Phosphor session live, one full probe run, a motion bench cycle)
 // the deepest free was 1,840 B of 8,192 -- 22 % headroom [verified 2026-09-21
 // -- uxTaskGetStackHighWaterMark, COM15]. The deep path is a client's catalog
 // BLOB transfer, and it GREW when val-091.11 advertised the motion plane: that
@@ -47,7 +47,7 @@ bool hubBegin();
 
 // The composed hub, or nullptr before hubBegin() succeeds. For the boot report
 // and the census line only -- never a door for another task to call into.
-slopsync::Hub* hub();
+valence::Hub* hub();
 
 // Census numbers for the 5 s liveness line, read from any task.
 struct HubCensus {
@@ -68,8 +68,8 @@ HubCensus hubCensus();
 // 151,008 us on this board [verified 2026-09-20 -- boot log, first call timed
 // with esp_timer]. On a 5 ms tick that is a thirty-tick stall every second,
 // which is the instrument manufacturing the fault it is meant to observe
-// (SlopDrive-32 memory-budget.md T27). The caller is main.cpp's 5 s liveness
-// loop, a task with nothing to starve.
+// (archived SlopDrive-32 repo, memory-budget.md T27). The caller is main.cpp's
+// 5 s liveness loop, a task with nothing to starve.
 void hubSetLinkRssi(int8_t rssi);
 
 }  // namespace valence

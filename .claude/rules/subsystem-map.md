@@ -23,7 +23,7 @@ slowly. For anything finer, ask codebase-memory rather than grepping for
 | `lib/vmotion` | The trajectory engine (liftable, hardware-free) |
 | `lib/vlog`, `lib/vglow` | Logging and LED cores (liftable, hardware-free) |
 | `lib/ruckig` | VENDORED, byte-identical to upstream. Do not restyle or respell (C-11 carve-out) |
-| `lib/slopsync` | Symlink to the sibling SlopSync repo, pinned by `slopsync.pin`. READ-ONLY from here |
+| `lib/valence` | Symlink to the sibling Valence repo, pinned by `valence.pin`. READ-ONLY from here |
 | `docs/` | Prose that outlives a run; `docs/flagship-board.md` is the PCB's design rationale |
 | `tools/` | Instruments. Mostly gitignored; the tracked ones are named in `.gitignore` |
 | `artifacts/` | Per-run output. Gitignored except the anchor |
@@ -57,8 +57,8 @@ Stop grepping for these. They live in exactly one place.
 | Firmware version | not yet allocated |
 | Silicon revision, flash size, PSRAM, ULP reserve, radio pins | `flagship_p4/sdkconfig.defaults` |
 | Build entry point, upload port, board id | `flagship_p4/platformio.ini` |
-| Wire numbers, CBOR keys, NACK codes, channels | sibling `SlopSync/spec/registry/registry.yaml` |
-| Protocol behavior | sibling `SlopSync/spec/SPEC.md` |
+| Wire numbers, CBOR keys, NACK codes, channels | sibling `Valence/spec/registry/registry.yaml` |
+| Protocol behavior | sibling `Valence/spec/SPEC.md` |
 | This machine's channel allocation | not yet allocated; lands with the hub port |
 | PCB design rationale and the bench measurements behind it | `docs/flagship-board.md` |
 | Versions, deployment state, milestones, open bugs, rulings | the dev board (`bd`) |

@@ -1,6 +1,7 @@
 # Style gate body. Reads the hook JSON on stdin, inspects only the text the
 # tool call would ADD (new_string / content), exit 2 blocks the write.
-# PORT of SlopDrive-32/.claude/hooks/style_check.py; only SKIP_PATHS changed
+# PORT of the archived SlopDrive-32 repo's .claude/hooks/style_check.py; only
+# SKIP_PATHS changed
 # (this tree has different vendored directories).
 import json
 import os
@@ -37,14 +38,14 @@ HASH_COMMENT_EXT = {".py", ".sh"}
 
 
 def governed(path):
-    # C-11/C-12 bind this repo and the sibling SlopSync checkout, nothing else.
+    # C-11/C-12 bind this repo and the sibling Valence checkout, nothing else.
     # Without this, the gate fires on scratchpad temp files and agent memory
     # outside either tree, where the canon has no jurisdiction. Fails CLOSED:
     # no project context means check anyway.
     root = (os.environ.get("CLAUDE_PROJECT_DIR") or "").replace("\\", "/").lower().rstrip("/")
     if not root:
         return True
-    sibling = root.rsplit("/", 1)[0] + "/slopsync"
+    sibling = root.rsplit("/", 1)[0] + "/valence"
     return path.startswith(root + "/") or path.startswith(sibling + "/")
 
 
@@ -143,8 +144,8 @@ def selftest():
           "new_string": "// k " + em + " p\nint b;"}, 0),
         ("out-of-tree path is not governed",
          {"file_path": "c:/temp/scratch/x.py", "content": "s = '" + gb + "'"}, 0),
-        ("sibling SlopSync is governed",
-         {"file_path": "c:/slopsync/spec/RFC-QUEUE.md", "content": "draft " + em + " text"}, 2),
+        ("sibling Valence is governed",
+         {"file_path": "c:/valence/spec/RFC-QUEUE.md", "content": "draft " + em + " text"}, 2),
         ("en-GB spelling in repo blocks",
          {"file_path": root + "/src/y.cpp", "content": "// " + gb + " of the thing"}, 2),
     ]

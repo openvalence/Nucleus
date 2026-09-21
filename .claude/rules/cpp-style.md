@@ -5,8 +5,9 @@ paths:
 
 # C++ style
 
-Carried from the machine repo (SlopDrive-32 `.claude/rules/cpp-style.md`).
-Navigation doctrine is NOT restated here (C-1): `.claude/rules/navigation.md`
+Carried from the archived machine repo (SlopDrive-32
+`.claude/rules/cpp-style.md`). Navigation doctrine is NOT restated here (C-1):
+`.claude/rules/navigation.md`
 is its home, and its rule -- grep to find, LSP to understand -- binds every
 C++ task in this repo.
 
@@ -48,7 +49,7 @@ is the mechanized form of CANON C-12.
 ### Minimalism-mode precedence (operator ruling 2026-07-29)
 
 The ponytail agent mode governs `docs/`, host `tools/`, and the web UI. It
-does NOT govern `flagship_*/src/`, `flagship_*/ulp/`, `lib/`, or the SlopSync
+does NOT govern `flagship_*/src/`, `flagship_*/ulp/`, `lib/`, or the Valence
 repo; there the rules files outrank it. Diff size is not a correctness
 argument.
 

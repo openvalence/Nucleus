@@ -1,5 +1,6 @@
 # TIDY GATE (PreToolUse, Write): the repo root is a closed set, see
-# .claude/rules/repo-layout.md. PORT of SlopDrive-32/.claude/hooks/tidy_check.py,
+# .claude/rules/repo-layout.md. PORT of the archived SlopDrive-32 repo's
+# .claude/hooks/tidy_check.py,
 # unchanged: the routing table is tree-independent. Fires only on NEW files whose parent is the
 # root; overwriting an existing root file is untouched, so this never blocks
 # editing a tracked root file.

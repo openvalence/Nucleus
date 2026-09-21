@@ -93,29 +93,30 @@ Valence Drive is the firmware; Valence is the protocol it speaks.
 ## 3. Naming doctrine
 
 Invented ecosystem-level things (protocols, subsystems, tools) get
-zero-collision, SEO-unique names: "SlopSync", never "SyncManager". Ordinary
-classes and variables keep plain descriptive names. The product names ruled
-2026-09-20 (OSSM Flagship / Valence Drive / Valence) are in
-`governance.md` §6; nothing wire-visible is respelled from this repo.
+zero-collision, SEO-unique names: "Valence", never "SyncManager". Ordinary
+classes and variables keep plain descriptive names. The product names (OSSM
+Flagship / Valence Drive / Valence) and the 2026-09-21 rename are in
+`governance.md` §6; wire-visible names still change upstream only, never
+from this repo.
 
-## 4. SSManager -- the tool surface has ONE door
+## 4. Valence Tool -- the tool surface has ONE door
 
-SSManager is the SlopSync project manager: one UI over every tool in the
-ecosystem. Its home is the SlopSync repo so it ships with the SDK; a vendor
+Valence Tool is the Valence project manager: one UI over every tool in the
+ecosystem. Its home is the Valence repo so it ships with the SDK; a vendor
 building a hub who never clones this repo still gets it. Landing state lives
 on the dev board.
 
 - **Every tool registers a manifest entry, and that is the whole of adding
   it.** A tool is declarative data: name, command, input globs, how its
   pass/fail reads, what toolchain it needs. Adding tool N+1 must require ZERO
-  changes to SSManager's own code. If SSManager has to learn about a tool, the
+  changes to Valence Tool's own code. If it has to learn about a tool, the
   registration is wrong: fix the manifest schema, not the console.
-- **SSManager knows nothing tool-specific.** No branch anywhere may name a
+- **Valence Tool knows nothing tool-specific.** No branch anywhere may name a
   tool, a repo, a language, or a build system. It reads manifests and spawns
   processes. A single `if tool == ...` is the whole design failing, and it is
   a flag, not a shortcut.
 - **Standalone invocation NEVER stops working.** Every tool stays runnable
-  from a plain shell exactly as it is today. SSManager is a funnel, not a
+  from a plain shell exactly as it is today. Valence Tool is a funnel, not a
   gate: CI, headless agents, and an operator with a terminal must never depend
   on it. A tool that only works through the UI is a defect.
 - **A result carries a fingerprint of its inputs; this is C-4 in software.**

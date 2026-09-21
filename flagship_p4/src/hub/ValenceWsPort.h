@@ -1,11 +1,11 @@
 #pragma once
 
-// ValenceWsPort / ValenceWsTransport -- the SlopSync WS binding on
+// ValenceWsPort / ValenceWsTransport -- the Valence WS binding on
 // esp_http_server (SPEC §13.1, §13.2)
 // Constraints:
-// - ONE SLOPSYNC FRAME IS ONE BINARY WEBSOCKET MESSAGE. A TEXT frame is not
+// - ONE VALENCE FRAME IS ONE BINARY WEBSOCKET MESSAGE. A TEXT frame is not
 //   this protocol and closes the session.
-// - The subprotocol "slopsync.v1" (registry.yaml:1173) MUST be echoed in the
+// - The subprotocol "valence.v1" (registry.yaml:1173) MUST be echoed in the
 //   upgrade response or conforming clients refuse the socket (SPEC §13.2).
 //   esp_http_server does that from httpd_uri_t::supported_subprotocol, which
 //   only exists when CONFIG_HTTPD_WS_SUPPORT=y.
@@ -67,7 +67,7 @@
 // there is no session to NACK into. Returning ESP_FAIL alone leaves the peer
 // connected-but-silent, which is the failure users report as a bug, so the
 // socket is closed explicitly.
-// See: SlopSync SPEC.md §6.3, §9, §10.3, §13.1, §13.2
+// See: Valence SPEC.md §6.3, §9, §10.3, §13.1, §13.2
 
 #include <atomic>
 #include <cstdint>
@@ -76,13 +76,13 @@
 
 #include <esp_http_server.h>
 
-#include "slopsync/hub/hub.hpp"
-#include "slopsync/transport/transport.hpp"
-#include "slopsync/wire/frame_buffer.hpp"
+#include "valence/hub/hub.hpp"
+#include "valence/transport/transport.hpp"
+#include "valence/wire/frame_buffer.hpp"
 
 namespace valence {
 
-class ValenceWsTransport final : public slopsync::ITransport {
+class ValenceWsTransport final : public valence::ITransport {
 public:
     // 32 inbound frames per slot. The S3 measured 2 drops at depth 8 over an
     // 18-minute 3-client soak; depth is burst tolerance, never a substitute
@@ -126,8 +126,8 @@ public:
     bool open() override;
     void close() override;
     bool write(std::span<const std::byte> frame) override;
-    std::optional<slopsync::FrameBuffer> read() override;
-    slopsync::TransportProperties properties() const override;
+    std::optional<valence::FrameBuffer> read() override;
+    valence::TransportProperties properties() const override;
 
     uint8_t pollCongestionLevel(uint32_t nowMs);
     // Called once per hub tick: re-arms the BLOB_CHUNK pacing budget.
@@ -153,7 +153,7 @@ private:
     std::atomic<bool> _closing{false};
     std::atomic<bool> _sending{false};
 
-    slopsync::FrameBuffer _rx[kRxRingDepth]{};
+    valence::FrameBuffer _rx[kRxRingDepth]{};
     std::atomic<uint8_t> _rxHead{0};
     std::atomic<uint8_t> _rxTail{0};
     std::atomic<uint32_t> _rxDrops{0};
@@ -172,7 +172,7 @@ private:
     uint32_t _lastSlowMs = 0;   // ms of the last slow-or-failed send, 0 = never
 };
 
-// The server plus its transport slots. Owns TWO httpd instances: the SlopSync
+// The server plus its transport slots. Owns TWO httpd instances: the Valence
 // socket on 82 and the /uitoken surface on 80 (ValenceUiToken registers into
 // the one this class starts), each with its own ctrl_port, because two
 // instances sharing one control port silently refuse to start.
@@ -181,9 +181,9 @@ public:
     // One more slot than the hub has sessions, so a connection that arrives
     // during a teardown has somewhere to land instead of being refused by a
     // slot the hub has not released yet.
-    static constexpr uint8_t kSlots = slopsync::kHubMaxSessions + 1;
+    static constexpr uint8_t kSlots = valence::kHubMaxSessions + 1;
 
-    bool begin(slopsync::Hub* hub, uint16_t port);
+    bool begin(valence::Hub* hub, uint16_t port);
     // Hub task: performs the deferred attach/detach and sweeps stalls.
     void loop(uint32_t nowMs);
 
@@ -199,7 +199,7 @@ private:
     int slotForFd(int fd) const;
 
     httpd_handle_t _srv = nullptr;
-    slopsync::Hub* _hub = nullptr;
+    valence::Hub* _hub = nullptr;
     ValenceWsTransport _slots[kSlots]{};
     bool _attached[kSlots]{};
     std::atomic<bool> _wantAttach[kSlots]{};

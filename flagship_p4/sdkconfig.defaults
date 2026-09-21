@@ -110,7 +110,7 @@ CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 # without a measured internal maxblock.
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 
-# The SlopSync hub's WS transport rides esp_http_server. Without this,
+# The Valence hub's WS transport rides esp_http_server. Without this,
 # httpd_uri_t carries no is_websocket/supported_subprotocol fields at all and
 # the handler registration does not compile. Not a memory-map change, so no
 # clean-build ceremony (platformio.ini trap 1).

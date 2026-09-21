@@ -54,8 +54,8 @@ Every command becomes ONE trajectory planned from the engine's actual
 The LP core renders edges and does nothing else. Its signed edge count IS the
 machine's position. All numbers below are measured on this stamp
 [verified 2026-09-20 -- Rigol DHO4204, single-shot captures at 8 ns and 100 ns
-per sample, decoded in numpy; board `val-091.3`, continued from SlopDrive-32
-`sd-1bi.3`].
+per sample, decoded in numpy; board `val-091.3`, continued from the archived
+SlopDrive-32 `sd-1bi.3`].
 
 - **Phase accumulator in exact fixed-point cycles, and the next deadline is
   computed from the PREVIOUS DEADLINE, never from the instant an edge was
@@ -98,8 +98,8 @@ per sample, decoded in numpy; board `val-091.3`, continued from SlopDrive-32
   the widest pulse of a move is gone BY CONSTRUCTION rather than by tuning.
   Any future renderer that adds a direction line brings the whole class back.
   The step-and-direction case file (FAS, MCPWM, RMT, the PCNT retime) is
-  SlopDrive-32 `.claude/rules/motion-control.md`; it describes a backend that
-  does not exist here.
+  the archived SlopDrive-32 `.claude/rules/motion-control.md`; it describes a
+  backend that does not exist here.
 
 ## ISR / IRAM / core discipline
 

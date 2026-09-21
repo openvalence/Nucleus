@@ -5,9 +5,10 @@ paths:
 
 # VLog and VGlow (NON-NEGOTIABLE usage)
 
-Carried from the machine repo (SlopDrive-32 `.claude/rules/logging-leds.md`).
-Self-contained ecosystem modules: hardware-free core plus thin platform glue.
-`lib/vlog` and `lib/vglow` hold the cores; their IDF glue twins land with the
+Carried from the archived machine repo (SlopDrive-32
+`.claude/rules/logging-leds.md`). Self-contained ecosystem modules:
+hardware-free core plus thin platform glue. `lib/vlog` and `lib/vglow` hold
+the cores; their IDF glue twins land with the
 hub port. Both are header-only via an explicit include path.
 
 ## Logging goes through VLog. Only.
@@ -155,5 +156,5 @@ a deep PSRAM archive read ONCE, after something goes wrong.
   table change.
 
 The relay half of that story -- pulling the archive through a second board --
-is legacy: SlopDrive-32 `.claude/rules/logging-leds.md` is the case file. Here
-the P4 serves its own diagnostics.
+is legacy: the archived SlopDrive-32 `.claude/rules/logging-leds.md` is the
+case file. Here the P4 serves its own diagnostics.

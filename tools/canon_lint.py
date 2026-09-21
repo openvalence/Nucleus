@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""SlopCanon mechanical floor -- judgment-free doctrine checks.
+"""Canon mechanical floor -- judgment-free doctrine checks.
 
-PORT of SlopDrive-32 tools/canon_lint.py, curated for Valence Drive. Defined
-by .claude/rules/governance.md SS5. Every hit is a defect BY DEFINITION: these
-checks encode only hard rules (violation classes that have actually bitten
-this project family). If a check fires falsely, the fix is a C-7 amendment to
-the exemption lists in this file -- never ignoring the output.
+PORT of the archived SlopDrive-32 repo's tools/canon_lint.py, curated for
+Valence Drive. Defined by .claude/rules/governance.md SS5. Every hit is a
+defect BY DEFINITION: these checks encode only hard rules (violation classes
+that have actually bitten this project family). If a check fires falsely, the
+fix is a C-7 amendment to the exemption lists in this file -- never ignoring
+the output.
 
-Checks here: printf-outside-vlog, slopsync-purity, this-assign,
+Checks here: printf-outside-vlog, valence-purity, this-assign,
 new-log-macro, led-outside-vglow, borrowed-member, sole-caller,
 static-in-critical, british-spelling (codespell plus the camelCase subword
-gap), and the slopsync.pin rule with the frozen-artifact hash cross-check.
+gap), and the valence.pin rule with the frozen-artifact hash cross-check.
 
 NOT ported, each for a stated reason:
   links2004-ghost  -- names a WebSocket stack that never existed in this tree.
@@ -43,21 +44,21 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SIBLING = ROOT.parent / "SlopSync"
-PIN_FILE = ROOT / "slopsync.pin"
+SIBLING = ROOT.parent / "Valence"
+PIN_FILE = ROOT / "valence.pin"
 
 # ---------------------------------------------------------------- frozen (C-6)
 # The conformance artifacts live in the pinned SIBLING checkout. Byte-identical
-# there or it is a protocol break; SlopSync's own tools/slopsync_lint.py
+# there or it is a protocol break; Valence's own tools/valence_lint.py
 # carries the same pins as its half of the belt-and-suspenders check.
 FROZEN_SHA256_SIBLING = {
-    "lib/slopsync/include/slopsync/conformance/mini_catalog.hpp":
-        "2a90bf8a5658b4ecb2c96a28d9aa9e39a908926c91e0aebba5844366c3252eb2",
+    "lib/valence/include/valence/conformance/mini_catalog.hpp":
+        "6613fea1cfa92e0de327dca17498bd18da64dd1e280ed0e2ed15ae6eaec3a228",
     "spec/vectors/fixtures/mini-catalog.yaml":
-        "b2b6a3063e66b56916683c6878ce237085fbcd8ea145c02369f5b96a45c6901c",
+        "7576f08b5c190a5c720b5ec09a1fe3476fc97d3e0f11ba417720c953d2cfe44e",
 }
 
-VENDORED_PREFIXES = ("lib/ruckig/", "lib/slopsync/", "managed_components/")
+VENDORED_PREFIXES = ("lib/ruckig/", "lib/valence/", "managed_components/")
 BINARY_SUFFIXES = (".bin", ".png", ".jpg", ".webp", ".ico", ".pdf",
                    ".woff", ".woff2", ".idx", ".gz", ".lock", ".elf", ".uf2")
 
@@ -174,10 +175,10 @@ GREP_CHECKS = [
         exempt=("lib/vlog/include/vlog/vlog.h",),
     ),
     dict(
-        name="slopsync-purity",
-        msg="platform header inside hardware-free lib/slopsync (transport.md: hardware-free, std headers only)",
+        name="valence-purity",
+        msg="platform header inside hardware-free lib/valence (transport.md: hardware-free, std headers only)",
         rx=re.compile(r'#\s*include\s*[<"](?:Arduino\.h|freertos/|esp_|driver/|soc/|nvs)'),
-        include=("lib/slopsync/include/",),
+        include=("lib/valence/include/",),
         exempt=(),
     ),
     dict(
@@ -186,7 +187,7 @@ GREP_CHECKS = [
             "task stack; use in-place destroy + placement-new)",
         rx=re.compile(r"\*\s*this\s*=\s*"),
         include=("flagship_", "lib/"),
-        exempt=("lib/ruckig/", "lib/slopsync/"),
+        exempt=("lib/ruckig/", "lib/valence/"),
     ),
     dict(
         name="new-log-macro",
@@ -400,7 +401,7 @@ def run_codespell_check():
 
 
 def run_pin_check():
-    """slopsync.pin RULE: FAIL if ../SlopSync is missing or its HEAD does not
+    """valence.pin RULE: FAIL if ../Valence is missing or its HEAD does not
     match the pin; WARN (not fail) if the sibling working tree is dirty; FAIL
     if the sibling's frozen conformance artifacts do not match our pinned
     hashes (C-6)."""
@@ -408,37 +409,37 @@ def run_pin_check():
     try:
         pinned = PIN_FILE.read_text(encoding="utf-8").splitlines()[0].strip()
     except OSError:
-        return [("pin-missing", "slopsync.pin", 0, "", "slopsync.pin is missing")]
+        return [("pin-missing", "valence.pin", 0, "", "valence.pin is missing")]
 
     if not SIBLING.is_dir():
-        return [("pin-sibling-missing", "../SlopSync", 0, "",
-                 "sibling checkout not found next to this repo -- clone SlopSync alongside ValenceDrive")]
+        return [("pin-sibling-missing", "../Valence", 0, "",
+                 "sibling checkout not found next to this repo -- clone Valence alongside ValenceDrive")]
 
     r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=SIBLING,
                        capture_output=True, text=True)
     if r.returncode != 0:
-        return [("pin-sibling-not-git", "../SlopSync", 0, "",
+        return [("pin-sibling-not-git", "../Valence", 0, "",
                  "sibling exists but `git rev-parse HEAD` failed there")]
     head = r.stdout.strip()
     if head != pinned:
-        findings.append(("pin-mismatch", "slopsync.pin", 0, head[:16],
-                         f"../SlopSync HEAD {head[:16]} != pinned {pinned[:16]} -- "
-                         "bump slopsync.pin (and re-run the gauntlet) or check out the pinned sha"))
+        findings.append(("pin-mismatch", "valence.pin", 0, head[:16],
+                         f"../Valence HEAD {head[:16]} != pinned {pinned[:16]} -- "
+                         "bump valence.pin (and re-run the gauntlet) or check out the pinned sha"))
 
     dirty = subprocess.run(["git", "status", "--porcelain"], cwd=SIBLING,
                            capture_output=True, text=True).stdout.strip()
     if dirty:
-        print("WARN: ../SlopSync working tree is dirty (not a lint failure)")
+        print("WARN: ../Valence working tree is dirty (not a lint failure)")
 
     for rel, want in FROZEN_SHA256_SIBLING.items():
         p = SIBLING / rel
         if not p.exists():
-            findings.append(("pin-frozen-missing", f"../SlopSync/{rel}", 0, "",
+            findings.append(("pin-frozen-missing", f"../Valence/{rel}", 0, "",
                              "frozen artifact is GONE from the sibling"))
             continue
         got = hashlib.sha256(p.read_bytes()).hexdigest()
         if got != want:
-            findings.append(("pin-frozen-changed", f"../SlopSync/{rel}", 0, got[:16],
+            findings.append(("pin-frozen-changed", f"../Valence/{rel}", 0, got[:16],
                              "frozen artifact modified in the sibling (C-6) -- protocol break unless amended"))
     return findings
 

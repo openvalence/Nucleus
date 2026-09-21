@@ -93,5 +93,5 @@ stays empty, check the index setting.
   is a one-time background index of the database's translation units.
 - Scope symbolic queries with `relative_path` anyway; an unscoped
   `find_symbol` walks files and can terminate the language server.
-- The vendored SlopSync surface under `lib/slopsync` is read-only from this
+- The vendored Valence surface under `lib/valence` is read-only from this
   repo. Navigate into it freely; changes there are RFCs, not edits.

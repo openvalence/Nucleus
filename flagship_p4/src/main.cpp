@@ -319,7 +319,7 @@ struct StackWatch {
     uint32_t worst_free = UINT32_MAX; // deepest reported so far, bytes remaining
 };
 StackWatch g_stacks[] = {
-    {"SlopHub",  valence::kHubTaskStackBytes},
+    {"ValenceHub",  valence::kHubTaskStackBytes},
     {"Motion",   valence::kMotionTaskStackBytes},
     {"app_main", uint32_t(CONFIG_ESP_MAIN_TASK_STACK_SIZE)},
 };
@@ -363,13 +363,13 @@ extern "C" void app_main() {
     const bool motion_ok = valence::motionBegin();
     if (!motion_ok) printf("--- motion path FAILED to start ---\n");
 
-    // The SlopSync hub. Independent of the emitters above by construction: it
+    // The Valence hub. Independent of the emitters above by construction: it
     // owns its own task on core 1 and shares no peripheral with them, so a hub
     // failure must never take the bench firmware down with it. It is now the
     // ONLY source of motion intents on this board.
-    printf("\n--- SlopSync hub ---\n");
+    printf("\n--- Valence hub ---\n");
     const bool hub_ok = valence::hubBegin();
-    if (!hub_ok) printf("--- SlopSync hub FAILED to start ---\n");
+    if (!hub_ok) printf("--- Valence hub FAILED to start ---\n");
     printf("\n");
 
     // Liveness line every 5 s.
@@ -395,7 +395,7 @@ extern "C" void app_main() {
         // maxblock, not free, is the number that decides anything: a serve or a
         // DMA descriptor needs ONE contiguous block, and a fragmented heap
         // reads healthy on free right up to the allocation that fails
-        // (SlopDrive-32 .claude/rules/memory-budget.md T21).
+        // (archived SlopDrive-32 repo, .claude/rules/memory-budget.md T21).
         const valence::MotionCensus mo = valence::motionCensus();
         note_stack(0, census.stackFree);
         note_stack(1, mo.stack_free);

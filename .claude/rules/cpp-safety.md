@@ -5,9 +5,9 @@ paths:
 
 # Memory safety and lifetime (operator directive 2026-07-31 -- binding)
 
-Carried from the machine repo (SlopDrive-32 `.claude/rules/cpp-safety.md`).
-Where this file and older doctrine disagree on a memory-safety question, this
-file wins.
+Carried from the archived machine repo (SlopDrive-32
+`.claude/rules/cpp-safety.md`). Where this file and older doctrine disagree on
+a memory-safety question, this file wins.
 
 **Scope, and it is deliberate.** These rules bind `flagship_*/src/`,
 `flagship_*/ulp/`, and the first-party libraries `lib/vlog`, `lib/vglow`,
@@ -15,7 +15,7 @@ file wins.
 component manager fetches into `managed_components/`. That code is
 third-party, is re-vendored from upstream, and is full of constructs the safe
 subset rejects. Enforcing there would mean choosing between a permanently red
-build and patching code we do not own. `lib/slopsync` is the sibling repo's
+build and patching code we do not own. `lib/valence` is the sibling repo's
 surface: read-only here, governed by its own doctrine.
 
 ## The safe subset
@@ -134,7 +134,8 @@ redeclares a default silently overrides a subclass's different default.
 
 An async-TCP dispatch loop that destroyed its own caller's object. There is no
 AsyncTCP in this repo. The case file, including the `0xfefefefe` poison-read
-technique, is SlopDrive-32 `.claude/rules/cpp-safety.md` T29; the reusable
-rule is: before a loop calls user code, ask whether that call can free the
+technique, is the archived SlopDrive-32 `.claude/rules/cpp-safety.md` T29;
+the reusable rule is: before a loop calls user code, ask whether that call can
+free the
 object the loop is iterating on, and if it can, keep the liveness check
 OUTSIDE the object.

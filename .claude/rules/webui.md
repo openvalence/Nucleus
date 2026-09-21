@@ -5,9 +5,10 @@ paths:
 
 # WebUI integration, build chain, and render traps
 
-Carried from the machine repo (SlopDrive-32 `.claude/rules/webui.md`). SlopDeck
-is unchanged: the design home is `docs/slopdeck/DESIGN.md` in whichever repo
-hosts it, and the Prime Rule stands -- through the protocol, never around it.
+Carried from the archived machine repo (SlopDrive-32
+`.claude/rules/webui.md`). Phosphor is unchanged: the design home is
+`docs/phosphor/DESIGN.md` in whichever repo hosts it, and the Prime Rule
+stands -- through the protocol, never around it.
 The `webui/` tree itself lands with the UI phase; these rules bind it the day
 it does.
 # WebUI integration, build chain, and render traps
@@ -47,7 +48,7 @@ are load-bearing rather than decorative:
   defect, not a design change.
 - Only the two accent hues vary by theme.
 
-Generative design tooling is for surfaces with no precedent yet (new SlopDeck
+Generative design tooling is for surfaces with no precedent yet (new Phosphor
 widgets, docs-site). On the existing webui it consumes this file; it does not
 re-litigate it. Aesthetic drift already cost one CSS drift audit and one
 OG-realignment pass.

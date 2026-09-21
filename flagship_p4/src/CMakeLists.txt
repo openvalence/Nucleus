@@ -1,5 +1,5 @@
-# lib/slopsync is a SYMLINK to the sibling SlopSync checkout, pinned by
-# slopsync.pin at the ValenceDrive root. The library ships no .c or .cpp, so an
+# lib/valence is a SYMLINK to the sibling Valence checkout, pinned by
+# valence.pin at the ValenceDrive root. The library ships no .c or .cpp, so an
 # include path is the whole of consuming it: no component, no build step.
 # READ-ONLY: a break there is fixed in flags here, never upstream.
 #
@@ -22,7 +22,7 @@ idf_component_register(SRCS "main.cpp"
                             "../../lib/ruckig/src/ruckig/velocity_third_step1.cpp"
                             "../../lib/ruckig/src/ruckig/velocity_third_step2.cpp"
                        INCLUDE_DIRS "." "hub" "motion"
-                                    "../../lib/slopsync/include"
+                                    "../../lib/valence/include"
                                     "../../lib/vlog/include"
                                     "../../lib/vmotion/include"
                                     "../../lib/ruckig/include"

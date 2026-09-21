@@ -15,7 +15,7 @@ blocks it (`.claude/hooks/tidy_check.py`).
 | Firmware for one chip | `flagship_<chip>/` -- its OWN PlatformIO project | yes |
 | LP core sources for that chip | `flagship_<chip>/ulp/` -- one directory per project, fixed by the builder | yes |
 | Liftable libraries (hardware-free cores) | `lib/` | yes |
-| The SlopSync surface | `lib/slopsync`, a symlink to the sibling checkout | the symlink only |
+| The Valence surface | `lib/valence`, a symlink to the sibling checkout | the symlink only |
 | Per-run output: captures, traces, sweeps, ELF archives | `artifacts/` | no |
 | Vendor manuals, datasheets, schematics | `docs/reference/` | no |
 | Prose that outlives the run: findings, designs, baselines | `docs/` | yes |

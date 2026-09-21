@@ -1,6 +1,6 @@
 // VLog — hardware-free core suite. Exercises the ring/sink/floor/drop
 // contract with an injected port (manual clock, counting lock) — the same
-// determinism posture as the slopsync suites.
+// determinism posture as the valence suites.
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 

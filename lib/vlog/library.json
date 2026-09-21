@@ -1,7 +1,7 @@
 {
   "name": "VLog",
   "version": "0.1.0",
-  "description": "SlopDrive ecosystem logging: leveled, tagged, rate-limited, multi-sink, bounded and non-blocking. Hardware-free core + thin ESP32/Arduino glue.",
+  "description": "Valence ecosystem logging: leveled, tagged, rate-limited, multi-sink, bounded and non-blocking. Hardware-free core + thin ESP32/Arduino glue.",
   "keywords": ["logging", "esp32", "embedded", "vlog"],
   "license": "MIT",
   "frameworks": "*",

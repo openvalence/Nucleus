@@ -1,5 +1,6 @@
 # clang-tidy -- the borrow-checker substitute (.claude/rules/cpp-safety.md).
-# PORT of SlopDrive-32/.clang-tidy; only the header filter changed.
+# PORT of the archived SlopDrive-32 repo's .clang-tidy; only the header
+# filter changed.
 #
 # NOT OPERATIONAL YET. cpp-safety.md names the two routes that failed on this
 # host and the sanitized compile database that would fix them. Do not claim

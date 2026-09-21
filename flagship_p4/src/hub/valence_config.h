@@ -11,12 +11,12 @@
 //   not include this file (it is library-only by contract), so ValenceHub.cpp
 //   sees both and static_asserts them together. Change a number here and the
 //   build fails until the catalog follows.
-// - Values carried verbatim from the SlopDrive-32 S3 product
+// - Values carried verbatim from the archived SlopDrive-32 S3 product
 //   (include/system/config_api.h) so a client that knows one machine's limits
 //   is not surprised by the other. They describe the MOTION plane, which
 //   has_motion=false does not yet expose; they are still the stored
 //   configuration and are published truthfully on 0x1000.
-// See: SlopDrive-32/.claude/rules/governance.md (C-1), ValenceCatalog.h
+// See: .claude/rules/governance.md (C-1), ValenceCatalog.h
 
 #define FIRMWARE_VERSION "0.1.0-p4hub"
 

@@ -3,10 +3,10 @@ paths:
   - "**"
 ---
 
-# SlopCanon -- governance law (C-1..C-12)
+# Canon -- governance law (C-1..C-12)
 
 The rule system every agent, every commit, and every document in this repo
-answers to. Carried verbatim from the machine repo (SlopDrive-32
+answers to. Carried verbatim from the archived machine repo (SlopDrive-32
 `.claude/rules/governance.md`), where it was written because that project's
 knowledge rotted once: status was appended as prose across many files, facts
 had many homes, claims were never stamped with how they were verified, and
@@ -14,7 +14,7 @@ agents resolved contradictions silently by picking whichever source they read
 first. A fleet audit in July 2026 un-rotted it. These rules make that a
 one-time event, and this repo starts with them rather than rediscovering them.
 
-The model is the SlopSync registry: one source of truth, everything else
+The model is the Valence registry: one source of truth, everything else
 derived, a check mode, and a ritual that fixes the doc BEFORE the code.
 
 The operator is not CS-trained. That is a design input, not a caveat: rules
@@ -29,8 +29,8 @@ values is not information, it is a flag (§3).
 
 | Domain | Sole home |
 |---|---|
-| Wire numbers (frames, CBOR keys, NACK codes, channels, limits) | SlopSync repo `spec/registry/registry.yaml` (sibling checkout, pinned by `slopsync.pin`) |
-| Protocol behavior | SlopSync repo `spec/SPEC.md` |
+| Wire numbers (frames, CBOR keys, NACK codes, channels, limits) | Valence repo `spec/registry/registry.yaml` (sibling checkout, pinned by `valence.pin`) |
+| Protocol behavior | Valence repo `spec/SPEC.md` |
 | This machine's device-channel allocation | not yet allocated; it lands with the hub port (board `val-091.3`) and gets a row here in the same commit |
 | Governance law | this file |
 | Engineering doctrine | the other files in `.claude/rules/` |
@@ -40,7 +40,7 @@ values is not information, it is a flag (§3).
 | Per-board silicon, memory-map and radio configuration | `flagship_<chip>/sdkconfig.defaults` (hand-written) and `flagship_<chip>/platformio.ini` |
 | Hardware design rationale for the PCB | `docs/flagship-board.md` |
 | Subsystem deep detail | that subsystem's own README / spec |
-| Public docs site content | SlopSync repo docs-site, generated from its spec homes, never hand-forked |
+| Public docs site content | Valence repo docs-site, generated from its spec homes, never hand-forked |
 
 `CLAUDE.md` is the auto-loaded entry point: operator preferences plus binding
 pointers. It holds NO rules and NO status.
@@ -71,7 +71,7 @@ Canon Flag (§3) and stop that thread until the operator rules. This is the
 core rule; everything else exists to make flags rare.
 
 **C-6 FROZEN MEANS FROZEN.** The frozen list (conformance artifacts, golden
-vectors, frozen public APIs -- SlopSync's own list, hash-pinned from this side
+vectors, frozen public APIs -- Valence's own list, hash-pinned from this side
 in `tools/canon_lint.py`) is touched only after a flag and an explicit
 operator "yes, break compatibility". No exceptions for "it is just a comment".
 
@@ -175,9 +175,10 @@ that file's header; it is the one home for which checks exist.
 
 | Date | Change | Approved by |
 |---|---|---|
-| 2026-09-20 | SlopCanon carried into Valence Drive from the machine repo (C-1..C-12, flag protocol, canon_lint), Map of Truth repointed: `val-` board, per-board sdkconfig/platformio homes, firmware version constant NOT YET ALLOCATED. The machine repo's S3-era incident record stays there and is cited by pointer, never copied. | operator |
-| 2026-09-20 | NAMING: the PCB is the OSSM FLAGSHIP, this firmware is VALENCE DRIVE, the protocol becomes VALENCE. The protocol rebrand is RFC-shaped (the name is in wire bytes, `transport.md` T11), drafted through SlopSync's `spec/RFC-QUEUE.md`, and is decoupled from this repo, which consumes the spec by pinned sha. Nothing wire-visible is respelled here. The name-collision search is closed and is not a flag. | operator |
+| 2026-09-20 | Canon carried into Valence Drive from the machine repo (C-1..C-12, flag protocol, canon_lint), Map of Truth repointed: `val-` board, per-board sdkconfig/platformio homes, firmware version constant NOT YET ALLOCATED. The machine repo's S3-era incident record stays there and is cited by pointer, never copied. | operator |
+| 2026-09-20 | NAMING: the PCB is the OSSM FLAGSHIP, this firmware is VALENCE DRIVE, the protocol becomes VALENCE. The protocol rebrand is RFC-shaped (the name is in wire bytes, `transport.md` T11), drafted through Valence's `spec/RFC-QUEUE.md`, and is decoupled from this repo, which consumes the spec by pinned sha. Nothing wire-visible is respelled here. The name-collision search is closed and is not a flag. | operator |
 | 2026-09-20 | PER-BOARD PlatformIO PROJECTS (`flagship_<chip>/`), and the reason is measured, not tidiness: the ULP build hook resolves exactly one directory, `$PROJECT_DIR/ulp`, with no per-environment override (platform 55.03.39, `espidf.py:2957`, `ulp.py:64`). A `ulp/` directory shared with another board's environment is compiled into that board's image too. A separate `PROJECT_DIR` scopes it structurally. Never merge the boards back into one project. | operator |
-| 2026-09-20 | PURE ESP-IDF, not Arduino, and measured: under `framework=arduino` the ULP binary is built in hybrid mode's throwaway stage and never reaches the final link (`nm` on `firmware.elf` carried no `_binary_ulp_main_bin_*` symbol). `sdkconfig.defaults` is the native home for what `custom_sdkconfig` had to smuggle. SlopLog and SlopGlow get IDF glue twins at the hub port. | operator |
+| 2026-09-20 | PURE ESP-IDF, not Arduino, and measured: under `framework=arduino` the ULP binary is built in hybrid mode's throwaway stage and never reaches the final link (`nm` on `firmware.elf` carried no `_binary_ulp_main_bin_*` symbol). `sdkconfig.defaults` is the native home for what `custom_sdkconfig` had to smuggle. vlog and vglow get IDF glue twins at the hub port. | operator |
 | 2026-09-20 | SOCKETS STAY ON THE P4; the C6 is a NIC running Espressif's stock hosted slave image. The S3's SRAM pressure came from an on-chip WiFi driver plus a BT controller; here the driver is off-chip, the part has 2.3x the SRAM and 32 MB PSRAM, and the measured network cost is 154 KB and tunable. A sockets-on-C6 design recreates the C5 bridge and its T31-T33 seam to save memory the P4 does not need. BLE later is a NimBLE host on the P4 with the controller on the C6. | operator |
 | 2026-09-20 | TASK STACKS LIVE IN INTERNAL RAM. `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y` is the IDF 5.5.4 default and only PERMITS a PSRAM stack; nothing here asks for one. PSRAM is unreachable while the flash cache is disabled, so putting a task stack there needs its own operator ruling. | operator |
+| 2026-09-21 | ECOSYSTEM RENAME LANDED. No live mention of "slop" anywhere; commit history excepted. The protocol repo is VALENCE (library `lib/valence`, namespace `valence::`, lint `tools/valence_lint.py`), consumed here through `lib/valence` -> `../Valence/lib/valence` and pinned by `valence.pin` (was `slopsync.pin`). Wire strings landed with RFC-060 upstream and are respelled here in the same pass, superseding the 2026-09-20 NAMING row's "nothing wire-visible is respelled here": ws subprotocol `valence.v1`, endpoint `/valence`. The catalog etag moved 0034d22cc3b11512 -> 5bba8cb1a2f618c0 (T11: one `desc` string is protocol bytes). vmotion/vglow/vlog, Phosphor, Canon, Valence Sim, Valence Trace follow the same table. SlopDrive-32 survives ONLY as a citation of the archived S3-era reference, marked as archived at every site. | operator |

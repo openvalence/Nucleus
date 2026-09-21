@@ -1708,7 +1708,7 @@ TEST_CASE("A segment longer than chase_stale_us must not starve its own settle g
 }
 
 TEST_CASE("Segment chain with 5 ms arrival jitter: no settle storm, no mode flap") {
-    // The measured defect: the firmware's 5 ms SlopSync pacing drain makes
+    // The measured defect: the firmware's 5 ms Valence pacing drain makes
     // segment arrivals jitter around their scheduled instant, so plans expire a
     // few ms before their successor lands. Pre-0.4 that fired a full Ruckig
     // brake plan every time. Every other row here is released ON its anchor and
@@ -1779,7 +1779,7 @@ namespace {
 
 using vmotion::boundHandoffVelocity;
 
-// The measured failure, MFP plugin v0.2.1 against slopsim, 2026-07-25: a Makima
+// The measured failure, MFP plugin v0.2.1 against Valence Sim, 2026-07-25: a Makima
 // tangent of 1.816 norm/s handed into a span whose own mean velocity is 0.050
 // norm/s -- 36x over. Sane relative to its OWN span (whose chord was steep) and
 // absurd only relative to the NEXT one, which is exactly why a current-chord-
@@ -2018,8 +2018,8 @@ TEST_CASE("RFC-008 guard in the engine: lookahead arms it, absence changes nothi
 
     SUBCASE("TAIL CASE: no known successor is accepted exactly as sent") {
         // Deliberate -- see the ingress note in
-        // SlopSyncHubService::drainMotionStream. Guessing a chord we do not
-        // have would trim well-behaved senders for free. RFC-049c evaluated an
+        // SlopSyncHubService::drainMotionStream (archived SlopDrive-32 repo).
+        // Guessing a chord we do not have would trim well-behaved senders for free. RFC-049c evaluated an
         // own-chord fallback for exactly this case and REJECTED it (see
         // commitWaveform's comment) as an unvalidated motion-quality change --
         // this stays the honest tail case.
@@ -2081,7 +2081,7 @@ TEST_CASE("RFC-008 guard: a bounded handoff does not poison the NEXT segment's a
 //
 // THE SPEED CEILING HOLDS IN BOTH DIRECTIONS
 //
-// Found by SlopScope on its first real capture against slopsim: the plan-strip
+// Found by Valence Trace on its first real capture against Valence Sim: the plan-strip
 // channel reported cur_vel = -896 mm/s on a machine whose input speed ceiling
 // was 550 mm/s, while the POSITIVE peaks sat at exactly +550. The asymmetry was
 // a red herring — every ceiling test in this engine is on |v|, and always was.
@@ -2144,13 +2144,13 @@ SweepStats handoffCase(const Config& cfg, double amp, double freq, double phase,
 
 }  // namespace
 
-TEST_CASE("M7a: the captured SlopScope excursion — chase handoff into a segment") {
-    // The capture, reconstructed: slopsim's limit set, the probe's own sine
+TEST_CASE("M7a: the captured Valence Trace excursion — chase handoff into a segment") {
+    // The capture, reconstructed: Valence Sim's limit set, the probe's own sine
     // (0.5 + 0.35·sin 2π·0.8t at 50 Hz), then the probe's own segment (target
     // 0.7, 900 ms, end-velocity sentinel). Before the fix this planned 1.43x
     // vmax and dived 0.34 units the wrong way; the plan-strip reported it
-    // faithfully, which is how SlopScope caught it.
-    // slopsim derives the engine's normalized jerk ceiling from the mm-domain
+    // faithfully, which is how Valence Trace caught it.
+    // Valence Sim derives the engine's normalized jerk ceiling from the mm-domain
     // input limit set (2e6 mm/s³ / 500 mm span = 4000), not from the firmware's
     // sm_tune_jmax default that machineConfig() carries — and the capture ran
     // under the derived one. The distinction matters here and only here: the

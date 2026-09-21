@@ -7,8 +7,8 @@
 //   request but the browser will not let it READ the answer, so the token
 //   reaches a same-origin UI and nothing else. `Access-Control-Allow-Origin`
 //   here would hand control of the machine to every page on the internet.
-// - PORT 80, not the WS port. SlopSync clients build "http://<ip>/uitoken"
-//   with no port regardless of where the socket lives (slopsync_probe.py's
+// - PORT 80, not the WS port. Valence clients build "http://<ip>/uitoken"
+//   with no port regardless of where the socket lives (valence_probe.py's
 //   mint_uitoken), so serving it only on 82 leaves the mint silently failing
 //   and every session landing at WATCH tier -- which reads as a transport
 //   fault and is not.
@@ -24,9 +24,9 @@
 //   taken with is defined on internal memory only, and external RAM is
 //   additionally unreachable inside a flash-cache-disabled window.
 // - THREADING: mintJson() runs on the :80 httpd task, consume() on the hub
-//   task. Neither touches slopsync::Hub, so the hub's one-task invariant is
+//   task. Neither touches valence::Hub, so the hub's one-task invariant is
 //   untouched.
-// See: SlopSync RFC-029 §4, SPEC.md §12.2
+// See: Valence RFC-029 §4, SPEC.md §12.2
 
 #include <array>
 #include <cstddef>
@@ -57,7 +57,7 @@ public:
     uint32_t consumed() const { return _consumed; }
 
 private:
-    static constexpr size_t kTokenBytes = 16;        // = slopsync limits::token_bytes
+    static constexpr size_t kTokenBytes = 16;        // = valence limits::token_bytes
     static constexpr size_t kSlots = 4;              // a few tabs' worth, no more
     static constexpr uint32_t kTtlMs = 60000;        // RFC-029 §4: short
     static constexpr uint32_t kMinIntervalMs = 250;  // rate limit, per device

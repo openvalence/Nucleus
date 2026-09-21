@@ -3,40 +3,40 @@ paths:
   - "**"
 ---
 
-# Transport and SlopSync boundary constraints
+# Transport and Valence boundary constraints
 
 SPEC §13/§14 and the headers own the protocol story; this file is this
 machine's half of the boundary plus the transport traps. Carried from the
-machine repo (SlopDrive-32 `.claude/rules/transport.md`), minus the UART
-bridge, which does not exist here.
+archived machine repo (SlopDrive-32 `.claude/rules/transport.md`), minus the
+UART bridge, which does not exist here.
 
-## SlopSync (NON-NEGOTIABLE)
+## Valence (NON-NEGOTIABLE)
 
-The ecosystem sync protocol is developed in its OWN repo, SlopSync (sibling
-checkout `../SlopSync`, pinned at this repo's root by `slopsync.pin`). This
+The ecosystem sync protocol is developed in its OWN repo, Valence (sibling
+checkout `../Valence`, pinned at this repo's root by `valence.pin`). This
 machine repo CONSUMES it, never edits it. The spec, registry, codegen, library
 invariants, frozen-artifact list, layering and tests are that repo's doctrine;
-restating them here would violate C-1. The protocol's rename to Valence is
-RFC-shaped and belongs upstream (`governance.md` §6); nothing wire-visible,
-and no `SlopSync` identifier, is respelled from this repo.
+restating them here would violate C-1. The protocol's rename to Valence landed
+upstream with RFC-060 and is reflected here by following the pin; nothing
+wire-visible is ever respelled FROM this repo (`governance.md` §6).
 
-- **Consumption mechanics.** `lib/slopsync` is a real symlink to
-  `../SlopSync/lib/slopsync`. The library ships no `.c` or `.cpp`, so an
+- **Consumption mechanics.** `lib/valence` is a real symlink to
+  `../Valence/lib/valence`. The library ships no `.c` or `.cpp`, so an
   INCLUDE PATH is the whole of consuming it: no component, no build step. The
   path is registered in the project's own `idf_component_register`.
   `tools/canon_lint.py`'s pin rule FAILS if the sibling's HEAD does not match
-  `slopsync.pin`, and cross-checks the sibling's frozen conformance artifacts
-  against the same hashes SlopSync's own lint pins. Belt and suspenders across
+  `valence.pin`, and cross-checks the sibling's frozen conformance artifacts
+  against the same hashes Valence's own lint pins. Belt and suspenders across
   the repo boundary.
 - **Spec-gap ritual, cross-repo order.** Need a number or rule the spec lacks:
-  fix it in the SlopSync repo FIRST (`registry.yaml` or `SPEC.md`,
-  regenerated, committed there), bump `slopsync.pin` to the new sha, THEN code
+  fix it in the Valence repo FIRST (`registry.yaml` or `SPEC.md`,
+  regenerated, committed there), bump `valence.pin` to the new sha, THEN code
   against the constant here. Never a code-local magic number for anything
   wire-visible, and never a spec change made from this repo. Enforced by
   `.claude/hooks/vendor-lock.sh`, whose one writable door is the sibling's
   `spec/RFC-QUEUE.md`.
 - **Frozen (C-6).** The conformance artifacts and the `hub.hpp`/`client.hpp`
-  public API freeze are SlopSync's own frozen list, enforced by its lint. This
+  public API freeze are Valence's own frozen list, enforced by its lint. This
   repo's half is the sha256 cross-check in `tools/canon_lint.py`.
 - **Firmware shape.** The hub service is the composition root, on its own
   task, single-task by design (T5), plus the transport ports plus this
@@ -49,10 +49,10 @@ and no `SlopSync` identifier, is respelled from this repo.
   then `watch`. Tokenless clients can watch and e-stop (stop and estop are
   role-EXEMPT) but cannot command motion. While a UI token is enabled, LAN
   HTTP equals control; a lockdown posture buys a chokepoint, not LAN secrecy.
-- **SlopSync is the ONLY input/output plane (operator ruling 2026-07-26).**
-  Motion input, telemetry, anomaly events and settings ride SlopSync channels.
+- **Valence is the ONLY input/output plane (operator ruling 2026-07-26).**
+  Motion input, telemetry, anomaly events and settings ride Valence channels.
   HTTP remains for fallback polling and bootstrap only.
-- **Transport doctrine (operator rulings 2026-07-27, calibrated).** SlopSync is
+- **Transport doctrine (operator rulings 2026-07-27, calibrated).** Valence is
   the only protocol and is transport-agnostic (SPEC §13, RFC-043 profiles). For
   hardware hubs: BLE GATT is the conformance floor (infrastructure-free
   control, discovery, future WiFi provisioning); WebSocket is the preferred
@@ -62,14 +62,14 @@ and no `SlopSync` identifier, is respelled from this repo.
   never a requirement. On this board BLE later means a NimBLE host on the P4
   with the controller on the C6 (`governance.md` §6).
 - **Intake doctrine (operator ruling 2026-07-27).** On THIS machine the only
-  way in and out is SlopSync. Other firmwares are never forced: SlopSync
+  way in and out is Valence. Other firmwares are never forced: Valence
   competes via the CLIENT ONRAMP (RFC-044). TCode passthrough is the easy rung
-  (clients feed the TCode they already generate through a SlopSync session),
+  (clients feed the TCode they already generate through a Valence session),
   then native segments, then native samples. First-party client support in
   MFP, Intiface and similar is maintained and encouraged. TCode integration is
   a CLIENT-SIDE adapter, never a hub-side stream.
-- **Clients.** The MFP plugin and the verifier (`tools/slopsync_probe.py`)
-  both live in the SlopSync repo. `LiveWireTest` refuses to run homed; run it
+- **Clients.** The MFP plugin and the verifier (`tools/valence_probe.py`)
+  both live in the Valence repo. `LiveWireTest` refuses to run homed; run it
   TWICE back to back, which is the T3 check.
 
 ## The radio link: the C6 is a NIC, not a peer
@@ -116,7 +116,7 @@ raw-scan duty, RX ring sizing against the drain interval, the physical-layer
 common-ground and inversion footguns, and traps T31 (a gate must never disable
 the transport carrying what it gates), T32 (fix a two-ended link at both ends;
 pace retransmits on progress) and T33 (ARQ halves must match; a flash write
-mutes a flash-resident RX ISR) -- is the case file in SlopDrive-32
+mutes a flash-resident RX ISR) -- is the case file in the archived SlopDrive-32
 `.claude/rules/transport.md`. **None of it is reachable here:** the C6 is a
 NIC, there is no second protocol terminator, and the P4 owns the socket. Read
 that file before building any board-to-board link, and never re-derive it.

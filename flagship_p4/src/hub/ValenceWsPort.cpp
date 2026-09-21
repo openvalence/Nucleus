@@ -43,7 +43,7 @@ void ValenceWsTransport::bind(httpd_handle_t hd, int fd) {
 }
 
 void ValenceWsTransport::pushRx(const uint8_t* data, size_t len) {
-    if (len == 0 || len > slopsync::kFrameBufferCapacity) return;  // never a valid frame
+    if (len == 0 || len > valence::kFrameBufferCapacity) return;  // never a valid frame
     const uint8_t tail = _rxTail.load(std::memory_order_relaxed);
     const uint8_t next = uint8_t((tail + 1) % kRxRingDepth);
     if (next == _rxHead.load(std::memory_order_acquire)) {
@@ -75,11 +75,11 @@ void ValenceWsTransport::close() {
 bool ValenceWsTransport::isDroppable(std::span<const std::byte> frame) {
     if (frame.empty()) return false;
     const auto t = uint8_t(frame[0]);  // byte 0 is the frame type (wire/frame_header.hpp)
-    return t == uint8_t(slopsync::FrameType::STATE) || t == uint8_t(slopsync::FrameType::STREAM);
+    return t == uint8_t(valence::FrameType::STATE) || t == uint8_t(valence::FrameType::STREAM);
 }
 
 bool ValenceWsTransport::isBlobChunk(std::span<const std::byte> frame) {
-    return !frame.empty() && uint8_t(frame[0]) == uint8_t(slopsync::FrameType::BLOB_CHUNK);
+    return !frame.empty() && uint8_t(frame[0]) == uint8_t(valence::FrameType::BLOB_CHUNK);
 }
 
 bool ValenceWsTransport::write(std::span<const std::byte> frame) {
@@ -95,7 +95,7 @@ bool ValenceWsTransport::write(std::span<const std::byte> frame) {
         return false;
     }
     if (blob) {
-        if (_blobThisTick >= slopsync::limits::blob_chunks_in_flight || _congestionLevel != 0) {
+        if (_blobThisTick >= valence::limits::blob_chunks_in_flight || _congestionLevel != 0) {
             ++_txBlobHolds;   // held, not lost: the hub retries this index next tick
             return false;
         }
@@ -143,21 +143,21 @@ bool ValenceWsTransport::write(std::span<const std::byte> frame) {
     return false;
 }
 
-std::optional<slopsync::FrameBuffer> ValenceWsTransport::read() {
+std::optional<valence::FrameBuffer> ValenceWsTransport::read() {
     const uint8_t head = _rxHead.load(std::memory_order_relaxed);
     // ACQUIRE: pairs with pushRx's release store.
     if (head == _rxTail.load(std::memory_order_acquire)) return std::nullopt;
-    slopsync::FrameBuffer out = _rx[head];
+    valence::FrameBuffer out = _rx[head];
     _rxHead.store(uint8_t((head + 1) % kRxRingDepth), std::memory_order_release);
     return out;
 }
 
-slopsync::TransportProperties ValenceWsTransport::properties() const {
-    slopsync::TransportProperties p;
-    p.mtu = uint16_t(slopsync::kFrameBufferCapacity);
+valence::TransportProperties ValenceWsTransport::properties() const {
+    valence::TransportProperties p;
+    p.mtu = uint16_t(valence::kFrameBufferCapacity);
     p.ordered = true;    // TCP
     p.reliable = true;
-    p.congestion = slopsync::CongestionSignal::QueueWatermark;
+    p.congestion = valence::CongestionSignal::QueueWatermark;
     return p;
 }
 
@@ -240,7 +240,7 @@ esp_err_t ValenceWsPort::wsHandler(httpd_req_t* req) {
 
     if (req->method == HTTP_GET) {
         // Handshake. esp_http_server has already negotiated and echoed
-        // "slopsync.v1" from the URI registration by the time this runs.
+        // "valence.v1" from the URI registration by the time this runs.
         for (uint8_t i = 0; i < kSlots; ++i) {
             bool expect = false;
             if (g_port->_inUse[i].compare_exchange_strong(expect, true,
@@ -267,7 +267,7 @@ esp_err_t ValenceWsPort::wsHandler(httpd_req_t* req) {
     // slot is never freed.
     if (httpd_ws_recv_frame(req, &f, 0) != ESP_OK) return ESP_FAIL;
 
-    uint8_t buf[slopsync::kFrameBufferCapacity];
+    uint8_t buf[valence::kFrameBufferCapacity];
     if (f.len > sizeof(buf)) return ESP_FAIL;   // cannot consume it; the stream is desynced
     if (f.len > 0) {
         f.payload = buf;
@@ -307,7 +307,7 @@ esp_err_t ValenceWsPort::wsHandler(httpd_req_t* req) {
     return ESP_OK;
 }
 
-bool ValenceWsPort::begin(slopsync::Hub* hub, uint16_t port) {
+bool ValenceWsPort::begin(valence::Hub* hub, uint16_t port) {
     _hub = hub;
     g_port = this;
 
@@ -328,17 +328,17 @@ bool ValenceWsPort::begin(slopsync::Hub* hub, uint16_t port) {
         return false;
     }
 
-    // BOTH paths. SlopDeck opens ws://<host>:82/ (clients/js/session.js:1133)
-    // while the SPEC recommends /slopsync; serving one and not the other is a
+    // BOTH paths. Phosphor opens ws://<host>:82/ (clients/js/session.js:1133)
+    // while the SPEC recommends /valence; serving one and not the other is a
     // silent refusal at connect time.
-    httpd_uri_t root{"/", HTTP_GET, wsHandler, nullptr, true, true, "slopsync.v1"};
-    httpd_uri_t named{"/slopsync", HTTP_GET, wsHandler, nullptr, true, true, "slopsync.v1"};
+    httpd_uri_t root{"/", HTTP_GET, wsHandler, nullptr, true, true, "valence.v1"};
+    httpd_uri_t named{"/valence", HTTP_GET, wsHandler, nullptr, true, true, "valence.v1"};
     if (httpd_register_uri_handler(_srv, &root) != ESP_OK ||
         httpd_register_uri_handler(_srv, &named) != ESP_OK) {
         SLOGE(kTag, "WS URI registration failed");
         return false;
     }
-    SLOGI(kTag, "listening on :%u at / and /slopsync (subprotocol slopsync.v1), %u slots",
+    SLOGI(kTag, "listening on :%u at / and /valence (subprotocol valence.v1), %u slots",
           unsigned(port), unsigned(kSlots));
     return true;
 }

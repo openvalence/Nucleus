@@ -16,8 +16,8 @@
 
 #include "vlog/vlog.h"
 
-#include "slopsync/core/crypto.hpp"
-#include "slopsync/wire/hmac_sha256.hpp"
+#include "valence/core/crypto.hpp"
+#include "valence/wire/hmac_sha256.hpp"
 
 namespace valence {
 
@@ -35,7 +35,7 @@ portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 // destructor via __cxa_atexit -- either of which aborts the core in a
 // no-abort context. At namespace scope it is built during static init and the
 // critical section below does pure arithmetic.
-slopsync::SoftwareCrypto s_cmp;
+valence::SoftwareCrypto s_cmp;
 
 ValenceUiTokenMinter* g_minter = nullptr;
 
@@ -77,7 +77,7 @@ esp_err_t ValenceUiTokenMinter::handleGet(httpd_req_t* req) {
 }
 
 bool ValenceUiTokenMinter::attachRoutes() {
-    // SECOND httpd instance, and the split is not cosmetic: the SlopSync socket
+    // SECOND httpd instance, and the split is not cosmetic: the Valence socket
     // owns 82 while clients mint over plain HTTP on 80. Two instances MUST NOT
     // share a ctrl_port -- the second one silently refuses to start.
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
@@ -127,7 +127,7 @@ uint8_t ValenceUiTokenMinter::mintJson(char* body, size_t cap) {
     std::array<std::byte, 8> material{};
     for (size_t i = 0; i < 4; ++i) material[i] = std::byte((counter >> (8 * i)) & 0xFF);
     for (size_t i = 0; i < 4; ++i) material[4 + i] = std::byte((now >> (8 * i)) & 0xFF);
-    auto mac = slopsync::hmacSha256(std::span<const std::byte>(_secret),
+    auto mac = valence::hmacSha256(std::span<const std::byte>(_secret),
                                     std::span<const std::byte>(material));
     std::array<std::byte, kTokenBytes> tok{};
     for (size_t i = 0; i < kTokenBytes; ++i) tok[i] = mac[i];

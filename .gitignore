@@ -23,7 +23,7 @@ secrets.h
 # (tools/* not tools/ so specific files CAN be re-included below - git cannot
 #  re-include anything under an excluded directory.)
 tools/*
-# SlopCanon mechanical floor (.claude/rules/governance.md SS5). Doctrine
+# Canon mechanical floor (.claude/rules/governance.md SS5). Doctrine
 # enforcement is part of the repo, not a scratch script.
 !tools/canon_lint.py
 # the motion acceptance instrument; val-091.4/.8 stamps cite it

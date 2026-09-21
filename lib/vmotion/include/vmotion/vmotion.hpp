@@ -112,7 +112,8 @@
 //
 // Hardware-free: std headers + vendored lib/ruckig only. Native-tested in
 // test/native/test_vmotion. The scenario-trace bench did not come across from
-// the SlopDrive-32 repo; regenerate it there if a waveform needs eyes on it.
+// the archived SlopDrive-32 repo; regenerate it there if a waveform needs
+// eyes on it.
 #pragma once
 
 #include <cstdint>
@@ -148,7 +149,7 @@ struct Limits {
 //             together in the ratio `infeasible_blend` sets and only as far as
 //             legality demands, so a segment 10 % over gives up about 10 % of
 //             the ray rather than 100 % of one axis. Right for a SCHEDULED
-//             sender (funscript segments over SlopSync 0x0085): the next
+//             sender (funscript segments over Valence 0x0085): the next
 //             segment arrives on its own clock regardless of whether we
 //             finished, so an overrun plan is PREEMPTED mid-flight. Measured
 //             on the virtual machine (window 500 mm, vmax 1.1, amax 16): a 0->1
@@ -235,7 +236,7 @@ enum class CurvePolicy : uint8_t {
 };
 
 // WaveformCommand::client_curve_family's "c1_cubic". Mirrored rather than
-// included: this header stays slopsync-free, so the registry numbering is
+// included: this header stays valence-free, so the registry numbering is
 // documented (see WaveformCommand) and restated here, never imported.
 inline constexpr uint8_t kClientCurveC1Cubic = 1;
 
@@ -485,7 +486,7 @@ struct Command {
     // ---- ONE-SEGMENT LOOKAHEAD (RFC-008 handoff sanity guard) ---------------
     // The mean speed (|Δtarget| / duration, same normalized units/s as
     // end_vel) of the segment that FOLLOWS this one, when the caller already
-    // holds it. The firmware's SlopSync pacing ring schedules 0x0085 segments
+    // holds it. The firmware's Valence pacing ring schedules 0x0085 segments
     // ~120 ms ahead of their start, so at the moment a segment is handed to
     // the engine its successor is frequently already queued — this is that
     // knowledge, and nothing else. It is NOT a command, it never plans
@@ -512,8 +513,8 @@ struct Command {
     bool     has_anchor = false;
 
     // ---- RFC-030: the sender's DECLARED curve family ------------------------
-    // Values mirror the SlopSync registry's `curve_families` table verbatim
-    // (this header stays slopsync-free, so the numbering is documented, not
+    // Values mirror the Valence registry's `curve_families` table verbatim
+    // (this header stays valence-free, so the numbering is documented, not
     // included): 0 = unspecified, 1 = c1_cubic, 2 = c2_quintic, 3 = step.
     // Consumed ONLY by the waveform path's FollowClient resolution — 1 selects
     // the cubic reconstruction, everything else keeps the quintic (today's
@@ -526,7 +527,7 @@ struct Command {
 // "The machine plans for the worst so clients don't have to."
 //
 // THE FAILURE THIS EXISTS FOR (measured live, MFP plugin v0.2.1-0.2.3 against
-// slopsim, 2026-07-25): a funscript axis on Makima interpolation produced a
+// Valence Sim, 2026-07-25): a funscript axis on Makima interpolation produced a
 // handoff velocity of 1.816 norm/s into a span whose own mean velocity is
 // 0.050 norm/s — 36x over. The client was computing a MATHEMATICALLY CORRECT
 // spline tangent; there is simply no monotone quintic that covers 0.050 of
@@ -1140,7 +1141,7 @@ private:
     static constexpr uint64_t kAnchorMaxLateUs = 50000;
     // Scheduled-anchor LEAD bound, and the ceiling on how long a scheduled
     // successor may suppress the settle boundary. At or above the hub's
-    // `max_future_schedule_ms` (250 ms, SlopSync registry), never under it.
+    // `max_future_schedule_ms` (250 ms, Valence registry), never under it.
     static constexpr uint64_t kAnchorMaxLeadUs = 500000;
     static constexpr float    kDetailAnchorLead = -97.0f;   // see PlanFailed
     // Anchored plans parked at once. The bound that matters is the registry's
@@ -1379,7 +1380,7 @@ private:
         // here, not merely deferred -- it clamps SOME declared down-stroke end
         // velocities on a chain whose own dynamics have already pulled chord_in
         // below the k-factor bound, which is a motion-quality change that pass
-        // could not re-validate. Left OPEN, per SlopSync RFC-049(c) (SlopSync
+        // could not re-validate. Left OPEN, per Valence RFC-049(c) (Valence
         // repo): a real fix needs the scheduling-depth signal to come
         // from somewhere that can tell "a successor is coming, just not yet
         // queued" apart from "this is genuinely the last segment" — which
@@ -2429,7 +2430,7 @@ private:
     //
     // ...but ONLY after the grace window. A plan expiring a few milliseconds
     // before its successor arrives is not a starved stream, it is a network.
-    // Measured on the firmware's SlopSync path, whose 5 ms segment-pacing
+    // Measured on the firmware's Valence path, whose 5 ms segment-pacing
     // drain guarantees exactly that jitter: a 14-segment funscript chain
     // produced 14 settles and 27 PlanKind flips at 5 ms of arrival lag,
     // against 1 and 1 at 0 ms — the engine was reacting to the transport, not
@@ -2439,7 +2440,7 @@ private:
     // was counting on inheriting. The grace window holds at the endpoint for
     // ms-scale stream jitter (degrading smoothly) and keeps the brake for a
     // real starvation.
-    // The §11.3 600 ms SlopSync deadman remains the actual starvation
+    // The §11.3 600 ms Valence deadman remains the actual starvation
     // authority; this window only stops the engine from panicking on ms-scale
     // pacing noise.
     void maybeSettle(uint64_t now_us) {

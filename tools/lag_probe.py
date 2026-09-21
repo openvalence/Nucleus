@@ -14,14 +14,14 @@ THREE NUMBERS, AND THEY ARE NOT THE SAME LAG:
                lands here. This is the half a display sits on top of.
 
 Constraints:
-- READ-ONLY against SlopSync: it imports tools/slopsync_probe.py from the
+- READ-ONLY against Valence: it imports tools/valence_probe.py from the
   sibling checkout for the wire primitives and never edits it.
 - Pick a window the demand fits INSIDE. A sine whose peak velocity exceeds the
   input speed ceiling is shaped by the ceiling, and the phase you measure is
   the clamp's, not the engine's.
 - Arrival time is a HINT, never a timeline: the network batches STATE frames,
   so `sent -> rx` is reported as a median and a p95, never interpolated
-  against (SlopDrive-32 webui.md T18).
+  against (archived SlopDrive-32 repo, webui.md T18).
 
 See: bd val-091.11
 """
@@ -32,11 +32,11 @@ import os
 import sys
 import time
 
-_SLOPSYNC_TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "..", "..", "SlopSync", "tools")
-sys.path.insert(0, os.path.abspath(_SLOPSYNC_TOOLS))
+_VALENCE_TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "..", "..", "Valence", "tools")
+sys.path.insert(0, os.path.abspath(_VALENCE_TOOLS))
 
-import slopsync_probe as sp  # noqa: E402
+import valence_probe as sp  # noqa: E402
 import websocket  # noqa: E402
 
 
@@ -106,7 +106,7 @@ def run(args):
     token = sp.mint_uitoken(args.ip)
     if not token:
         print("FAIL: no /uitoken -- a watch-tier session cannot publish a stream. "
-              "Close any SlopDeck tab (it retries the mint in a loop and 429s us).")
+              "Close any Phosphor tab (it retries the mint in a loop and 429s us).")
         return 1
     url = "ws://%s:%d/" % (args.ip, args.port)
     ws = websocket.create_connection(url, subprotocols=[sp.WS_SUBPROTOCOL], timeout=5.0)

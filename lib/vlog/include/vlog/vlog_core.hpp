@@ -54,7 +54,7 @@ inline char levelChar(Level l) { return "TDIWEF?"[uint8_t(l) < 6 ? uint8_t(l) : 
 // The severity line that splits "keep at all costs" from "shed under load".
 // Warn and above is what an operator needs after the fact; Trace/Debug/Info
 // are the running commentary. Shared by every ring in the chain (core ring,
-// the SlopSync bridge ring, the /api/log web ring) — a severity-blind ring
+// the Valence bridge ring, the /api/log web ring) — a severity-blind ring
 // anywhere would defeat the whole scheme.
 inline constexpr Level kReserveFloor = Level::Warn;
 inline constexpr bool isReserved(Level l) { return l >= kReserveFloor; }
