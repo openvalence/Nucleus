@@ -103,7 +103,13 @@ def pct(xs, q):
 
 
 def run(args):
-    token = sp.mint_uitoken(args.ip)
+    # A watch-tier Phosphor tab retries its blocked mint in a loop and eats the
+    # device-wide one-per-250-ms slots; keep asking until one lands.
+    token = None
+    for _ in range(40):
+        token = sp.mint_uitoken(args.ip)
+        if token: break
+        time.sleep(0.137)
     if not token:
         print("FAIL: no /uitoken -- a watch-tier session cannot publish a stream. "
               "Close any Phosphor tab (it retries the mint in a loop and 429s us).")
@@ -207,6 +213,16 @@ def run(args):
             rx.append((time.time(), d["pos_mm"], d["tgt_mm"], d.get("raw_mm", float("nan"))))
     sp.send_frame(ws, sp.FRAME["GOODBYE"], 0, sp.build_goodbye(0))
     ws.close()
+    if args.dump:
+        # Wall-clock series for a display-side correlation (a browser sampling
+        # what the client draws against the same epoch clock).
+        import json
+        with open(args.dump, "w") as f:
+            json.dump({"t_start": t_start, "span_mm": args.span_mm, "center": args.center,
+                       "amp": args.amp, "freq": args.freq,
+                       "sent": [[t, tg] for t, tg in sent],
+                       "rx": [[r[0], r[1], r[2], r[3]] for r in rx]}, f)
+        print("dumped %d sent / %d rx to %s" % (len(sent), len(rx), args.dump))
 
     # ---- fits ---------------------------------------------------------------
     # Drop the first second: the cold-start plan is a POSITIONING move to the
@@ -281,6 +297,7 @@ def main():
     ap.add_argument("--seg-ms", type=float, default=100.0, help="segment duration, ms")
     ap.add_argument("--lookahead-ms", type=float, default=120.0,
                     help="schedule each segment this far ahead of now (the plugin's SegLookaheadMs)")
+    ap.add_argument("--dump", help="write the sent and received series (epoch seconds) to this JSON")
     ap.add_argument("--force-home", type=float, metavar="STROKE",
                     help="send home op 2 with this stroke first (RFC-025 bench op)")
     return run(ap.parse_args())
