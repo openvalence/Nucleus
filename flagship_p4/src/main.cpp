@@ -305,7 +305,7 @@ struct StackWatch {
 };
 StackWatch g_stacks[] = {
     {"SlopHub",  valence::kHubTaskStackBytes},
-    {"Motion",   16384},
+    {"Motion",   valence::kMotionTaskStackBytes},
     {"app_main", uint32_t(CONFIG_ESP_MAIN_TASK_STACK_SIZE)},
 };
 void note_stack(size_t i, uint32_t free_bytes) {
@@ -339,20 +339,22 @@ extern "C" void app_main() {
     const bool wifi_ok = wifi_up();
     if (!wifi_ok) printf("--- network FAILED to start ---\n");
 
-    // The SlopSync hub. Independent of the emitters above by construction: it
-    // owns its own task on core 1 and shares no peripheral with them, so a hub
-    // failure must never take the bench firmware down with it.
-    printf("\n--- SlopSync hub ---\n");
-    const bool hub_ok = valence::hubBegin();
-    if (!hub_ok) printf("--- SlopSync hub FAILED to start ---\n");
-
     // The motion path. It TAKES OVER the LP emitter's steering words from
     // start_lp_core()'s constant-rate liveness value and parks it; from here
     // the arbiter is their sole writer.
+    // BEFORE the hub, and that order is load-bearing: the hub's boot publish of
+    // every motion STATE channel reads motionCensus().
     printf("\n--- motion path (arbiter + vmotion + LP emitter) ---\n");
     const bool motion_ok = valence::motionBegin();
     if (!motion_ok) printf("--- motion path FAILED to start ---\n");
-    else            valence::motionBenchStart();
+
+    // The SlopSync hub. Independent of the emitters above by construction: it
+    // owns its own task on core 1 and shares no peripheral with them, so a hub
+    // failure must never take the bench firmware down with it. It is now the
+    // ONLY source of motion intents on this board.
+    printf("\n--- SlopSync hub ---\n");
+    const bool hub_ok = valence::hubBegin();
+    if (!hub_ok) printf("--- SlopSync hub FAILED to start ---\n");
     printf("\n");
 
     // Liveness line every 5 s.

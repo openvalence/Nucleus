@@ -13,9 +13,11 @@
 // - CONSTRUCTION ORDER IS LOAD-BEARING: catalog, clock and rng must all exist
 //   and be final before the Hub constructor runs -- it encodes the catalog and
 //   draws boot_id from the rng right there.
-// - Nothing here owns motion. DeviceFeatures::has_motion is false on this
-//   board, so the catalog carries no motion or pattern channel and the
-//   delegate has no motion intent to apply.
+// - NOTHING HERE OWNS MOTION. The delegate submits intents and reads
+//   motionCensus(); the arbiter owns every gate, the window clamp and the
+//   limit set (architecture.md section 2). hubBegin() therefore runs AFTER
+//   motionBegin(): the boot publish of every motion STATE channel reads the
+//   census, and a hub that came up first would seed them from a dead struct.
 // See: SlopSync SPEC.md §6, §8, §9; ValenceCatalog.h
 
 #include <cstdint>
@@ -32,11 +34,10 @@ namespace valence {
 // workload (a SlopDeck session live, one full probe run, a motion bench cycle)
 // the deepest free was 1,840 B of 8,192 -- 22 % headroom [verified 2026-09-21
 // -- uxTaskGetStackHighWaterMark, COM15]. The deep path is a client's catalog
-// BLOB transfer, and it GROWS: the catalog is gated down to 14 entries by
-// DeviceFeatures::has_motion, so the day a drive lands the motion and pattern
-// domains reappear and that same path chunks a bigger blob. T21 forbids sizing
-// DOWN without a mark and this is the other direction: 16 KB is the motion
-// task's size, internal, and it costs 8,192 B of internal heap.
+// BLOB transfer, and it GREW when val-091.11 advertised the motion plane: that
+// same path now chunks a bigger blob. T21 forbids sizing DOWN without a mark
+// and this is the other direction: 16 KB is the motion task's size, internal,
+// and it costs 8,192 B of internal heap.
 inline constexpr uint32_t kHubTaskStackBytes = 16384;
 
 // Brings up logging, the catalog, the hub and the hub task. Returns false if

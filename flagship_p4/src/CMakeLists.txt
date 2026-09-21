@@ -41,13 +41,6 @@ idf_component_register(SRCS "main.cpp"
                                      espressif__esp_hosted
                                      espressif__esp_wifi_remote)
 
-# BENCH IMAGE. This define is the whole mechanism keeping the bench-only motion
-# entries (assume-homed, the +20/-20/reversal sequence) out of a product build:
-# it is set HERE and nowhere else, so a product project that reuses
-# motion/ValenceMotion.cpp compiles neither of them. This board has no drive
-# and no encoder, so it cannot home; see the header's note.
-target_compile_definitions(${COMPONENT_LIB} PRIVATE VALENCE_BENCH_MOTION=1)
-
 # ulp_embed_binary builds ulp/ with the LP core toolchain, embeds ulp_main.bin
 # into the app, and generates ulp_main.h (every LP global as ulp_<name>). The
 # app name MUST be ulp_main: pioarduino's ulp.py hardcodes it.

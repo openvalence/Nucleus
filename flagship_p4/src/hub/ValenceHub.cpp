@@ -5,8 +5,13 @@
 //   to valence_config.h. The catalog is library-only and cannot include the
 //   config header; this TU sees both, so it is where the mirror is nailed.
 // - The delegate is HONEST OR ABSENT: an intent it cannot really apply is
-//   NACKed UNSUPPORTED_OP (0x0303, registry.yaml:609), never NOT_HOMED --
-//   there is no homing on this board to be waiting for.
+//   NACKed UNSUPPORTED_OP (0x0303, registry.yaml:609) and NEVER echoed. A
+//   refusal that IS a machine state (e-stop latched, not homed) carries that
+//   state's own code instead, so a client gets a reason it can act on.
+// - EVERY advertised STATE channel is published at boot with its truthful
+//   at-rest value and kept truthful after. An advertised-but-never-published
+//   STATE leaves a subscriber holding "no idea" where the protocol promised a
+//   value, and a generic client sits at syncing forever.
 // - THE 0x1000 CONFIG AND ITS cfg_gen ARE PERSISTED IN NVS (namespace
 //   "valence", key "cfg"). The load happens BEFORE the first retained 0x1000
 //   push, so a subscriber's first snapshot is the stored truth and never a
@@ -98,6 +103,36 @@ struct StoredConfig {
 
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+// ---- packed-layout writers ---------------------------------------------------
+// The STATE layouts below are long and every offset in them is wire-visible, so
+// nothing spells an offset twice: a miscounted subspan is a silent field shift
+// that renders as plausible numbers in the wrong columns.
+
+// Free functions over a caller-owned buffer and a caller-owned cursor, not a
+// writer object: a cursor that HELD the span would be a borrowed member, which
+// the safe subset forbids outright (cpp-safety.md).
+void packU8(std::span<std::byte> o, size_t& n, uint8_t v)   { n += slopsync::putU8(o.subspan(n), v); }
+void packU16(std::span<std::byte> o, size_t& n, uint16_t v) { n += slopsync::putU16(o.subspan(n), v); }
+void packI16(std::span<std::byte> o, size_t& n, int16_t v)  { packU16(o, n, uint16_t(v)); }
+void packU32(std::span<std::byte> o, size_t& n, uint32_t v) { n += slopsync::putU32(o.subspan(n), v); }
+void packF32(std::span<std::byte> o, size_t& n, float v)    { n += slopsync::putF32(o.subspan(n), v); }
+
+// A packed field's wire value is value*scale, SATURATED at the type. Saturating
+// beats wrapping: a position past the top of a u16 reads as the far end of the
+// rail, never as the near end.
+uint16_t wireU16(float v, float scale) {
+    const float x = v * scale;
+    if (!(x > 0.0f)) return 0;                 // NaN takes this branch
+    return x >= 65535.0f ? uint16_t(65535) : uint16_t(x + 0.5f);
+}
+int16_t wireI16(float v, float scale) {
+    const float x = v * scale;
+    if (!std::isfinite(x)) return 0;
+    if (x >= 32767.0f) return 32767;
+    if (x <= -32768.0f) return -32768;
+    return int16_t(x >= 0.0f ? x + 0.5f : x - 0.5f);
+}
+
 const slopsync::IntentValueField* findField(const IntentValueMap& m, uint8_t key) {
     for (uint32_t i = 0; i < m.count; ++i) {
         if (m.fields[i].key == key) return &m.fields[i];
@@ -114,6 +149,25 @@ float fieldF32(const slopsync::IntentValueField* f, float dflt) {
         default:                      return dflt;
     }
 }
+
+uint64_t fieldU64(const slopsync::IntentValueField* f, uint64_t dflt) {
+    if (!f) return dflt;
+    switch (f->value.kind) {
+        case IntentValue::Kind::U64: return f->value.u64_val;
+        case IntentValue::Kind::I64: return f->value.i64_val < 0 ? dflt : uint64_t(f->value.i64_val);
+        default:                     return dflt;
+    }
+}
+
+// 0x2101 field 3's "no end velocity" sentinel. 0 is a legitimate slope, so it
+// cannot mean absent; INT16_MIN is the value the catalog reserves.
+constexpr int16_t kSegNoEndVel = -32768;
+
+// How far ahead of now a stream sample's t_off may resolve before it is treated
+// as a client clock that lost sync. Past this the sample is pulled back rather
+// than parked: a quarter second of runway is already far more than any bundle
+// span, so a larger lead is a resync failure, not a schedule.
+constexpr int32_t kStreamFarFutureUs = 250000;
 
 // ---- NVS persistence for 0x1000 and its cfg_gen ------------------------------
 // One blob, one write. cfg_gen rides WITH the values because §4.2 makes it a
@@ -223,28 +277,25 @@ public:
     Ret applyIntent(uint16_t channel_id, const IntentValueMap& requested, AccessLevel role,
                     bool& cfgChanged) override {
         (void)role;
+        if (channel_id == ch::move) return applyMove(requested);
+        if (channel_id == ch::home) return applyHome(requested);
+        if (channel_id == ch::modes_set || channel_id == ch::sm_set) {
+            // HONEST OR ABSENT. Both writers are advertised because their
+            // read-side cards are real, but nothing on this board applies
+            // either: the modes name a drive backend and a homing style that
+            // do not exist, and the vmotion tuning is not wired to a live
+            // setter. Their cards therefore publish an all-zero enabled_mask
+            // and their writes NACK, which is one statement, not two. An echo
+            // of a value the machine did not take is the ground-truth defect
+            // this refusal exists to avoid (bd val-091.11).
+            return Ret::err(NackCode::UNSUPPORTED_OP);
+        }
         if (channel_id != ch::config_set) {
-            // THE SEAM FOR ch::move (0x3100), and it is deliberately not code
-            // yet. The motion path exists and works (motion/ValenceMotion.h),
-            // but DeviceFeatures::has_motion is false, so ch::move is not in
-            // the catalog and an intent on it cannot arrive: a branch here
-            // would be unreachable by construction. When a real drive and
-            // encoder land and has_motion flips on, this becomes
-            //   if (channel_id == ch::move) {
-            //       MotionIntent in{MotionSource::Stream, <target mm>, ...};
-            //       return motionSubmit(in) ? Ret::ok(...)
-            //                               : Ret::err(NackCode::...);
-            //   }
-            // and nothing else here changes -- the arbiter already owns the
-            // gates, the clamp and the limit set.
-            //
-            // Includes every op on 0x0005 that the hub does not handle itself
-            // (stop / hold / pause / resume / override / bypass): each one names
-            // a motion-plane behavior this board does not yet expose, and the
-            // library's own contract is that an unimplemented op returns
-            // UNSUPPORTED_OP so the hub latches NOTHING. estop and estop_clear
-            // never reach here -- the hub owns both -- so the red button works
-            // regardless.
+            // Every op on 0x0005 the hub does not handle itself (stop / hold /
+            // pause / resume / override / bypass). The library's contract is
+            // that an unimplemented op returns UNSUPPORTED_OP so the hub
+            // latches NOTHING. estop and estop_clear never reach here -- the
+            // hub owns both -- so the red button works regardless.
             return Ret::err(NackCode::UNSUPPORTED_OP);
         }
 
@@ -294,14 +345,184 @@ public:
         return Ret::ok(applied);
     }
 
+    // ---- 0x3100 move ---------------------------------------------------------
+    // MANUAL source: the wire operator is the one driving. The arbiter lets a
+    // Manual intent through an unhomed machine (the push-to-home case a local
+    // button would use); this board has no such button, so the WIRE door is
+    // gated on homed here. force_home is that door (operator ruling
+    // 2026-09-21), and a refusal carries its reason rather than a count.
+    Ret applyMove(const IntentValueMap& requested) {
+        const MotionCensus c = motionCensus();
+        if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+        if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
+
+        MotionIntent in;
+        in.source    = MotionSource::Manual;
+        in.target_mm = fieldF32(findField(requested, 1), 0.0f);
+        if (!std::isfinite(in.target_mm)) return Ret::err(NackCode::INVALID_VALUE);
+        if (!motionSubmit(in)) return Ret::err(NackCode::INTERLOCK);
+
+        // Ground truth: echo the post-clamp position, against the SAME rail the
+        // arbiter clamps a Manual intent to. `bypass` echoes false always --
+        // nothing here bypasses anything, and echoing the request back would
+        // report a capability the machine does not have.
+        IntentValueMap applied{};
+        applied.count = 2;
+        applied.fields[0] = {1, IntentValue::ofF32(clampf(in.target_mm, 0.0f, c.rail_mm))};
+        applied.fields[1] = {2, IntentValue::ofBool(false)};
+        return Ret::ok(applied);
+    }
+
+    // ---- 0x3101 home ---------------------------------------------------------
+    Ret applyHome(const IntentValueMap& requested) {
+        const uint64_t op = fieldU64(findField(requested, 1), 0);
+        IntentValueMap applied{};
+        switch (op) {
+            case 1:  // real homing
+                // There is no motor and no encoder on this board, so a homing
+                // cycle has nothing to feel for. Saying so once is the whole
+                // handling; op 2 is how this machine becomes homed.
+                SLOGW_EVERY_MS(60000, kTag,
+                               "home op 1 refused: no drive and no encoder on this board, "
+                               "nothing to home against -- use force_home (op 2)");
+                return Ret::err(NackCode::UNSUPPORTED_OP);
+
+            case 2: {  // force_home {stroke}
+                // *** HAZARD, RFC-025. The hazard note lives on motionForceHome()
+                // in ValenceMotion.h; do not restate it (C-1). What matters
+                // HERE is the lockstep: the arbiter's latch drops inside that
+                // call, and the hub's own ESTOP bit is dropped by the hub task
+                // on the next tick, because clearEstop() broadcasts and this
+                // runs inside the hub's own intent dispatch.
+                const float asked = fieldF32(findField(requested, 2), 250.0f);
+                const float stroke = motionForceHome(asked);
+                _clearLatch = true;
+                applied.count = 2;
+                applied.fields[0] = {1, IntentValue::ofU64(2)};
+                applied.fields[1] = {2, IntentValue::ofF32(stroke)};
+                return Ret::ok(applied);
+            }
+
+            case 3:  // clear_override
+                // On a machine that can really home, this returns it to real
+                // homing. Here op 1 does not exist, so "back to real homing"
+                // has no state to return to and accepting it would echo a
+                // transition that did not happen.
+                return Ret::err(NackCode::UNSUPPORTED_OP);
+
+            default:
+                return Ret::err(NackCode::INVALID_VALUE);
+        }
+    }
+
+    // §11.4: the sources this machine has. move is the operator's hand, both
+    // c2h motion streams are ONE machine-driven source -- a client uses 0x2100
+    // or 0x2101, never both, and ownership is what enforces that.
+    std::optional<uint8_t> sourceForChannel(uint16_t channel_id) override {
+        if (channel_id == ch::move) return uint8_t(MotionSource::Manual);
+        if (channel_id == ch::motion_input || channel_id == ch::motion_segment)
+            return uint8_t(MotionSource::Stream);
+        return std::nullopt;
+    }
+
+    // §11.2 (b): the machine-domain precondition the library cannot see. The
+    // emitter's steering word IS that answer -- 0 means parked, and the engine
+    // resets itself one motion tick after the latch, so busy falls too.
+    // This is also the ONE hook the hub calls on the clear path and the hub
+    // guarantees the clear proceeds iff it returns true, so dropping the
+    // arbiter's latch here keeps both sides in lockstep. Clearing never
+    // rehomes: homed stays false and motion stays refused until force_home.
+    bool canClearEstop() override {
+        const MotionCensus c = motionCensus();
+        if (c.busy || c.step_q8 != 0) return false;
+        motionEstopClear();
+        return true;
+    }
+
     // §11.2: motion stops before protocol bookkeeping. The emitter is parked on
     // THIS task inside motionEstop(), before this returns, so the stop precedes
-    // the latch as the spec requires -- and it does so whether or not the
-    // catalog advertises a motion channel, because e-stop is never gated by a
-    // capability flag.
+    // the latch as the spec requires.
     void onEstop(uint8_t cause, uint8_t origin) override {
         motionEstop();
         SLOGW(kTag, "ESTOP latched: cause=%u origin=%u", unsigned(cause), unsigned(origin));
+    }
+
+    // ---- 0x2100 / 0x2101 stream ingress --------------------------------------
+    // Runs on the hub task, synchronously inside Hub::update(). The hub has
+    // already validated the §5.4 caps, the granted rate, ownership and the
+    // deadman (hub.hpp's contract on this method); this decodes and submits and
+    // re-checks none of it. Decoding is BY FIXED OFFSET against the catalog's
+    // own 0x2100 (4 B point) / 0x2101 (6 B timed segment) field order -- the
+    // same convention the publishers above encode with.
+    void onStreamBundle(uint16_t channel_id, uint32_t session_id,
+                        const slopsync::BundleView& bundle) override {
+        const bool isSegment = (channel_id == ch::motion_segment);
+        if (channel_id != ch::motion_input && !isSegment) return;
+
+        // RFC-030: the session's GRANTED (post-curve-policy) family, looked up
+        // once per bundle. Chase points never carry one -- the family is a
+        // waveform-reconstruction concept.
+        const uint8_t curveFamily =
+            (isSegment && _hub != nullptr) ? _hub->publishCurveFamily(session_id, channel_id) : 0;
+
+        // t_base/t_off are u32 HUB-us, the same wrapping domain EspClock reads
+        // (§7.2). now64 stays the FULL 64-bit reading so the anchor never wraps
+        // itself; only the WIRE stamp being resolved against it does.
+        const int64_t now64 = esp_timer_get_time();
+        const uint32_t now32 = uint32_t(uint64_t(now64) & 0xFFFFFFFFull);
+
+        uint32_t dropped = 0;
+        uint32_t farClamped = 0;
+        const uint8_t n = bundle.sampleCount();
+        for (uint8_t i = 0; i < n; ++i) {
+            // Nearest-window resolve (§7.2): a wrap-aware signed subtract, safe
+            // because the wire stamp is near now by construction (the bundle
+            // span is capped far under the 32-bit wrap).
+            int32_t delta = int32_t(bundle.sampleTimeUs(i) - now32);
+            if (delta > kStreamFarFutureUs) { delta = kStreamFarFutureUs; ++farClamped; }
+            if (delta < 0) delta = 0;
+
+            const auto sample = bundle.sample(i);
+            const float norm = float(slopsync::getU16(sample.subspan(0, 2))) / 10000.0f;
+
+            MotionIntent in;
+            in.source    = MotionSource::Stream;
+            in.target_mm = _cfg.window_min + norm * (_cfg.window_max - _cfg.window_min);
+            in.anchor_us = uint64_t(now64 + int64_t(delta));
+
+            if (isSegment) {
+                const uint16_t durMs = slopsync::getU16(sample.subspan(2, 2));
+                const int16_t endV = int16_t(slopsync::getU16(sample.subspan(4, 2)));
+                if (durMs == 0) { ++dropped; continue; }  // durationless points belong on 0x2100
+                in.duration_us  = uint32_t(durMs) * 1000u;
+                in.curve_family = curveFamily;
+                // -32768 is the NO-END-VELOCITY sentinel: 0 is a legitimate
+                // slope (a reversal ends AT rest), so 0 cannot mean absent.
+                if (endV != kSegNoEndVel) {
+                    in.end_vel_mm_s = float(endV) / 1000.0f * (_cfg.window_max - _cfg.window_min);
+                    in.has_end_vel  = true;
+                }
+            } else {
+                const int16_t vel = int16_t(slopsync::getU16(sample.subspan(2, 2)));
+                in.end_vel_mm_s = float(vel) / 1000.0f * (_cfg.window_max - _cfg.window_min);
+                in.has_end_vel  = (vel != 0);
+            }
+            if (!motionSubmit(in)) ++dropped;
+        }
+
+        motionNoteStream(1, n, dropped);
+        if (farClamped) {
+            SLOGW_EVERY_MS(2000, kTag,
+                           "motion stream: %u sample(s) clamped from a far-future t_off "
+                           "(missed CLOCK resync on the client?)", unsigned(farClamped));
+        }
+    }
+
+    void bindHub(slopsync::Hub* h) { _hub = h; }
+    bool takeClearLatch() {
+        const bool v = _clearLatch;
+        _clearLatch = false;
+        return v;
     }
 
     void onSessionJoined(uint32_t session_id) override {
@@ -327,7 +548,13 @@ public:
 private:
     StoredConfig _cfg{};
     bool _cfgDirty = false;
+    // force_home cleared the arbiter's latch; the hub's own ESTOP bit is
+    // dropped by the hub task on the next tick. DEFERRED on purpose:
+    // Hub::clearEstop() publishes a safety snapshot and broadcasts, and
+    // applyIntent runs inside the hub's own intent dispatch.
+    bool _clearLatch = false;
     ValenceUiTokenMinter* _minter = nullptr;
+    slopsync::Hub* _hub = nullptr;
 };
 
 // ---- the PSRAM-resident box --------------------------------------------------
@@ -375,9 +602,9 @@ std::atomic<int8_t> g_linkRssi{0};
 
 void publishControlOwner() {
     // 4 x {source u8, owner u32} ascending, exactly Hub::buildControlOwnerPayload.
-    // Every source unowned at boot, which is the truth: with no motion plane
-    // there is nothing for a session to own, and the delegate maps no channel
-    // to a source, so this value never changes.
+    // Every source unowned at boot, which is the truth. The hub republishes
+    // this channel itself on every ownership transition; this call is the SEED
+    // that keeps a subscriber from holding "no idea" before the first one.
     std::array<std::byte, 20> buf{};
     std::span<std::byte> s(buf);
     for (uint8_t i = 0; i < 4; ++i) {
@@ -421,12 +648,176 @@ void publishMachineConfig() {
     // min/max is for. A bit held low here would gray a control the machine
     // would in fact accept.
     slopsync::putU8(s.subspan(32, 1), 0xFF);
-    // measured_stroke: 0 means NOT MEASURED, and on a board with no motion
-    // plane that is the whole truth. Never report the configured rail here.
+    // measured_stroke: 0 means NOT MEASURED. force_home ASSERTS a stroke that
+    // nothing measured, and the arbiter's rail is where that assertion lives;
+    // reporting it here would dress an assertion as a measurement. This board
+    // has no way to measure a stroke, so the field is 0 forever.
     slopsync::putF32(s.subspan(33, 4), 0.0f);
     g_box->hub->publishState(ch::machine_config, s);
     g_lastPublishedCfg = c;
     g_cfgEverSent = true;
+}
+
+// ---- the motion plane's retained STATE ---------------------------------------
+// Every channel below reads ONE motionCensus(), so no two of them can disagree
+// about the same instant. The byte layouts mirror ValenceCatalog.h's field
+// order for each id exactly; that mirroring is the whole contract (there is no
+// packed struct to static_assert against).
+
+// A layout whose hand-count disagrees with its buffer is a SILENT FIELD SHIFT:
+// the writers stop when the buffer runs out and the tail goes out as zeros,
+// which renders as plausible numbers in the wrong columns. This is the check that
+// fails if any layout below is miscounted.
+void publishPacked(uint16_t id, std::span<const std::byte> buf, size_t written) {
+    if (written != buf.size()) {
+        SLOGE_EVERY_MS(5000, kTag, "channel %04x packed %u of %u B -- layout miscounted",
+                       unsigned(id), unsigned(written), unsigned(buf.size()));
+    }
+    g_box->hub->publishState(id, buf);
+}
+
+uint32_t g_lastMotionMs = 0;
+uint32_t g_lastPlanMs = 0;
+uint32_t g_lastSlowMs = 0;
+
+void publishMotion(const MotionCensus& m) {
+    std::array<std::byte, 9> buf{};
+    size_t n = 0;
+    packU16(buf, n, wireU16(m.position_mm, 100.0f));   // pos_10um
+    packU16(buf, n, wireU16(m.plan_mm, 100.0f));       // tgt_10um: where the plan is driving to
+    packI16(buf, n, wireI16(m.velocity_mm_s, 10.0f));  // speed
+    // flags: homed, homing, gen_running, paused, override, estop, stream.
+    // homing and gen_running are permanently 0 and that is the truth, not a
+    // stub: there is no homing cycle and no pattern generator on this board.
+    packU8(buf, n, uint8_t((m.homed ? 0x01u : 0u) | (m.paused ? 0x08u : 0u) |
+                 (m.estop ? 0x20u : 0u) | (m.stream ? 0x40u : 0u)));
+    packU16(buf, n, wireU16(m.demand_mm, 100.0f));     // raw_10um: the asked position
+    // AT RATE, not on change. An on-change gate looks like an economy and is a
+    // ground-truth hazard on a hero channel: a machine at rest stops pushing,
+    // so a subscriber that joined late, or whose retained value never landed,
+    // has nothing to show and cannot tell a still carriage from a dead feed.
+    publishPacked(ch::motion, buf, n);
+}
+
+void publishPlanStrip(const MotionCensus& m) {
+    std::array<std::byte, 18> buf{};
+    size_t n = 0;
+    // flags: active, live_mode, grad_mode. live_mode and grad_mode named a
+    // legacy interpolator split that has no counterpart in this engine.
+    packU8(buf, n, m.busy ? 0x01u : 0u);
+    packU8(buf, n, m.mode);                            // style: idle/waveform/chase/settle
+    packU16(buf, n, wireU16(m.plan_start, 10000.0f));
+    packU16(buf, n, wireU16(m.plan_end, 10000.0f));
+    packU16(buf, n, wireU16(m.plan_cur, 10000.0f));
+    packI16(buf, n, wireI16(m.plan_vel, 1000.0f));
+    packU32(buf, n, m.plan_duration_us);
+    packU32(buf, n, m.plan_elapsed_us);
+    publishPacked(ch::plan_strip, buf, n);
+}
+
+void publishMotionDiag(const MotionCensus& m) {
+    std::array<std::byte, 92> buf{};
+    size_t n = 0;
+    packU32(buf, n, m.plans);
+    packU32(buf, n, m.failures);
+    packU32(buf, n, m.anomalies);
+    packU8(buf, n, m.mode);
+    packU8(buf, n, m.plan_kind);
+    for (uint32_t k : m.anom) packU32(buf, n, k);
+    packU32(buf, n, m.plan_us_last);
+    packU32(buf, n, m.plan_us_max);
+    packF32(buf, n, m.plan_us_avg);
+    packU32(buf, n, m.stream_bundles);
+    packU32(buf, n, m.stream_samples);
+    // sync_enqueued: every decoded sample that was not dropped reached the
+    // arbiter, because the delegate submits inside the same loop that counts.
+    packU32(buf, n, m.stream_samples - m.stream_dropped);
+    packU32(buf, n, m.stream_dropped);
+    // sync_seg_bundles is not separated here: both stream channels land in one
+    // counter, and splitting it would need a second pair the census does not
+    // carry. It reads 0, which understates rather than invents.
+    packU32(buf, n, 0);
+    packU16(buf, n, 0);                                // reset_gen: nothing resets these
+    publishPacked(ch::motion_diag, buf, n);
+}
+
+void publishOdometer(const MotionCensus& m) {
+    std::array<std::byte, 20> buf{};
+    size_t n = 0;
+    packU32(buf, n, m.strokes);
+    packF32(buf, n, m.distance_mm / 1000.0f);          // distance_m
+    packF32(buf, n, m.peak_mm_s);
+    packF32(buf, n, 0.0f);                             // energy_wh: no power monitor
+    packU32(buf, n, uint32_t(esp_timer_get_time() / 1000));
+    publishPacked(ch::odometer, buf, n);
+}
+
+// Published ONCE at boot: nothing on this board changes any of it, and 0x3030
+// NACKs every write, so a republish would carry no news.
+void publishMachineModes() {
+    std::array<std::byte, 6> buf{};
+    size_t n = 0;
+    packU8(buf, n, 0);   // blend_mode_reserved
+    packU8(buf, n, 0);   // stream_speed_reserved
+    packU8(buf, n, 0);   // overshoot_clamp: inert, off
+    // enabled_mask 0: the machine accepts NONE of these. overshoot_clamp is
+    // inert, the backend is fixed by what is soldered, and home_style picks
+    // between two homing cycles neither of which exists here.
+    packU8(buf, n, 0);
+    packU8(buf, n, 2);   // motion_backend: quadrature, the LP-core emitter
+    packU8(buf, n, 0);   // home_style: reported only because the field exists; mask is low
+    publishPacked(ch::machine_modes, buf, n);
+}
+
+// The three vmotion cards. Read-only on this board (0x3120 NACKs), so their
+// enabled_mask is 0 and they publish once at boot.
+void publishSmCards() {
+    const MotionTuning t = motionTuning();
+    {
+        std::array<std::byte, 13> buf{};
+        size_t n = 0;
+        // The overrides are genuinely 0: this arbiter derives every ceiling
+        // from the mm limit set, which is exactly what "0" means on this card.
+        packF32(buf, n, 0.0f);   // jmax_ovr
+        packF32(buf, n, 0.0f);   // vmax_ovr
+        packF32(buf, n, 0.0f);   // amax_ovr
+        packU8(buf, n, 0);       // enabled_mask
+        publishPacked(ch::sm_limits, buf, n);
+    }
+    {
+        std::array<std::byte, 20> buf{};
+        size_t n = 0;
+        packU8(buf, n, t.chase_ff ? 1 : 0);
+        packU8(buf, n, t.chase_accel_ff ? 1 : 0);
+        packF32(buf, n, t.chase_gain);
+        packF32(buf, n, t.chase_lookahead);
+        packU32(buf, n, t.chase_dense_us);     // scale 1000, unit ms: the wire carries us
+        packU8(buf, n, t.chase_aim_extrap ? 1 : 0);
+        packF32(buf, n, t.handoff_k);
+        packU8(buf, n, 0);                     // enabled_mask
+        publishPacked(ch::sm_chase, buf, n);
+    }
+    {
+        std::array<std::byte, 16> buf{};
+        size_t n = 0;
+        packU8(buf, n, t.curve_policy);
+        packU8(buf, n, t.infeasible_policy);
+        packF32(buf, n, t.smooth_budget);
+        packF32(buf, n, t.amplitude_budget);
+        packU8(buf, n, t.blend_steps);
+        packU32(buf, n, t.settle_grace_us);    // scale 1000, unit ms: the wire carries us
+        packU8(buf, n, 0);                     // enabled_mask
+        publishPacked(ch::sm_waveform, buf, n);
+    }
+}
+
+// The stored config IS the arbiter's window and ceilings. One function so the
+// two can never be set from different places and drift (C-1): boot adoption and
+// every applied 0x3000 write both come through here.
+void pushConfigToMotion(const StoredConfig& c) {
+    motionSetWindow(c.window_min, c.window_max, c.max_rail);
+    motionSetUserLimits(c.user_speed, c.user_accel);
+    motionSetInputLimits(c.input_speed, c.input_accel, c.input_jerk);
 }
 
 // WELCOME keys 46/47 (RFC-046): the hub's own reachable endpoint. 0/0 omits
@@ -486,8 +877,36 @@ void hubTask(void*) {
         g_box->port.loop(nowMs);
         g_box->hub->update(g_box->clock.nowUs());
 
+        // force_home dropped the arbiter's latch inside applyIntent; the hub's
+        // own ESTOP bit drops HERE, one tick later, because clearEstop()
+        // publishes and broadcasts and applyIntent runs inside the hub's intent
+        // dispatch. canClearEstop() still gates it, so the two never disagree.
+        if (g_box->delegate.takeClearLatch() && g_box->hub->estopLatched()) {
+            if (g_box->hub->clearEstop()) SLOGW(kTag, "ESTOP latch cleared by force_home");
+            else SLOGW(kTag, "force_home could not clear the ESTOP latch: motion is not parked");
+        }
+
+        // The motion plane, from ONE census so no two channels disagree about
+        // the same instant. 0x1100 publishes on change under its 60 Hz ceiling;
+        // 0x1110 is a strip that is only news while a plan runs.
+        const MotionCensus mo = motionCensus();
+        if (uint32_t(nowMs - g_lastMotionMs) >= 33u) {
+            g_lastMotionMs = nowMs;
+            publishMotion(mo);
+        }
+        if (uint32_t(nowMs - g_lastPlanMs) >= 50u) {
+            g_lastPlanMs = nowMs;
+            publishPlanStrip(mo);
+        }
+        if (uint32_t(nowMs - g_lastSlowMs) >= 1000u) {
+            g_lastSlowMs = nowMs;
+            publishMotionDiag(mo);
+            publishOdometer(mo);
+        }
+
         if (g_box->delegate.takeConfigDirty() ||
             (g_cfgEverSent && !(g_lastPublishedCfg == g_box->delegate.config()))) {
+            pushConfigToMotion(g_box->delegate.config());
             publishMachineConfig();
             // Re-armed, not accumulated: the write lands only after the changes
             // stop. cfg_gen is read at write time, by which point hub->update()
@@ -545,8 +964,14 @@ bool hubBegin() {
     g_box->minter.begin();
     g_box->delegate.bindMinter(&g_box->minter);
 
+    // Operator ruling 2026-09-21: this board acts like a normal machine with no
+    // motor, no Modbus drive and no current sensor. The motion plane is REAL --
+    // the arbiter, the engine and the LP emitter are all live -- so it is
+    // advertised; the two absent subsystems are what stays gated.
     DeviceFeatures feat{};
-    feat.has_motion = false;  // no motion plane on this board yet (sd/val-091.3)
+    feat.has_motion  = true;
+    feat.has_drive   = false;  // no Modbus drive on this board (val-091)
+    feat.has_pattern = false;  // no pattern engine ported yet (val-091.12)
     if (!buildValenceCatalog(g_box->catalog, feat)) {
         SLOGE(kTag, "catalog build overflowed a Catalog32 pool");
         vlog::drainToSinks();
@@ -562,7 +987,12 @@ bool hubBegin() {
     const bool haveStored = loadStoredConfig(stored, storedGen);
     if (haveStored) g_box->delegate.adoptConfig(stored);
 
+    // The arbiter's window and ceilings ARE the stored config: pushed before
+    // the hub exists so the first 0x1000 snapshot and the machine agree.
+    pushConfigToMotion(g_box->delegate.config());
+
     g_box->hub.emplace(g_box->catalog, g_box->clock, g_box->rng, g_box->delegate);
+    g_box->delegate.bindHub(&*g_box->hub);
     // cfg_gen survives the reboot with the values it belongs to (§4.2). The
     // library exposes advance-only (bumpConfigGeneration), which is correct for
     // its RFC-011 job, so the restore walks the u16 up to the stored value; it
@@ -584,6 +1014,18 @@ bool hubBegin() {
     publishControlOwner();
     publishMachineConfig();
     publishHubStatus();
+    publishMachineModes();
+    publishSmCards();
+    {
+        // EVERY advertised STATE gets its truthful at-rest value before the
+        // first client can subscribe. Without this a subscriber holds "no idea"
+        // where the protocol promised it a value and sits at syncing forever.
+        const MotionCensus mo = motionCensus();
+        publishMotion(mo);
+        publishPlanStrip(mo);
+        publishMotionDiag(mo);
+        publishOdometer(mo);
+    }
 
     auto etag = g_box->hub->catalogEtag();
     SLOGI(kTag, "catalog: %u entries, %u B encoded (scratch %u B)",

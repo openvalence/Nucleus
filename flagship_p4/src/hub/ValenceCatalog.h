@@ -6,11 +6,11 @@
 //   Hardware-free and library-only: nothing here may include an IDF or board
 //   header. The constants it mirrors from valence_config.h are pinned by
 //   static_asserts in ValenceHub.cpp, which is the one TU that sees both.
-//   DeviceFeatures::has_motion gates EVERY motion and pattern channel. A
-//   feature exists IF AND ONLY IF its channels exist (SPEC §6.3): a hub with
-//   no motion plane advertising a motion channel that publishes zeros is
-//   indistinguishable from an idle machine, the dead-gauge lie
-//   has_current_sensor already exists to prevent.
+//   DeviceFeatures gates whole planes: has_motion the motion plane, has_drive
+//   the servo drive's own surface, has_pattern the generator. A feature exists
+//   IF AND ONLY IF its channels exist (SPEC §6.3): a hub advertising a channel
+//   that publishes zeros is indistinguishable from an idle machine, the
+//   dead-gauge lie has_current_sensor already exists to prevent.
 //   Every field, unit, scale, and bit label below is wire-visible and part
 //   of the client-invariant etag (SPEC §8.3) — author with the same care as
 //   the FROZEN conformance fixture (conformance/mini_catalog.hpp).
@@ -176,15 +176,26 @@ inline constexpr uint8_t t_us   = 5;  // engine time at record, µs (low 32 bits
 struct DeviceFeatures {
     bool has_current_sensor = false;  // MotorDriver::hasCurrentSensor()
     bool has_power_monitor  = false;  // MotorDriver::hasPowerMonitor() (die temp)
-    // Gates EVERY motion and pattern channel, plus the three machine-domain
-    // channels whose content is motion: odometer (0x1020, distance and stroke
-    // totals), machine-modes (0x1030, motion_backend / home_style /
-    // overshoot_clamp) with its writer 0x3030, and machine-admin (0x30F0,
-    // whose ops are clear_fault / servo_scan on a drive that is absent).
-    // machine-config (0x1000) and config-set (0x3000) SURVIVE: they are
+    // Gates the MOTION PLANE: the motion/plan/diag/tuning STATE channels, both
+    // c2h motion streams, move/home, the anomaly event, and the two
+    // machine-domain channels whose content is motion (odometer 0x1020,
+    // machine-modes 0x1030 with its writer 0x3030).
+    // machine-config (0x1000) and config-set (0x3000) SURVIVE it: they are
     // configuration STORAGE, and a stored limit is truthfully what the hub
     // holds, not a gauge reading zero forever.
     bool has_motion         = false;
+    // Gates the SERVO DRIVE's own surface: drive-tune (0x1130), its writer
+    // drive-set (0x3130), and machine-admin (0x30F0, whose ops are
+    // clear_fault / servo_scan on that drive). A machine can plan and render
+    // motion with no programmable drive on a bus, which is why this is its own
+    // flag and not a corner of has_motion.
+    bool has_drive          = false;
+    // Gates the PATTERN GENERATOR: every pattern-* channel and the 0x5220
+    // preset store. A hub with no generator advertising pattern-state would
+    // publish a permanently stopped generator, which is the dead-gauge lie.
+    // TODO(val-091.12): port the generator, then this can be true on a board
+    // that carries one.
+    bool has_pattern        = false;
 };
 
 // ---- Factory DEFAULTS advertised as RFC-009 `default` annotations -----------
@@ -1186,20 +1197,24 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
                         .hasRank = true, .rank = slopsync::ui_ranks::detail},
                        {"overshoot_clamp", "motion_backend", "home_style"});
     // Which path actually drives the motor. restart_required is the whole
-    // contract: the NVS key is read once in setup() before anything touches
-    // the motor reference, so a live switch is not expressible. Applying it
-    // stores the choice and changes nothing until the next boot.
+    // contract: the backend is bound once at boot before anything touches the
+    // motor reference, so a live switch is not expressible. Applying it stores
+    // the choice and changes nothing until the next boot.
+    // "quadrature" is ordinal 2, APPENDED rather than substituted: a select's
+    // wire value is its index, so re-pointing 0 or 1 would silently re-label a
+    // value another machine in this ecosystem already publishes.
     c.addSelectField({.name = "motion_backend", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Motion behavior",
-                      .desc = "Which path drives the motor: a step/dir pulse train, or absolute "
-                              "setpoints over RS485. Takes effect at the next boot.",
+                      // 128 bytes exactly, which is limits::desc_max_bytes.
+                      .desc = "Which path drives the motor: step/dir pulses, RS485 setpoints, "
+                              "or a quadrature the drive follows. Takes effect at the next boot.",
                       .settingKey = 5,
                       .flags = uint8_t(slopsync::setting_flags::advanced |
                                        slopsync::setting_flags::restart_required),
                       .hasSettingKey = true,
                       .hasRank = true, .rank = slopsync::ui_ranks::advanced},
-                     {"step-dir", "modbus"});
+                     {"step-dir", "modbus", "quadrature"});
     // Live-applied, no restart: read fresh at the start of every homing cycle.
     // Only the Modbus backend honors it; step/dir mode always runs its own
     // current-stall sweep.
@@ -1867,7 +1882,7 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     c.addSchemaField({.key = 4, .name = "overshoot_clamp", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 5, .name = "motion_backend", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2.0f});
     c.addSchemaField({.key = 6, .name = "home_style", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     };
@@ -2055,12 +2070,11 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
     // advpat::BaseId order — see the ch:: namespace comment on those
     // constants.
     //
-    // `feat.has_motion` gates every call below that describes motion. The gate
-    // is HERE and not inside each lambda so the surviving set is readable as a
-    // list: an id that is not in this block's unconditional half does not exist
-    // on a motionless hub, and its absence IS the capability answer (SPEC §6.3).
-    // Ascending order is preserved either way -- skipping entries never
-    // reorders the rest.
+    // The three feature flags gate every call below. The gates are HERE and
+    // not inside each lambda so the surviving set is readable as a list: an id
+    // this block skips does not exist on that hub, and its absence IS the
+    // capability answer (SPEC §6.3). Ascending order is preserved either way --
+    // skipping entries never reorders the rest.
     addMachineConfig();          // 0x1000 STATE·machine, family 0 member 0
     addPower();                  // 0x1010 STATE·machine, family 1 member 0 (no-ops without feat.has_current_sensor)
     if (feat.has_motion) {
@@ -2072,7 +2086,9 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
         addSmLimits();           // 0x1120 STATE·motion, family 2 member 0
         addSmChase();            // 0x1121 STATE·motion, family 2 member 1
         addSmWaveform();         // 0x1122 STATE·motion, family 2 member 2
-        addDriveTune();          // 0x1130 STATE·motion, family 3 member 0
+    }
+    if (feat.has_drive) addDriveTune();   // 0x1130 STATE·motion, family 3 member 0
+    if (feat.has_pattern) {
         addPatternState();       // 0x1200 STATE·pattern, family 0 member 0
         addPatternAdvanced();    // 0x1210 STATE·pattern, family 1 member 0
         addApModifierChannel(ch::pattern_adv_mod_speedin,  "pattern-adv-mod-speedin",  "Speed in modifier",  21);  // 0x1211
@@ -2082,23 +2098,27 @@ inline bool buildValenceCatalog(slopsync::Catalog32& c, DeviceFeatures feat = {}
         addApModifierChannel(ch::pattern_adv_mod_depth1,   "pattern-adv-mod-depth1",   "Depth 1 modifier",   9);   // 0x1215
         addApModifierChannel(ch::pattern_adv_mod_depth2,   "pattern-adv-mod-depth2",   "Depth 2 modifier",   15);  // 0x1216
         addPatternPresetsRoster();  // 0x1220 STATE·pattern, family 2 member 0
+    }
+    if (feat.has_motion) {
         addMotionInput();        // 0x2100 STREAM·motion, family 0 member 0
         addMotionSegment();      // 0x2101 STREAM·motion, family 0 member 1
     }
     addConfigSet();              // 0x3000 INTENT·machine, family 0 member 0
+    if (feat.has_motion) addModesSet();      // 0x3030 INTENT·machine, family 3 member 0
+    if (feat.has_drive)  addMachineAdmin();  // 0x30F0 INTENT·machine, family F member 0
     if (feat.has_motion) {
-        addModesSet();           // 0x3030 INTENT·machine, family 3 member 0
-        addMachineAdmin();       // 0x30F0 INTENT·machine, family F member 0
         addMove();               // 0x3100 INTENT·motion, family 0 member 0
         addHome();               // 0x3101 INTENT·motion, family 0 member 1
         addSmSet();              // 0x3120 INTENT·motion, family 2 member 0
-        addDriveSet();           // 0x3130 INTENT·motion, family 3 member 0
+    }
+    if (feat.has_drive) addDriveSet();   // 0x3130 INTENT·motion, family 3 member 0
+    if (feat.has_pattern) {
         addPatternCmd();         // 0x3200 INTENT·pattern, family 0 member 0
         addPatternAdvancedCmd(); // 0x3210 INTENT·pattern, family 1 member 0
         addPatternPresetsCmd();  // 0x3220 INTENT·pattern, family 2 member 0
-        addMotionAnomaly();      // 0x4100 EVENT·motion, family 0 member 0
-        addPatternPresets();     // 0x5220 STORE·pattern, family 2 member 0
     }
+    if (feat.has_motion) addMotionAnomaly();    // 0x4100 EVENT·motion, family 0 member 0
+    if (feat.has_pattern) addPatternPresets();  // 0x5220 STORE·pattern, family 2 member 0
 
     return c.ok();
 }
