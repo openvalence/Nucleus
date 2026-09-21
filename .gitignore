@@ -1,0 +1,69 @@
+# PlatformIO / IDF build output. One .pio per board project.
+.pio
+/build/
+flagship_*/build/
+
+# Derived from the hand-written sdkconfig.defaults by the IDF build.
+# sdkconfig.defaults is the ONE home for those values (C-1); these are its
+# output, and editing them silently loses the edit on the next build.
+sdkconfig.*
+!flagship_*/sdkconfig.defaults
+
+# IDF managed components: hundreds of MB fetched into a project by the
+# component manager. Generated, never edited by hand, never committed.
+# dependencies.lock is deliberately NOT ignored: it pins the exact component
+# versions the build resolves, so tracking it is the only way two checkouts
+# build the same image.
+managed_components/
+
+# Real secrets - never commit. Use secrets.example.h as the shared template.
+secrets.h
+
+# Dev tools & diagnostic scripts - not part of the firmware.
+# (tools/* not tools/ so specific files CAN be re-included below - git cannot
+#  re-include anything under an excluded directory.)
+tools/*
+# SlopCanon mechanical floor (.claude/rules/governance.md SS5). Doctrine
+# enforcement is part of the repo, not a scratch script.
+!tools/canon_lint.py
+
+# Claude Code config is COMMITTED (hooks/rules survive a clone, like
+# canon_lint). Only host/session-local state stays out.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Per-run output: captures, traces, sweeps, ELF archives
+# (.claude/rules/repo-layout.md). Every tools/ script defaults --out here.
+artifacts/*
+# ...except the anchor. A fresh clone needs the directory to exist because the
+# tools write into it without mkdir. Note /* above rather than /: git cannot
+# re-include a file whose parent DIRECTORY is excluded.
+!artifacts/.gitkeep
+
+# Vendor manuals, datasheets and schematics. Reference INPUTS, not artifacts,
+# and binary, so they are kept out of the tree the same way.
+docs/reference/
+
+# Host-local editor and language-server state.
+.clangd
+.cache/
+compile_commands.json
+.serena/
+.clinerules
+.vscode/.browse.c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+
+# Operator's own file, per CANON: preferences, not rules.
+CLAUDE.md
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/

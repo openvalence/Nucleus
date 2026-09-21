@@ -1,0 +1,32 @@
+# clang-tidy -- the borrow-checker substitute (.claude/rules/cpp-safety.md).
+# PORT of SlopDrive-32/.clang-tidy; only the header filter changed.
+#
+# NOT OPERATIONAL YET. cpp-safety.md names the two routes that failed on this
+# host and the sanitized compile database that would fix them. Do not claim
+# clang-tidy coverage until that lands.
+#
+# HeaderFilterRegex is the load-bearing line. Without it clang-tidy analyzes
+# every header it can reach, which here means ESP-IDF, the managed components
+# and vendored ruckig -- tens of thousands of findings in code we do not own.
+# Scope is OUR code: the board projects and the first-party libraries.
+HeaderFilterRegex: 'flagship_[a-z0-9]+/(src|ulp)/|lib/(vlog|vglow|vmotion)/'
+
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  cppcoreguidelines-*,
+  misc-*,
+  performance-*,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-avoid-c-arrays,
+  -misc-include-cleaner
+
+# The floor from the directive, unweakened. clang-analyzer-* is the
+# path-sensitive one that finds use-after-free and null deref; the
+# cppcoreguidelines bounds/owning checks mechanically enforce the banned-
+# construct list (raw new, C arrays, pointer arithmetic, array decay).
+WarningsAsErrors: 'bugprone-*,clang-analyzer-*,cppcoreguidelines-pro-bounds-*,cppcoreguidelines-owning-memory'
+
+FormatStyle: none

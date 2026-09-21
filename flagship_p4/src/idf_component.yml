@@ -1,0 +1,7 @@
+## flagship_p4 component manifest. The C6 add-on is an esp_hosted slave over
+## SDIO; esp_wifi_remote makes the esp_wifi_* API transparent on the P4.
+## Versions match the Arduino manifest that M5's own example runs on.
+dependencies:
+  espressif/esp_hosted: "^2.9.2"
+  espressif/esp_wifi_remote: "^1.2.2"
+  idf: ">=5.5"
