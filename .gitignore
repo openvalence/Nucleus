@@ -30,6 +30,7 @@ tools/*
 !tools/lp_leg_capture.py
 !tools/lp_scope.py
 !tools/lp_stream_capture.py
+!tools/lag_probe.py
 
 # Claude Code config is COMMITTED (hooks/rules survive a clone, like
 # canon_lint). Only host/session-local state stays out.
