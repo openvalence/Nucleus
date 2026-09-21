@@ -22,8 +22,8 @@
 
 // Identity strings for WELCOME key 37 (RFC-016a). Static storage, so the views
 // the hub holds outlive it.
-#define VALENCE_PRODUCT  "ValenceDrive"
-#define VALENCE_HUB_NAME "valence-p4"
+#define VALENCE_PRODUCT  "Nucleus"
+#define VALENCE_HUB_NAME "nucleus-p4"
 
 // ---- Stroke geometry --------------------------------------------------------
 #define DEFAULT_MAX_RAIL_MM 500.0f

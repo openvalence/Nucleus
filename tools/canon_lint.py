@@ -2,7 +2,7 @@
 """Canon mechanical floor -- judgment-free doctrine checks.
 
 PORT of the archived SlopDrive-32 repo's tools/canon_lint.py, curated for
-Valence Drive. Defined by .claude/rules/governance.md SS5. Every hit is a
+Nucleus. Defined by .claude/rules/governance.md SS5. Every hit is a
 defect BY DEFINITION: these checks encode only hard rules (violation classes
 that have actually bitten this project family). If a check fires falsely, the
 fix is a C-7 amendment to the exemption lists in this file -- never ignoring
@@ -413,7 +413,7 @@ def run_pin_check():
 
     if not SIBLING.is_dir():
         return [("pin-sibling-missing", "../Valence", 0, "",
-                 "sibling checkout not found next to this repo -- clone Valence alongside ValenceDrive")]
+                 "sibling checkout not found next to this repo -- clone Valence alongside Nucleus")]
 
     r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=SIBLING,
                        capture_output=True, text=True)

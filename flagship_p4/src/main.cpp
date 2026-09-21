@@ -1,4 +1,4 @@
-// flagship_p4 -- Valence Drive bring-up on the OSSM Flagship: silicon report,
+// flagship_p4 -- Nucleus bring-up on the OSSM Flagship: silicon report,
 // the PARLIO and LP core quadrature emitters side by side for the scope, and
 // the network up through the C6
 // Constraints:
@@ -268,7 +268,7 @@ static void report() {
     uint32_t flash_bytes = 0;
     esp_flash_get_size(nullptr, &flash_bytes);
 
-    printf("\n=== flagship_p4: Valence Drive bench, ESP32-P4, pure ESP-IDF ===\n");
+    printf("\n=== flagship_p4: Nucleus bench, ESP32-P4, pure ESP-IDF ===\n");
     printf("chip         : model %d, %d cores, revision %d\n", int(info.model), info.cores, info.revision);
     printf("cpu (config) : %d MHz\n", CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
     printf("flash        : %lu MB\n", static_cast<unsigned long>(flash_bytes / (1024u * 1024u)));

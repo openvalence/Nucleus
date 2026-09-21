@@ -1,5 +1,5 @@
 # lib/valence is a SYMLINK to the sibling Valence checkout, pinned by
-# valence.pin at the ValenceDrive root. The library ships no .c or .cpp, so an
+# valence.pin at the Nucleus root. The library ships no .c or .cpp, so an
 # include path is the whole of consuming it: no component, no build step.
 # READ-ONLY: a break there is fixed in flags here, never upstream.
 #

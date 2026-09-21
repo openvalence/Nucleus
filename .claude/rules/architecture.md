@@ -7,7 +7,7 @@ paths:
 
 The product: an extensible, high-performance modular linear motion control
 platform on the OSSM Flagship PCB. Hardware-agnostic, community-extensible.
-Valence Drive is the firmware; Valence is the protocol it speaks.
+Nucleus is the firmware; Valence is the protocol it speaks.
 
 ## 1. Hardware-agnostic modularity
 
@@ -95,7 +95,7 @@ Valence Drive is the firmware; Valence is the protocol it speaks.
 Invented ecosystem-level things (protocols, subsystems, tools) get
 zero-collision, SEO-unique names: "Valence", never "SyncManager". Ordinary
 classes and variables keep plain descriptive names. The product names (OSSM
-Flagship / Valence Drive / Valence) and the 2026-09-21 rename are in
+Flagship / Nucleus / Valence) and the 2026-09-21 renames are in
 `governance.md` §6; wire-visible names still change upstream only, never
 from this repo.
 

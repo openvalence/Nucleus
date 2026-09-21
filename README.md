@@ -1,4 +1,4 @@
-# Valence Drive
+# Nucleus
 
 Firmware for the **OSSM Flagship**: an extensible, high-performance modular
 linear motion control platform.
@@ -6,7 +6,7 @@ linear motion control platform.
 Three names, three things:
 
 - **OSSM Flagship** -- the PCB.
-- **Valence Drive** -- this firmware.
+- **Nucleus** (full name Valence Nucleus) -- this firmware.
 - **Valence** -- the protocol it speaks. It is developed in the sibling
   `Valence` repo and consumed here READ-ONLY, pinned by sha in `valence.pin`.
   Wire-visible names landed upstream with RFC-060; this repo follows the pin,

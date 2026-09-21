@@ -21,7 +21,7 @@ case "$NORM" in
 esac
 case "$NORM" in
   */valence/lib/valence/* | */valence/spec/spec.md | */valence/spec/registry/* | */valence/*/generated/*)
-    >&2 printf 'VENDOR-LOCK: %s is vendored/normative Valence surface, read-only from Valence Drive. Protocol changes belong in an RFC upstream: draft it in ../Valence/spec/RFC-QUEUE.md, get the ruling, land it there, then bump valence.pin here. Never edit the vendored spec to match this code.\n' "$FILE"
+    >&2 printf 'VENDOR-LOCK: %s is vendored/normative Valence surface, read-only from Nucleus. Protocol changes belong in an RFC upstream: draft it in ../Valence/spec/RFC-QUEUE.md, get the ruling, land it there, then bump valence.pin here. Never edit the vendored spec to match this code.\n' "$FILE"
     exit 2
     ;;
 esac
