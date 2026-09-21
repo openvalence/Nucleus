@@ -51,10 +51,21 @@ valence::Hub* hub();
 
 // Census numbers for the 5 s liveness line, read from any task.
 struct HubCensus {
-    uint32_t sessions = 0;
+    // LIVE and PARKED are counted apart on purpose. A parked session is
+    // RFC-042 working as designed -- slot retained, transport gone, waiting for
+    // a reattach -- and a total that folds the two together reads exactly like
+    // a session leak. Distinguishing them is what makes val-091.15's class
+    // visible from the console instead of inferable.
+    uint32_t sessions = 0;   // LIVE: occupied and not STALE
+    uint32_t parked = 0;     // RFC-042 STALE, holding no socket
     uint32_t ticks = 0;
     uint32_t wsFrames = 0;
     uint32_t wsDrops = 0;
+    // Client sockets held by each esp_http_server instance. Against the budget
+    // in sdkconfig.defaults (CONFIG_LWIP_MAX_SOCKETS) these are the two numbers
+    // that say whether the table is about to refuse new connections.
+    uint32_t wsSockets = 0;
+    uint32_t uiSockets = 0;
     // Hub task stack high-water HEADROOM in bytes, 0 before the task exists.
     // T21: a mark only knows the paths that have run, so it is a floor on this
     // boot's workload, never a sizing number on its own.

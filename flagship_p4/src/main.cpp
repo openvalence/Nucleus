@@ -402,7 +402,7 @@ extern "C" void app_main() {
         note_stack(2, uint32_t(uxTaskGetStackHighWaterMark(nullptr)));
         printf("[flagship_p4] %lus  int_free=%u int_max=%u  psram_free=%u psram_max=%u  "
                "parlio=%s  lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
-               "hub=%s sess=%lu ws=%lu/%lu  "
+               "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu  "
                "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu\n",
                static_cast<unsigned long>(n * 5),
                unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
@@ -418,6 +418,9 @@ extern "C" void app_main() {
                g_ip,
                hub_ok ? "up" : "down",
                static_cast<unsigned long>(census.sessions),
+               static_cast<unsigned long>(census.parked),
+               static_cast<unsigned long>(census.wsSockets),
+               static_cast<unsigned long>(census.uiSockets),
                static_cast<unsigned long>(census.wsFrames),
                static_cast<unsigned long>(census.wsDrops),
                mo.estop ? "estop" : (mo.busy ? "moving" : (mo.homed ? "idle" : "unhomed")),

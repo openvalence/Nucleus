@@ -73,7 +73,22 @@ esp_err_t ValenceUiTokenMinter::handleGet(httpd_req_t* req) {
     if (code == 2) httpd_resp_set_status(req, "429 Too Many Requests");
     else httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    // Connection: close is the POLITE half (the client stops reusing this
+    // socket); httpd_sess_trigger_close below is the ENFORCING half, because
+    // esp_http_server keeps a session alive regardless of what header we set.
+    // Both, or a browser parks the socket on keep-alive -- see the header.
+    httpd_resp_set_hdr(req, "Connection", "close");
+    const esp_err_t sent = httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
+    return sent;
+}
+
+size_t ValenceUiTokenMinter::openSockets() const {
+    if (_srv == nullptr) return 0;
+    int fds[2]{};                   // exactly cfg.max_open_sockets
+    size_t n = sizeof(fds) / sizeof(fds[0]);
+    if (httpd_get_client_list(_srv, &n, fds) != ESP_OK) return 0;
+    return n;
 }
 
 bool ValenceUiTokenMinter::attachRoutes() {
@@ -83,7 +98,11 @@ bool ValenceUiTokenMinter::attachRoutes() {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
     cfg.ctrl_port = 32770;
-    cfg.max_open_sockets = 4;
+    // TWO client sockets, and every mint closes its own (handleGet). This
+    // instance also costs three fds of its own (listener, ctrl_fd, msg_fd --
+    // httpd_main.c:353/400/407). The socket budget and its arithmetic have ONE
+    // home (C-1): flagship_p4/sdkconfig.defaults, CONFIG_LWIP_MAX_SOCKETS.
+    cfg.max_open_sockets = 2;
     cfg.max_uri_handlers = 4;
     cfg.lru_purge_enable = true;
 

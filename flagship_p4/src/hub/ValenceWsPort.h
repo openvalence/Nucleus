@@ -61,6 +61,24 @@
 //                     cleared ONLY by a control frame actually going out, never
 //                     by inbound traffic.
 //
+// ---- Every way a client leaves runs ONE funnel (T3) -------------------------
+// close_fn is the funnel: it waits out an in-flight send, records the detach
+// and closes(2) the fd. THREE ways in exist and all three must reach it.
+//   TCP FIN/RST, recv error : httpd deletes the session itself -> close_fn.
+//   WS CLOSE frame          : does NOT reach it on its own. esp_http_server
+//     latches sd->ws_close and then short-circuits that socket forever
+//     ("WS was marked close", httpd_parse.c:790) without deleting the session,
+//     so the fd, the port slot and the hub session are all held until the peer
+//     drops TCP. A peer that waits for the server to close (RFC 6455 §5.5.1
+//     makes that the server's duty) never does. The handler therefore echoes
+//     the close and returns ESP_FAIL, which is what deletes the session.
+//   SILENCE (T19 addendum)  : a locked phone or killed tab sends no FIN, so
+//     httpd never wakes on that socket at all. kIdleReapMs closes it. Without
+//     this reap the lwIP socket table fills with ghosts and BOTH listeners
+//     start refusing with RST while the live clients keep working.
+// A PARKED (RFC-042 STALE) session holds NO fd: the fd is closed on the way
+// into the park, and only the hub-side slot is retained for reattach.
+//
 // ---- Slot exhaustion ---------------------------------------------------------
 // Refuse AND CLOSE at the handshake. SPEC §6.3's NACK BUSY is the right answer
 // on an ATTACHED transport, and the handshake predates HELLO by definition --
@@ -109,6 +127,15 @@ public:
     // §10.3's one-second threshold, which no real backup produces.
     static constexpr uint32_t kSlowWindowMs = 200;
 
+    // IDLE-RX REAP (T19 addendum). A conforming client PINGs every
+    // limits::ping_interval_idle_ms, so ten intervals of total inbound silence
+    // is ten missed proof-of-life pings. DERIVED from the library's own
+    // liveness constant on purpose: a second hand-picked clock answering the
+    // same question is the defect class, not the fix. Strictly more lenient
+    // than the hub's own 3-interval silence reap, which only marks a session
+    // STALE -- this one is the half that releases the SOCKET.
+    static constexpr uint32_t kIdleReapMs = 10 * valence::limits::ping_interval_idle_ms;
+
     // Socket send bound. Mirrors the C5 bridge's value: ~6 frames at the
     // observed relay rate -- long enough that a healthy client on a busy
     // channel is never cut short, short enough that a dead one cannot own the
@@ -118,6 +145,9 @@ public:
     // ---- httpd task ---------------------------------------------------------
     void bind(httpd_handle_t hd, int fd);
     void pushRx(const uint8_t* data, size_t len);
+    // Proof of life. ANY inbound frame, control frames included -- a PING is
+    // the only thing an idle-but-healthy client sends.
+    void noteRx();
     // The ONE teardown funnel (T3). Waits out any in-flight send, then releases
     // the fd to the caller to close.
     void beginClose();
@@ -134,6 +164,8 @@ public:
     void newTick() { _blobThisTick = 0; }
     // True once the control-stall timer has run past kCtrlStallMs.
     bool stalledOut(uint32_t nowMs) const;
+    // True once nothing at all has arrived for kIdleReapMs.
+    bool idleOut(uint32_t nowMs) const;
 
     // ---- diagnostics (either task, relaxed) ---------------------------------
     int fd() const { return _fd.load(std::memory_order_relaxed); }
@@ -158,6 +190,7 @@ private:
     std::atomic<uint8_t> _rxTail{0};
     std::atomic<uint32_t> _rxDrops{0};
     std::atomic<uint32_t> _framesRx{0};
+    std::atomic<uint32_t> _lastRxMs{0};   // httpd task stamps, hub task reads
 
     // Hub task only -- no atomics wanted.
     uint32_t _framesTx = 0;
@@ -188,6 +221,9 @@ public:
     void loop(uint32_t nowMs);
 
     httpd_handle_t handle() const { return _srv; }
+    // Client sockets this instance currently holds. Cheap: a scan of the
+    // socket table, no lock and no allocation (httpd_main.c:173).
+    size_t openSockets() const;
     uint32_t framesRx() const;
     uint32_t drops() const;
 

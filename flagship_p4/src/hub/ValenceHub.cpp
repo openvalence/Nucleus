@@ -943,10 +943,18 @@ void hubSetLinkRssi(int8_t rssi) { g_linkRssi.store(rssi, std::memory_order_rela
 HubCensus hubCensus() {
     HubCensus c{};
     if (!g_box || !g_box->hub) return c;
-    c.sessions = uint32_t(g_box->hub->sessionCount());
+    for (size_t i = 0;; ++i) {
+        const valence::HubSession* s = g_box->hub->sessionBySlot(i);
+        if (s == nullptr) break;
+        if (!s->occupied()) continue;
+        if (s->state == valence::HubSessionState::STALE) ++c.parked;
+        else ++c.sessions;
+    }
     c.ticks = g_ticks;
     c.wsFrames = g_box->port.framesRx();
     c.wsDrops = g_box->port.drops();
+    c.wsSockets = uint32_t(g_box->port.openSockets());
+    c.uiSockets = uint32_t(g_box->minter.openSockets());
     c.stackFree = g_hubTask ? uint32_t(uxTaskGetStackHighWaterMark(g_hubTask)) : 0;
     return c;
 }

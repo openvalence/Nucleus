@@ -26,6 +26,11 @@
 // - THREADING: mintJson() runs on the :80 httpd task, consume() on the hub
 //   task. Neither touches valence::Hub, so the hub's one-task invariant is
 //   untouched.
+// - A MINT IS ONE REQUEST, SO THE SOCKET CLOSES WITH THE ANSWER. A browser
+//   would otherwise hold this connection open on keep-alive for minutes for a
+//   fetch it will never repeat, and this board's whole lwIP socket table is
+//   small enough that a few parked tabs lock out both listeners (val-091.15).
+//   Two client sockets are all this server ever needs.
 // See: Valence RFC-029 §4, SPEC.md §12.2
 
 #include <array>
@@ -52,6 +57,9 @@ public:
 
     // Fills `body` with the JSON answer. 0 ok / 2 rate-limited.
     uint8_t mintJson(char* body, size_t cap);
+
+    // Client sockets the :80 instance currently holds. For the census line.
+    size_t openSockets() const;
 
     uint32_t minted() const { return _minted; }
     uint32_t consumed() const { return _consumed; }

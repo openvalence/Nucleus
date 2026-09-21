@@ -39,7 +39,12 @@ void ValenceWsTransport::bind(httpd_handle_t hd, int fd) {
     _congestionLevel = 0;
     _aboveSinceMs = _belowSinceMs = 0;
     _lastSlowMs = 0;
+    _lastRxMs.store(uint32_t(esp_timer_get_time() / 1000), std::memory_order_relaxed);
     _fd.store(fd, std::memory_order_seq_cst);
+}
+
+void ValenceWsTransport::noteRx() {
+    _lastRxMs.store(uint32_t(esp_timer_get_time() / 1000), std::memory_order_relaxed);
 }
 
 void ValenceWsTransport::pushRx(const uint8_t* data, size_t len) {
@@ -165,6 +170,10 @@ bool ValenceWsTransport::stalledOut(uint32_t nowMs) const {
     return _ctrlStallSinceMs != 0 && uint32_t(nowMs - _ctrlStallSinceMs) > kCtrlStallMs;
 }
 
+bool ValenceWsTransport::idleOut(uint32_t nowMs) const {
+    return uint32_t(nowMs - _lastRxMs.load(std::memory_order_relaxed)) > kIdleReapMs;
+}
+
 uint8_t ValenceWsTransport::pollCongestionLevel(uint32_t nowMs) {
     // severe: a never-shed frame is stalled right now. §10.4's own definition.
     if (_ctrlStallSinceMs != 0) {
@@ -274,6 +283,11 @@ esp_err_t ValenceWsPort::wsHandler(httpd_req_t* req) {
         if (httpd_ws_recv_frame(req, &f, f.len) != ESP_OK) return ESP_FAIL;
     }
 
+    // Slot lookup BEFORE the switch: a control frame is proof of life too, and
+    // for an idle client a PING is the only thing that ever arrives.
+    const int slot = g_port->slotForFd(fd);
+    if (slot >= 0) g_port->_slots[slot].noteRx();
+
     switch (f.type) {
         case HTTPD_WS_TYPE_PONG:
             return ESP_OK;   // §5.5.3: unidirectional heartbeat, no response expected
@@ -287,12 +301,19 @@ esp_err_t ValenceWsPort::wsHandler(httpd_req_t* req) {
             return ESP_OK;
         }
         case HTTPD_WS_TYPE_CLOSE: {
-            httpd_ws_frame_t bye{};   // §5.5.1: echo it; close_fn does the teardown
+            httpd_ws_frame_t bye{};   // §5.5.1: echo it, then close the socket
             bye.final = true;
             bye.type = HTTPD_WS_TYPE_CLOSE;
             bye.len = 0;
             httpd_ws_send_frame(req, &bye);
-            return ESP_OK;
+            // ESP_FAIL IS THE TEARDOWN. ESP_OK here leaks the fd, the port slot
+            // and the hub session: esp_http_server has already latched
+            // sd->ws_close, and from the next select it returns early on this
+            // socket without ever deleting the session ("WS was marked close",
+            // httpd_parse.c:790). close_fn is then unreachable and the peer --
+            // which by RFC 6455 §5.5.1 is waiting for the SERVER to close the
+            // TCP connection -- waits forever. val-091.15.
+            return ESP_FAIL;
         }
         case HTTPD_WS_TYPE_BINARY:
             break;
@@ -301,7 +322,6 @@ esp_err_t ValenceWsPort::wsHandler(httpd_req_t* req) {
             return ESP_FAIL;
     }
 
-    const int slot = g_port->slotForFd(fd);
     if (slot < 0 || f.len == 0) return ESP_OK;
     g_port->_slots[slot].pushRx(buf, f.len);
     return ESP_OK;
@@ -314,6 +334,11 @@ bool ValenceWsPort::begin(valence::Hub* hub, uint16_t port) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = port;
     cfg.ctrl_port = 32769;          // must not collide with the :80 instance
+    // kSlots + 2 = 7 client sockets. This instance ALSO costs three fds of its
+    // own (listener, ctrl_fd, msg_fd -- httpd_main.c:353/400/407). The whole
+    // lwIP socket budget and its arithmetic live in ONE home (C-1):
+    // flagship_p4/sdkconfig.defaults, CONFIG_LWIP_MAX_SOCKETS. Raising this
+    // number without raising that one is the val-091.15 lockout.
     cfg.max_open_sockets = kSlots + 2;
     cfg.max_uri_handlers = 4;
     cfg.lru_purge_enable = true;
@@ -375,6 +400,19 @@ void ValenceWsPort::loop(uint32_t nowMs) {
         s.newTick();
         _hub->setCongestionLevel(s, s.pollCongestionLevel(nowMs));
 
+        // T19 addendum: a peer that went dark without a FIN never wakes httpd
+        // on its socket, so nothing else in this system will ever free it.
+        // Closing here runs the ONE funnel -- close_fn detaches and the hub
+        // parks the session (RFC-042), which is what a reconnect reattaches to.
+        if (s.idleOut(nowMs)) {
+            GLOGW(kTag, "slot %u silent >%lums -- reaping", unsigned(i),
+                  static_cast<unsigned long>(ValenceWsTransport::kIdleReapMs));
+            s.noteRx();   // re-arm: close_fn lands a tick or two later, and a
+                          // trigger_close per 5 ms tick would flood the ctrl socket
+            s.close();
+            continue;
+        }
+
         // Continuous control failure for kCtrlStallMs is the one case where a
         // client really is stranded waiting on a reply that will never come.
         if (s.stalledOut(nowMs)) {
@@ -383,6 +421,14 @@ void ValenceWsPort::loop(uint32_t nowMs) {
             s.close();
         }
     }
+}
+
+size_t ValenceWsPort::openSockets() const {
+    if (_srv == nullptr) return 0;
+    int fds[kSlots + 2]{};          // exactly cfg.max_open_sockets
+    size_t n = sizeof(fds) / sizeof(fds[0]);
+    if (httpd_get_client_list(_srv, &n, fds) != ESP_OK) return 0;
+    return n;
 }
 
 uint32_t ValenceWsPort::framesRx() const {
