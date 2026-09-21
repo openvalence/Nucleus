@@ -3,24 +3,24 @@ paths:
   - "**"
 ---
 
-# VLog and VGlow (NON-NEGOTIABLE usage)
+# Geiger and Flux (NON-NEGOTIABLE usage)
 
 Carried from the archived machine repo (SlopDrive-32
 `.claude/rules/logging-leds.md`). Self-contained ecosystem modules:
-hardware-free core plus thin platform glue. `lib/vlog` and `lib/vglow` hold
+hardware-free core plus thin platform glue. `lib/geiger` and `lib/flux` hold
 the cores; their IDF glue twins land with the
 hub port. Both are header-only via an explicit include path.
 
-## Logging goes through VLog. Only.
+## Logging goes through Geiger. Only.
 
-- `SLOGT/D/I/W/E/F("tag", fmt, ...)` from any task, either core. Bounded
+- `GLOGT/D/I/W/E/F("tag", fmt, ...)` from any task, either core. Bounded
   format plus spinlock slot copy; never blocks, never allocates, NOT ISR-safe.
-- Throttle with `SLOGx_EVERY_MS`. Compile floor `VLOG_COMPILE_LEVEL`.
-- **ONE drain point**, on one task, with sinks implementing `vlog::ISink`
+- Throttle with `GLOGx_EVERY_MS`. Compile floor `GEIGER_COMPILE_LEVEL`.
+- **ONE drain point**, on one task, with sinks implementing `geiger::ISink`
   registered in one place. The glue file that owns it names itself when it
   lands; there is never a second drain.
 - **No `printf` debug output in firmware, and no new log macros.** Enforced by
-  canon_lint `printf-outside-vlog` and `new-log-macro`, scoped to the hub
+  canon_lint `printf-outside-geiger` and `new-log-macro`, scoped to the hub
   sources. Exactly one file is exempt from both, because it IS the front door
   and the output device's driver; canon_lint names it, and a SECOND definer
   anywhere is the violation the check exists for. Bench sketches are out of
@@ -30,9 +30,9 @@ hub port. Both are header-only via an explicit include path.
   startup, the composition root disables that before task creation, and the
   console sink demotes to Warn and above once a richer reader exists.
 
-## LEDs go through VGlow. Only.
+## LEDs go through Flux. Only.
 
-- Callers speak semantics: `vglowEngine().set(System::X, Status::Y)`.
+- Callers speak semantics: `fluxEngine().set(System::X, Status::Y)`.
   Board wiring lives in exactly one glue file per board.
 - **Never drive an LED pin directly anywhere else.**
 - The PCB has no LED fitted on the bench stamp yet. The grammar below is
@@ -88,7 +88,7 @@ task with zero CPU load visible.
 
 ## T7 -- LED freeze is a diagnostic, not a bug
 
-**Rule:** never "fix" static LEDs by moving the VGlow pump or removing a
+**Rule:** never "fix" static LEDs by moving the Flux pump or removing a
 heartbeat pulse.
 **Mechanism:** it is a liveness gate. Frozen LEDs plus live cores means the
 task hosting the pump is blocked, see T6. This distinction has solved a field
@@ -152,7 +152,7 @@ a deep PSRAM archive read ONCE, after something goes wrong.
   instrument reached for when the machine is already unwell, so it carries no
   heap floor and no mid-body abort: it must not be the first thing memory
   pressure switches off.
-- Filtering by SLOGx tag is what gives a new subsystem a route without a route
+- Filtering by GLOGx tag is what gives a new subsystem a route without a route
   table change.
 
 The relay half of that story -- pulling the archive through a second board --

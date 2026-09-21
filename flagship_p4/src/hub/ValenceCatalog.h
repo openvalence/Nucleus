@@ -57,17 +57,17 @@ namespace valence {
 // A renumber moves the etag, which is the designed re-fetch mechanism, not a
 // break; 0x0080-0x7FFF is device-allocated space per the registry.
 namespace ch {
-inline constexpr uint16_t motion         = 0x1100;  // STATE·motion, family 0 member 0 (master)
-inline constexpr uint16_t machine_config = 0x1000;  // STATE·machine, family 0 member 0 (master)
-inline constexpr uint16_t pattern_state  = 0x1200;  // STATE·pattern, family 0 member 0 (master); background_run field rides here
-inline constexpr uint16_t odometer       = 0x1020;  // STATE·machine, family 2 member 0 (was 0x1002)
-inline constexpr uint16_t motion_input   = 0x2100;  // STREAM·motion, family 0 member 0 (master)
-inline constexpr uint16_t motion_segment = 0x2101;  // STREAM·motion, family 0 member 1
+inline constexpr uint16_t motion           = 0x1100;  // STATE·motion, family 0 member 0 (master)
+inline constexpr uint16_t machine_config   = 0x1000;  // STATE·machine, family 0 member 0 (master)
+inline constexpr uint16_t pattern_state    = 0x1200;  // STATE·pattern, family 0 member 0 (master); background_run field rides here
+inline constexpr uint16_t odometer         = 0x1020;  // STATE·machine, family 2 member 0 (was 0x1002)
+inline constexpr uint16_t motion_input     = 0x2100;  // STREAM·motion, family 0 member 0 (master)
+inline constexpr uint16_t motion_segment   = 0x2101;  // STREAM·motion, family 0 member 1
 // ---- telemetry channels the legacy :81 plane owned --------------------------
-inline constexpr uint16_t plan_strip     = 0x1110;  // STATE·motion, family 1 member 0 (master; was 0x1101)
-inline constexpr uint16_t power          = 0x1010;  // STATE·machine, family 1 member 0 (was 0x1001)
-inline constexpr uint16_t motion_diag    = 0x1111;  // STATE·motion, family 1 member 1 (was 0x1102)
-inline constexpr uint16_t motion_anomaly = 0x4100;  // EVENT·motion, family 0 member 0 (master)
+inline constexpr uint16_t plan_strip       = 0x1110;  // STATE·motion, family 1 member 0 (master; was 0x1101)
+inline constexpr uint16_t power            = 0x1010;  // STATE·machine, family 1 member 0 (was 0x1001)
+inline constexpr uint16_t motion_diag      = 0x1111;  // STATE·motion, family 1 member 1 (was 0x1102)
+inline constexpr uint16_t motion_anomaly   = 0x4100;  // EVENT·motion, family 0 member 0 (master)
 // ---- MODE settings the legacy :81/HTTP plane owned --------------------------
 // A SECOND settings category, not more fields on 0x0081 — the reason is
 // structural. 0x0081's `enabled_mask` is a bitfield8 whose bit i gates its
@@ -75,20 +75,20 @@ inline constexpr uint16_t motion_anomaly = 0x4100;  // EVENT·motion, family 0 m
 // for; widening the mask to fit these four would change an existing field's
 // type, which is a protocol break, not append-only evolution. A settings
 // category that outgrows its channel SPLITS into a new STATE+INTENT pair.
-inline constexpr uint16_t machine_modes  = 0x1030;  // STATE·machine, family 3 member 0 (master; was 0x1003)
-// ---- VMotion live tuning, off HTTP and onto the protocol -----------------
+inline constexpr uint16_t machine_modes    = 0x1030;  // STATE·machine, family 3 member 0 (master; was 0x1003)
+// ---- Kinetic live tuning, off HTTP and onto the protocol -----------------
 // THREE state cards, ONE shared writer (0x0105). `settingChannel` is per-entry
 // and `setting_key` is a key WITHIN that writer, so several STATE channels may
 // name the same INTENT channel as long as their keys do not collide. That is
 // what lets 17 knobs -- more than any single channel's bitfield8 enabled_mask
 // can gate -- stay one coherent write path instead of three.
-inline constexpr uint16_t sm_limits      = 0x1120;  // STATE·motion, family 2 member 0 (master; was 0x1103)
-inline constexpr uint16_t sm_chase       = 0x1121;  // STATE·motion, family 2 member 1 (was 0x1104)
-inline constexpr uint16_t sm_waveform    = 0x1122;  // STATE·motion, family 2 member 2 (was 0x1105)
+inline constexpr uint16_t kinetic_limits   = 0x1120;  // STATE·motion, family 2 member 0 (master; was 0x1103)
+inline constexpr uint16_t kinetic_chase    = 0x1121;  // STATE·motion, family 2 member 1 (was 0x1104)
+inline constexpr uint16_t kinetic_waveform = 0x1122;  // STATE·motion, family 2 member 2 (was 0x1105)
 // ---- Servo drive registers, its own family: these configure the DRIVE, not --
-// the planner. Family 2 is vmotion's; a drive register that happens to be
+// the planner. Family 2 is kinetic's; a drive register that happens to be
 // spelled "acceleration" is a different subsystem and gets its own writer.
-inline constexpr uint16_t drive_tune     = 0x1130;  // STATE·motion, family 3 member 0 (master)
+inline constexpr uint16_t drive_tune       = 0x1130;  // STATE·motion, family 3 member 0 (master)
 // ---- Advanced pattern — off the dead /api/pattern HTTP surface, onto Valence
 // Same flattened-entry budget split as 0x008B/C/D. AdvancedPattern.h's real
 // parameter set is 8 base controls (advpat::Settings) plus a 6-field cyclic
@@ -97,7 +97,7 @@ inline constexpr uint16_t drive_tune     = 0x1130;  // STATE·motion, family 3 m
 // fitting in kMaxFields (64) and being affordable in one entry are different
 // constraints, so this splits by subsystem — one channel per base control's
 // modifier (6 fields each, well under the 8-bit enabled_mask) — same
-// principle as the sm_limits/sm_chase/sm_waveform split.
+// principle as the kinetic_limits/kinetic_chase/kinetic_waveform split.
 inline constexpr uint16_t pattern_advanced          = 0x1210;  // STATE·pattern, family 1 member 0 (master; was 0x1201) — ap_mode + 7 base controls
 // The six fray-d modifier lanes: ONE family (domain=pattern, family=1),
 // members 1-6. Member order is speed-in/out, accel-in/out, depth-1/2 — NOT
@@ -109,16 +109,16 @@ inline constexpr uint16_t pattern_adv_mod_accelin   = 0x1213;  // STATE·pattern
 inline constexpr uint16_t pattern_adv_mod_accelout  = 0x1214;  // STATE·pattern, family 1 member 4 (was 0x1207)
 inline constexpr uint16_t pattern_adv_mod_depth1    = 0x1215;  // STATE·pattern, family 1 member 5 (was 0x1202) — advpat::DEPTH_MAX modifier
 inline constexpr uint16_t pattern_adv_mod_depth2    = 0x1216;  // STATE·pattern, family 1 member 6 (was 0x1203) — advpat::DEPTH_MIN modifier
-inline constexpr uint16_t move           = 0x3100;  // INTENT·motion, family 0 member 0 (master)
-inline constexpr uint16_t config_set     = 0x3000;  // INTENT·machine, family 0 member 0 (master), MIRROR of machine_config
-inline constexpr uint16_t pattern_cmd    = 0x3200;  // INTENT·pattern, family 0 member 0 (master), MIRROR of pattern_state
-inline constexpr uint16_t home           = 0x3101;  // INTENT·motion, family 0 member 1
-inline constexpr uint16_t modes_set      = 0x3030;  // INTENT·machine, family 3 member 0, MIRROR of machine_modes (was 0x3001)
-inline constexpr uint16_t sm_set         = 0x3120;  // INTENT·motion, family 2 member 0, MIRROR of the sm_* family (was 0x3102)
-inline constexpr uint16_t machine_admin  = 0x30F0;  // INTENT·machine, family F member 0 = admin (was 0x3002)
-inline constexpr uint16_t drive_set      = 0x3130;  // INTENT·motion, family 3 member 0, MIRROR of drive_tune
+inline constexpr uint16_t move             = 0x3100;  // INTENT·motion, family 0 member 0 (master)
+inline constexpr uint16_t config_set       = 0x3000;  // INTENT·machine, family 0 member 0 (master), MIRROR of machine_config
+inline constexpr uint16_t pattern_cmd      = 0x3200;  // INTENT·pattern, family 0 member 0 (master), MIRROR of pattern_state
+inline constexpr uint16_t home             = 0x3101;  // INTENT·motion, family 0 member 1
+inline constexpr uint16_t modes_set        = 0x3030;  // INTENT·machine, family 3 member 0, MIRROR of machine_modes (was 0x3001)
+inline constexpr uint16_t kinetic_set      = 0x3120;  // INTENT·motion, family 2 member 0, MIRROR of the kinetic_* family (was 0x3102)
+inline constexpr uint16_t machine_admin    = 0x30F0;  // INTENT·machine, family F member 0 = admin (was 0x3002)
+inline constexpr uint16_t drive_set        = 0x3130;  // INTENT·motion, family 3 member 0, MIRROR of drive_tune
 // Shared writer behind ALL SEVEN pattern-advanced STATE channels — same
-// "one settingChannel, many cards" pattern as sm_set. MIRROR of
+// "one settingChannel, many cards" pattern as kinetic_set. MIRROR of
 // pattern_advanced (family 1 member 0 on both sides).
 inline constexpr uint16_t pattern_advanced_cmd = 0x3210;  // INTENT·pattern, family 1 member 0 (was 0x3201)
 // RFC-021 `pattern.frayd` preset store — retires POST /api/pattern/presets.
@@ -158,7 +158,7 @@ inline constexpr uint8_t kApBaseCount = 6;
 // DEVICE-authored EVENT channel in the ecosystem and therefore the proof that
 // the grammar fix works: nothing below required a registry change.
 namespace anom_body {
-inline constexpr uint8_t kind   = 1;  // vmotion::AnomalyType, MIRRORS event_kind (see the entry)
+inline constexpr uint8_t kind   = 1;  // kinetic::AnomalyType, MIRRORS event_kind (see the entry)
 inline constexpr uint8_t seq    = 2;  // engine's rolling event id (wraps)
 inline constexpr uint8_t target = 3;  // the command target that provoked it, 0..1 normalized
 inline constexpr uint8_t detail = 4;  // KIND-SPECIFIC scalar — see the option labels
@@ -394,7 +394,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // shape hub and client cannot negotiate, so a hand-authored near-copy
     // would be quietly non-conforming.
     //
-    // Declaring it is what makes the VLog bridge REACHABLE: publishLog()
+    // Declaring it is what makes the Geiger bridge REACHABLE: publishLog()
     // returns false on a hub whose catalog has no 0x0008, so without this line
     // the whole bridge is a no-op. The replay depth is the registry default
     // (limits::log_replay_depth_default = 32) — a client that connects AFTER a
@@ -807,7 +807,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // ---- "motion-input" — STREAM, c2h, control, ≤333 Hz ---------------------
     // Continuous stroke-window targets + optional signed handoff velocity,
     // decoded straight off BundleView by the hub delegate's onStreamBundle()
-    // into the VMotion pacing ring; maps to arbiter source 1
+    // into the Kinetic pacing ring; maps to arbiter source 1
     // (MotionSource::TCODE_STREAM), the same source id legacy TCode uses.
     // scale 10000 on target = 1e-4 resolution over the 0..1 stroke window;
     // scale 1000 on vel = 1e-3 resolution, i16 signed (0 = no handoff
@@ -827,16 +827,16 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasUnitId = true, .unitId = valence::unit_ids::normalized});
     c.addLayoutField({.name = "vel_norm",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
                       // unit_id left absent for vel_norm: unit_ids has no "normalized/s" variant
-                      // (a documented gap, same class as the sm_limits override fields below).
+                      // (a documented gap, same class as the kinetic_limits override fields below).
     };
 
     // ---- "motion-segment" — STREAM, c2h, control, ≤50 Hz --------------------
     // TIMED-SEGMENT motion streaming, the WAVEFORM-mode companion to 0x0084.
     // Carries the sender's native segments — ONE {target, duration, end_vel}
-    // per stroke leg — which the VMotion engine renders as a C2 quintic
+    // per stroke leg — which the Kinetic engine renders as a C2 quintic
     // over EXACTLY the commanded duration. Decoded by FIXED OFFSET in the
     // delegate's onStreamBundle() (same convention as 0x0084), enqueued into
-    // the SAME VMotion pacing ring, mapped to arbiter source 1
+    // the SAME Kinetic pacing ring, mapped to arbiter source 1
     // (TCODE_STREAM) — a client uses 0x0084 OR 0x0085, both ARE "the stream
     // input".
     //   * duration_ms is the commanded segment duration and MUST be ≥1;
@@ -874,7 +874,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "plan-strip" — STATE, elevated, 45 Hz ------------------------------
-    // THE PLANNER'S CURRENT SEGMENT: what VMotion is executing right now,
+    // THE PLANNER'S CURRENT SEGMENT: what Kinetic is executing right now,
     // as a strip you can draw. Together with 0x0080's raw/tgt/pos triple it
     // is the whole input for the diagnostic graphing CLI: raw demand in,
     // planner shape out, carriage response.
@@ -977,13 +977,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     }
     };
 
-    // ---- "vmotion-diag" — STATE, background, 1 Hz ------------------------
+    // ---- "kinetic-diag" — STATE, background, 1 Hz ------------------------
     // Plan counts, the per-kind anomaly breakdown, the on-device plan-time
     // bench, and the Valence stream-ingress counters.
     //
     // The per-kind counters are eleven NAMED fields rather than one array: a
     // generic client renders named fields with no per-device knowledge.
-    // Their order is vmotion::AnomalyType's own, which is APPEND-ONLY
+    // Their order is kinetic::AnomalyType's own, which is APPEND-ONLY
     // upstream, so a new engine kind appends a field to the END OF THIS
     // BLOCK — shifting every offset after it. The catalog's own layout is
     // what a client decodes against and the etag moves with it, so that is
@@ -996,7 +996,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // counters cannot tell a reset from a reboot from a wrap.
     //   [3*4 + 11*4 + 12 + 5*4 + 2 + 1 + 1 = 92 B]
     auto addMotionDiag = [&]() {
-    c.addEntry({.id = ch::motion_diag, .name = "vmotion-diag",
+    c.addEntry({.id = ch::motion_diag, .name = "kinetic-diag",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
                 .defaultPriority = Priority::background,
@@ -1011,14 +1011,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectField({.name = "mode",      .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .group = "Planner", .desc = "Which planning mode the motion core is in."},
                      {"idle", "waveform", "chase", "settle"});
-    // Options are indexed by vmotion::PlanKind and the enum is APPEND-ONLY.
+    // Options are indexed by kinetic::PlanKind and the enum is APPEND-ONLY.
     // "cubic" (=3) arrived with curve_policy/ForceC1: a C1 cubic and a C2 quintic
     // are different curves and the client must be able to tell them apart, so
     // this list grows rather than collapsing both into "hermite".
     c.addSelectField({.name = "plan_kind", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .group = "Planner", .desc = "Which curve the active plan is."},
                      {"none", "quintic", "ruckig", "cubic"});
-    // Per-kind breakdown — names are vmotion::AnomalyType's, index 0 is
+    // Per-kind breakdown — names are kinetic::AnomalyType's, index 0 is
     // the engine's own "none" placeholder and is never counted.
     c.addLayoutField({.name = "anom_none",        .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies", .desc = "Placeholder slot; never counts."});
@@ -1078,7 +1078,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "motion-anomaly" — EVENT, watch, normal ----------------------------
-    // VMotion's anomaly feed, as EDGES.
+    // Kinetic's anomaly feed, as EDGES.
     //
     // FIRST DEVICE-AUTHORED EVENT CHANNEL: every field below is keyed by
     // THIS CHANNEL'S OWN schema (valence::anom_body), naming them costs no
@@ -1232,7 +1232,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                      {"sensorless sweep", "drive built-in"});
     };
 
-    // ---- "vmotion-*" — STATE, tuning -------------------------------------
+    // ---- "kinetic-*" — STATE, tuning -------------------------------------
     // The motion engine's live-tune surface. No controls outside Valence.
     //
     // THREE CHANNELS, ONE TAB. A settings channel is capped at 8 settings
@@ -1250,13 +1250,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // PERSISTED to NVS: these are real settings and survive a reboot. That is
     // also why they carry `default` annotations — a generic client needs to
     // offer "reset to factory" for a value that sticks.
-    auto addSmLimits = [&]() {
-    c.addEntry({.id = ch::sm_limits, .name = "vmotion-limits",
+    auto addKineticLimits = [&]() {
+    c.addEntry({.id = ch::kinetic_limits, .name = "kinetic-limits",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
                 .hasCategory = true, .category = valence::ui_categories::tuning,
-                .hasSettingChannel = true, .settingChannel = ch::sm_set,
+                .hasSettingChannel = true, .settingChannel = ch::kinetic_set,
                 .hasRank = true, .rank = valence::ui_ranks::advanced});
     c.addLayoutField({.name = "jmax_ovr", .type = PackedFieldType::f32, .unit = "1/s3", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2000000.0f,
@@ -1295,13 +1295,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // knob that is accepted but whose path is not currently active is a
     // different statement from a knob the machine refuses, and graying it would
     // be exactly the lie enabled_mask exists to prevent.
-    auto addSmChase = [&]() {
-    c.addEntry({.id = ch::sm_chase, .name = "vmotion-chase",
+    auto addKineticChase = [&]() {
+    c.addEntry({.id = ch::kinetic_chase, .name = "kinetic-chase",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
                 .hasCategory = true, .category = valence::ui_categories::tuning,
-                .hasSettingChannel = true, .settingChannel = ch::sm_set,
+                .hasSettingChannel = true, .settingChannel = ch::kinetic_set,
                 .hasRank = true, .rank = valence::ui_ranks::advanced});
     c.addSelectField({.name = "chase_ff", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(1), .group = "Sample streams",
@@ -1354,14 +1354,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // The WAVEFORM path (timed segments — MFP's Segments mode). Equally live.
-    auto addSmWaveform = [&]() {
-    c.addEntry({.id = ch::sm_waveform, .name = "vmotion-waveform",
+    auto addKineticWaveform = [&]() {
+    c.addEntry({.id = ch::kinetic_waveform, .name = "kinetic-waveform",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
                 .hasCategory = true, .category = valence::ui_categories::tuning,
-                .hasSettingChannel = true, .settingChannel = ch::sm_set,
-                // Unlike its sm_limits/sm_chase siblings, none of these fields carry
+                .hasSettingChannel = true, .settingChannel = ch::kinetic_set,
+                // Unlike its kinetic_limits/kinetic_chase siblings, none of these fields carry
                 // setting_flags::advanced in code — rank matches that: control, not
                 // advanced, so it stays visible without an advanced-affordance gate.
                 .hasRank = true, .rank = valence::ui_ranks::control});
@@ -1890,8 +1890,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     };
 
-    // ---- "vmotion-set" — INTENT, control, 5 Hz ---------------------------
-    // The single writer behind all three vmotion-* cards. Keys 1..20 are
+    // ---- "kinetic-set" — INTENT, control, 5 Hz ---------------------------
+    // The single writer behind all three kinetic-* cards. Keys 1..20 are
     // allocated across those cards and never collide; every key optional, only
     // the keys PRESENT are applied, and each echoes the value the machine
     // actually took after its own clamp. Keys 4, 5, 15 and 19 were RELEASED
@@ -1900,8 +1900,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // Bounds mirror the engine's own clamps exactly, so a client that validates
     // locally gets the same answer the hub would NACK with. Times are
     // MILLISECONDS on the wire; the engine stores microseconds.
-    auto addSmSet = [&]() {
-    c.addEntry({.id = ch::sm_set, .name = "vmotion-set",
+    auto addKineticSet = [&]() {
+    c.addEntry({.id = ch::kinetic_set, .name = "kinetic-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
                 .defaultPriority = Priority::normal});
@@ -1985,7 +1985,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // ---- "pattern-advanced-cmd" — INTENT, control, 20 Hz --------------------
     // The single writer behind ALL SEVEN 0x008E..0x0094 advanced-pattern
     // cards. Same lean-schema convention as every other settings writer in
-    // this catalog (config_set, pattern_cmd, modes_set, sm_set): the
+    // this catalog (config_set, pattern_cmd, modes_set, kinetic_set): the
     // user-facing text (desc/group/default/role) lives ONCE, on the STATE
     // side, so this channel carries only what a client needs to validate
     // before sending — name, type, unit, bounds.
@@ -2086,9 +2086,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         addMotion();             // 0x1100 STATE·motion, family 0 member 0
         addPlanStrip();          // 0x1110 STATE·motion, family 1 member 0
         addMotionDiag();         // 0x1111 STATE·motion, family 1 member 1
-        addSmLimits();           // 0x1120 STATE·motion, family 2 member 0
-        addSmChase();            // 0x1121 STATE·motion, family 2 member 1
-        addSmWaveform();         // 0x1122 STATE·motion, family 2 member 2
+        addKineticLimits();      // 0x1120 STATE·motion, family 2 member 0
+        addKineticChase();       // 0x1121 STATE·motion, family 2 member 1
+        addKineticWaveform();    // 0x1122 STATE·motion, family 2 member 2
     }
     if (feat.has_drive) addDriveTune();   // 0x1130 STATE·motion, family 3 member 0
     if (feat.has_pattern) {
@@ -2112,7 +2112,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     if (feat.has_motion) {
         addMove();               // 0x3100 INTENT·motion, family 0 member 0
         addHome();               // 0x3101 INTENT·motion, family 0 member 1
-        addSmSet();              // 0x3120 INTENT·motion, family 2 member 0
+        addKineticSet();         // 0x3120 INTENT·motion, family 2 member 0
     }
     if (feat.has_drive) addDriveSet();   // 0x3130 INTENT·motion, family 3 member 0
     if (feat.has_pattern) {

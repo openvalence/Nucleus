@@ -359,7 +359,7 @@ extern "C" void app_main() {
     // the arbiter is their sole writer.
     // BEFORE the hub, and that order is load-bearing: the hub's boot publish of
     // every motion STATE channel reads motionCensus().
-    printf("\n--- motion path (arbiter + vmotion + LP emitter) ---\n");
+    printf("\n--- motion path (arbiter + kinetic + LP emitter) ---\n");
     const bool motion_ok = valence::motionBegin();
     if (!motion_ok) printf("--- motion path FAILED to start ---\n");
 

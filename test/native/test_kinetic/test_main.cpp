@@ -1,4 +1,4 @@
-// test_vmotion — native doctest suite for the VMotion engine.
+// test_kinetic — native doctest suite for the Kinetic engine.
 //
 // Hardware-free, fully deterministic: time is a synthetic uint64 microsecond
 // counter, no clocks, no randomness. Every kinematic assertion is checked by
@@ -21,27 +21,27 @@
 // ============================================================================
 
 // Debug scaffolding for a bench session; every printf in this file is behind it
-// and the suite is silent at 0. Build with -DVMOTION_TEST_VERBOSE=1.
-#ifndef VMOTION_TEST_VERBOSE
-#define VMOTION_TEST_VERBOSE 0
+// and the suite is silent at 0. Build with -DKINETIC_TEST_VERBOSE=1.
+#ifndef KINETIC_TEST_VERBOSE
+#define KINETIC_TEST_VERBOSE 0
 #endif
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
-#include "vmotion/vmotion.hpp"
+#include "kinetic/kinetic.hpp"
 
 #include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
 
-using vmotion::AnomalyType;
-using vmotion::Command;
-using vmotion::Config;
-using vmotion::Engine;
-using vmotion::InfeasiblePolicy;
-using vmotion::Mode;
+using kinetic::AnomalyType;
+using kinetic::Command;
+using kinetic::Config;
+using kinetic::Engine;
+using kinetic::InfeasiblePolicy;
+using kinetic::Mode;
 
 namespace {
 
@@ -144,7 +144,7 @@ struct AnomalyHit {
 
 AnomalyHit drainFor(Engine& e, AnomalyType kind) {
     AnomalyHit h;
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     while (e.popAnomaly(ev)) {
         if (ev.kind == (uint8_t)kind) {
             h.seen = true;
@@ -274,7 +274,7 @@ TEST_CASE("Waveform rest-to-rest: lands on target, at rest, on the deadline") {
     const uint64_t t0 = 1 * kS;
     REQUIRE(e.commit(c, t0));
     CHECK(e.mode() == Mode::Waveform);
-    CHECK(e.planKind() == vmotion::PlanKind::Quintic);
+    CHECK(e.planKind() == kinetic::PlanKind::Quintic);
     CHECK(e.isBusy(t0 + 10 * kMs));
 
     auto snap = e.snapshot(t0);
@@ -288,7 +288,7 @@ TEST_CASE("Waveform rest-to-rest: lands on target, at rest, on the deadline") {
     CHECK_FALSE(e.isBusy(tEnd));
 
     // No anomalies for a clean feasible move.
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     CHECK_FALSE(e.popAnomaly(ev));
 }
 
@@ -302,7 +302,7 @@ TEST_CASE("Waveform quintic is the min-jerk curve (shape fidelity)") {
     Command c;
     c.target = 0.8f; c.duration_us = 600 * (uint32_t)kMs; c.has_duration = true;
     REQUIRE(e.commit(c, 0));
-    REQUIRE(e.planKind() == vmotion::PlanKind::Quintic);
+    REQUIRE(e.planKind() == kinetic::PlanKind::Quintic);
 
     CHECK(e.positionAt(300 * kMs) == doctest::Approx(0.5).epsilon(1e-4));
     CHECK(e.velocityAt(300 * kMs) ==
@@ -341,7 +341,7 @@ TEST_CASE("Consecutive G-slope segments join C2 (no accel jump at boundaries)") 
             c.end_vel      = (float)srcV(te);
             c.has_end_vel  = true;
             REQUIRE(e.commit(c, next_cmd));
-            REQUIRE(e.planKind() == vmotion::PlanKind::Quintic);
+            REQUIRE(e.planKind() == kinetic::PlanKind::Quintic);
             next_cmd += seg;
         }
         const double a = e.accelerationAt(t);
@@ -371,9 +371,9 @@ TEST_CASE("Over-demanding waveform falls back to the Ruckig guard, ceilings hold
     c.duration_us  = 900 * (uint32_t)kMs;
     c.has_duration = true;
     REQUIRE(e.commit(c, 0));
-    CHECK(e.planKind() == vmotion::PlanKind::Ruckig);
+    CHECK(e.planKind() == kinetic::PlanKind::Ruckig);
 
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     bool saw_fallback = false;
     while (e.popAnomaly(ev)) {
         if (ev.kind == (uint8_t)AnomalyType::WaveformFallback) saw_fallback = true;
@@ -499,7 +499,7 @@ TEST_CASE("Infeasible deadline stretches to physical minimum + anomaly") {
     auto snap = e.snapshot(0);
     CHECK(snap.duration_s > 0.5f);    // stretched to ≥ distance / vmax
 
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     bool saw_fallback = false, saw_stretch = false;
     float stretch_detail = 0.0f;
     while (e.popAnomaly(ev)) {
@@ -625,7 +625,7 @@ TEST_CASE("Starve-settle: dead stream brakes to rest and holds") {
     CHECK(e.positionAt(t_dead + 3 * kS) == doctest::Approx(final_p).epsilon(1e-9));
 
     // A SettleEngaged anomaly was recorded.
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     bool saw_settle = false;
     while (e.popAnomaly(ev)) {
         if (ev.kind == (uint8_t)AnomalyType::SettleEngaged) saw_settle = true;
@@ -648,7 +648,7 @@ TEST_CASE("End velocity near a wall is clamped bound-safe") {
     c.has_end_vel  = true;
     REQUIRE(e.commit(c, 0));
 
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     bool saw_clamp = false;
     while (e.popAnomaly(ev)) {
         if (ev.kind == (uint8_t)AnomalyType::EndVelClamped) {
@@ -678,7 +678,7 @@ TEST_CASE("Non-finite input is rejected; previous plan keeps executing") {
     evil.target = std::nanf("");
     CHECK_FALSE(e.commit(evil, 100 * kMs));
 
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     REQUIRE(e.popAnomaly(ev));
     CHECK(ev.kind == (uint8_t)AnomalyType::PlanFailed);
     CHECK(ev.detail == doctest::Approx(-99.0f));
@@ -734,7 +734,7 @@ TEST_CASE("Stretch policy: same command keeps the stroke and overruns the deadli
     REQUIRE(e.commit(c, 0));
 
     // Pre-0.3 behavior, byte for byte: the Ruckig guard owns the segment.
-    CHECK(e.planKind() == vmotion::PlanKind::Ruckig);
+    CHECK(e.planKind() == kinetic::PlanKind::Ruckig);
     const double dur = e.snapshot(0).duration_s;
     MESSAGE("Stretch 0->1 in 100ms: plan runs " << dur << " s");
     CHECK(dur > 0.9);                   // ≥ distance / vmax = 1/1.1
@@ -743,7 +743,7 @@ TEST_CASE("Stretch policy: same command keeps the stroke and overruns the deadli
     // Full stroke delivered — late.
     CHECK(e.positionAt(2 * kS) == doctest::Approx(1.0).epsilon(1e-3));
 
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     bool saw_scaled = false, saw_fallback = false, saw_stretch = false;
     while (e.popAnomaly(ev)) {
         if (ev.kind == (uint8_t)AnomalyType::WaveformScaled)    saw_scaled = true;
@@ -770,13 +770,13 @@ TEST_CASE("A feasible segment is bit-identical under BOTH policies") {
         c.duration_us  = 600 * (uint32_t)kMs;
         c.has_duration = true;
         REQUIRE(e.commit(c, 0));
-        REQUIRE(e.planKind() == vmotion::PlanKind::Quintic);
+        REQUIRE(e.planKind() == kinetic::PlanKind::Quintic);
         for (uint64_t t = 0; t <= 700 * kMs; t += kMs) {
             out.push_back(e.positionAt(t));
             out.push_back(e.velocityAt(t));
             out.push_back(e.accelerationAt(t));
         }
-        vmotion::Anomaly ev;
+        kinetic::Anomaly ev;
         while (e.popAnomaly(ev)) {
             CHECK(ev.kind != (uint8_t)AnomalyType::WaveformScaled);
             CHECK(ev.kind != (uint8_t)AnomalyType::WaveformFallback);
@@ -1015,12 +1015,12 @@ TEST_CASE("Snapshot::sharpness reports the plan's real peak jerk") {
     const double jmax = cfg.limits.jmax;
 
     const Shape q = segShape(cfg, 0.30, 0.55, 600);     // comfortably feasible
-    REQUIRE(q.kind == (uint8_t)vmotion::PlanKind::Quintic);
+    REQUIRE(q.kind == (uint8_t)kinetic::PlanKind::Quintic);
     CHECK(q.sharp < 0.05);                              // an easy stroke IS soft
     CHECK(q.sharp * jmax == doctest::Approx(q.jpk).epsilon(0.05));
 
     const Shape r = segShape(cfg, 0.15, 0.85, 400);     // the guard's profile
-    REQUIRE(r.kind == (uint8_t)vmotion::PlanKind::Ruckig);
+    REQUIRE(r.kind == (uint8_t)kinetic::PlanKind::Ruckig);
     // Ruckig is bang-bang in jerk, so the sampled peak IS the planning ceiling
     // (the finite difference smears the switching instants, hence the margin).
     CHECK(r.sharp * jmax == doctest::Approx(r.jpk).epsilon(0.10));
@@ -1067,7 +1067,7 @@ TEST_CASE("Settle grace coasts at the end velocity, then brakes when the stream 
               doctest::Approx(p_end + v_end * 0.029).epsilon(1e-6));
         CHECK(max_jump <= std::fabs(v_end) * 1e-3 * 1.05);
         CHECK(e.mode() == Mode::Waveform);        // NOT Settle
-        CHECK(e.planKind() == vmotion::PlanKind::Quintic);
+        CHECK(e.planKind() == kinetic::PlanKind::Quintic);
         CHECK(drainFor(e, AnomalyType::SettleEngaged).seen == false);
 
         // Past the grace the brake engages — and does so CONTINUOUSLY (the
@@ -1124,7 +1124,7 @@ TEST_CASE("Dwell rule: a re-commanded hold's declared arrival velocity is ignore
     // drain -- drainFor empties the ring, so a second call always reads clean.
     bool  dwell_seen = false, handoff_seen = false;
     float dropped = 0.0f;
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     while (e.popAnomaly(ev)) {
         if (ev.kind == (uint8_t)AnomalyType::DwellZeroed) {
             dwell_seen = true;
@@ -1217,9 +1217,9 @@ struct Log {
 };
 
 inline void drain(Engine& e, Log& lg, bool print) {
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     while (e.popAnomaly(ev)) {
-        if (VMOTION_TEST_VERBOSE && print)
+        if (KINETIC_TEST_VERBOSE && print)
             printf("      anomaly kind=%u target=%.3f detail=%.3f t=%.3f\n",
                    unsigned(ev.kind), (double)ev.target, (double)ev.detail,
                    ev.t_us / 1e6);
@@ -1328,7 +1328,7 @@ inline void play(Engine& e, uint64_t& now, const S* seq, size_t n, uint64_t due0
         c.client_curve_family = 1;              // RFC-030 c1_cubic, fam=1
         const bool ok = e.commit(c, now);
         lg.commits++;
-        if (VMOTION_TEST_VERBOSE && print)
+        if (KINETIC_TEST_VERBOSE && print)
             printf("  commit tgt=%.3f dur=%u vf=%s%.3f late=%u -> ok=%d kind=%u "
                    "mode=%u p=%.3f v=%.3f\n",
                    (double)c.target, unsigned(seq[i].dur_ms),
@@ -1605,8 +1605,8 @@ TEST_CASE("A 10 ms segment is a 10 ms span with its authored tangent") {
     const double pT   = (double)e.positionAt(10 * kMs);
     MESSAGE("10 ms knot: kind " << unsigned(kind) << ", dur " << dur
             << ", v(T) " << vT << ", p(T) " << pT);
-    CHECK((kind == vmotion::PlanKind::Cubic ||
-           kind == vmotion::PlanKind::Quintic));
+    CHECK((kind == kinetic::PlanKind::Cubic ||
+           kind == kinetic::PlanKind::Quintic));
     CHECK(dur == doctest::Approx(0.010).epsilon(1e-6));
     // The authored tangent is the point of the ruling: it is rendered, not
     // replaced by a chase arrival estimate.
@@ -1683,7 +1683,7 @@ TEST_CASE("A bare point with no duration is still the chase planner's") {
     c.target = 0.70f;
     REQUIRE(e.commit(c, 0));
     CHECK(e.mode() == Mode::Chase);
-    CHECK(e.planKind() == vmotion::PlanKind::Ruckig);
+    CHECK(e.planKind() == kinetic::PlanKind::Ruckig);
 }
 
 TEST_CASE("A segment longer than chase_stale_us must not starve its own settle grace") {
@@ -1777,7 +1777,7 @@ TEST_CASE("Reset drops everything back to a hold") {
 
 namespace {
 
-using vmotion::boundHandoffVelocity;
+using kinetic::boundHandoffVelocity;
 
 // The measured failure, MFP plugin v0.2.1 against Valence Sim, 2026-07-25: a Makima
 // tangent of 1.816 norm/s handed into a span whose own mean velocity is 0.050
@@ -2547,7 +2547,7 @@ TEST_CASE("Blend: a rail slam just over the ceiling is shortened, not surrendere
     play(e, now, RAIL + 2, 1, now - 3 * kMs, lg);
 
     // A Hermite plan in the declared family, not the guard's bang-bang profile.
-    CHECK(lg.kind_last == (int8_t)vmotion::PlanKind::Cubic);
+    CHECK(lg.kind_last == (int8_t)kinetic::PlanKind::Cubic);
     CHECK(lg.fallback == 0);
     CHECK(lg.scaled == 1);
     // The amplitude budget is a FLOOR: at most `budget` of the stroke may be
@@ -2588,9 +2588,9 @@ TEST_CASE("Blend: smoothing never raises |vf| past the RFC-008 bound") {
             REQUIRE(e.commit(c, 0));
 
             const auto snap = e.snapshot(0);
-            bool is_hermite = snap.plan_kind == (uint8_t)vmotion::PlanKind::Cubic ||
-                              snap.plan_kind == (uint8_t)vmotion::PlanKind::Quintic;
-            vmotion::Anomaly ev;
+            bool is_hermite = snap.plan_kind == (uint8_t)kinetic::PlanKind::Cubic ||
+                              snap.plan_kind == (uint8_t)kinetic::PlanKind::Quintic;
+            kinetic::Anomaly ev;
             while (e.popAnomaly(ev))
                 if (ev.kind == (uint8_t)AnomalyType::WaveformSmoothed) smoothed++;
             if (!is_hermite) continue;   // the guard's plan is not this test's
@@ -2749,8 +2749,8 @@ TEST_CASE("jmax = 0 reports ILLEGAL, never legal (sd-6b2.3)") {
     cmd.has_duration = true;
     e.commit(cmd, 0);
     const auto s = e.snapshot(0);
-    CHECK(s.plan_kind != (uint8_t)vmotion::PlanKind::Quintic);
-    CHECK(s.plan_kind != (uint8_t)vmotion::PlanKind::Cubic);
+    CHECK(s.plan_kind != (uint8_t)kinetic::PlanKind::Quintic);
+    CHECK(s.plan_kind != (uint8_t)kinetic::PlanKind::Cubic);
 }
 
 TEST_CASE("A 1 ms due gap does not blow up the af estimate (sd-6b2.3)") {
@@ -2836,7 +2836,7 @@ TEST_CASE("Every chase plan is refereed; the window holds on RAW state "
                                                  * (double)t * 1e-6));
         c.has_anchor = true; c.anchor_us = t;
         e.commit(c, t);
-        vmotion::Anomaly ev;
+        kinetic::Anomaly ev;
         while (e.popAnomaly(ev))
             if (ev.kind == (uint8_t)AnomalyType::WaveformFallback) fallbacks++;
         for (uint64_t q = t; q < t + dt; q += kMs) {
@@ -3039,7 +3039,7 @@ TEST_CASE("An anchor beyond the lead bound is refused; the plan in flight is unt
     c1.target = 0.40f; c1.duration_us = 200 * (uint32_t)kMs;
     c1.has_duration = true;
     REQUIRE(e.commit(c1, 0));
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     while (e.popAnomaly(ev)) {}
     const double ref = e.positionAt(50 * kMs);
 
@@ -3076,7 +3076,7 @@ TEST_CASE("No settle while a scheduled successor exists") {
     c2.anchor_us = 300 * kMs; c2.has_anchor = true;
     REQUIRE(e.commit(c2, 5 * kMs));
 
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     int settles = 0;
     for (uint64_t t = 5 * kMs; t < 300 * kMs; t += kMs) {
         e.positionAt(t);
@@ -3118,7 +3118,7 @@ TEST_CASE("A 110 ms lookahead of segments renders every anchor, continuously") {
     size_t next_row = 0, next_anchor = 0;
     int settles = 0, failed = 0;
     double prev_p = e.positionAt(0), prev_v = 0.0;
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     for (uint64_t t = kMs; t <= due + 50 * kMs; t += kMs) {
         while (next_row < rows.size() && rows[next_row].at <= t) {
             CHECK(e.commit(rows[next_row].c, t));
@@ -3157,7 +3157,7 @@ TEST_CASE("A full schedule queue refuses with -96 and keeps what it holds") {
         c.anchor_us = uint32_t((100 + 40 * i) * kMs);
         REQUIRE(e.commit(c, 10 * kMs));
     }
-    vmotion::Anomaly ev;
+    kinetic::Anomaly ev;
     while (e.popAnomaly(ev)) {}
 
     Command over = c;
@@ -3286,7 +3286,7 @@ TEST_CASE("planView hands out the plan without touching it") {
     double p0, v0, a0;
     e.rawSampleAt(t_mid, p0, v0, a0);
 
-    vmotion::PlanView pv = e.planView();
+    kinetic::PlanView pv = e.planView();
     for (int k = 0; k < 3; ++k) pv = e.planView();
 
     CHECK(e.planKind() == kind0);
@@ -3310,7 +3310,7 @@ TEST_CASE("planView hands out the plan without touching it") {
     for (uint64_t t : {uint64_t(1000 + 20000), uint64_t(1000 + 150000),
                        uint64_t(1000 + 290000)}) {
         double ep, ev, ea, rp, rv, ra;
-        vmotion::Engine::evalPiece(pv.active, t, ep, ev, ea);
+        kinetic::Engine::evalPiece(pv.active, t, ep, ev, ea);
         e.rawSampleAt(t, rp, rv, ra);
         CHECK(ep == doctest::Approx(rp).epsilon(1e-9));
         CHECK(ev == doctest::Approx(rv).epsilon(1e-9));
@@ -3325,9 +3325,9 @@ TEST_CASE("planView hands out the plan without touching it") {
     later.has_anchor = true;
     later.anchor_us = 1000 + 250000;
     REQUIRE(e.commit(later, t_mid));
-    const vmotion::PlanView sched = e.planView();
+    const kinetic::PlanView sched = e.planView();
     CHECK(sched.next_ok == true);
     CHECK(sched.next.start_us == later.anchor_us);
-    CHECK(sched.next.kind != vmotion::PlanKind::None);
+    CHECK(sched.next.kind != kinetic::PlanKind::None);
     CHECK(sched.active.start_us == start0);
 }

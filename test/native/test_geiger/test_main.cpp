@@ -1,4 +1,4 @@
-// VLog — hardware-free core suite. Exercises the ring/sink/floor/drop
+// Geiger — hardware-free core suite. Exercises the ring/sink/floor/drop
 // contract with an injected port (manual clock, counting lock) — the same
 // determinism posture as the valence suites.
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -7,9 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "vlog/vlog_core.hpp"
+#include "geiger/geiger_core.hpp"
 
-using namespace vlog;
+using namespace geiger;
 
 namespace {
 

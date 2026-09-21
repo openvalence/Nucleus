@@ -29,7 +29,7 @@ Nucleus is the firmware; Valence is the protocol it speaks.
 - **Module boundary doctrine (operator-ratified 2026-07-27, carried).**
   Functional cores are LIFTABLE: hardware-free, dependency-injected (clock,
   randomness, transport, motor handed IN, never grabbed), native-testable,
-  stitchable into another codebase. `lib/vlog`, `lib/vglow` and `lib/vmotion`
+  stitchable into another codebase. `lib/geiger`, `lib/flux` and `lib/kinetic`
   are the proof pattern, and the IDF port is its honest test: cores lift, glue
   is rewritten. Glue is the opposite and proudly so: the composition root
   (`main.cpp`), delegates, and board wiring are deliberately machine-specific,

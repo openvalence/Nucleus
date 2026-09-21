@@ -24,7 +24,7 @@
 
 namespace valence {
 
-// One per vmotion::AnomalyType, INCLUDING its index-0 placeholder and the
+// One per kinetic::AnomalyType, INCLUDING its index-0 placeholder and the
 // retired kind that holds its ordinal. The enum is append-only and the 0x1111
 // per-kind field list is indexed by it, so this number and that list move
 // together or the table re-points.
@@ -96,8 +96,8 @@ struct MotionCensus {
     bool     stream         = false;  // a Stream intent is the live source
 
     // ---- the active plan, normalized, as 0x1110 publishes it ----
-    uint8_t  mode             = 0;   // vmotion::Mode
-    uint8_t  plan_kind        = 0;   // vmotion::PlanKind
+    uint8_t  mode             = 0;   // kinetic::Mode
+    uint8_t  plan_kind        = 0;   // kinetic::PlanKind
     float    plan_start       = 0.0f;
     float    plan_end         = 0.0f;
     float    plan_cur         = 0.0f;
@@ -109,7 +109,7 @@ struct MotionCensus {
     uint32_t plans          = 0;
     uint32_t failures       = 0;
     uint32_t anomalies      = 0;   // every kind, summed
-    std::array<uint32_t, kAnomalyKinds> anom{};  // indexed by vmotion::AnomalyType
+    std::array<uint32_t, kAnomalyKinds> anom{};  // indexed by kinetic::AnomalyType
     uint32_t plan_us_last   = 0;
     uint32_t plan_us_max    = 0;
     float    plan_us_avg    = 0.0f;

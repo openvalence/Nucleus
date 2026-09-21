@@ -1,4 +1,4 @@
-// VGlow -- Arduino output drivers over the hardware-free core.
+// Flux -- Arduino output drivers over the hardware-free core.
 //
 // Constraints:
 // - Drivers here are the generic, reusable ones (LEDC PWM color/mono). Board
@@ -6,19 +6,19 @@
 //   sources -- lives in the firmware, NOT here.
 // - There is NO ESP-IDF driver, and its absence is the rule, not a gap: no
 //   board in this repo carries a pixel yet. A stamp with no LED injects
-//   vglow::NullGlowOutput from the core; the IDF driver lands with the
+//   flux::NullGlowOutput from the core; the IDF driver lands with the
 //   hardware it drives, never before it.
-// - Native tests include vglow_core.hpp directly and never reach this file.
+// - Native tests include flux_core.hpp directly and never reach this file.
 #pragma once
 
-#include "vglow/vglow_core.hpp"
+#include "flux/flux_core.hpp"
 
 #if defined(ARDUINO)
 #include <Arduino.h>
 
-namespace vglow {
+namespace flux {
 
-// gamma8 moved into vglow_core.hpp (hardware-free, all boards share it).
+// gamma8 moved into flux_core.hpp (hardware-free, all boards share it).
 
 // One true-color pixel on three LEDC PWM pins (discrete RGB LED). Handles
 // active-low (current-sinking) LEDs by inverting duty.
@@ -78,6 +78,6 @@ private:
     Rgb _pending{};
 };
 
-}  // namespace vglow
+}  // namespace flux
 
 #endif  // ARDUINO

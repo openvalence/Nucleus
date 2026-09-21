@@ -1,4 +1,4 @@
-// VMotion — jerk-limited dual-mode motion core (quintic waveform + Ruckig).
+// Kinetic — jerk-limited dual-mode motion core (quintic waveform + Ruckig).
 //
 // PURPOSE
 // -------
@@ -111,7 +111,7 @@
 // steady state (Ruckig's waypoint vectors stay empty in community mode).
 //
 // Hardware-free: std headers + vendored lib/ruckig only. Native-tested in
-// test/native/test_vmotion. The scenario-trace bench did not come across from
+// test/native/test_kinetic. The scenario-trace bench did not come across from
 // the archived SlopDrive-32 repo; regenerate it there if a waveform needs
 // eyes on it.
 #pragma once
@@ -123,7 +123,7 @@
 
 #include <ruckig/ruckig.hpp>
 
-namespace vmotion {
+namespace kinetic {
 
 inline constexpr const char* kVersion = "0.8.0";
 
@@ -167,7 +167,7 @@ struct Limits {
 // ORDINALS ARE PINNED. Stretch is 0 and Blend is 5 because those are the values
 // already persisted in NVS and already carried by the device catalog's select;
 // the four ordinals between them named policies deleted 2026-09-02 (docs/
-// reviews/vmotion-2026-09-02/02-waveform-referee-chain.md section 5) and the
+// reviews/kinetic-2026-09-02/02-waveform-referee-chain.md section 5) and the
 // HOST maps a stored one onto Blend. Renumbering to close the gap would
 // silently re-point every stored setting.
 enum class InfeasiblePolicy : uint8_t {
@@ -633,7 +633,7 @@ enum class AnomalyType : uint8_t {
 // counter after it.
 // HandoffBounded = 8 SPENT that width: SM_ANOM_KINDS went 8 -> 9 in the same
 // change, together with kSmAnomalyNames, the sim's mirror of it, and the
-// per-kind field list on the 0x0088 vmotion-diag channel.
+// per-kind field list on the 0x0088 kinetic-diag channel.
 // WaveformSmoothed = 9 SPENT the next slot: SM_ANOM_KINDS went 9 -> 10, same
 // three-place update (names, sim mirror, 0x0088 field list).
 // DwellZeroed = 10 SPENT the next: SM_ANOM_KINDS went 10 -> 11, same three
@@ -2030,7 +2030,7 @@ public:
     // and in what it calls legal: it scores every sample through the SAME
     // pointWorst predicate, with the same window and the same band allowance,
     // so the two planners cannot disagree about what "legal" means. Pinned by
-    // the coincident-curve sweep in test/native/test_vmotion.
+    // the coincident-curve sweep in test/native/test_kinetic.
     //
     // WHY THIS HAS TO EXIST — RUCKIG IS NOT A LEGALITY ORACLE. `max_velocity`
     // is an input to Ruckig's profile SEARCH, not a postcondition of its
@@ -2666,7 +2666,7 @@ private:
     // THE activity clock: the last instant the machine was known to be
     // executing content, engine clock. Stamped by every commit (at its
     // anchor) and every plan end; EVERY "is the stream alive" test reads
-    // this one member (docs/reviews/vmotion-2026-09-02).
+    // this one member (docs/reviews/kinetic-2026-09-02).
     uint64_t _last_activity_us = 0;
     bool     _reset_cold = true;   // resetAt: the next plan is a cold start
     Limits   _plan_lim;            // ceilings of the plan in flight (commit())
@@ -2685,4 +2685,4 @@ private:
     uint16_t _anom_seq = 0;
 };
 
-} // namespace vmotion
+} // namespace kinetic

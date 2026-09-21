@@ -3,7 +3,7 @@
 # include path is the whole of consuming it: no component, no build step.
 # READ-ONLY: a break there is fixed in flags here, never upstream.
 #
-# lib/vmotion is header-only too, but the vendored Ruckig it wraps is not: its
+# lib/kinetic is header-only too, but the vendored Ruckig it wraps is not: its
 # step solvers are real translation units and are listed here. lib/ruckig is
 # BYTE-IDENTICAL to upstream -- wrap, never patch (lib/ruckig/VENDORED.md).
 idf_component_register(SRCS "main.cpp"
@@ -23,11 +23,11 @@ idf_component_register(SRCS "main.cpp"
                             "../../lib/ruckig/src/ruckig/velocity_third_step2.cpp"
                        INCLUDE_DIRS "." "hub" "motion"
                                     "../../lib/valence/include"
-                                    "../../lib/vlog/include"
-                                    "../../lib/vmotion/include"
+                                    "../../lib/geiger/include"
+                                    "../../lib/kinetic/include"
                                     "../../lib/ruckig/include"
                        # REQUIRES: reached from a header in the PUBLIC include
-                       # dirs above. esp_timer (ValencePlatform.h, vlog),
+                       # dirs above. esp_timer (ValencePlatform.h, geiger),
                        # esp_http_server (ValenceUiToken.h, ValenceWsPort.h),
                        # ulp (ulp_embed_binary and the ulp_main.h it generates).
                        REQUIRES esp_timer esp_http_server ulp

@@ -9,15 +9,15 @@ Architecture-level motion doctrine (one command one plan, the MotionArbiter
 sole-caller rule, the two-chip split, HP-evaluates / LP-renders) lives in
 `.claude/rules/architecture.md` §2. This file is the mechanism layer.
 
-## VMotion (`lib/vmotion/`)
+## Kinetic (`lib/kinetic/`)
 
 Every command becomes ONE trajectory planned from the engine's actual
 (p, v, a); the sampler evaluates it. Event-driven, never clocked.
 
-- **Map:** header-only, hardware-free `vmotion::Engine` wrapping vendored
+- **Map:** header-only, hardware-free `kinetic::Engine` wrapping vendored
   `lib/ruckig/`, which is BYTE-IDENTICAL to upstream. Wrap, never patch; see
-  `lib/ruckig/VENDORED.md`. The namespace rename to `vmotion` is board work
-  (`val-091.1`), gated on the native suite, not a sed pass.
+  `lib/ruckig/VENDORED.md`. A namespace rename here is gated on the native
+  suite, never a blind sed pass.
 - **Division of labor (MEASURED; re-run the bench before re-litigating).**
   Ruckig Community is a point-to-point planner, not a waveform interpolator.
   WAVEFORM (every duration-carrying segment, with NO duration floor: a 10 ms

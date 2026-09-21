@@ -17,7 +17,7 @@ License:   MIT (see LICENSE, copied verbatim from upstream)
 ## Local modifications
 
 NONE. The vendored files are byte-identical to upstream. Keep it that way —
-any behavior we need lives in `lib/vmotion/`, the wrapper. If a genuine
+any behavior we need lives in `lib/kinetic/`, the wrapper. If a genuine
 upstream patch is ever unavoidable, record the diff here.
 
 ## Why vendored (not lib_deps)
@@ -38,8 +38,8 @@ every clean build a network build. The subset is small, MIT, and frozen.
 
 - Ruckig computes in `double` internally. That is fine here: planning is
   event-driven (per intent/point, never per sample), so the S3's
-  software-double cost is paid at plan time only. vmotion's public API
+  software-double cost is paid at plan time only. Kinetic's public API
   stays `float` per project style.
 - Exceptions: all `throw` sites are behind `template<bool throw_error>`
-  paths that vmotion never instantiates with `true`; the non-throwing
+  paths that Kinetic never instantiates with `true`; the non-throwing
   `calculate()`/`update()` overloads return `Result` error codes instead.

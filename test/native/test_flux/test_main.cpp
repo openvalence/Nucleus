@@ -1,4 +1,4 @@
-// VGlow -- hardware-free core suite. The heartbeat-gate contract is the
+// Flux -- hardware-free core suite. The heartbeat-gate contract is the
 // safety-relevant part (a frozen core MUST freeze the LEDs), so it gets the
 // most coverage; the two-axis arbiter, boot rainbow, pulse layering, blink
 // timing, crossfade, and mode math follow.
@@ -7,9 +7,9 @@
 
 #include <vector>
 
-#include "vglow/vglow_core.hpp"
+#include "flux/flux_core.hpp"
 
-using namespace vglow;
+using namespace flux;
 
 namespace {
 

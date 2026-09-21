@@ -1,4 +1,4 @@
-// VLog — hardware-free logging core. No Arduino, no FreeRTOS, no heap in
+// Geiger — hardware-free logging core. No Arduino, no FreeRTOS, no heap in
 // steady state: everything platform-specific (time source, critical section,
 // core id, sinks) is injected, so this exact code runs on the S3, the C5
 // nodes, and inside the native doctest suite.
@@ -33,7 +33,7 @@
 #include <cstdio>
 #include <cstring>
 
-namespace vlog {
+namespace geiger {
 
 enum class Level : uint8_t { Trace = 0, Debug, Info, Warn, Error, Fatal, Off };
 
@@ -158,11 +158,11 @@ public:
     void logf(Level level, const char* tag, const char* fmt, ...) {
         va_list ap;
         va_start(ap, fmt);
-        vlogf(level, tag, fmt, ap);
+        geigerf(level, tag, fmt, ap);
         va_end(ap);
     }
 
-    void vlogf(Level level, const char* tag, const char* fmt, va_list ap) {
+    void geigerf(Level level, const char* tag, const char* fmt, va_list ap) {
         if (level < _floor || level >= Level::Off) return;
         Record r;
         r.ms = _port.nowMs();
@@ -313,4 +313,4 @@ private:
     bool _immediateDrain = false;
 };
 
-}  // namespace vlog
+}  // namespace geiger

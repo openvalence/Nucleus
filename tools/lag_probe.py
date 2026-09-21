@@ -126,7 +126,7 @@ def run(args):
     if welcome is None:
         print("FAIL: no WELCOME")
         return 1
-    grants = welcome.get(sp.K["grants"]) or []
+    grants = welcome.get(sp.K["granted_publishes"]) or []
     if not grants:
         print("FAIL: motion-input publish wish not granted (watch tier?)")
         return 1

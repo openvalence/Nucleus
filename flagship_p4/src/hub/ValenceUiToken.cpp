@@ -14,7 +14,7 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 
-#include "vlog/vlog.h"
+#include "geiger/geiger.h"
 
 #include "valence/core/crypto.hpp"
 #include "valence/wire/hmac_sha256.hpp"
@@ -89,15 +89,15 @@ bool ValenceUiTokenMinter::attachRoutes() {
 
     esp_err_t err = httpd_start(&_srv, &cfg);
     if (err != ESP_OK) {
-        SLOGE(kTag, "httpd_start on :80 failed: %d", int(err));
+        GLOGE(kTag, "httpd_start on :80 failed: %d", int(err));
         return false;
     }
     httpd_uri_t ut{"/uitoken", HTTP_GET, handleGet, nullptr};
     if (httpd_register_uri_handler(_srv, &ut) != ESP_OK) {
-        SLOGE(kTag, "route registration failed");
+        GLOGE(kTag, "route registration failed");
         return false;
     }
-    SLOGI(kTag, "GET /uitoken on :80 (no CORS headers, by design; %lu ms TTL, control tier)",
+    GLOGI(kTag, "GET /uitoken on :80 (no CORS headers, by design; %lu ms TTL, control tier)",
           static_cast<unsigned long>(kTtlMs));
     return true;
 }

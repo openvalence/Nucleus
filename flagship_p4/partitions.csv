@@ -10,7 +10,7 @@
 # one home for this fact; sdkconfig carries nothing about it.
 #
 # 4 MB of factory against a 1.31 MB image: the vendored Ruckig step solvers
-# that vmotion wraps are most of the growth, and none of it is compressible by
+# that kinetic wraps are most of the growth, and none of it is compressible by
 # build flags. No OTA slots yet -- adding them is a table change, not a code
 # change, and it is not owed until this board takes remote updates.
 # Name,   Type, SubType, Offset,  Size,     Flags

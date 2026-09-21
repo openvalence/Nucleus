@@ -8,8 +8,8 @@ that have actually bitten this project family). If a check fires falsely, the
 fix is a C-7 amendment to the exemption lists in this file -- never ignoring
 the output.
 
-Checks here: printf-outside-vlog, valence-purity, this-assign,
-new-log-macro, led-outside-vglow, borrowed-member, sole-caller,
+Checks here: printf-outside-geiger, valence-purity, this-assign,
+new-log-macro, led-outside-flux, borrowed-member, sole-caller,
 static-in-critical, british-spelling (codespell plus the camelCase subword
 gap), and the valence.pin rule with the frozen-artifact hash cross-check.
 
@@ -161,18 +161,18 @@ def _spelling_exempt(rel):
 
 GREP_CHECKS = [
     dict(
-        name="printf-outside-vlog",
-        msg="printf in hub firmware (logging-leds.md: logging goes through VLog. Only.)",
+        name="printf-outside-geiger",
+        msg="printf in hub firmware (logging-leds.md: logging goes through Geiger. Only.)",
         rx=re.compile(r"\b(?:printf|puts|fputs|vprintf)\s*\("),
         # Scoped to the hub sources and the logging library, deliberately not to
         # the whole of flagship_*/src/: the composition root today is a BENCH
         # IMAGE whose report lines ARE its product, and they run before any sink
         # exists.
-        include=("flagship_p4/src/hub/", "lib/vlog/"),
+        include=("flagship_p4/src/hub/", "lib/geiger/"),
         # The sink itself. Same standing as the machine repo's AppLog: the one
         # file allowed to touch the output device, because it IS the output
         # device's driver.
-        exempt=("lib/vlog/include/vlog/vlog.h",),
+        exempt=("lib/geiger/include/geiger/geiger.h",),
     ),
     dict(
         name="valence-purity",
@@ -191,21 +191,21 @@ GREP_CHECKS = [
     ),
     dict(
         name="new-log-macro",
-        msg="new SLOG* macro definition (logging-leds.md: no new log macros; "
-            "VLog is the only logging path)",
-        rx=re.compile(r"^\s*#\s*define\s+SLOG"),
-        include=("flagship_", "lib/vlog/"),
-        # The VLog front door defines the macro surface; that is its job, and it
+        msg="new GLOG* macro definition (logging-leds.md: no new log macros; "
+            "Geiger is the only logging path)",
+        rx=re.compile(r"^\s*#\s*define\s+GLOG"),
+        include=("flagship_", "lib/geiger/"),
+        # The Geiger front door defines the macro surface; that is its job, and it
         # binds one platform layer per host so no consumer ever supplies its
         # own. A SECOND definer anywhere is the violation this check exists for.
-        exempt=("lib/vlog/include/vlog/vlog.h",),
+        exempt=("lib/geiger/include/geiger/geiger.h",),
     ),
     dict(
-        name="led-outside-vglow",
-        msg="LED driven outside VGlow (logging-leds.md: callers speak semantics; "
+        name="led-outside-flux",
+        msg="LED driven outside Flux (logging-leds.md: callers speak semantics; "
             "board wiring lives in one glue file per board)",
         rx=re.compile(r"\bled_strip_\w+\s*\(|\bgpio_set_level\s*\(\s*\w*LED\w*"),
-        include=("flagship_", "lib/vmotion/", "lib/vlog/"),
+        include=("flagship_", "lib/kinetic/", "lib/geiger/"),
         exempt=(),
     ),
     dict(

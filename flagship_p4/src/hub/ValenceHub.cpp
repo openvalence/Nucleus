@@ -46,7 +46,7 @@
 #include <nvs.h>
 
 #include "ValenceCatalog.h"
-#include "vlog/vlog.h"
+#include "geiger/geiger.h"
 #include "ValencePlatform.h"
 #include "ValenceUiToken.h"
 #include "ValenceWsPort.h"
@@ -221,7 +221,7 @@ bool loadStoredConfig(StoredConfig& cfg, uint16_t& gen) {
     nvs_close(h);
     if (err != ESP_OK || len != sizeof(b)) return false;
     if (!blobValid(b)) {
-        SLOGW(kTag, "stored config rejected (magic/version/range) -- factory defaults stand");
+        GLOGW(kTag, "stored config rejected (magic/version/range) -- factory defaults stand");
         return false;
     }
     cfg = b.cfg;
@@ -234,7 +234,7 @@ bool loadStoredConfig(StoredConfig& cfg, uint16_t& gen) {
 void saveStoredConfig(const StoredConfig& cfg, uint16_t gen) {
     nvs_handle_t h;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) {
-        SLOGW(kTag, "config persist: nvs_open failed");
+        GLOGW(kTag, "config persist: nvs_open failed");
         return;
     }
     const CfgBlob b{kCfgMagic, kCfgVersion, gen, cfg};
@@ -247,8 +247,8 @@ void saveStoredConfig(const StoredConfig& cfg, uint16_t gen) {
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
     const uint32_t us = uint32_t(esp_timer_get_time() - t0);
-    if (err != ESP_OK) SLOGW(kTag, "config persist failed: %s", esp_err_to_name(err));
-    else SLOGI(kTag, "config persisted, cfg_gen=%u, %lu us on the hub task",
+    if (err != ESP_OK) GLOGW(kTag, "config persist failed: %s", esp_err_to_name(err));
+    else GLOGI(kTag, "config persisted, cfg_gen=%u, %lu us on the hub task",
                unsigned(gen), static_cast<unsigned long>(us));
 }
 
@@ -279,11 +279,11 @@ public:
         (void)role;
         if (channel_id == ch::move) return applyMove(requested);
         if (channel_id == ch::home) return applyHome(requested);
-        if (channel_id == ch::modes_set || channel_id == ch::sm_set) {
+        if (channel_id == ch::modes_set || channel_id == ch::kinetic_set) {
             // HONEST OR ABSENT. Both writers are advertised because their
             // read-side cards are real, but nothing on this board applies
             // either: the modes name a drive backend and a homing style that
-            // do not exist, and the vmotion tuning is not wired to a live
+            // do not exist, and the kinetic tuning is not wired to a live
             // setter. Their cards therefore publish an all-zero enabled_mask
             // and their writes NACK, which is one statement, not two. An echo
             // of a value the machine did not take is the ground-truth defect
@@ -382,7 +382,7 @@ public:
                 // There is no motor and no encoder on this board, so a homing
                 // cycle has nothing to feel for. Saying so once is the whole
                 // handling; op 2 is how this machine becomes homed.
-                SLOGW_EVERY_MS(60000, kTag,
+                GLOGW_EVERY_MS(60000, kTag,
                                "home op 1 refused: no drive and no encoder on this board, "
                                "nothing to home against -- use force_home (op 2)");
                 return Ret::err(NackCode::UNSUPPORTED_OP);
@@ -444,7 +444,7 @@ public:
     // the latch as the spec requires.
     void onEstop(uint8_t cause, uint8_t origin) override {
         motionEstop();
-        SLOGW(kTag, "ESTOP latched: cause=%u origin=%u", unsigned(cause), unsigned(origin));
+        GLOGW(kTag, "ESTOP latched: cause=%u origin=%u", unsigned(cause), unsigned(origin));
     }
 
     // ---- 0x2100 / 0x2101 stream ingress --------------------------------------
@@ -512,7 +512,7 @@ public:
 
         motionNoteStream(1, n, dropped);
         if (farClamped) {
-            SLOGW_EVERY_MS(2000, kTag,
+            GLOGW_EVERY_MS(2000, kTag,
                            "motion stream: %u sample(s) clamped from a far-future t_off "
                            "(missed CLOCK resync on the client?)", unsigned(farClamped));
         }
@@ -526,10 +526,10 @@ public:
     }
 
     void onSessionJoined(uint32_t session_id) override {
-        SLOGI(kTag, "session %lu joined", static_cast<unsigned long>(session_id));
+        GLOGI(kTag, "session %lu joined", static_cast<unsigned long>(session_id));
     }
     void onSessionLeft(uint32_t session_id) override {
-        SLOGI(kTag, "session %lu left", static_cast<unsigned long>(session_id));
+        GLOGI(kTag, "session %lu left", static_cast<unsigned long>(session_id));
     }
 
     // Boot adoption from NVS. Deliberately NOT an intent and NOT a change: no
@@ -670,7 +670,7 @@ void publishMachineConfig() {
 // fails if any layout below is miscounted.
 void publishPacked(uint16_t id, std::span<const std::byte> buf, size_t written) {
     if (written != buf.size()) {
-        SLOGE_EVERY_MS(5000, kTag, "channel %04x packed %u of %u B -- layout miscounted",
+        GLOGE_EVERY_MS(5000, kTag, "channel %04x packed %u of %u B -- layout miscounted",
                        unsigned(id), unsigned(written), unsigned(buf.size()));
     }
     g_box->hub->publishState(id, buf);
@@ -773,9 +773,9 @@ void publishMachineModes() {
     publishPacked(ch::machine_modes, buf, n);
 }
 
-// The three vmotion cards. Read-only on this board (0x3120 NACKs), so their
+// The three kinetic cards. Read-only on this board (0x3120 NACKs), so their
 // enabled_mask is 0 and they publish once at boot.
-void publishSmCards() {
+void publishKineticCards() {
     const MotionTuning t = motionTuning();
     {
         std::array<std::byte, 13> buf{};
@@ -786,7 +786,7 @@ void publishSmCards() {
         packF32(buf, n, 0.0f);   // vmax_ovr
         packF32(buf, n, 0.0f);   // amax_ovr
         packU8(buf, n, 0);       // enabled_mask
-        publishPacked(ch::sm_limits, buf, n);
+        publishPacked(ch::kinetic_limits, buf, n);
     }
     {
         std::array<std::byte, 20> buf{};
@@ -799,7 +799,7 @@ void publishSmCards() {
         packU8(buf, n, t.chase_aim_extrap ? 1 : 0);
         packF32(buf, n, t.handoff_k);
         packU8(buf, n, 0);                     // enabled_mask
-        publishPacked(ch::sm_chase, buf, n);
+        publishPacked(ch::kinetic_chase, buf, n);
     }
     {
         std::array<std::byte, 16> buf{};
@@ -811,7 +811,7 @@ void publishSmCards() {
         packU8(buf, n, t.blend_steps);
         packU32(buf, n, t.settle_grace_us);    // scale 1000, unit ms: the wire carries us
         packU8(buf, n, 0);                     // enabled_mask
-        publishPacked(ch::sm_waveform, buf, n);
+        publishPacked(ch::kinetic_waveform, buf, n);
     }
 }
 
@@ -855,7 +855,7 @@ uint64_t loadOrMintInstanceId() {
         } while (id == 0);
         nvs_set_u64(h, "hub_iid", id);
         nvs_commit(h);
-        SLOGI(kTag, "minted hub_instance_id %08lx%08lx",
+        GLOGI(kTag, "minted hub_instance_id %08lx%08lx",
               static_cast<unsigned long>(id >> 32), static_cast<unsigned long>(id & 0xFFFFFFFFu));
     }
     nvs_close(h);
@@ -886,8 +886,8 @@ void hubTask(void*) {
         // publishes and broadcasts and applyIntent runs inside the hub's intent
         // dispatch. canClearEstop() still gates it, so the two never disagree.
         if (g_box->delegate.takeClearLatch() && g_box->hub->estopLatched()) {
-            if (g_box->hub->clearEstop()) SLOGW(kTag, "ESTOP latch cleared by force_home");
-            else SLOGW(kTag, "force_home could not clear the ESTOP latch: motion is not parked");
+            if (g_box->hub->clearEstop()) GLOGW(kTag, "ESTOP latch cleared by force_home");
+            else GLOGW(kTag, "force_home could not clear the ESTOP latch: motion is not parked");
         }
 
         // The motion plane, from ONE census so no two channels disagree about
@@ -928,7 +928,7 @@ void hubTask(void*) {
             refreshEndpoint();
         }
 
-        vlog::drainToSinks();
+        geiger::drainToSinks();
     }
 }
 
@@ -952,7 +952,7 @@ HubCensus hubCensus() {
 }
 
 bool hubBegin() {
-    vlog::logBegin();
+    geiger::logBegin();
 
     // PSRAM, via placement-new (T2). The catalog alone is ~22 KB of pooled
     // field storage and the hub carries the session table and the retained
@@ -960,8 +960,8 @@ bool hubBegin() {
     // runtime. The TASK STACK below stays internal on purpose.
     void* mem = heap_caps_malloc(sizeof(HubBox), MALLOC_CAP_SPIRAM);
     if (mem == nullptr) {
-        SLOGE(kTag, "PSRAM alloc of %u bytes for the hub failed", unsigned(sizeof(HubBox)));
-        vlog::drainToSinks();
+        GLOGE(kTag, "PSRAM alloc of %u bytes for the hub failed", unsigned(sizeof(HubBox)));
+        geiger::drainToSinks();
         return false;
     }
     g_box = new (mem) HubBox();
@@ -977,8 +977,8 @@ bool hubBegin() {
     feat.has_drive   = false;  // no Modbus drive on this board (val-091)
     feat.has_pattern = false;  // no pattern engine ported yet (val-091.12)
     if (!buildValenceCatalog(g_box->catalog, feat)) {
-        SLOGE(kTag, "catalog build overflowed a Catalog32 pool");
-        vlog::drainToSinks();
+        GLOGE(kTag, "catalog build overflowed a Catalog32 pool");
+        geiger::drainToSinks();
         return false;
     }
 
@@ -1003,12 +1003,12 @@ bool hubBegin() {
     // terminates by wrapping and costs one increment per step, nothing more.
     if (haveStored) {
         while (g_box->hub->cfgGen() != storedGen) g_box->hub->bumpConfigGeneration();
-        SLOGI(kTag, "config adopted from NVS, cfg_gen=%u", unsigned(storedGen));
+        GLOGI(kTag, "config adopted from NVS, cfg_gen=%u", unsigned(storedGen));
     }
     if (g_box->hub->catalogEncodedBytes() == 0) {
-        SLOGE(kTag, "catalog encoded to ZERO bytes -- it did not fit the hub scratch (%u B)",
+        GLOGE(kTag, "catalog encoded to ZERO bytes -- it did not fit the hub scratch (%u B)",
               unsigned(valence::Hub::catalogScratchCapacity()));
-        vlog::drainToSinks();
+        geiger::drainToSinks();
         return false;
     }
     g_box->hub->setIdentity(VALENCE_PRODUCT, FIRMWARE_VERSION, VALENCE_HUB_NAME);
@@ -1019,7 +1019,7 @@ bool hubBegin() {
     publishMachineConfig();
     publishHubStatus();
     publishMachineModes();
-    publishSmCards();
+    publishKineticCards();
     {
         // EVERY advertised STATE gets its truthful at-rest value before the
         // first client can subscribe. Without this a subscriber holds "no idea"
@@ -1032,35 +1032,35 @@ bool hubBegin() {
     }
 
     auto etag = g_box->hub->catalogEtag();
-    SLOGI(kTag, "catalog: %u entries, %u B encoded (scratch %u B)",
+    GLOGI(kTag, "catalog: %u entries, %u B encoded (scratch %u B)",
           unsigned(g_box->catalog.count), unsigned(g_box->hub->catalogEncodedBytes()),
           unsigned(valence::Hub::catalogScratchCapacity()));
-    SLOGI(kTag, "catalog etag: %02x%02x%02x%02x%02x%02x%02x%02x",
+    GLOGI(kTag, "catalog etag: %02x%02x%02x%02x%02x%02x%02x%02x",
           unsigned(etag[0]), unsigned(etag[1]), unsigned(etag[2]), unsigned(etag[3]),
           unsigned(etag[4]), unsigned(etag[5]), unsigned(etag[6]), unsigned(etag[7]));
-    SLOGI(kTag, "hub box %u B in PSRAM, boot_id=%08lx, %s",
+    GLOGI(kTag, "hub box %u B in PSRAM, boot_id=%08lx, %s",
           unsigned(sizeof(HubBox)), static_cast<unsigned long>(g_box->hub->bootId()),
           FIRMWARE_VERSION);
 
     if (!g_box->port.begin(&*g_box->hub, kWsPort)) {
-        SLOGE(kTag, "WS port failed to start on :%u", unsigned(kWsPort));
-        vlog::drainToSinks();
+        GLOGE(kTag, "WS port failed to start on :%u", unsigned(kWsPort));
+        geiger::drainToSinks();
         return false;
     }
     // Non-fatal: a hub with no /uitoken still serves every watch-tier client
     // and every paired one. Losing the mint costs the browser onramp, not the
     // machine.
-    if (!g_box->minter.attachRoutes()) SLOGW(kTag, "/uitoken unavailable");
+    if (!g_box->minter.attachRoutes()) GLOGW(kTag, "/uitoken unavailable");
 
     // Stack: internal by construction (plain xTaskCreatePinnedToCore). The size
     // and the measurement that set it live on kHubTaskStackBytes in ValenceHub.h.
     if (xTaskCreatePinnedToCore(hubTask, "ValenceHub", kHubTaskStackBytes, nullptr, 5,
                                 &g_hubTask, 1) != pdPASS) {
-        SLOGE(kTag, "hub task create failed");
-        vlog::drainToSinks();
+        GLOGE(kTag, "hub task create failed");
+        geiger::drainToSinks();
         return false;
     }
-    vlog::drainToSinks();
+    geiger::drainToSinks();
     return true;
 }
 

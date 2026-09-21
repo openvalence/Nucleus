@@ -1,4 +1,4 @@
-// VGlow — hardware-free status-LED core.
+// Flux — hardware-free status-LED core.
 //
 // Philosophy (the three rules everything here serves):
 //   1. CALLERS SPEAK SEMANTICS. Modules set a system's status
@@ -21,7 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace vglow {
+namespace flux {
 
 // ---- Color ------------------------------------------------------------------
 
@@ -445,4 +445,4 @@ private:
     bool _frozen = false;
 };
 
-}  // namespace vglow
+}  // namespace flux

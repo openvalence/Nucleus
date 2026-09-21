@@ -23,10 +23,10 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
   exactly one `$PROJECT_DIR/ulp` with no per-environment override.
 - `python tools/canon_lint.py` gates every substantive change; zero findings
   is the bar.
-- Host tests for the liftable libraries (`lib/vlog`, `lib/vglow`,
-  `lib/vmotion`) are the check the namespace rename is gated on. That
-  environment does not exist yet: do not cite a native suite as a gate until
-  it does.
+- Host tests for the liftable libraries (`lib/geiger`, `lib/flux`,
+  `lib/kinetic`) are the check a namespace rename is gated on: `pio test
+  -e native` from the root project, all three suites named in the output
+  (T10 -- the runner misreports, so read the suite names and the exit code).
 
 ## The bench
 

@@ -28,9 +28,9 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 
-#include "vlog/vlog.h"
+#include "geiger/geiger.h"
 #include "hub/valence_config.h"
-#include "vmotion/vmotion.hpp"
+#include "kinetic/kinetic.hpp"
 #include "ulp_main.h"
 
 namespace valence {
@@ -152,7 +152,7 @@ private:
 
     // The engine is a member so it lands in this object's storage, which is a
     // file-scope static in internal RAM. Never move it to PSRAM.
-    vmotion::Engine _engine{};
+    kinetic::Engine _engine{};
 
     TaskHandle_t  _task = nullptr;
     QueueHandle_t _queue = nullptr;
@@ -234,7 +234,7 @@ bool MotionArbiter::begin() {
     const BaseType_t ok = xTaskCreatePinnedToCore(&MotionArbiter::taskTrampoline, "Motion",
                                                   kMotionTaskStackBytes, this, 6, &_task, 1);
     if (ok != pdPASS) return false;
-    SLOGI(kTag, "motion path up: window %.1f..%.1f mm, rail %.1f mm, %.3f steps/mm, %lu us tick",
+    GLOGI(kTag, "motion path up: window %.1f..%.1f mm, rail %.1f mm, %.3f steps/mm, %lu us tick",
           double(_win_min), double(_win_max), double(_rail), double(kStepsPerMm),
           static_cast<unsigned long>(kTickUs));
     return true;
@@ -243,7 +243,7 @@ bool MotionArbiter::begin() {
 bool MotionArbiter::submit(const MotionIntent& in) {
     if (_queue == nullptr) return false;
     if (xQueueSend(_queue, &in, 0) != pdTRUE) {
-        SLOGW_EVERY_MS(1000, kTag, "DROP: intent queue full");
+        GLOGW_EVERY_MS(1000, kTag, "DROP: intent queue full");
         return false;
     }
     // On arrival, never on a tick: the task is woken now and plans now.
@@ -263,7 +263,7 @@ void MotionArbiter::estop(bool on) {
     // it on the next tick (see evaluate()).
     ulp_g_step_q8 = 0;
     _homed = false;      // an abandoned plan leaves the carriage where it fell
-    SLOGW(kTag, "ESTOP: emitter parked at %.3f mm", double(positionMm()));
+    GLOGW(kTag, "ESTOP: emitter parked at %.3f mm", double(positionMm()));
 }
 
 void MotionArbiter::setWindow(float lo, float hi, float rail) {
@@ -286,7 +286,7 @@ float MotionArbiter::forceHome(float stroke_mm) {
     _homed     = true;
     // The engine reseeds itself at rest on the next accepted intent; nothing
     // here may call into it, this runs on the hub task.
-    SLOGW(kTag, "FORCE HOME: homed asserted at 0.0 mm, stroke %.1f mm, e-stop cleared "
+    GLOGW(kTag, "FORCE HOME: homed asserted at 0.0 mm, stroke %.1f mm, e-stop cleared "
                 "-- no homing cycle ran (RFC-025)", double(stroke));
     return stroke;
 }
@@ -303,7 +303,7 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
     // E-stop is the one gate no source bypasses.
     if (_estop) {
         ++_rejected;
-        SLOGW_EVERY_MS(1000, kTag, "REJECT: e-stop");
+        GLOGW_EVERY_MS(1000, kTag, "REJECT: e-stop");
         return false;
     }
     // Manual bypasses the rest (the push-to-home case): an operator must be
@@ -311,12 +311,12 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
     if (in.source != MotionSource::Manual) {
         if (!_homed) {
             ++_rejected;
-            SLOGW_EVERY_MS(1000, kTag, "REJECT: not homed");
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: not homed");
             return false;
         }
         if (_paused) {
             ++_rejected;
-            SLOGW_EVERY_MS(1000, kTag, "REJECT: paused");
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: paused");
             return false;
         }
     }
@@ -336,7 +336,7 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
     // on a normal condition is a log nobody reads (T27's shape in the logging
     // dimension).
     if (target != in.target_mm)
-        SLOGW_EVERY_MS(1000, kTag, "WINDOW CLAMP: %.2f -> %.2f mm",
+        GLOGW_EVERY_MS(1000, kTag, "WINDOW CLAMP: %.2f -> %.2f mm",
                        double(in.target_mm), double(target));
 
     // Limit-set selection. Ceilings are clamps, never targets; a deadline-less
@@ -346,7 +346,7 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
     const float sp = manual ? _user_v : _in_v;
     const float ac = manual ? _user_a : _in_a;
     const float s  = span();
-    vmotion::Limits lim;
+    kinetic::Limits lim;
     lim.vmax = sp / s;
     lim.amax = ac / s;
     lim.jmax = _in_j / s;
@@ -362,7 +362,7 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
         _p_cmd_mm = positionMm();
     }
 
-    vmotion::Command cmd;
+    kinetic::Command cmd;
     cmd.target       = toNorm(target);
     cmd.has_duration = in.duration_us > 0;
     cmd.duration_us  = in.duration_us;
@@ -381,7 +381,7 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
     _plan_us_avg += (float(plan_us) - _plan_us_avg) * 0.125f;
     if (!ok) {
         ++_rejected;
-        SLOGW_EVERY_MS(1000, kTag, "REJECT: plan failed for %.2f mm", double(target));
+        GLOGW_EVERY_MS(1000, kTag, "REJECT: plan failed for %.2f mm", double(target));
         return false;
     }
     ++_intents;
@@ -435,7 +435,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
 // Motion task only. A kind past the table is DROPPED rather than folded into
 // a neighbor: a miscounted kind reads as a diagnosis that never happened.
 void MotionArbiter::drainAnomalies() {
-    vmotion::Anomaly a;
+    kinetic::Anomaly a;
     while (_engine.popAnomaly(a)) {
         if (a.kind < kAnomalyKinds) ++_anom[a.kind];
         ++_anomalies;
@@ -443,7 +443,7 @@ void MotionArbiter::drainAnomalies() {
 }
 
 void MotionArbiter::refreshSnapshot(uint64_t now_us) {
-    const vmotion::Snapshot s = _engine.snapshot(now_us);
+    const kinetic::Snapshot s = _engine.snapshot(now_us);
     const float s_mm = span();
 
     const int32_t steps = lpSteps();
@@ -568,7 +568,7 @@ MotionCensus motionCensus() { return g_arb.census(); }
 // tuning (bd val-091.11), so a default-constructed Config is exactly what the
 // engine holds and reading it needs no cross-task access.
 MotionTuning motionTuning() {
-    const vmotion::Config cfg{};
+    const kinetic::Config cfg{};
     MotionTuning t;
     t.chase_ff         = cfg.chase_feedforward;
     t.chase_accel_ff   = cfg.chase_accel_ff;
@@ -581,7 +581,7 @@ MotionTuning motionTuning() {
     // The catalog select is 0 stretch / 1 blend; the engine's own ordinals are
     // pinned at 0 and 5 by what is already persisted elsewhere in the
     // ecosystem, so the mapping is explicit rather than a cast.
-    t.infeasible_policy = cfg.infeasible_policy == vmotion::InfeasiblePolicy::Stretch ? 0 : 1;
+    t.infeasible_policy = cfg.infeasible_policy == kinetic::InfeasiblePolicy::Stretch ? 0 : 1;
     t.smooth_budget    = cfg.infeasible_smooth_budget;
     t.amplitude_budget = cfg.infeasible_amplitude_budget;
     t.blend_steps      = cfg.infeasible_blend_steps;

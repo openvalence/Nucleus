@@ -1,0 +1,17 @@
+{
+  "name": "Kinetic",
+  "version": "0.8.0",
+  "description": "Kinetic — jerk-limited dual-mode motion core (Ruckig-powered): v4 one-shot deadline planner + v3 cyclic chase tracker. Hardware-free, deterministic, native-tested.",
+  "keywords": ["motion", "jerk-limited", "trajectory", "kinetic"],
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "headers": "kinetic/kinetic.hpp",
+  "build": {
+    "includeDir": "include",
+    "flags": ["-std=gnu++2b"]
+  },
+  "dependencies": {
+    "ruckig": "*"
+  }
+}

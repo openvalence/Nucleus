@@ -1,12 +1,12 @@
 {
-  "name": "VLog",
+  "name": "Geiger",
   "version": "0.1.0",
   "description": "Valence ecosystem logging: leveled, tagged, rate-limited, multi-sink, bounded and non-blocking. Hardware-free core + thin ESP32/Arduino glue.",
-  "keywords": ["logging", "esp32", "embedded", "vlog"],
+  "keywords": ["logging", "esp32", "embedded", "geiger"],
   "license": "MIT",
   "frameworks": "*",
   "platforms": "*",
-  "headers": "vlog/vlog.h",
+  "headers": "geiger/geiger.h",
   "build": {
     "includeDir": "include",
     "srcDir": "src",
