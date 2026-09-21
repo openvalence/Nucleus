@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-24 -24 304 304" width="256" height="256">
+  <defs>
+    <filter id="bloom-wide" filterUnits="userSpaceOnUse" x="-128" y="-128" width="512" height="512"><feGaussianBlur stdDeviation="16"/></filter>
+    <filter id="bloom" filterUnits="userSpaceOnUse" x="-128" y="-128" width="512" height="512"><feGaussianBlur stdDeviation="6"/></filter>
+    <filter id="bloom-tight" filterUnits="userSpaceOnUse" x="-128" y="-128" width="512" height="512"><feGaussianBlur stdDeviation="2.5"/></filter>
+    <radialGradient id="core" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#FFFFFF"/><stop offset="0.35" stop-color="#BFE0FF"/><stop offset="1" stop-color="#4DA6FF"/>
+    </radialGradient>
+    <radialGradient id="elec" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#FFFFFF"/><stop offset="0.4" stop-color="#DCD0FF"/><stop offset="1" stop-color="#A78BFA"/>
+    </radialGradient>
+  </defs>
+  <circle cx="128.0" cy="128.0" r="73.6" fill="#4DA6FF" fill-opacity="0.6" filter="url(#bloom-wide)"/>
+  <circle cx="128.0" cy="128.0" r="52.9" fill="#4DA6FF" fill-opacity="0.85" filter="url(#bloom)"/>
+  <circle cx="128.0" cy="128.0" r="46" fill="url(#core)"/>
+</svg>
