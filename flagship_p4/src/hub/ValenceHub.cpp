@@ -684,7 +684,11 @@ void publishMotion(const MotionCensus& m) {
     std::array<std::byte, 9> buf{};
     size_t n = 0;
     packU16(buf, n, wireU16(m.position_mm, 100.0f));   // pos_10um
-    packU16(buf, n, wireU16(m.plan_mm, 100.0f));       // tgt_10um: where the plan is driving to
+    // tgt_10um is the plan's AIM, m.target_mm, never m.plan_mm. plan_mm is
+    // where the plan is right now, which tracks pos within a step or two, so
+    // publishing it here draws the target marker on top of the position and a
+    // client can never see the planner leading.
+    packU16(buf, n, wireU16(m.target_mm, 100.0f));     // tgt_10um
     packI16(buf, n, wireI16(m.velocity_mm_s, 10.0f));  // speed
     // flags: homed, homing, gen_running, paused, override, estop, stream.
     // homing and gen_running are permanently 0 and that is the truth, not a

@@ -138,6 +138,21 @@ static bool wifi_up() {
     if ((err = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK)        { printf("set_mode: %s\n", esp_err_to_name(err)); return false; }
     if ((err = esp_wifi_set_config(WIFI_IF_STA, &w)) != ESP_OK)    { printf("set_config: %s\n", esp_err_to_name(err)); return false; }
     if ((err = esp_wifi_start()) != ESP_OK)                        { printf("wifi_start: %s\n", esp_err_to_name(err)); return false; }
+
+    // POWER SAVE OFF, and this is a LATENCY constraint, not a preference. The
+    // IDF default is WIFI_PS_MIN_MODEM: the station sleeps between DTIM
+    // beacons and the AP HOLDS INBOUND FRAMES until the next wake, so every
+    // client-to-hub motion sample waits out a beacon interval it did not have
+    // to. Both retired boards disabled it for the same reason.
+    // NON-FATAL on failure -- this is an esp_hosted RPC to the C6, and a hub
+    // that streams with extra latency still beats one that refuses to boot --
+    // but LOUD, because a silent revert to PS_MIN_MODEM reads as a motion-path
+    // problem and gets hunted there. Measured both ways on the bench; the
+    // numbers live on bd val-091.11.
+    if ((err = esp_wifi_set_ps(WIFI_PS_NONE)) != ESP_OK)
+        printf("wifi_set_ps(NONE): %s -- inbound frames will wait for DTIM\n", esp_err_to_name(err));
+    else
+        printf("wifi power save: OFF (WIFI_PS_NONE)\n");
     return true;
 }
 

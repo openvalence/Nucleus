@@ -61,7 +61,13 @@ struct MotionCensus {
     int32_t  steps          = 0;     // LP signed edge count since the origin
     float    position_mm    = 0.0f;  // that count, in millimeters
     float    plan_mm        = 0.0f;  // where the plan says the carriage should be
+                                     // RIGHT NOW. Not the target -- see
+                                     // target_mm. Publishing this as tgt makes
+                                     // the aim render on top of the position.
     float    demand_mm      = 0.0f;  // last accepted target, post window clamp
+    float    target_mm      = 0.0f;  // where the ACTIVE PLAN ends: the aim, not
+                                     // the plan's position right now. 0x1100's
+                                     // tgt_10um is this and nothing else.
     float    velocity_mm_s  = 0.0f;  // the plan's velocity, signed
     int32_t  residual_steps = 0;     // plan minus rendered, in steps
     float    win_min        = 0.0f;

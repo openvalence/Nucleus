@@ -468,6 +468,7 @@ void MotionArbiter::refreshSnapshot(uint64_t now_us) {
     c.steps          = steps - _lp_origin;
     c.position_mm    = float(c.steps) * kMmPerStep;
     c.plan_mm        = toMm(s.pos);
+    c.target_mm      = toMm(s.target);
     c.velocity_mm_s  = vel_mm_s;
     c.residual_steps = static_cast<int32_t>(std::lround((c.plan_mm - c.position_mm) * kStepsPerMm));
     c.win_min        = _win_min;
