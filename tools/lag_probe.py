@@ -170,6 +170,7 @@ def run(args):
     print("clock offset %+d us, rtt %d us" % (offset_us, rtt_us))
 
     sent = []   # (t_local_s, target_norm)
+    nacks = []  # every NACK the hub sent during the run: a refused stream is a silent zero otherwise
     rx = []     # (t_local_s, pos_mm, tgt_mm, raw_mm, t_hub_send_estimate_s)
 
     # --segments is the MFP-shaped path (0x2101): one timed segment every
@@ -205,12 +206,15 @@ def run(args):
         if got is None:
             continue
         hdr, payload = got
+        if hdr["type"] == sp.FRAME["NACK"]:
+            nacks.append(sp.cb_decode_full(payload)); continue
         if hdr["type"] == sp.FRAME["STATE"] and hdr["channel"] == sp.CH_MOTION:
             try:
                 d = sp.decode_motion_state(payload)
             except ValueError:
                 continue
             rx.append((time.time(), d["pos_mm"], d["tgt_mm"], d.get("raw_mm", float("nan"))))
+    if nacks: print("NACKs during the run (%d): first %s" % (len(nacks), nacks[0]))
     sp.send_frame(ws, sp.FRAME["GOODBYE"], 0, sp.build_goodbye(0))
     ws.close()
     if args.dump:
