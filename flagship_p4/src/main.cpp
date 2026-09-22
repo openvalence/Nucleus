@@ -403,7 +403,8 @@ extern "C" void app_main() {
         printf("[flagship_p4] %lus  int_free=%u int_max=%u  psram_free=%u psram_max=%u  "
                "parlio=%s  lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
                "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu  "
-               "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu\n",
+               "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu "
+               "faults=%lu\n",
                static_cast<unsigned long>(n * 5),
                unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
@@ -429,6 +430,7 @@ extern "C" void app_main() {
                static_cast<long>(mo.residual_steps),
                static_cast<unsigned long>(mo.intents),
                static_cast<unsigned long>(mo.rejected),
-               static_cast<unsigned long>(mo.stack_free));
+               static_cast<unsigned long>(mo.stack_free),
+               static_cast<unsigned long>(mo.emitter_faults));
     }
 }

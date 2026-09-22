@@ -174,6 +174,9 @@ private:
     volatile bool _estop  = false;
     volatile bool _paused = false;
     bool _estop_settled = false;  // the engine has been reset since the latch
+    // Set on the hub task by setWindow()/forceHome(), consumed on the motion
+    // task in evaluate(): the mm FRAME moved, the carriage did not.
+    volatile bool _frame_moved = false;
 
     // Odometer state, motion task only.
     int32_t _odo_steps = 0;       // LP count at the previous refresh
@@ -272,6 +275,7 @@ void MotionArbiter::setWindow(float lo, float hi, float rail) {
     _win_min = lo;
     _win_max = hi;
     _rail    = rail > 0.0f ? rail : DEFAULT_MAX_RAIL_MM;
+    _frame_moved = true;   // normalized units now mean different millimeters
 }
 
 float MotionArbiter::forceHome(float stroke_mm) {
@@ -280,6 +284,7 @@ float MotionArbiter::forceHome(float stroke_mm) {
     if (!(stroke >= 1.0f)) stroke = 250.0f;
     if (stroke > _rail) stroke = _rail;
     _lp_origin = lpSteps();
+    _frame_moved = true;   // 0.0 mm now means a different LP count
     _rail      = stroke;
     _estop     = false;
     _estop_settled = false;
@@ -411,6 +416,23 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         return;
     }
 
+    // A FRAME MOVE IS NOT MOTION. force_home re-origins the LP count and a
+    // window change rescales normalized units, so both make plan_mm and
+    // position_mm jump by up to the whole rail while the carriage stands
+    // still. Left alone the feedforward differences that jump and demands
+    // 10^5 mm/s, steerLp clamps it to the emitter floor, and the LP renders a
+    // saturated burst -- unrequested travel at the emitter's maximum rate,
+    // plus thousands of missed deadlines (measured, bd val-091.13). Re-anchor
+    // the plan and the feedforward's own previous sample instead, and park for
+    // this one tick: the next accepted intent plans from the new frame's rest.
+    if (_frame_moved) {
+        _frame_moved = false;
+        _engine.resetAt(toNorm(positionMm()), now_us);
+        _p_cmd_mm = positionMm();
+        steerLp(0.0f);
+        return;
+    }
+
     // The one side-effecting sample per tick: it promotes scheduled plans and
     // engages SETTLE when a plan ends still moving.
     const float p_plan_mm = toMm(_engine.positionAt(now_us));
@@ -426,7 +448,27 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     // period is long, and the emitter cannot render the plan's first steps on
     // time however often it is re-steered.
     const float err_mm = p_plan_mm - positionMm();
-    if (std::fabs(err_mm) > kMmPerStep) v += err_mm * kTrackHz;
+    if (std::fabs(err_mm) > kMmPerStep) {
+        // BOUNDED, because the residual is proportional to an error no ceiling
+        // shaped and is therefore the one term that can hand the emitter a
+        // demand the machine cannot make. Its ceiling is the accel limit's own
+        // answer to "how much velocity may one tick add".
+        const float kick_max = _in_a * dt_s;
+        float kick = err_mm * kTrackHz;
+        if (kick >  kick_max) kick =  kick_max;
+        if (kick < -kick_max) kick = -kick_max;
+        v += kick;
+    }
+    // The emitter floor is a FAULT DETECTOR, never a shaper (architecture.md
+    // section 2), so the arbiter holds its own last word. The bound is the sum
+    // of the two terms that make it: the plan, under the speed ceiling by
+    // construction, plus a correction already capped at one tick of accel.
+    // Deliberately NOT the bare ceiling -- at a demand that sits ON vmax, a
+    // tracking correction has to be allowed above it or the residual can never
+    // close (measured: 25 ms of added lag on the ceiling-limited run).
+    const float v_cap = _in_v + _in_a * dt_s;
+    if (v >  v_cap) v =  v_cap;
+    if (v < -v_cap) v = -v_cap;
 
     steerLp(v);
 }

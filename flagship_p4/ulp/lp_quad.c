@@ -8,7 +8,8 @@
 // - Shared words are 32-bit ON PURPOSE. There is no lock between HP and LP and
 //   the LP core reads them mid-stride, so a 64-bit value would tear.
 // - g_step_q8 is cycles-per-edge in Q8. The HP core owns that arithmetic; the
-//   LP core has one shift per edge and must never divide.
+//   PER-EDGE path has one shift and no divide. The mid-wait re-steer path
+//   divides once, at the steering rate, to re-price the rest of the interval.
 // - g_pos IS THE MACHINE'S POSITION, in steps. This core is its ONLY writer;
 //   the HP core reads it and keeps its own origin, so the word never needs a
 //   write from the other side.
@@ -108,16 +109,25 @@ int main(void)
 
         // The next deadline comes from the PREVIOUS DEADLINE, never from the
         // instant the last edge actually landed. Feeding the emitted time back
-        // makes every late edge permanent and the phase walks.
+        // makes every late edge permanent and the phase walks. The ONE place
+        // real time enters is a mid-wait re-steer below, where the interval is
+        // re-priced rather than rebased.
         uint32_t carry    = acc_q8 + step;
-        uint32_t deadline = prev + (carry >> 8);
+        // base/per/rem describe the interval being waited out: it started at
+        // `base`, a whole edge at the current rate costs `per`, and `rem` of it
+        // is still owed. They are what makes a SECOND re-steer inside one wait
+        // price the same remainder again instead of re-measuring it from the
+        // previous edge.
+        uint32_t base     = prev;
+        uint32_t per      = carry >> 8;
+        uint32_t rem      = per;
+        uint32_t deadline = base + rem;
 
         // COARSE WAIT: re-read the steering words while the deadline is still
         // far off. Out of rest the plan's opening velocity is tiny and its
         // period is tens of milliseconds; without this the emitter ignores
         // every steering update until that one edge fires, and a move opens
-        // with a dead zone the size of its own first period. The recomputed
-        // deadline is STILL measured from prev, so the accumulator rule holds.
+        // with a dead zone the size of its own first period.
         uint32_t resteered = 0;
         while ((int32_t)(RV_READ_CSR(mcycle) - (deadline - RESTEER_SLACK_CYCLES)) < 0) {
             uint32_t d2 = g_dir;
@@ -127,12 +137,34 @@ int main(void)
             }
             uint32_t s2 = g_step_q8;
             if (s2 != step) {
+                uint32_t at_r  = RV_READ_CSR(mcycle);
+                uint32_t spent = at_r - base;
                 g_resteer++;
                 resteered = 1;
                 step = s2;
                 if (step == 0) break;
-                carry    = acc_q8 + step;
-                deadline = prev + (carry >> 8);
+                carry = acc_q8 + step;
+                // RE-PRICE THE REMAINDER, never the whole interval. The part
+                // of this edge already traversed was traversed at the old
+                // rate; only the fraction still owed, rem-spent out of per,
+                // belongs to the new one. Rebasing the whole interval on the
+                // previous deadline instead charges all of it to the new
+                // period, so a rise out of a near-standstill lands the
+                // deadline up to one OLD period in the past -- measured
+                // 77 ms -- and the emitter then renders that debt as thousands
+                // of edges at core speed, which is travel the plan never
+                // commanded. NOT a shaper: no rate is limited here and the
+                // commanded velocity is untouched, only the instant THIS edge
+                // is due. The 64-bit divide is legal because this path runs at
+                // the steering rate (~1 kHz), never per edge; the per-edge
+                // path below still has no divide.
+                const uint32_t want = carry >> 8;
+                rem = (spent >= rem || per == 0)
+                        ? 0u
+                        : (uint32_t)(((uint64_t)(rem - spent) * want) / per);
+                base     = at_r;
+                per      = want;
+                deadline = base + rem;
             }
         }
         if (step == 0) {
