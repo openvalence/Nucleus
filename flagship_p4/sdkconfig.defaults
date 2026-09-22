@@ -118,15 +118,20 @@ CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 #
 #   esp_http_server on :82 (WS)      3  listener + ctrl_fd + msg_fd
 #                                    7  client sockets (ValenceWsPort::kSlots + 2)
-#   esp_http_server on :80 (uitoken) 3  listener + ctrl_fd + msg_fd
-#                                    2  client sockets, each closed with its answer
+#   esp_http_server on :80 (admin)   3  listener + ctrl_fd + msg_fd
+#                                    3  client sockets, each closed with its answer
 #                                   --
-#                                   15  worst case, one spare of 16
+#                                   16  worst case, one spare of 17
+#
+# The :80 instance grew from two client sockets to three when it took /ota and
+# /diag beside /uitoken (val-091.16/.17): those two hold a socket for the whole
+# of a multi-megabyte transfer, and with lru_purge_enable a third connection
+# would otherwise evict an OTA mid-flash.
 #
 # The three-per-instance overhead is the part that is easy to miss and it is
 # what made 10 unworkable: 6 fds were gone before a single client connected,
 # while the two servers between them believed they were entitled to 11.
-CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_LWIP_MAX_SOCKETS=17
 
 # The Valence hub's WS transport rides esp_http_server. Without this,
 # httpd_uri_t carries no is_websocket/supported_subprotocol fields at all and
@@ -134,3 +139,16 @@ CONFIG_LWIP_MAX_SOCKETS=16
 # clean-build ceremony (platformio.ini trap 1).
 CONFIG_HTTPD_WS_SUPPORT=y
 
+
+# ---- OTA: rollback, and the watchdog that makes it fire (val-091.16) --------
+# The bootloader marks a freshly written slot PENDING_VERIFY and reverts to its
+# pair unless the running image calls esp_ota_mark_app_valid_cancel_rollback().
+# ValenceOta buys the image only after the hub is up AND WiFi holds an IP, so a
+# build that cannot reach either never becomes the boot slot.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# A REVERT NEEDS A RESET, AND A HUNG TASK DOES NOT PRODUCE ONE. The task
+# watchdog was already enabled and already watching both idle tasks; without
+# PANIC it only printed. The hub task subscribes to it (ValenceHub.cpp), so an
+# image whose hub stops ticking resets inside TIMEOUT_S and the bootloader --
+# which has not been told the image is good -- brings the previous slot back.
+CONFIG_ESP_TASK_WDT_PANIC=y

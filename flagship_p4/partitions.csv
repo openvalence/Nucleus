@@ -1,4 +1,4 @@
-# flagship_p4 partition table -- 16 MB flash, one factory app.
+# flagship_p4 partition table -- 16 MB flash, two OTA app slots.
 #
 # WHY IT IS HERE: PlatformIO builds partitions.bin from board_build.partitions
 # in platformio.ini, NOT from CONFIG_PARTITION_TABLE_* in sdkconfig. Setting
@@ -9,11 +9,26 @@
 # then a reset loop (measured 2026-09-20, bd val-091.4). platformio.ini is the
 # one home for this fact; sdkconfig carries nothing about it.
 #
-# 4 MB of factory against a 1.31 MB image: the vendored Ruckig step solvers
-# that kinetic wraps are most of the growth, and none of it is compressible by
-# build flags. No OTA slots yet -- adding them is a table change, not a code
-# change, and it is not owed until this board takes remote updates.
-# Name,   Type, SubType, Offset,  Size,     Flags
-nvs,      data, nvs,     0x9000,  0x6000,
-phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 0x400000,
+# NO factory PARTITION, AND THAT IS DELIBERATE (val-091.16). With one present
+# the bootloader boots it whenever otadata is blank, so a rolled-back board
+# would land on a stale third image instead of the slot that last worked. Two
+# slots and otadata is the whole state machine. PlatformIO reads the `ota_0`
+# subtype to place the serially uploaded image (builder/main.py
+# _parse_partitions), so a serial flash lands in slot A and OTA alternates
+# from there.
+#
+# 4 MB per slot against a 1.31 MB image: the vendored Ruckig step solvers that
+# kinetic wraps are most of the growth, and none of it is compressible by build
+# flags. 8.5 MB of the 16 MB part is used; the tail is unallocated on purpose,
+# because a future data partition must not force the app slots to move (moving
+# them invalidates every otadata entry and needs a serial flash to recover).
+#
+# nvs KEEPS ITS 0x9000 OFFSET AND SIZE across this change, so the hub instance
+# id and the stored machine config survive the reflash. phy_init moves; it is
+# regenerated and this board's radio is on the C6 anyway.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+otadata,  data, ota,     0xf000,   0x2000,
+phy_init, data, phy,     0x11000,  0x1000,
+ota_0,    app,  ota_0,   0x20000,  0x400000,
+ota_1,    app,  ota_1,   0x420000, 0x400000,

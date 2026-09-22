@@ -38,6 +38,7 @@
 #include <esp_heap_caps.h>
 #include <esp_netif.h>
 #include <esp_random.h>
+#include <esp_task_wdt.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
@@ -51,6 +52,7 @@
 #include "ValenceUiToken.h"
 #include "ValenceWsPort.h"
 #include "motion/ValenceMotion.h"
+#include "system/ValenceHttp.h"
 #include "valence_config.h"
 
 #include "valence/util/byte_io.hpp"
@@ -870,9 +872,18 @@ uint64_t loadOrMintInstanceId() {
 // the same separation the S3 makes between comms and real time, drawn where
 // this silicon actually puts the work.
 void hubTask(void*) {
+    // SUBSCRIBED TO THE TASK WATCHDOG, AND THAT IS THE OTHER HALF OF OTA
+    // ROLLBACK (val-091.16). A new image is PENDING_VERIFY until the liveness
+    // loop buys it, and the bootloader only reverts an unbought image on a
+    // RESET -- which a hung task does not produce by itself. With
+    // ESP_TASK_WDT_PANIC this loop going quiet IS that reset. Non-fatal if the
+    // subscribe fails: an unwatched hub still runs.
+    if (esp_task_wdt_add(nullptr) != ESP_OK)
+        GLOGW(kTag, "task watchdog subscribe failed: a hung hub will not self-reset");
     TickType_t last = xTaskGetTickCount();
     for (;;) {
         vTaskDelayUntil(&last, pdMS_TO_TICKS(5));
+        esp_task_wdt_reset();
         ++g_ticks;
         const uint32_t nowMs = uint32_t(esp_timer_get_time() / 1000);
 
@@ -954,7 +965,7 @@ HubCensus hubCensus() {
     c.wsFrames = g_box->port.framesRx();
     c.wsDrops = g_box->port.drops();
     c.wsSockets = uint32_t(g_box->port.openSockets());
-    c.uiSockets = uint32_t(g_box->minter.openSockets());
+    c.uiSockets = uint32_t(http80Sockets());
     c.stackFree = g_hubTask ? uint32_t(uxTaskGetStackHighWaterMark(g_hubTask)) : 0;
     return c;
 }

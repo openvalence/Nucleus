@@ -86,17 +86,47 @@ not be cited as a reason to re-run a failed build.
 
 ## Deployment
 
-**There is no OTA on this board yet, and no bridge to flash it through.**
-Every flash is a bench act over USB. Do not describe anything here as
-"deployed"; C-8 means version-verified on-device, and there is no version
-constant yet (`governance.md` §1). The planned route is ESP-IDF's native
-`esp_ota_ops` with its own rollback, which the part supports directly -- the
-two-hop forwarder the machine repo needed is a consequence of a topology this
-board does not have.
+**OTA is the default path, and there is no bridge in it.** `POST /ota` on the
+board's own port 80, RAW body, `X-OTA-Token`, `esp_ota_ops` into the idle slot,
+reboot. The two-hop forwarder the archived S3 product needed was a consequence
+of a topology this board does not have: the sockets are on the P4.
 
-**Before flashing:** machine idle, operator aware. **After flashing:** read
-the boot banner and confirm the thing you changed is the thing that came up.
-Upload completed is not deployed (C-8).
+- `python tools/ota.py [--ip <ip>] [--image <bin>] [--expect <version>]`. It
+  reads the running version off the hub, pushes the image, then waits for a
+  NEW version AND for that image to buy itself. Both, or it is not a deploy.
+- The token lives in git-ignored `flagship_p4/src/secrets.h`
+  (`SECRET_OTA_TOKEN`, template in `secrets.example.h`) and the tool reads it
+  from there. Never put it on a command line and never inline it.
+- **A NEW IMAGE IS ON TRIAL.** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` leaves
+  it PENDING_VERIFY; it is bought only once the hub has been observed TICKING
+  across two liveness intervals with an IP. The hub task is subscribed to the
+  task watchdog with `CONFIG_ESP_TASK_WDT_PANIC`, so an image whose hub hangs
+  resets inside the watchdog window -- before the buy -- and the bootloader
+  brings the previous slot back. That ordering is deliberate: the buy is one
+  interval LATER than the watchdog window.
+- **`ota.py` reporting the old version back is the ROLLBACK WORKING**, not a
+  broken tool. Read `/diag` for `reset=TASK-WDT` and the previous boot's
+  breadcrumbs before blaming the transfer.
+- The running slot is never written, so a truncated body or a wrong magic
+  costs an unusable spare slot and nothing else. Both are refused with 400.
+- **Serial is the rescue path**, and the one case that REQUIRES it is a
+  partition-table change: the table is flashed only by
+  `pio run -d flagship_p4 -t upload`.
+- **Before flashing:** machine idle, operator aware. **After:** the version is
+  what the hub's WELCOME identity says, not what you uploaded. Upload
+  completed is not deployed (C-8).
+
+## Diagnostics
+
+`GET /diag` on the same port 80 is the whole archive; `/diag/<tag>` filters one
+GLOG tag and `?from=<seq>` composes with both. `python tools/diag.py` pulls it
+into `artifacts/` and prints the tail. The rules that make it an instrument
+rather than a log viewer live in `logging-leds.md`; the two worth knowing at
+the bench:
+
+- **It dies with its boot.** Post-panic forensics is the header's breadcrumb
+  block, which is RTC_NOINIT and survives the reset.
+- **The footer's `next=` is the resume cursor**, and `--from` takes it back.
 
 ## T10 -- a test runner misreports its own suite
 

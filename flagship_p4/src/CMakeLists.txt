@@ -10,6 +10,7 @@ idf_component_register(SRCS "main.cpp"
                             "hub/ValenceHub.cpp" "hub/ValenceWsPort.cpp"
                             "hub/ValenceUiToken.cpp"
                             "motion/ValenceMotion.cpp"
+                            "system/ValenceHttp.cpp" "system/ValenceOta.cpp"
                             "../../lib/ruckig/src/ruckig/brake.cpp"
                             "../../lib/ruckig/src/ruckig/position_first_step1.cpp"
                             "../../lib/ruckig/src/ruckig/position_first_step2.cpp"
@@ -21,7 +22,7 @@ idf_component_register(SRCS "main.cpp"
                             "../../lib/ruckig/src/ruckig/velocity_second_step2.cpp"
                             "../../lib/ruckig/src/ruckig/velocity_third_step1.cpp"
                             "../../lib/ruckig/src/ruckig/velocity_third_step2.cpp"
-                       INCLUDE_DIRS "." "hub" "motion"
+                       INCLUDE_DIRS "." "hub" "motion" "system"
                                     "../../lib/valence/include"
                                     "../../lib/geiger/include"
                                     "../../lib/kinetic/include"
@@ -36,7 +37,7 @@ idf_component_register(SRCS "main.cpp"
                        # with an all-components include set and so hides a
                        # missing entry from every pio build; ninja's own
                        # __idf_src target is the check.
-                       PRIV_REQUIRES esp_driver_parlio esp_event esp_netif
+                       PRIV_REQUIRES app_update esp_driver_parlio esp_event esp_netif
                                      esp_wifi lwip nvs_flash spi_flash
                                      espressif__esp_hosted
                                      espressif__esp_wifi_remote)

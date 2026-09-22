@@ -168,7 +168,7 @@ GREP_CHECKS = [
         # the whole of flagship_*/src/: the composition root today is a BENCH
         # IMAGE whose report lines ARE its product, and they run before any sink
         # exists.
-        include=("flagship_p4/src/hub/", "lib/geiger/"),
+        include=("flagship_p4/src/hub/", "flagship_p4/src/system/", "lib/geiger/"),
         # The sink itself. Same standing as the machine repo's AppLog: the one
         # file allowed to touch the output device, because it IS the output
         # device's driver.

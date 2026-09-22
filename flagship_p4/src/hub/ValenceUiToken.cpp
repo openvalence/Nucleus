@@ -15,6 +15,7 @@
 #include <freertos/FreeRTOS.h>
 
 #include "geiger/geiger.h"
+#include "system/ValenceHttp.h"
 
 #include "valence/core/crypto.hpp"
 #include "valence/wire/hmac_sha256.hpp"
@@ -83,36 +84,11 @@ esp_err_t ValenceUiTokenMinter::handleGet(httpd_req_t* req) {
     return sent;
 }
 
-size_t ValenceUiTokenMinter::openSockets() const {
-    if (_srv == nullptr) return 0;
-    int fds[2]{};                   // exactly cfg.max_open_sockets
-    size_t n = sizeof(fds) / sizeof(fds[0]);
-    if (httpd_get_client_list(_srv, &n, fds) != ESP_OK) return 0;
-    return n;
-}
-
 bool ValenceUiTokenMinter::attachRoutes() {
-    // SECOND httpd instance, and the split is not cosmetic: the Valence socket
-    // owns 82 while clients mint over plain HTTP on 80. Two instances MUST NOT
-    // share a ctrl_port -- the second one silently refuses to start.
-    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.server_port = 80;
-    cfg.ctrl_port = 32770;
-    // TWO client sockets, and every mint closes its own (handleGet). This
-    // instance also costs three fds of its own (listener, ctrl_fd, msg_fd --
-    // httpd_main.c:353/400/407). The socket budget and its arithmetic have ONE
-    // home (C-1): flagship_p4/sdkconfig.defaults, CONFIG_LWIP_MAX_SOCKETS.
-    cfg.max_open_sockets = 2;
-    cfg.max_uri_handlers = 4;
-    cfg.lru_purge_enable = true;
-
-    esp_err_t err = httpd_start(&_srv, &cfg);
-    if (err != ESP_OK) {
-        GLOGE(kTag, "httpd_start on :80 failed: %d", int(err));
-        return false;
-    }
+    httpd_handle_t srv = http80();
+    if (srv == nullptr) return false;
     httpd_uri_t ut{"/uitoken", HTTP_GET, handleGet, nullptr};
-    if (httpd_register_uri_handler(_srv, &ut) != ESP_OK) {
+    if (httpd_register_uri_handler(srv, &ut) != ESP_OK) {
         GLOGE(kTag, "route registration failed");
         return false;
     }

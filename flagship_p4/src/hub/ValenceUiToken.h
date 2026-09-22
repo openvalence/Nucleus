@@ -7,6 +7,9 @@
 //   request but the browser will not let it READ the answer, so the token
 //   reaches a same-origin UI and nothing else. `Access-Control-Allow-Origin`
 //   here would hand control of the machine to every page on the internet.
+// - THE :80 SERVER IS NOT THIS CLASS'S. It registers a route onto the shared
+//   instance (system/ValenceHttp.h), which /ota and /diag also use; a second
+//   server on the same port cannot start.
 // - PORT 80, not the WS port. Valence clients build "http://<ip>/uitoken"
 //   with no port regardless of where the socket lives (valence_probe.py's
 //   mint_uitoken), so serving it only on 82 leaves the mint silently failing
@@ -48,7 +51,7 @@ public:
     // survive a reboot, which is correct: a reboot is a trust boundary.
     void begin();
 
-    // Starts the port-80 instance and registers GET /uitoken on it.
+    // Registers GET /uitoken on the shared :80 instance.
     bool attachRoutes();
 
     // Hub task: is this the bytes of a live, unexpired, unused token? A true
@@ -57,9 +60,6 @@ public:
 
     // Fills `body` with the JSON answer. 0 ok / 2 rate-limited.
     uint8_t mintJson(char* body, size_t cap);
-
-    // Client sockets the :80 instance currently holds. For the census line.
-    size_t openSockets() const;
 
     uint32_t minted() const { return _minted; }
     uint32_t consumed() const { return _consumed; }
@@ -78,7 +78,6 @@ private:
 
     static esp_err_t handleGet(httpd_req_t* req);
 
-    httpd_handle_t _srv = nullptr;
     std::array<Slot, kSlots> _slots{};
     std::array<std::byte, 32> _secret{};
     uint32_t _counter = 0;

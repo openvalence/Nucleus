@@ -32,6 +32,10 @@ tools/*
 !tools/lp_stream_capture.py
 !tools/lag_probe.py
 !tools/encoder_log.py
+# the deploy and forensics doors: an operator with a fresh clone has no other
+# way onto the board or into the archive (val-091.16/.17)
+!tools/ota.py
+!tools/diag.py
 
 # Claude Code config is COMMITTED (hooks/rules survive a clone, like
 # canon_lint). Only host/session-local state stays out.

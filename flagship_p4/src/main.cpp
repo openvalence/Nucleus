@@ -35,6 +35,7 @@
 #include <ulp_lp_core.h>
 #include "hub/ValenceHub.h"
 #include "motion/ValenceMotion.h"
+#include "system/ValenceOta.h"
 #include "secrets.h"
 #include "ulp_main.h"
 
@@ -370,6 +371,11 @@ extern "C" void app_main() {
     printf("\n--- Valence hub ---\n");
     const bool hub_ok = valence::hubBegin();
     if (!hub_ok) printf("--- Valence hub FAILED to start ---\n");
+
+    // The operator surface rides the :80 instance the hub's /uitoken already
+    // started, so these come AFTER hubBegin(). Both are non-fatal: a machine
+    // that cannot be updated or dumped still runs.
+    valence::otaBegin();
     printf("\n");
 
     // Liveness line every 5 s.
@@ -380,10 +386,24 @@ extern "C" void app_main() {
     // .claude/rules/motion-control.md; an instrument that lies is worse than one
     // that is absent.
     uint32_t n = 0;
+    uint32_t lastTicks = 0;
+    bool haveTicks = false;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(5000));
         ++n;
         const valence::HubCensus census = valence::hubCensus();
+        // THE BUY (val-091.16). THREE conditions, and the third is the one that
+        // is easy to leave out: hubBegin() returning true says the hub was
+        // BUILT, not that its task is still alive, so an image whose hub hangs
+        // after startup would otherwise buy itself out of the rollback that
+        // exists for it. Requiring the tick counter to ADVANCE BETWEEN TWO
+        // observations is the cheap liveness proof, and it lands one interval
+        // later than the task watchdog's own window -- so a hung hub resets
+        // first and the bootloader restores its pair.
+        if (hub_ok && g_got_ip && haveTicks && census.ticks > lastTicks)
+            valence::otaMarkAppValid();
+        lastTicks = census.ticks;
+        haveTicks = true;
         // The hub-status channel's RSSI, pushed from HERE and not read on the
         // hub task: the radio is on the C6, so this call is an esp_hosted RPC
         // measured at 151 ms, which on a 5 ms tick is the instrument breaking

@@ -36,7 +36,7 @@ values is not information, it is a flag (§3).
 | Engineering doctrine | the other files in `.claude/rules/` |
 | Volatile project/device state (fw versions, deployment, milestones) | the Beads dev board (`bd`, `val-` prefix) |
 | Operator preferences | `CLAUDE.md` (repo root, gitignored) |
-| Firmware version constant | not yet allocated; the first deploy that needs a version allocates it and names it here |
+| Firmware version constant | `FIRMWARE_VERSION` in `flagship_p4/src/hub/valence_config.h` |
 | Per-board silicon, memory-map and radio configuration | `flagship_<chip>/sdkconfig.defaults` (hand-written) and `flagship_<chip>/platformio.ini` |
 | Hardware design rationale for the PCB | `docs/flagship-board.md` |
 | Subsystem deep detail | that subsystem's own README / spec |
@@ -175,6 +175,7 @@ that file's header; it is the one home for which checks exist.
 
 | Date | Change | Approved by |
 |---|---|---|
+| 2026-09-21 | OTA AND THE DIAGNOSTICS ARCHIVE LANDED (val-091.16/.17), and the Map of Truth row for the firmware version constant is allocated with them: `FIRMWARE_VERSION` in `flagship_p4/src/hub/valence_config.h`, which was already the string the hub's WELCOME identity sent and is now the C-8 evidence a deploy is checked against. `build-test-deploy.md`'s Deployment section is rewritten in the same commit: this board takes remote updates. RECORDED AS VETO-ABLE -- the row named a home that had existed since the hub port, so this is a C-3 correction rather than a rule change, but it is logged here because the version constant is now load-bearing for every deploy claim. | agent, operator veto pending |
 | 2026-09-20 | Canon carried into Valence Drive from the machine repo (C-1..C-12, flag protocol, canon_lint), Map of Truth repointed: `val-` board, per-board sdkconfig/platformio homes, firmware version constant NOT YET ALLOCATED. The machine repo's S3-era incident record stays there and is cited by pointer, never copied. | operator |
 | 2026-09-20 | NAMING: the PCB is the OSSM FLAGSHIP, this firmware is VALENCE DRIVE, the protocol becomes VALENCE. The protocol rebrand is RFC-shaped (the name is in wire bytes, `transport.md` T11), drafted through Valence's `spec/RFC-QUEUE.md`, and is decoupled from this repo, which consumes the spec by pinned sha. Nothing wire-visible is respelled here. The name-collision search is closed and is not a flag. | operator |
 | 2026-09-20 | PER-BOARD PlatformIO PROJECTS (`flagship_<chip>/`), and the reason is measured, not tidiness: the ULP build hook resolves exactly one directory, `$PROJECT_DIR/ulp`, with no per-environment override (platform 55.03.39, `espidf.py:2957`, `ulp.py:64`). A `ulp/` directory shared with another board's environment is compiled into that board's image too. A separate `PROJECT_DIR` scopes it structurally. Never merge the boards back into one project. | operator |

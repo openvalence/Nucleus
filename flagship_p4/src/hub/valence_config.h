@@ -18,7 +18,7 @@
 //   configuration and are published truthfully on 0x1000.
 // See: .claude/rules/governance.md (C-1), ValenceCatalog.h
 
-#define FIRMWARE_VERSION "0.1.0-p4hub"
+#define FIRMWARE_VERSION "0.1.5-p4hub"
 
 // Identity strings for WELCOME key 37 (RFC-016a). Static storage, so the views
 // the hub holds outlive it.
