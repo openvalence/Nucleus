@@ -35,6 +35,7 @@
 #include <ulp_lp_core.h>
 #include "hub/ValenceHub.h"
 #include "motion/ValenceMotion.h"
+#include "system/ValenceDiag.h"
 #include "system/ValenceOta.h"
 #include "secrets.h"
 #include "ulp_main.h"
@@ -343,6 +344,11 @@ extern "C" void app_main() {
     vTaskDelay(pdMS_TO_TICKS(1000));
     report();
 
+    // FIRST, so the archive holds the boot itself. It needs only PSRAM, and
+    // the boot sequence is precisely the history a bench console loses.
+    const bool diag_ok = valence::diagBegin();
+    if (!diag_ok) printf("--- diagnostics archive FAILED to allocate ---\n");
+
     const bool parlio_ok = start_parlio();
     if (parlio_ok) report_parlio();
     else           printf("\n--- PARLIO emitter FAILED to start ---\n");
@@ -376,6 +382,7 @@ extern "C" void app_main() {
     // started, so these come AFTER hubBegin(). Both are non-fatal: a machine
     // that cannot be updated or dumped still runs.
     valence::otaBegin();
+    if (diag_ok) valence::diagAttachRoutes();
     printf("\n");
 
     // Liveness line every 5 s.
