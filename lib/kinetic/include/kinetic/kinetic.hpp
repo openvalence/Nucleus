@@ -279,7 +279,13 @@ struct Config {
     // measured ~4 intervals of lag.
     bool     chase_feedforward = true;
     float    chase_ff_gain     = 0.9f;    // damping on the velocity estimate
-    float    chase_lookahead   = 3.0f;    // intervals of predictive aim (bench-swept)
+    // Intervals of predictive aim: enough lead to cancel the plan's own
+    // tracking lag and no more. 1.3 is the P4 bench value (bd val-091.14) --
+    // the aim then leads ~25 ms at a 20 ms cadence against a measured 23-27 ms
+    // of tracking lag. The older 3.0 was swept on the S3, where clumpy
+    // arrivals disabled the feedforward often enough to hide how much lead it
+    // really buys.
+    float    chase_lookahead   = 1.3f;
     // Arrive matching the stream's estimated CURVATURE too (target accel).
     // With af forced to 0 every chase plan is a long flatten-out tail that a
     // curving stream preempts forever — chronic lag (bench-measured).
@@ -1120,6 +1126,11 @@ private:
     // window GRACE is not coming back (see the note in pointWorst).
     static constexpr double   kWindowRoundEps = 1e-6;
     static constexpr double   kAimCapS      = 0.060;  // predictive aim ceiling
+    // The v EMA's smoothing factor, and the group delay it implies in units of
+    // the stream interval: dt*(1-a)/a. One home for both, because the aim
+    // de-lags with a number updateEstimator owns (see commitChase).
+    static constexpr double   kVEmaAlpha       = 0.35;
+    static constexpr double   kVEmaLagIntervals = (1.0 - kVEmaAlpha) / kVEmaAlpha;
     // Settle grace = min(this × estimated stream interval, settle_grace_us).
     // 1.5 intervals: one whole interval of lateness is normal transport
     // scheduling, half of another is the margin before it means something.
@@ -2164,7 +2175,6 @@ private:
             // legacy live-mode extrapolation, reborn with real dynamics.)
             const double look =
                 std::fmin(_est_dt_ema * (double)_cfg.chase_lookahead, kAimCapS);
-            const double v_est = _est_v_ema * (double)_cfg.chase_ff_gain;
             // acap-limited stream curvature. Limited BEFORE it is used
             // anywhere: the accel estimate is a second difference of a jittery
             // signal, and it feeds both the arrival acceleration and (below)
@@ -2172,6 +2182,19 @@ private:
             const double acap  = 0.5 * (double)_plan_lim.amax;
             const double a_est = _est_a_ema < -acap ? -acap
                                : _est_a_ema >  acap ?  acap : _est_a_ema;
+            // DE-LAG before extrapolating. The v EMA describes the stream one
+            // group delay ago (kVEmaLagIntervals of an interval), so using it
+            // as the velocity NOW leaves a residue IN PHASE with the target --
+            // which is amplitude, not lead. That is why raising lookahead used
+            // to buy lead at the cost of stroke. Carried forward by the same
+            // acap-limited a_est, so a noisy second difference cannot fling it.
+            // Under the v2 flag with the two terms above: it is the same
+            // curvature correction, and the flag's contract is that clearing
+            // it reverts every a_est-derived term at once.
+            const double v_now = _cfg.chase_aim_accel_extrap
+                                     ? _est_v_ema + kVEmaLagIntervals * _est_dt_ema * a_est
+                                     : _est_v_ema;
+            const double v_est = v_now * (double)_cfg.chase_ff_gain;
             // Second-order aim: a straight-line extrapolation is wrong exactly
             // where a waveform turns, and the turn near a rail is where being
             // wrong costs the most (aim clamps to the wall → end-vel guard
@@ -2352,7 +2375,19 @@ private:
         if (_est_valid && now_us > _est_last_us) {
             const uint64_t gap = now_us - _est_last_us;
             if (gap <= _cfg.chase_stale_us) {
-                const double dt  = span > 0.0 ? span : (double)gap * 1e-6;
+                const double cad = span > 0.0 ? span : (double)gap * 1e-6;
+                // A bare point declares no timeline and the hub resolves a
+                // sample that arrived late to NOW, so the anchor difference IS
+                // the arrival gap. Dividing a uniform-cadence chord by a
+                // jittered gap reads HIGH -- E[1/dt] exceeds 1/E[dt] -- and the
+                // predictive aim renders that over-read as stroke: 20 ms of
+                // jitter on a 20 ms cadence measured +17% amplitude on the P4
+                // (bd val-091.14). Difference against the LEARNED cadence
+                // instead; the gap still teaches it, one line down. Archived
+                // SlopDrive-32 repo, .claude/rules/webui.md T18: arrival time
+                // is a hint, never a timeline.
+                const double dt  = span > 0.0 ? span
+                                 : (_est_ema_ok && _est_dt_ema > 0.0 ? _est_dt_ema : cad);
                 const double raw = span > 0.0
                                        ? chord
                                        : (target - _est_last_target) / dt;
@@ -2365,8 +2400,8 @@ private:
                     if (sp > _est_sp_pk) _est_sp_pk = sp;
                     else _est_sp_pk += (dt / kSpPeakReleaseS) *
                                        (sp - _est_sp_pk);
-                    _est_v_ema  += 0.35 * (raw - _est_v_ema);
-                    _est_dt_ema += 0.30 * (dt - _est_dt_ema);
+                    _est_v_ema  += kVEmaAlpha * (raw - _est_v_ema);
+                    _est_dt_ema += 0.30 * (cad - _est_dt_ema);
                     // Stream curvature: differentiate the (already smoothed)
                     // velocity EMA, then smooth again — accel estimates are
                     // second differences of a jittery signal, treat gently.
@@ -2375,7 +2410,7 @@ private:
                 } else {
                     _est_v_ema  = raw;
                     _est_sp_pk  = std::fabs(raw);
-                    _est_dt_ema = dt;
+                    _est_dt_ema = cad;
                     _est_a_ema  = 0.0;
                     _est_ema_ok = true;
                 }

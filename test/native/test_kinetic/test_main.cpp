@@ -588,13 +588,19 @@ TEST_CASE("Chase: 60 Hz sine stream tracks smoothly within limits") {
                                  std::fabs(p - target((double)t * 1e-6)));
         }
     }
-    // DERIVED, not baselined: the engine chases the newest point, so its
-    // steady-state error cannot beat the source's own travel over the horizon
-    // the aim extrapolates across. Source peak |v| = amp*2*pi*f, horizon =
-    // chase_lookahead stream intervals. Lag tuning itself is done with eyes on
-    // the scenario graphs, not here.
+    // DERIVED, not baselined: the newest point is already ONE interval stale
+    // and the aim extrapolates chase_lookahead intervals past it, so the
+    // tracker cannot sit further off the source than the source itself travels
+    // across that window. Source peak |v| = amp*2*pi*f.
+    // The "+1" is load-bearing and was not always here: a bound of the horizon
+    // ALONE shrinks as the lead shrinks, which is backwards, because less lead
+    // means more residual lag. Swept on this fixture (worst_err by lookahead):
+    // 3.0 -> 0.071, 2.0 -> 0.026, 1.5 -> 0.042, 1.3 -> 0.048, 1.0 -> 0.059,
+    // 0.5 -> 0.078. The optimum is a property of the MACHINE's headroom, not
+    // of the engine, so this asserts sanity on both sides and the tuning is
+    // done on the bench (bd val-091.14).
     const double src_vpk   = 0.4 * 2.0 * M_PI * f;
-    const double horizon_s = (double)cfg.chase_lookahead * 16667e-6;
+    const double horizon_s = ((double)cfg.chase_lookahead + 1.0) * 16667e-6;
     CHECK(worst_err < src_vpk * horizon_s);
 }
 
