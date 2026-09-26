@@ -594,7 +594,7 @@ enum class Mode : uint8_t {
     Idle     = 0,   // holding position, no planned motion
     Waveform = 1,   // executing a quintic v4 segment (or its Ruckig fallback)
     Chase    = 2,   // tracking a bare point stream
-    Settle   = 3    // braking to rest after stream starvation
+    Settle   = 3    // braking to rest: stream starvation, or brake() (a STOP)
 };
 
 // APPEND-ONLY (wire-visible: 0x0081 `plan_kind` is a select field whose option
@@ -941,6 +941,21 @@ public:
         }
         if (ok) _plans++;
         return ok;
+    }
+
+    // ---- STOP (Core 1, after queue drain) ------------------------------------
+    // The SETTLE brake on demand: drops every scheduled plan, then brakes the
+    // plan in flight to rest from its sampled (p, v, a) under the current
+    // limits -- jerk-limited, windowed, never a reversal. False when nothing is
+    // moving. Records no SettleEngaged: a stop is not a starved stream.
+    bool brake(uint64_t now_us) {
+        promoteDue(now_us);
+        dropScheduledFrom(now_us);
+        if (!isBusy(now_us)) return false;
+        double p, v, a;
+        sampleRaw(now_us, p, v, a);
+        planBrake(p, v, a, now_us, p, v, /*starved=*/false);
+        return true;
     }
 
     // ---- Evaluation (Core 1, ~1 kHz hot path) -------------------------------
@@ -2527,6 +2542,21 @@ private:
                         + (uint64_t)(grace * 1e6 + 0.5);
         double cp, cv, ca;
         sampleRaw(coast_end_us, cp, cv, ca);
+        // Anchor the settle at the moment the COAST ended (plan end + grace),
+        // not at this sample's clock, so the brake follows the coasted state
+        // seamlessly. Anchoring at plan end alone would be a bug once a grace
+        // exists: the brake profile would be entered `grace` seconds deep, and
+        // the very first sample would JUMP up to vmax·grace (30 mm on the
+        // operator's 200 mm window at a 30 ms grace). With grace = 0 this is
+        // byte-identical to the pre-0.4 anchor.
+        planBrake(cp, cv, ca, coast_end_us, p, v, /*starved=*/true);
+    }
+
+    // The one brake-to-rest planner, SETTLE's and brake()'s: from (cp, cv, ca)
+    // at end_us, jerk-limited through Ruckig's velocity interface, windowed.
+    // (p, v) are what the anomaly records name.
+    void planBrake(double cp, double cv, double ca, uint64_t end_us, double p, double v,
+                   bool starved) {
         ruckig::InputParameter<1> in;
         in.control_interface       = ruckig::ControlInterface::Velocity;
         in.current_position[0]     = cp;
@@ -2540,14 +2570,6 @@ private:
 
         ruckig::Trajectory<1> traj;
         const ruckig::Result res = _calc.calculate(in, traj);
-        // Anchor the settle at the moment the COAST ended (plan end + grace),
-        // not at this sample's clock, so the brake follows the coasted state
-        // seamlessly. Anchoring at plan end alone would be a bug once a grace
-        // exists: the brake profile would be entered `grace` seconds deep, and
-        // the very first sample would JUMP up to vmax·grace (30 mm on the
-        // operator's 200 mm window at a 30 ms grace). With grace = 0 this is
-        // byte-identical to the pre-0.4 anchor.
-        const uint64_t end_us = coast_end_us;
         if ((int)res < 0) {
             // Should be unreachable: a brake from a legal state is always
             // feasible — hard-hold the end position.
@@ -2578,8 +2600,8 @@ private:
                 std::isfinite(railed.get_duration()))
                 traj = railed;
         }
-        recordAnomaly(AnomalyType::SettleEngaged, (float)p,
-                      (float)v, end_us);
+        if (starved)
+            recordAnomaly(AnomalyType::SettleEngaged, (float)p, (float)v, end_us);
         _traj       = traj;
         _kind       = PlanKind::Ruckig;
         _plan_start = end_us;

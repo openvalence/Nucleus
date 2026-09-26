@@ -3337,3 +3337,40 @@ TEST_CASE("planView hands out the plan without touching it") {
     CHECK(sched.next.kind != kinetic::PlanKind::None);
     CHECK(sched.active.start_us == start0);
 }
+
+TEST_CASE("brake(): a STOP brakes a moving plan to rest without reversing, drops the schedule") {
+    Engine e(liveTuning(), 0.2f);
+    CHECK_FALSE(e.brake(1 * kS));   // nothing moving
+
+    Command c;
+    c.target       = 0.8f;
+    c.duration_us  = 600 * (uint32_t)kMs;
+    c.has_duration = true;
+    const uint64_t t0 = 1 * kS;
+    REQUIRE(e.commit(c, t0));
+    Command next = c;
+    next.target     = 0.3f;
+    next.has_anchor = true;
+    next.anchor_us  = t0 + 600 * kMs;
+    const uint64_t ts = t0 + 200 * kMs;       // mid-stroke, moving up
+    REQUIRE(e.commit(next, ts));              // parked in the schedule
+    const double p0 = e.positionAt(ts);
+    const double v0 = e.velocityAt(ts);
+    REQUIRE(v0 > 0.5);
+    REQUIRE(e.brake(ts));
+    CHECK(e.mode() == Mode::Settle);
+
+    double prev = p0;
+    for (uint64_t t = ts; t <= ts + 400 * kMs; t += kMs) {
+        const double p = e.positionAt(t);
+        CHECK(p >= prev - 1e-9);   // never a reversal
+        prev = p;
+    }
+    CHECK_FALSE(e.isBusy(ts + 400 * kMs));
+    CHECK(e.velocityAt(ts + 400 * kMs) == doctest::Approx(0.0));
+    // The scheduled 0.3 never ran, and the stop landed short of the stroke's 0.8.
+    CHECK(e.positionAt(ts + 2 * kS) == doctest::Approx(prev));
+    CHECK(prev < 0.8);
+    kinetic::Anomaly ev;
+    while (e.popAnomaly(ev)) CHECK(ev.kind != (uint8_t)AnomalyType::SettleEngaged);
+}

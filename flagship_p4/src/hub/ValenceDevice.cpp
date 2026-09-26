@@ -397,14 +397,8 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     if (channel_id == ch::pattern_cmd) return applyPattern(requested);
     if (channel_id == ch::pattern_advanced_cmd) return applyPatternAdvanced(requested);
     if (channel_id == ch::pattern_presets_cmd) return applyPresets(requested);
-    if (channel_id != ch::config_set) {
-        // Every op on 0x0005 the hub does not handle itself (stop / hold /
-        // pause / resume / override / bypass). The library's contract is
-        // that an unimplemented op returns UNSUPPORTED_OP so the hub
-        // latches NOTHING. estop and estop_clear never reach here -- the
-        // hub owns both -- so the red button works regardless.
-        return Ret::err(NackCode::UNSUPPORTED_OP);
-    }
+    if (channel_id == channels::safety_intents) return applySafety(requested);
+    if (channel_id != ch::config_set) return Ret::err(NackCode::UNSUPPORTED_OP);
 
     const auto* f1 = findField(requested, 1);  // window_min
     const auto* f2 = findField(requested, 2);  // window_max
@@ -565,6 +559,7 @@ Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
 
     PatternSettings& p = _pat;
     if (f1) p.running = *boolOf(f1);
+    if (f1 && p.running) motionPatternAllow();   // a start is the one thing that reopens it
     if (f2) p.setPattern(int(wholeIn(*numberOf(f2), 0.0f, float(PatternSettings::kPatternCount - 1))));
     if (f3) p.speed = PatternSettings::percent(*numberOf(f3));
     if (f4) p.depth = PatternSettings::percent(*numberOf(f4));
@@ -789,6 +784,39 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     return Ret::ok(applied);
 }
 
+// ---- 0x0005 safety-intents ------------------------------------------------------
+// STOP (SPEC 11.1) is the one op applied here. estop and estop_clear never
+// reach the delegate (the hub owns both); every other op -- hold, pause,
+// resume, override, bypass -- is UNSUPPORTED_OP, so the hub latches NOTHING
+// for it. Acceptance is what makes the hub latch STOP in 0x0003, and any
+// accepted source-mapped intent clears it. Never refused: stopping needs no
+// homing and no role (the catalog marks it watch, ROLE-EXEMPT).
+Ret ValenceDevice::applySafety(const IntentValueMap& requested) {
+    if (fieldU64(findField(requested, 1), 0) != safety_ops::stop)
+        return Ret::err(NackCode::UNSUPPORTED_OP);
+    // The generator's running state drops FIRST, on this call, then
+    // motionStop() closes the arbiter's Pattern gate and only then asks for
+    // the brake. The gate is what closes the preemption window: the pattern
+    // task (core 1, priority 4) can hold a half-stroke it built from the old
+    // settings across this whole call, and submits it after. That stroke is
+    // refused at accept, or was accepted before the gate closed and is braked.
+    haltGenerator();
+    motionStop();
+    GLOGW(kTag, "STOP: generator halted, braking to rest");
+    IntentValueMap applied{};
+    applied.count = 1;
+    applied.fields[0] = {1, IntentValue::ofU64(safety_ops::stop)};
+    return Ret::ok(applied);
+}
+
+// Pushed NOW rather than on the next tick: the push wakes the pattern task, so
+// 0x1200 running and 0x1100 gen_running fall at the next publish.
+void ValenceDevice::haltGenerator() {
+    _pat.running = false;
+    _patDirty = false;
+    if (boardFeatures().has_pattern) pushPattern();
+}
+
 // ---- 0x3101 home ---------------------------------------------------------------
 Ret ValenceDevice::applyHome(const IntentValueMap& requested) {
     const uint64_t op = fieldU64(findField(requested, 1), 0);
@@ -865,12 +893,9 @@ bool ValenceDevice::canClearEstop() {
 void ValenceDevice::onEstop(uint8_t cause, uint8_t origin) {
     motionEstop();
     // The generator stops with the machine and stays stopped: clearing the
-    // latch never restarts it. The arbiter already refuses its strokes; this
-    // makes 0x1200's running tell the same truth.
-    if (_pat.running) {
-        _pat.running = false;
-        _patDirty = true;
-    }
+    // latch never restarts it (the arbiter's Pattern gate stays closed until a
+    // start). This makes 0x1200's running tell the same truth.
+    haltGenerator();
     GLOGW(kTag, "ESTOP latched: cause=%u origin=%u", unsigned(cause), unsigned(origin));
     (void)cause;
     (void)origin;

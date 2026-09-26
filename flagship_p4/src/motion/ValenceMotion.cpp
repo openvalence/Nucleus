@@ -93,6 +93,7 @@ class MotionTask {
 public:
     bool begin();
     bool submit(const MotionIntent& in);     // any task: enqueue and wake
+    void stop();                             // any task: gate, brake request, wake
     void setTuning(const MotionTuning& t);   // any task: overwrite the one slot
     MotionCensus census() const;
     MotionArbiter& arbiter() { return _arb; }
@@ -159,6 +160,12 @@ bool MotionTask::submit(const MotionIntent& in) {
     // On arrival, never on a tick: the task is woken now and plans now.
     if (_task != nullptr) xTaskNotifyGive(_task);
     return true;
+}
+
+void MotionTask::stop() {
+    _arb.stop();
+    // Brakes at arrival, not on the tick.
+    if (_task != nullptr) xTaskNotifyGive(_task);
 }
 
 void MotionTask::setTuning(const MotionTuning& t) {
@@ -229,6 +236,8 @@ bool motionBegin() { return g_motion.begin(); }
 bool motionSubmit(const MotionIntent& in) { return g_motion.submit(in); }
 void motionEstop() { g_motion.arbiter().estop(true); }
 void motionEstopClear() { g_motion.arbiter().estop(false); }
+void motionStop() { g_motion.stop(); }
+void motionPatternAllow() { g_motion.arbiter().allowPattern(); }
 void motionPause(bool on) { g_motion.arbiter().pause(on); }
 void motionSetUserLimits(float v, float a) { g_motion.arbiter().setUserLimits(v, a); }
 void motionSetInputLimits(float v, float a, float j) { g_motion.arbiter().setInputLimits(v, a, j); }

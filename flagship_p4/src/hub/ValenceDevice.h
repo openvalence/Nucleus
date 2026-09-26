@@ -142,6 +142,8 @@ private:
     Result<IntentValueMap, NackCode> applyPattern(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applyPatternAdvanced(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applyPresets(const IntentValueMap& requested);
+    Result<IntentValueMap, NackCode> applySafety(const IntentValueMap& requested);
+    void haltGenerator();
     void pushPattern();
     void publishPatternPlane(const MotionCensus& mo);
 

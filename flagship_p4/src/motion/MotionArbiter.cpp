@@ -57,9 +57,15 @@ void MotionArbiter::estop(bool on) {
     }
     // Park on the CALLING task. The ENGINE is not touched here: it belongs to
     // the owning task, which resets it on the next tick (see evaluate()).
+    _pattern_stopped.store(true);   // clearing the latch never restarts the generator
     _emitter.park();
     _homed = false;      // an abandoned plan leaves the carriage where it fell
     GLOGW(kTag, "ESTOP: emitter parked at %.3f mm", double(positionMm()));
+}
+
+void MotionArbiter::stop() {
+    _pattern_stopped.store(true);
+    _brake_req.store(true);
 }
 
 void MotionArbiter::setWindow(float lo, float hi, float rail) {
@@ -125,6 +131,11 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
             GLOGW_EVERY_MS(1000, kTag, "REJECT: paused");
             return false;
         }
+        if (in.source == MotionSource::Pattern && _pattern_stopped.load()) {
+            ++_rejected;
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: pattern stopped");
+            return false;
+        }
     }
 
     const bool manual = in.source == MotionSource::Manual;
@@ -149,11 +160,7 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
     // TODO(val-091.4): the soft-start cap, which shapes the INPUT set only and
     // has no source to shape yet.
     const float s  = span();
-    kinetic::Limits lim;
-    lim.vmax = manual ? _user_v / s : inputVmaxMm() / s;
-    lim.amax = manual ? _user_a / s : inputAmaxMm() / s;
-    lim.jmax = _ovr_j > 0.0f ? _ovr_j : _in_j / s;
-    _engine.setLimits(lim);
+    _engine.setLimits(limitsFor(manual));
 
     // Plan from the machine's ACTUAL state. At rest that state is the emitter's
     // count and nothing else: an engine that re-seeds from its own idea of
@@ -193,7 +200,28 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
     return true;
 }
 
+kinetic::Limits MotionArbiter::limitsFor(bool manual) const {
+    const float s = span();
+    kinetic::Limits lim;
+    lim.vmax = manual ? _user_v / s : inputVmaxMm() / s;
+    lim.amax = manual ? _user_a / s : inputAmaxMm() / s;
+    lim.jmax = _ovr_j > 0.0f ? _ovr_j : _in_j / s;
+    return lim;
+}
+
 // ---- the tick ---------------------------------------------------------------
+
+// SPEC 11.1 STOP, owning task only: the engine's own SETTLE brake, planned
+// from the plan's (p, v, a) -- continuous with what the emitter is rendering,
+// unlike a census read -- at the input decel, and never a reversal. It also
+// drops every scheduled plan (Engine::brake).
+void MotionArbiter::brakeToRest(uint64_t now_us) {
+    _engine.setLimits(limitsFor(false));
+    [[maybe_unused]] const float v = _engine.velocityAt(now_us) * span();   // log only
+    if (!_engine.brake(now_us)) return;
+    _demand_mm = toMm(_engine.snapshot(now_us).target);   // where it comes to rest
+    GLOGI(kTag, "STOP: braking from %.1f mm/s", double(v));
+}
 
 void MotionArbiter::applyTuning(const MotionTuning& t) {
     // A COPY of the live config with the tuning fields replaced, so the
@@ -223,6 +251,7 @@ void MotionArbiter::applyTuning(const MotionTuning& t) {
 
 void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     if (_estop) {
+        _brake_req.store(false);   // park already stopped it
         _emitter.park();
         // ONCE per latch, and on the task that owns the engine: without it the
         // abandoned plan keeps reading busy and canClearEstop() -- which asks
@@ -251,6 +280,8 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         _emitter.steer(0.0f);
         return;
     }
+
+    if (_brake_req.exchange(false)) brakeToRest(now_us);
 
     // The one side-effecting sample per tick: it promotes scheduled plans and
     // engages SETTLE when a plan ends still moving.
