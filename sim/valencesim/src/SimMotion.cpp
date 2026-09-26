@@ -4,7 +4,7 @@
 // - SINGLE-THREADED (SimMotion.h). The P4 hands intents across a FreeRTOS
 //   queue to its motion task; here submit() and simMotionTick() share one
 //   thread, so the queue is a plain ring and nothing is locked.
-// - accept() and evaluate() MIRROR MotionArbiter in
+// - accept(), evaluate() and applyTuning() MIRROR MotionArbiter in
 //   flagship_p4/src/motion/ValenceMotion.cpp BY HAND: same gate order, same
 //   window clamp, same limit-set selection, same rest-only reseed, same
 //   frame-move re-anchor. Change one and change the other in the same commit
@@ -22,6 +22,7 @@
 
 #include <array>
 #include <cmath>
+#include <optional>
 
 #include "hub/ValenceDevice.h"
 #include "hub/valence_config.h"
@@ -68,6 +69,9 @@ public:
     void pause(bool on) { _paused = on; }
     void setUserLimits(float v, float a) { _user_v = v; _user_a = a; }
     void setInputLimits(float v, float a, float j) { _in_v = v; _in_a = a; _in_j = j; }
+    // The P4 overwrites a depth-one queue; one pending slot is the same thing
+    // on one thread.
+    void setTuning(const MotionTuning& t) { _tune_pending = t; }
 
     void setWindow(float lo, float hi, float rail) {
         if (!(std::isfinite(lo) && std::isfinite(hi) && std::isfinite(rail))) return;
@@ -98,6 +102,10 @@ public:
     }
 
     void tick(uint64_t now_us) {
+        if (_tune_pending) {
+            applyTuning(*_tune_pending);
+            _tune_pending.reset();
+        }
         while (_count > 0) {
             const MotionIntent in = _queue[_head];
             _head = (_head + 1) % _queue.size();
@@ -120,6 +128,31 @@ private:
     float span() const { return _win_max - _win_min; }
     float toNorm(float mm) const { return (mm - _win_min) / span(); }
     float toMm(float norm) const { return _win_min + norm * span(); }
+    float inputVmaxMm() const { return _ovr_v > 0.0f ? _ovr_v * span() : _in_v; }
+    float inputAmaxMm() const { return _ovr_a > 0.0f ? _ovr_a * span() : _in_a; }
+
+    void applyTuning(const MotionTuning& t) {
+        kinetic::Config c = _engine.config();
+        c.chase_feedforward           = t.chase_ff;
+        c.chase_accel_ff              = t.chase_accel_ff;
+        c.chase_ff_gain               = t.chase_gain;
+        c.chase_lookahead             = t.chase_lookahead;
+        c.chase_dense_us              = t.chase_dense_us;
+        c.chase_aim_accel_extrap      = t.chase_aim_extrap;
+        c.handoff_chord_factor        = t.handoff_k;
+        c.curve_policy                = static_cast<kinetic::CurvePolicy>(t.curve_policy);
+        c.infeasible_policy           = t.infeasible_policy == 0 ? kinetic::InfeasiblePolicy::Stretch
+                                                                 : kinetic::InfeasiblePolicy::Blend;
+        c.infeasible_smooth_budget    = t.smooth_budget;
+        c.infeasible_amplitude_budget = t.amplitude_budget;
+        c.infeasible_blend_steps      = t.blend_steps;
+        c.settle_grace_us             = t.settle_grace_us;
+        c.overshoot_guard             = t.overshoot_guard;
+        _engine.setConfig(c);
+        _ovr_v = t.vmax_ovr;
+        _ovr_a = t.amax_ovr;
+        _ovr_j = t.jmax_ovr;
+    }
 
     void steer(float v_mm_s) {
         const float mag = std::fabs(v_mm_s);
@@ -150,13 +183,11 @@ private:
         if (target < lo) target = lo;
         if (target > hi) target = hi;
 
-        const float sp = manual ? _user_v : _in_v;
-        const float ac = manual ? _user_a : _in_a;
         const float s = span();
         kinetic::Limits lim;
-        lim.vmax = sp / s;
-        lim.amax = ac / s;
-        lim.jmax = _in_j / s;
+        lim.vmax = manual ? _user_v / s : inputVmaxMm() / s;
+        lim.amax = manual ? _user_a / s : inputAmaxMm() / s;
+        lim.jmax = _ovr_j > 0.0f ? _ovr_j : _in_j / s;
         _engine.setLimits(lim);
 
         if (!_engine.isBusy(now_us)) {
@@ -302,6 +333,10 @@ private:
     float _in_v   = DEFAULT_MAX_SPEED_MM_S;
     float _in_a   = DEFAULT_ACCEL_MM_S2;
     float _in_j   = DEFAULT_INPUT_MAX_JERK_MM_S3;
+    float _ovr_v  = 0.0f;
+    float _ovr_a  = 0.0f;
+    float _ovr_j  = 0.0f;
+    std::optional<MotionTuning> _tune_pending;
 
     int64_t _phys_steps = 0;   // the ideal emitter's absolute count
     int64_t _origin = 0;       // the count that means 0.0 mm
@@ -363,9 +398,10 @@ void motionNoteStream(uint32_t b, uint32_t s, uint32_t d) { g_arb.noteStream(b, 
 float motionForceHome(float stroke_mm) { return g_arb.forceHome(stroke_mm); }
 MotionCensus motionCensus() { return g_arb.census(); }
 
-// Mirrors ValenceMotion.cpp's motionTuning(): the engine's defaults ARE its
-// live values, because nothing writes the tuning (bd val-091.11).
-MotionTuning motionTuning() {
+void motionSetTuning(const MotionTuning& t) { g_arb.setTuning(t); }
+
+// Mirrors ValenceMotion.cpp's motionDefaultTuning().
+MotionTuning motionDefaultTuning() {
     const kinetic::Config cfg{};
     MotionTuning t;
     t.chase_ff         = cfg.chase_feedforward;
@@ -381,6 +417,7 @@ MotionTuning motionTuning() {
     t.amplitude_budget = cfg.infeasible_amplitude_budget;
     t.blend_steps      = cfg.infeasible_blend_steps;
     t.settle_grace_us  = cfg.settle_grace_us;
+    t.overshoot_guard  = cfg.overshoot_guard;
     return t;
 }
 

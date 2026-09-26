@@ -132,6 +132,7 @@ public:
     void setUserLimits(float v, float a) { _user_v = v; _user_a = a; }
     void setInputLimits(float v, float a, float j) { _in_v = v; _in_a = a; _in_j = j; }
     void setWindow(float lo, float hi, float rail);
+    void setTuning(const MotionTuning& t);   // any task: overwrite the one slot
     float forceHome(float stroke_mm);
     void noteStream(uint32_t bundles, uint32_t samples, uint32_t dropped);
     MotionCensus census() const;
@@ -140,6 +141,7 @@ private:
     static void taskTrampoline(void* self) { static_cast<MotionArbiter*>(self)->run(); }
     void run();
     void drain(uint64_t now_us);
+    void applyTuning(const MotionTuning& t);   // motion task only
     bool accept(const MotionIntent& in, uint64_t now_us);   // gates, clamp, commit
     void evaluate(uint64_t now_us, float dt_s);
     void refreshSnapshot(uint64_t now_us);
@@ -149,6 +151,12 @@ private:
     float span() const { return _win_max - _win_min; }
     float toNorm(float mm) const { return (mm - _win_min) / span(); }
     float toMm(float norm) const { return _win_min + norm * span(); }
+    // The INPUT set's ceilings as the engine plans them, in mm: the mm limit,
+    // or the normalized override scaled by the CURRENT window. evaluate()'s
+    // tracking cap reads the same answer, so a plan an override allowed is
+    // never capped below its own ceiling at render time.
+    float inputVmaxMm() const { return _ovr_v > 0.0f ? _ovr_v * span() : _in_v; }
+    float inputAmaxMm() const { return _ovr_a > 0.0f ? _ovr_a * span() : _in_a; }
 
     // The engine is a member so it lands in this object's storage, which is a
     // file-scope static in internal RAM. Never move it to PSRAM.
@@ -156,6 +164,9 @@ private:
 
     TaskHandle_t  _task = nullptr;
     QueueHandle_t _queue = nullptr;
+    // Depth ONE, written with xQueueOverwrite: the newest tuning set is the
+    // only one worth applying, and the writer never waits on the motion task.
+    QueueHandle_t _tuneQueue = nullptr;
 
     float _win_min = 0.0f;
     float _win_max = DEFAULT_MAX_RAIL_MM;
@@ -166,6 +177,11 @@ private:
     float _in_v   = DEFAULT_MAX_SPEED_MM_S;
     float _in_a   = DEFAULT_ACCEL_MM_S2;
     float _in_j   = DEFAULT_INPUT_MAX_JERK_MM_S3;
+    // Normalized ceiling overrides from 0x3120, 0 = derived. Motion task only:
+    // written by applyTuning(), read by accept() and evaluate().
+    float _ovr_v = 0.0f;
+    float _ovr_a = 0.0f;
+    float _ovr_j = 0.0f;
 
     int32_t _lp_origin = 0;      // the LP count that means 0.0 mm
     float   _p_cmd_mm  = 0.0f;   // the plan position at the previous tick
@@ -218,6 +234,8 @@ MotionArbiter g_arb;
 bool MotionArbiter::begin() {
     _queue = xQueueCreate(kIntentQueueDepth, sizeof(MotionIntent));
     if (_queue == nullptr) return false;
+    _tuneQueue = xQueueCreate(1, sizeof(MotionTuning));
+    if (_tuneQueue == nullptr) return false;
     steerLp(0.0f);                       // the emitter is PARKED until an intent lands
     _lp_origin = lpSteps();
     _odo_steps = lpSteps();
@@ -252,6 +270,12 @@ bool MotionArbiter::submit(const MotionIntent& in) {
     // On arrival, never on a tick: the task is woken now and plans now.
     if (_task != nullptr) xTaskNotifyGive(_task);
     return true;
+}
+
+void MotionArbiter::setTuning(const MotionTuning& t) {
+    if (_tuneQueue == nullptr) return;
+    xQueueOverwrite(_tuneQueue, &t);
+    if (_task != nullptr) xTaskNotifyGive(_task);
 }
 
 void MotionArbiter::estop(bool on) {
@@ -348,13 +372,11 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
     // Manual point move is the ratified exception and plans AT the user set.
     // NOT IMPLEMENTED IN v0: the soft-start cap, which shapes the INPUT set
     // only and has no source to shape here (see bd val-091.4).
-    const float sp = manual ? _user_v : _in_v;
-    const float ac = manual ? _user_a : _in_a;
     const float s  = span();
     kinetic::Limits lim;
-    lim.vmax = sp / s;
-    lim.amax = ac / s;
-    lim.jmax = _in_j / s;
+    lim.vmax = manual ? _user_v / s : inputVmaxMm() / s;
+    lim.amax = manual ? _user_a / s : inputAmaxMm() / s;
+    lim.jmax = _ovr_j > 0.0f ? _ovr_j : _in_j / s;
     _engine.setLimits(lim);
 
     // Plan from the machine's ACTUAL state. At rest that state is the LP core's
@@ -397,7 +419,37 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
 
 // ---- the tick ---------------------------------------------------------------
 
+void MotionArbiter::applyTuning(const MotionTuning& t) {
+    // A COPY of the live config with the tuning fields replaced, so the
+    // limits accept() last set ride through untouched. Takes effect at the
+    // next plan; an in-flight trajectory keeps the config it was planned under.
+    kinetic::Config c = _engine.config();
+    c.chase_feedforward           = t.chase_ff;
+    c.chase_accel_ff              = t.chase_accel_ff;
+    c.chase_ff_gain               = t.chase_gain;
+    c.chase_lookahead             = t.chase_lookahead;
+    c.chase_dense_us              = t.chase_dense_us;
+    c.chase_aim_accel_extrap      = t.chase_aim_extrap;
+    c.handoff_chord_factor        = t.handoff_k;
+    c.curve_policy                = static_cast<kinetic::CurvePolicy>(t.curve_policy);
+    c.infeasible_policy           = t.infeasible_policy == 0 ? kinetic::InfeasiblePolicy::Stretch
+                                                             : kinetic::InfeasiblePolicy::Blend;
+    c.infeasible_smooth_budget    = t.smooth_budget;
+    c.infeasible_amplitude_budget = t.amplitude_budget;
+    c.infeasible_blend_steps      = t.blend_steps;
+    c.settle_grace_us             = t.settle_grace_us;
+    c.overshoot_guard             = t.overshoot_guard;
+    _engine.setConfig(c);
+    _ovr_v = t.vmax_ovr;
+    _ovr_a = t.amax_ovr;
+    _ovr_j = t.jmax_ovr;
+}
+
 void MotionArbiter::drain(uint64_t now_us) {
+    // Tuning BEFORE intents: an intent that arrived after a tuning write plans
+    // under it.
+    MotionTuning t;
+    if (xQueueReceive(_tuneQueue, &t, 0) == pdTRUE) applyTuning(t);
     MotionIntent in;
     while (xQueueReceive(_queue, &in, 0) == pdTRUE) accept(in, now_us);
 }
@@ -453,7 +505,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         // shaped and is therefore the one term that can hand the emitter a
         // demand the machine cannot make. Its ceiling is the accel limit's own
         // answer to "how much velocity may one tick add".
-        const float kick_max = _in_a * dt_s;
+        const float kick_max = inputAmaxMm() * dt_s;
         float kick = err_mm * kTrackHz;
         if (kick >  kick_max) kick =  kick_max;
         if (kick < -kick_max) kick = -kick_max;
@@ -466,7 +518,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     // Deliberately NOT the bare ceiling -- at a demand that sits ON vmax, a
     // tracking correction has to be allowed above it or the residual can never
     // close (measured: 25 ms of added lag on the ceiling-limited run).
-    const float v_cap = _in_v + _in_a * dt_s;
+    const float v_cap = inputVmaxMm() + inputAmaxMm() * dt_s;
     if (v >  v_cap) v =  v_cap;
     if (v < -v_cap) v = -v_cap;
 
@@ -606,10 +658,9 @@ void motionNoteStream(uint32_t b, uint32_t s, uint32_t d) { g_arb.noteStream(b, 
 float motionForceHome(float stroke_mm) { return g_arb.forceHome(stroke_mm); }
 MotionCensus motionCensus() { return g_arb.census(); }
 
-// The engine's defaults ARE its live values: nothing on this board writes the
-// tuning (bd val-091.11), so a default-constructed Config is exactly what the
-// engine holds and reading it needs no cross-task access.
-MotionTuning motionTuning() {
+void motionSetTuning(const MotionTuning& t) { g_arb.setTuning(t); }
+
+MotionTuning motionDefaultTuning() {
     const kinetic::Config cfg{};
     MotionTuning t;
     t.chase_ff         = cfg.chase_feedforward;
@@ -628,6 +679,7 @@ MotionTuning motionTuning() {
     t.amplitude_budget = cfg.infeasible_amplitude_budget;
     t.blend_steps      = cfg.infeasible_blend_steps;
     t.settle_grace_us  = cfg.settle_grace_us;
+    t.overshoot_guard  = cfg.overshoot_guard;
     return t;
 }
 

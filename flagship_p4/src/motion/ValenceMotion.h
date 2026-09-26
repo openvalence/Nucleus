@@ -123,10 +123,17 @@ struct MotionCensus {
     float    peak_mm_s      = 0.0f;
 };
 
-// The engine's live tuning, for the 0x1120/0x1121/0x1122 cards. Every value is
-// what the engine actually holds. NOTHING on this board writes them, which is
-// why those cards publish an all-zero enabled_mask (bd val-091.11).
+// The engine's tuning as the 0x1030 / 0x1120-0x1122 cards speak it. The hub
+// delegate OWNS the live set (seeded from motionDefaultTuning(), written by
+// 0x3030 / 0x3120) and hands every change to motionSetTuning(); the engine
+// only ever holds what the delegate last pushed.
 struct MotionTuning {
+    // Input-set ceiling overrides, NORMALIZED window units. 0 = derive the
+    // ceiling from the mm input limits. jmax applies to both sets, because the
+    // user set has no jerk of its own; vmax and amax to the input set only.
+    float    jmax_ovr          = 0.0f;
+    float    vmax_ovr          = 0.0f;
+    float    amax_ovr          = 0.0f;
     bool     chase_ff          = false;
     bool     chase_accel_ff    = false;
     float    chase_gain        = 0.0f;
@@ -140,6 +147,11 @@ struct MotionTuning {
     float    amplitude_budget  = 0.0f;
     uint8_t  blend_steps       = 0;
     uint32_t settle_grace_us   = 0;
+    // 0x1030 overshoot_clamp. kinetic's overshoot_guard, 0 = disarmed; "on" is
+    // the engine's own factory multiplier, never a value this side invents.
+    float    overshoot_guard   = 0.0f;
+
+    bool operator==(const MotionTuning&) const = default;
 };
 
 // The motion task's stack, in bytes, and the ONE home for that number (C-1):
@@ -188,6 +200,15 @@ void motionNoteStream(uint32_t bundles, uint32_t samples, uint32_t dropped);
 float motionForceHome(float stroke_mm);
 
 MotionCensus motionCensus();
-MotionTuning motionTuning();
+
+// The engine's factory tuning, read from a default-constructed kinetic Config.
+// Pure: touches no engine and no task, so any task may call it.
+MotionTuning motionDefaultTuning();
+
+// Hands a whole tuning set to the motion task, which applies it before it
+// plans the next intent. Any task; never blocks (a newer set overwrites an
+// unapplied older one, which is the only one that matters). Values arrive
+// already clamped to the catalog bounds, which mirror the engine's own clamps.
+void motionSetTuning(const MotionTuning& t);
 
 }  // namespace valence

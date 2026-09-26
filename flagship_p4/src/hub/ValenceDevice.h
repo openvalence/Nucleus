@@ -27,6 +27,7 @@
 #include <span>
 
 #include "ValenceCatalog.h"
+#include "motion/ValenceMotion.h"
 #include "valence/hub/hub.hpp"
 
 namespace valence {
@@ -130,6 +131,9 @@ public:
 private:
     Result<IntentValueMap, NackCode> applyMove(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applyHome(const IntentValueMap& requested);
+    Result<IntentValueMap, NackCode> applyModes(const IntentValueMap& requested, bool& cfgChanged);
+    Result<IntentValueMap, NackCode> applyTuning(const IntentValueMap& requested, bool& cfgChanged);
+    void noteTuning(const MotionTuning& next, bool& cfgChanged);
 
     void publishHubStatus();
     void publishMachineConfig();
@@ -140,6 +144,13 @@ private:
 
     StoredConfig _cfg{};
     bool _cfgDirty = false;
+    // The live tuning set behind 0x1030 and 0x1120-0x1122, seeded from the
+    // engine's factory set at attach(). This copy IS the setting; the engine
+    // holds whatever tick() last pushed from it.
+    MotionTuning _tune{};
+    // Which of those four cards an applied write changed, bit per card
+    // (ValenceDevice.cpp, kCard*). tick() pushes and republishes, then clears.
+    uint8_t _tuneDirty = 0;
     StoredConfig _lastPublishedCfg{};
     bool _cfgEverSent = false;
     // force_home cleared the arbiter's latch; the hub's own ESTOP bit drops in

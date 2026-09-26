@@ -102,6 +102,50 @@ uint64_t fieldU64(const IntentValueField* f, uint64_t dflt) {
     }
 }
 
+// A numeric intent value as a float, or nullopt for a non-numeric or
+// non-finite one. clampf() passes NaN straight through, so a clamp is only as
+// good as this check in front of it.
+std::optional<float> numberOf(const IntentValueField* f) {
+    if (!f) return std::nullopt;
+    float v = 0.0f;
+    switch (f->value.kind) {
+        case IntentValue::Kind::F32: v = f->value.f32_val; break;
+        case IntentValue::Kind::U64: v = float(f->value.u64_val); break;
+        case IntentValue::Kind::I64: v = float(f->value.i64_val); break;
+        default: return std::nullopt;
+    }
+    if (!std::isfinite(v)) return std::nullopt;
+    return v;
+}
+
+// A uint schema field: clamped, then rounded to the nearest whole value.
+uint32_t wholeIn(float v, float lo, float hi) { return uint32_t(clampf(v, lo, hi) + 0.5f); }
+
+// The four tuning cards, one bit each in ValenceDevice::_tuneDirty.
+constexpr uint8_t kCardModes    = 0x01;  // 0x1030
+constexpr uint8_t kCardLimits   = 0x02;  // 0x1120
+constexpr uint8_t kCardChase    = 0x04;  // 0x1121
+constexpr uint8_t kCardWaveform = 0x08;  // 0x1122
+
+// Which cards differ between two tuning sets. Field-to-card membership is the
+// catalog's (ValenceCatalog.h, the kinetic-* and machine-modes entries).
+uint8_t cardsChanged(const MotionTuning& a, const MotionTuning& b) {
+    uint8_t m = 0;
+    if ((a.overshoot_guard > 0.0f) != (b.overshoot_guard > 0.0f)) m |= kCardModes;
+    if (a.jmax_ovr != b.jmax_ovr || a.vmax_ovr != b.vmax_ovr || a.amax_ovr != b.amax_ovr)
+        m |= kCardLimits;
+    if (a.chase_ff != b.chase_ff || a.chase_accel_ff != b.chase_accel_ff ||
+        a.chase_gain != b.chase_gain || a.chase_lookahead != b.chase_lookahead ||
+        a.chase_dense_us != b.chase_dense_us || a.chase_aim_extrap != b.chase_aim_extrap ||
+        a.handoff_k != b.handoff_k)
+        m |= kCardChase;
+    if (a.curve_policy != b.curve_policy || a.infeasible_policy != b.infeasible_policy ||
+        a.smooth_budget != b.smooth_budget || a.amplitude_budget != b.amplitude_budget ||
+        a.blend_steps != b.blend_steps || a.settle_grace_us != b.settle_grace_us)
+        m |= kCardWaveform;
+    return m;
+}
+
 // A layout whose hand-count disagrees with its buffer is a SILENT FIELD SHIFT:
 // the writers stop when the buffer runs out and the tail goes out as zeros,
 // which renders as plausible numbers in the wrong columns. This is the check
@@ -210,39 +254,36 @@ void publishOdometer(Hub& hub, const MotionCensus& m) {
     publishPacked(hub, ch::odometer, buf, n);
 }
 
-// Published ONCE at attach(): nothing on this board changes any of it, and
-// 0x3030 NACKs every write, so a republish would carry no news.
-void publishMachineModes(Hub& hub) {
+// Layout per ValenceCatalog.h's machine-modes entry: 5 B, plus home_style
+// only where has_drive put it in the catalog.
+void publishMachineModes(Hub& hub, const MotionTuning& t) {
     std::array<std::byte, 6> buf{};
+    const size_t len = boardFeatures().has_drive ? 6 : 5;
     size_t n = 0;
     packU8(buf, n, 0);   // blend_mode_reserved
     packU8(buf, n, 0);   // stream_speed_reserved
-    packU8(buf, n, 0);   // overshoot_clamp: inert, off
-    // enabled_mask 0: the machine accepts NONE of these. overshoot_clamp is
-    // inert, the backend is fixed by what is soldered, and home_style picks
-    // between two homing cycles neither of which exists here.
-    packU8(buf, n, 0);
-    packU8(buf, n, 2);   // motion_backend: quadrature, the LP-core emitter
-    packU8(buf, n, 0);   // home_style: reported only because the field exists; mask is low
-    publishPacked(hub, ch::machine_modes, buf, n);
+    packU8(buf, n, t.overshoot_guard > 0.0f ? 1 : 0);   // overshoot_clamp
+    // enabled_mask: bit 0 overshoot_clamp, accepted at all times. Bit 1
+    // (home_style, has_drive only) stays low: nothing here runs a homing cycle.
+    packU8(buf, n, 0x01);
+    packU8(buf, n, 2);   // motion_backend, read-only: quadrature, the LP-core emitter
+    if (len == 6) packU8(buf, n, 0);   // home_style
+    publishPacked(hub, ch::machine_modes, std::span<const std::byte>(buf).first(len), n);
 }
 
-// The three kinetic cards. Read-only on this board (0x3120 NACKs), so their
-// enabled_mask is 0 and they publish once at attach().
-void publishKineticCards(Hub& hub) {
-    const MotionTuning t = motionTuning();
-    {
+// The three kinetic cards, each only when `cards` names it. Every setting on
+// them is applied (0x3120), so every enabled_mask bit is high.
+void publishKineticCards(Hub& hub, const MotionTuning& t, uint8_t cards) {
+    if (cards & kCardLimits) {
         std::array<std::byte, 13> buf{};
         size_t n = 0;
-        // The overrides are genuinely 0: this arbiter derives every ceiling
-        // from the mm limit set, which is exactly what "0" means on this card.
-        packF32(buf, n, 0.0f);   // jmax_ovr
-        packF32(buf, n, 0.0f);   // vmax_ovr
-        packF32(buf, n, 0.0f);   // amax_ovr
-        packU8(buf, n, 0);       // enabled_mask
+        packF32(buf, n, t.jmax_ovr);
+        packF32(buf, n, t.vmax_ovr);
+        packF32(buf, n, t.amax_ovr);
+        packU8(buf, n, 0x07);    // enabled_mask
         publishPacked(hub, ch::kinetic_limits, buf, n);
     }
-    {
+    if (cards & kCardChase) {
         std::array<std::byte, 20> buf{};
         size_t n = 0;
         packU8(buf, n, t.chase_ff ? 1 : 0);
@@ -252,10 +293,10 @@ void publishKineticCards(Hub& hub) {
         packU32(buf, n, t.chase_dense_us);     // scale 1000, unit ms: the wire carries us
         packU8(buf, n, t.chase_aim_extrap ? 1 : 0);
         packF32(buf, n, t.handoff_k);
-        packU8(buf, n, 0);                     // enabled_mask
+        packU8(buf, n, 0x7F);                  // enabled_mask
         publishPacked(hub, ch::kinetic_chase, buf, n);
     }
-    {
+    if (cards & kCardWaveform) {
         std::array<std::byte, 16> buf{};
         size_t n = 0;
         packU8(buf, n, t.curve_policy);
@@ -264,7 +305,7 @@ void publishKineticCards(Hub& hub) {
         packF32(buf, n, t.amplitude_budget);
         packU8(buf, n, t.blend_steps);
         packU32(buf, n, t.settle_grace_us);    // scale 1000, unit ms: the wire carries us
-        packU8(buf, n, 0);                     // enabled_mask
+        packU8(buf, n, 0x3F);                  // enabled_mask
         publishPacked(hub, ch::kinetic_waveform, buf, n);
     }
 }
@@ -291,17 +332,8 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     (void)role;
     if (channel_id == ch::move) return applyMove(requested);
     if (channel_id == ch::home) return applyHome(requested);
-    if (channel_id == ch::modes_set || channel_id == ch::kinetic_set) {
-        // HONEST OR ABSENT. Both writers are advertised because their
-        // read-side cards are real, but nothing on this board applies
-        // either: the modes name a drive backend and a homing style that
-        // do not exist, and the kinetic tuning is not wired to a live
-        // setter. Their cards therefore publish an all-zero enabled_mask
-        // and their writes NACK, which is one statement, not two. An echo
-        // of a value the machine did not take is the ground-truth defect
-        // this refusal exists to avoid (bd val-091.11).
-        return Ret::err(NackCode::UNSUPPORTED_OP);
-    }
+    if (channel_id == ch::modes_set) return applyModes(requested, cfgChanged);
+    if (channel_id == ch::kinetic_set) return applyTuning(requested, cfgChanged);
     if (channel_id != ch::config_set) {
         // Every op on 0x0005 the hub does not handle itself (stop / hold /
         // pause / resume / override / bypass). The library's contract is
@@ -354,6 +386,89 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     if (f7) applied.fields[n++] = {7, IntentValue::ofF32(_cfg.input_jerk)};
     if (f8) applied.fields[n++] = {8, IntentValue::ofF32(_cfg.max_rail)};
     applied.count = n;
+    return Ret::ok(applied);
+}
+
+// ---- 0x3030 modes / 0x3120 kinetic tuning -----------------------------------
+// Both write ONE MotionTuning, the device's own copy. The ECHO carries the
+// post-clamp value that copy now holds, and tick() hands the copy to the
+// motion task before the next hub tick ends, so the engine plans its next
+// intent under it. A key outside the channel's schema is not applied and is
+// absent from the ECHO (§9.3); a write that applies no key at all NACKs
+// INVALID_VALUE, as does a non-numeric or non-finite value anywhere in it.
+// Not persisted yet: TODO(val-091.11.2).
+
+void ValenceDevice::noteTuning(const MotionTuning& next, bool& cfgChanged) {
+    const uint8_t cards = cardsChanged(_tune, next);
+    cfgChanged = cards != 0;
+    _tuneDirty |= cards;
+    _tune = next;
+}
+
+Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged) {
+    const auto* f4 = findField(requested, 4);   // overshoot_clamp
+    if (!f4) return Ret::err(NackCode::INVALID_VALUE);
+    const std::optional<float> v = numberOf(f4);
+    if (!v) return Ret::err(NackCode::INVALID_VALUE);
+
+    // "on" is the engine's own factory multiplier, never a number chosen here.
+    const float factoryGuard = motionDefaultTuning().overshoot_guard;
+    MotionTuning next = _tune;
+    const bool on = wholeIn(*v, 0.0f, 1.0f) != 0;
+    next.overshoot_guard = on ? (factoryGuard > 0.0f ? factoryGuard : 1.0f) : 0.0f;
+    noteTuning(next, cfgChanged);
+
+    IntentValueMap applied{};
+    applied.count = 1;
+    applied.fields[0] = {4, IntentValue::ofU64(on ? 1 : 0)};
+    return Ret::ok(applied);
+}
+
+Ret ValenceDevice::applyTuning(const IntentValueMap& requested, bool& cfgChanged) {
+    // The schema's keys in wire order; 4, 5, 15 and 19 are released.
+    static constexpr std::array<uint8_t, 16> kKeys{1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 20};
+
+    MotionTuning t = _tune;
+    IntentValueMap applied{};
+    uint32_t n = 0;
+    for (const uint8_t key : kKeys) {
+        const auto* f = findField(requested, key);
+        if (!f) continue;
+        const std::optional<float> v = numberOf(f);
+        if (!v) return Ret::err(NackCode::INVALID_VALUE);
+        // n cannot overrun: requested carries at most kIntentMaxValueFields
+        // fields, and each key here consumes one of them at most once.
+        IntentValue out;
+        switch (key) {
+            case 1:  t.jmax_ovr = clampf(*v, 0.0f, 2000000.0f); out = IntentValue::ofF32(t.jmax_ovr); break;
+            case 2:  t.vmax_ovr = clampf(*v, 0.0f, 20.0f);      out = IntentValue::ofF32(t.vmax_ovr); break;
+            case 3:  t.amax_ovr = clampf(*v, 0.0f, 500.0f);     out = IntentValue::ofF32(t.amax_ovr); break;
+            case 6:  t.chase_ff = wholeIn(*v, 0.0f, 1.0f) != 0;         out = IntentValue::ofU64(t.chase_ff); break;
+            case 7:  t.chase_accel_ff = wholeIn(*v, 0.0f, 1.0f) != 0;   out = IntentValue::ofU64(t.chase_accel_ff); break;
+            case 8:  t.chase_gain = clampf(*v, 0.0f, 1.5f);      out = IntentValue::ofF32(t.chase_gain); break;
+            case 9:  t.chase_lookahead = clampf(*v, 0.0f, 8.0f); out = IntentValue::ofF32(t.chase_lookahead); break;
+            case 10:  // ms on the wire, us in the engine
+                t.chase_dense_us = uint32_t(clampf(*v, 10.0f, 500.0f) * 1000.0f + 0.5f);
+                out = IntentValue::ofF32(float(t.chase_dense_us) / 1000.0f);
+                break;
+            case 11: t.chase_aim_extrap = wholeIn(*v, 0.0f, 1.0f) != 0; out = IntentValue::ofU64(t.chase_aim_extrap); break;
+            case 12: t.handoff_k = clampf(*v, 0.0f, 8.0f);       out = IntentValue::ofF32(t.handoff_k); break;
+            case 13: t.curve_policy = uint8_t(wholeIn(*v, 0.0f, 2.0f));      out = IntentValue::ofU64(t.curve_policy); break;
+            case 14: t.infeasible_policy = uint8_t(wholeIn(*v, 0.0f, 1.0f)); out = IntentValue::ofU64(t.infeasible_policy); break;
+            case 16: t.smooth_budget = clampf(*v, 0.0f, 1.0f);    out = IntentValue::ofF32(t.smooth_budget); break;
+            case 17: t.amplitude_budget = clampf(*v, 0.0f, 1.0f); out = IntentValue::ofF32(t.amplitude_budget); break;
+            case 18: t.blend_steps = uint8_t(wholeIn(*v, 1.0f, 10.0f));      out = IntentValue::ofU64(t.blend_steps); break;
+            case 20:  // ms on the wire, us in the engine
+                t.settle_grace_us = uint32_t(clampf(*v, 0.0f, 200.0f) * 1000.0f + 0.5f);
+                out = IntentValue::ofF32(float(t.settle_grace_us) / 1000.0f);
+                break;
+            default: continue;
+        }
+        applied.fields[n++] = {key, out};
+    }
+    if (n == 0) return Ret::err(NackCode::INVALID_VALUE);
+    applied.count = n;
+    noteTuning(t, cfgChanged);
     return Ret::ok(applied);
 }
 
@@ -596,8 +711,11 @@ void ValenceDevice::attach(Hub& hub) {
     publishControlOwner(hub);
     publishMachineConfig();
     publishHubStatus();
-    publishMachineModes(hub);
-    publishKineticCards(hub);
+    // The engine already holds its factory tuning, so seeding the copy needs
+    // no push; the first applied write is the first push.
+    _tune = motionDefaultTuning();
+    publishMachineModes(hub, _tune);
+    publishKineticCards(hub, _tune, kCardLimits | kCardChase | kCardWaveform);
     const MotionCensus mo = motionCensus();
     publishMotion(hub, mo);
     publishPlanStrip(hub, mo);
@@ -634,6 +752,13 @@ bool ValenceDevice::tick(uint32_t nowMs) {
         _lastSlowMs = nowMs;
         publishMotionDiag(*_hub, mo);
         publishOdometer(*_hub, mo);
+    }
+
+    if (_tuneDirty != 0) {
+        motionSetTuning(_tune);
+        if (_tuneDirty & kCardModes) publishMachineModes(*_hub, _tune);
+        publishKineticCards(*_hub, _tune, _tuneDirty);
+        _tuneDirty = 0;
     }
 
     const bool dirty = _cfgDirty;

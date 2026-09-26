@@ -225,7 +225,9 @@ inline constexpr float max_rail    = 500.0f;      // DEFAULT_MAX_RAIL_MM
 // `blend_mode` and `stream_speed_mode` have no `.dflt` here: the settings they
 // defaulted were retired from 0x008A (see the field comments there). Do not
 // re-add either without re-adding the field's setting_key first.
-inline constexpr uint8_t overshoot_clamp   = 0;   // SystemState::interp_clamp_overshoot = false
+// kinetic::Config::overshoot_guard defaults ARMED (1.0), so the toggle that
+// drives it defaults on.
+inline constexpr uint8_t overshoot_clamp   = 1;
 }  // namespace factory
 
 // ---- Hard firmware ceilings advertised as `min`/`max` -----------------------
@@ -1123,7 +1125,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "machine-modes" — STATE, elevated, on-change -----------------------
-    // One MODE setting left: overshoot_clamp. blend_mode_reserved and
+    // One live MODE setting: overshoot_clamp, which arms kinetic's overshoot
+    // guard. motion_backend is READ-ONLY (no setting_key): this board has one
+    // backend, soldered, and a select it could not honor would be a control
+    // that drives nothing. home_style exists only with has_drive, because
+    // both homing cycles it picks between need a drive. blend_mode_reserved and
     // stream_speed_reserved are retired bytes (see below), and
     // `transport` (WS_OP_MODE) is a PERMANENT GAP at INTENT key 2 — see
     // ch::modes_set's note.
@@ -1150,10 +1156,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // category rather than more fields on 0x0081 (see ch::machine_modes for
     // the enabled_mask arithmetic that makes the split structural).
     //
-    // Layout [1+1+1+1 = 4 B], all u8 — small enough that the on-change
-    // cadence costs nothing, and every live value is an enum the catalog
-    // names, so a generic client renders two dropdowns without knowing this
-    // device exists.
+    // Layout [5 B, 6 B with has_drive], all u8 — small enough that the
+    // on-change cadence costs nothing, and every value is an enum the catalog
+    // names, so a generic client renders it without knowing this device
+    // exists. ValenceDevice.cpp's publishMachineModes() packs the same bytes.
     auto addMachineModes = [&]() {
     c.addEntry({.id = ch::machine_modes, .name = "machine-modes",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1175,11 +1181,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "stream_speed_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .desc = "Retired. Unused padding now, the speed feed it selected between "
                               "is gone. A streamed point takes the speed its plan derives."});
-    // rank = hidden. INERT: `interp_clamp_overshoot` is consumed by nothing
-    // on the live engine; this is the released-but-inert-field case
-    // ui_ranks::hidden exists for (RENDERING.md §4), overriding the
-    // `advanced` setting_flag rather than stacking with it — hidden is the
-    // stronger, terminal statement.
+    // Live: applied to the engine before its next plan (ValenceDevice.cpp).
     c.addSelectField({.name = "overshoot_clamp", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(factory::overshoot_clamp),
                       .group = "Motion behavior",
@@ -1187,40 +1189,41 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                               "Costs a little smoothness to remove overshoot micromotion.",
                       .settingKey = 4, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true,
-                      .hasRank = true, .rank = valence::ui_ranks::hidden},
+                      .hasRank = true, .rank = valence::ui_ranks::advanced},
                      {"off", "on"});
     // Bit i gates the i-th setting-annotated field, same rule as 0x0081.
-    // Neither reserved byte carries a setting_key, so overshoot_clamp,
-    // motion_backend and home_style (the last two appended after this mask
-    // byte, packed layouts being append-only) are bits 0, 1 and 2.
-    c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
-                        .scale = 1.0f,
-                        .desc = "Which of these the machine will accept right now.",
-                        .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = valence::ui_ranks::detail},
-                       {"overshoot_clamp", "motion_backend", "home_style"});
-    // Which path actually drives the motor. restart_required is the whole
-    // contract: the backend is bound once at boot before anything touches the
-    // motor reference, so a live switch is not expressible. Applying it stores
-    // the choice and changes nothing until the next boot.
+    // Neither reserved byte nor motion_backend carries a setting_key, so
+    // overshoot_clamp is bit 0 and home_style, where it exists, bit 1.
+    if (feat.has_drive) {
+        c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                            .scale = 1.0f,
+                            .desc = "Which of these the machine will accept right now.",
+                            .role = roles::meta_enabled_mask,
+                            .hasRank = true, .rank = valence::ui_ranks::detail},
+                           {"overshoot_clamp", "home_style"});
+    } else {
+        c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                            .scale = 1.0f,
+                            .desc = "Which of these the machine will accept right now.",
+                            .role = roles::meta_enabled_mask,
+                            .hasRank = true, .rank = valence::ui_ranks::detail},
+                           {"overshoot_clamp"});
+    }
+    // Which path actually drives the motor. READ-ONLY: the backend is what is
+    // soldered, so there is no choice for a setting to make.
     // "quadrature" is ordinal 2, APPENDED rather than substituted: a select's
     // wire value is its index, so re-pointing 0 or 1 would silently re-label a
     // value another machine in this ecosystem already publishes.
     c.addSelectField({.name = "motion_backend", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(0),
                       .group = "Motion behavior",
-                      // 128 bytes exactly, which is limits::desc_max_bytes.
                       .desc = "Which path drives the motor: step/dir pulses, RS485 setpoints, "
-                              "or a quadrature the drive follows. Takes effect at the next boot.",
-                      .settingKey = 5,
-                      .flags = uint8_t(valence::setting_flags::advanced |
-                                       valence::setting_flags::restart_required),
-                      .hasSettingKey = true,
+                              "or a quadrature the drive follows.",
+                      .flags = valence::setting_flags::advanced,
                       .hasRank = true, .rank = valence::ui_ranks::advanced},
                      {"step-dir", "modbus", "quadrature"});
-    // Live-applied, no restart: read fresh at the start of every homing cycle.
-    // Only the Modbus backend honors it; step/dir mode always runs its own
-    // current-stall sweep.
+    // APPENDED LAST so its absence shifts no offset. Needs a drive: one cycle
+    // feels for the hard stops through it, the other hands it the whole job.
+    if (!feat.has_drive) return;
     c.addSelectField({.name = "home_style", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Motion behavior",
@@ -1247,9 +1250,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // may name the same INTENT channel provided their keys never collide.
     // Keys are allocated 1..20 across the three cards and are never reused.
     //
-    // PERSISTED to NVS: these are real settings and survive a reboot. That is
-    // also why they carry `default` annotations — a generic client needs to
-    // offer "reset to factory" for a value that sticks.
+    // Applied live, NOT yet persisted: a reboot returns the engine's factory
+    // tuning, which the `default` annotations mirror (kinetic::Config).
+    // TODO(val-091.11.2): persist the tuning set and 0x1030 in NVS.
     auto addKineticLimits = [&]() {
     c.addEntry({.id = ch::kinetic_limits, .name = "kinetic-limits",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1290,8 +1293,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // per-path split, NOT a legacy one: neither path is deprecated and the
     // plugin ships both.
     //
-    // All of them are wired — every one reaches the engine config on the
-    // per-tick push — so the mask reports them ENABLED, which is the truth. A
+    // All of them are wired — every applied write reaches the engine config
+    // before its next plan — so the mask reports them ENABLED, the truth. A
     // knob that is accepted but whose path is not currently active is a
     // different statement from a knob the machine refuses, and graying it would
     // be exactly the lie enabled_mask exists to prevent.
@@ -1323,7 +1326,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "chase_lookahead", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f,
-                      .dflt = SettingDefault::ofFloat(3.0f), .group = "Sample streams",
+                      .dflt = SettingDefault::ofFloat(1.3f), .group = "Sample streams",
                       .desc = "How far ahead to aim, in stream intervals. Too far overshoots at turns.",
                       .step = 0.5f, .settingKey = 9, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
@@ -1376,7 +1379,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // (include/motion/EngineConfigMap.h), which is also what runs the four
     // ordinals of policies deleted 2026-09-02 as blend.
     c.addSelectField({.name = "infeasible_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(0), .group = "Infeasible moves",
+                      .dflt = SettingDefault::ofInt(1), .group = "Infeasible moves",
                       .desc = "What to do when a move cannot be finished in the time it was given.",
                       .settingKey = 14, .hasSettingKey = true},
                      {"stretch", "blend"});
@@ -1845,10 +1848,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // The write half of 0x008A. Every key optional; present keys applied,
     // and the ECHO carries the POST-CLAMP value the handler actually took.
     //
-    // NOT cfg_gen-bumping and NOT persisted here — each op routes to the same
-    // WebUI::handleCommand path the legacy plane used, which owns whatever
-    // persistence each mode has. Routing them anywhere else would give
-    // Valence a second, divergent idea of what "blend mode" means.
+    // cfg_gen bumps on a real change (SPEC §4.2); not persisted yet
+    // (TODO(val-091.11.2)).
     //
     // 5 Hz because these are human dropdown changes, not a control loop. The
     // bounds are the enum ranges the catalog's own option arrays declare, so a
@@ -1878,16 +1879,18 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // SlopSyncHubService.cpp no longer recognizes it, so a client that still
     // sends it gets NACK(INVALID_VALUE).
     //
-    // All three numbers are skipped rather than recycled. This channel never
-    // left the branch so reuse would technically be safe, but "released keys
-    // are never reused" is only a reliable habit if it does not get
-    // relitigated per case, and a gap costs nothing.
+    // KEY 5 IS RELEASED on this board: motion_backend is read-only here (see
+    // 0x1030), so there is nothing for it to write.
+    //
+    // Every number is skipped rather than recycled. "Released keys are never
+    // reused" is only a reliable habit if it does not get relitigated per
+    // case, and a gap costs nothing.
     c.addSchemaField({.key = 4, .name = "overshoot_clamp", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
-    c.addSchemaField({.key = 5, .name = "motion_backend", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2.0f});
-    c.addSchemaField({.key = 6, .name = "home_style", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
+    if (feat.has_drive) {
+        c.addSchemaField({.key = 6, .name = "home_style", .type = CborFieldType::uint_t, .unit = "",
+                          .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
+    }
     };
 
     // ---- "kinetic-set" — INTENT, control, 5 Hz ---------------------------
