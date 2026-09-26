@@ -42,6 +42,10 @@ bool otaBegin();
 // loop, which owns the "hub up and addressable" judgment.
 void otaMarkAppValid();
 
+// True from the moment an update starts writing until the reboot that follows
+// it (or until it fails). Any task; the hub task holds its NVS writes on it.
+bool otaInFlight();
+
 // Boot-banner truth: the label of the partition actually running, and whether
 // it is still on trial.
 const char* otaRunningSlot();

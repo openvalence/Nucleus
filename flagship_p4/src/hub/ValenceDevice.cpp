@@ -12,7 +12,9 @@
 //   value, and a generic client sits at syncing forever. The hub seeds 0x0003
 //   safety, 0x000A pending-pairing and 0x000D roster itself.
 // - The persist debounce (kCfgPersistDebounceMs) is the wear bound on the P4's
-//   NVS page; the arithmetic lives on ValenceHub.cpp's file header.
+//   NVS pages; the arithmetic lives on ValenceHub.cpp's file header. What a
+//   blob holds is StoredState.h's and PatternPresetStore's; background_run is
+//   in neither, on purpose (bd val-wcm, pending ruling).
 // See: Valence SPEC.md §4.2, §6.3, §9.1, §9.3, §11.2, §11.4
 
 #include "ValenceDevice.h"
@@ -42,7 +44,11 @@ using Ret = Result<IntentValueMap, NackCode>;
 
 constexpr const char* kTag = "hub";
 
-// Quiet time after the last applied change before the persist is due.
+// Quiet time after the last applied change before a blob's persist is due,
+// the same for both blobs. It coalesces a burst (a slider drag streams
+// 0x3120 writes; a rename follows a save) into ONE flash write after the
+// operator lets go: a write per INTENT would put an NVS commit, and now and
+// then a sector erase, on the hub task at the intent rate.
 constexpr uint32_t kCfgPersistDebounceMs = 2000;
 
 // 0x2101 field 3's "no end velocity" sentinel. 0 is a legitimate slope, so it
@@ -392,8 +398,9 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     if (channel_id == ch::home) return applyHome(requested);
     if (channel_id == ch::modes_set) return applyModes(requested, cfgChanged);
     if (channel_id == ch::kinetic_set) return applyTuning(requested, cfgChanged);
-    // Session-volatile, all three: cfg_gen does not move (cfgChanged stays
-    // false). The presets' own change signal is the roster generation.
+    // None of the three moves cfg_gen (cfgChanged stays false). The presets
+    // persist, but on their own blob, and their change signal is the roster
+    // generation.
     if (channel_id == ch::pattern_cmd) return applyPattern(requested);
     if (channel_id == ch::pattern_advanced_cmd) return applyPatternAdvanced(requested);
     if (channel_id == ch::pattern_presets_cmd) return applyPresets(requested);
@@ -453,7 +460,8 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
 // intent under it. A key outside the channel's schema is not applied and is
 // absent from the ECHO (§9.3); a write that applies no key at all NACKs
 // INVALID_VALUE, as does a non-numeric or non-finite value anywhere in it.
-// Not persisted yet: TODO(val-091.11.2).
+// Clamp bounds are StoredState.h's tuning_bounds, the same ones a stored set
+// is validated against at boot; tick() persists a changed set with 0x1000.
 
 void ValenceDevice::noteTuning(const MotionTuning& next, bool& cfgChanged) {
     const uint8_t cards = cardsChanged(_tune, next);
@@ -468,11 +476,9 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
     const std::optional<float> v = numberOf(f4);
     if (!v) return Ret::err(NackCode::INVALID_VALUE);
 
-    // "on" is the engine's own factory multiplier, never a number chosen here.
-    const float factoryGuard = motionDefaultTuning().overshoot_guard;
     MotionTuning next = _tune;
     const bool on = wholeIn(*v, 0.0f, 1.0f) != 0;
-    next.overshoot_guard = on ? (factoryGuard > 0.0f ? factoryGuard : 1.0f) : 0.0f;
+    next.overshoot_guard = overshootGuardFor(on, motionDefaultTuning().overshoot_guard);
     noteTuning(next, cfgChanged);
 
     IntentValueMap applied{};
@@ -484,6 +490,7 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
 Ret ValenceDevice::applyTuning(const IntentValueMap& requested, bool& cfgChanged) {
     // The schema's keys in wire order; 4, 5, 15 and 19 are released.
     static constexpr std::array<uint8_t, 16> kKeys{1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 20};
+    namespace b = tuning_bounds;
 
     MotionTuning t = _tune;
     IntentValueMap applied{};
@@ -497,26 +504,27 @@ Ret ValenceDevice::applyTuning(const IntentValueMap& requested, bool& cfgChanged
         // fields, and each key here consumes one of them at most once.
         IntentValue out;
         switch (key) {
-            case 1:  t.jmax_ovr = clampf(*v, 0.0f, 2000000.0f); out = IntentValue::ofF32(t.jmax_ovr); break;
-            case 2:  t.vmax_ovr = clampf(*v, 0.0f, 20.0f);      out = IntentValue::ofF32(t.vmax_ovr); break;
-            case 3:  t.amax_ovr = clampf(*v, 0.0f, 500.0f);     out = IntentValue::ofF32(t.amax_ovr); break;
+            case 1:  t.jmax_ovr = clampf(*v, 0.0f, b::jmax_ovr_max);  out = IntentValue::ofF32(t.jmax_ovr); break;
+            case 2:  t.vmax_ovr = clampf(*v, 0.0f, b::vmax_ovr_max);  out = IntentValue::ofF32(t.vmax_ovr); break;
+            case 3:  t.amax_ovr = clampf(*v, 0.0f, b::amax_ovr_max);  out = IntentValue::ofF32(t.amax_ovr); break;
             case 6:  t.chase_ff = wholeIn(*v, 0.0f, 1.0f) != 0;         out = IntentValue::ofU64(t.chase_ff); break;
             case 7:  t.chase_accel_ff = wholeIn(*v, 0.0f, 1.0f) != 0;   out = IntentValue::ofU64(t.chase_accel_ff); break;
-            case 8:  t.chase_gain = clampf(*v, 0.0f, 1.5f);      out = IntentValue::ofF32(t.chase_gain); break;
-            case 9:  t.chase_lookahead = clampf(*v, 0.0f, 8.0f); out = IntentValue::ofF32(t.chase_lookahead); break;
+            case 8:  t.chase_gain = clampf(*v, 0.0f, b::chase_gain_max);     out = IntentValue::ofF32(t.chase_gain); break;
+            case 9:  t.chase_lookahead = clampf(*v, 0.0f, b::lookahead_max); out = IntentValue::ofF32(t.chase_lookahead); break;
             case 10:  // ms on the wire, us in the engine
-                t.chase_dense_us = uint32_t(clampf(*v, 10.0f, 500.0f) * 1000.0f + 0.5f);
+                t.chase_dense_us = uint32_t(clampf(*v, b::dense_ms_min, b::dense_ms_max) * 1000.0f + 0.5f);
                 out = IntentValue::ofF32(float(t.chase_dense_us) / 1000.0f);
                 break;
             case 11: t.chase_aim_extrap = wholeIn(*v, 0.0f, 1.0f) != 0; out = IntentValue::ofU64(t.chase_aim_extrap); break;
-            case 12: t.handoff_k = clampf(*v, 0.0f, 8.0f);       out = IntentValue::ofF32(t.handoff_k); break;
-            case 13: t.curve_policy = uint8_t(wholeIn(*v, 0.0f, 2.0f));      out = IntentValue::ofU64(t.curve_policy); break;
-            case 14: t.infeasible_policy = uint8_t(wholeIn(*v, 0.0f, 1.0f)); out = IntentValue::ofU64(t.infeasible_policy); break;
-            case 16: t.smooth_budget = clampf(*v, 0.0f, 1.0f);    out = IntentValue::ofF32(t.smooth_budget); break;
-            case 17: t.amplitude_budget = clampf(*v, 0.0f, 1.0f); out = IntentValue::ofF32(t.amplitude_budget); break;
-            case 18: t.blend_steps = uint8_t(wholeIn(*v, 1.0f, 10.0f));      out = IntentValue::ofU64(t.blend_steps); break;
+            case 12: t.handoff_k = clampf(*v, 0.0f, b::handoff_k_max);   out = IntentValue::ofF32(t.handoff_k); break;
+            case 13: t.curve_policy = uint8_t(wholeIn(*v, 0.0f, float(b::curve_policy_max)));    out = IntentValue::ofU64(t.curve_policy); break;
+            case 14: t.infeasible_policy = uint8_t(wholeIn(*v, 0.0f, float(b::infeasible_max))); out = IntentValue::ofU64(t.infeasible_policy); break;
+            case 16: t.smooth_budget = clampf(*v, 0.0f, b::budget_max);    out = IntentValue::ofF32(t.smooth_budget); break;
+            case 17: t.amplitude_budget = clampf(*v, 0.0f, b::budget_max); out = IntentValue::ofF32(t.amplitude_budget); break;
+            case 18: t.blend_steps = uint8_t(wholeIn(*v, float(b::blend_steps_min), float(b::blend_steps_max)));
+                     out = IntentValue::ofU64(t.blend_steps); break;
             case 20:  // ms on the wire, us in the engine
-                t.settle_grace_us = uint32_t(clampf(*v, 0.0f, 200.0f) * 1000.0f + 0.5f);
+                t.settle_grace_us = uint32_t(clampf(*v, 0.0f, b::settle_ms_max) * 1000.0f + 0.5f);
                 out = IntentValue::ofF32(float(t.settle_grace_us) / 1000.0f);
                 break;
             default: continue;
@@ -1077,14 +1085,33 @@ void ValenceDevice::pushConfigToMotion() const {
     motionSetInputLimits(_cfg.input_speed, _cfg.input_accel, _cfg.input_jerk);
 }
 
+// ---- persistence ----------------------------------------------------------------
+
+bool ValenceDevice::adoptConfigBlob(std::span<const std::byte> blob, uint16_t& cfgGen) {
+    StoredConfig c;
+    MotionTuning t;
+    if (!stored::decodeConfig(blob, motionDefaultTuning().overshoot_guard, c, t, cfgGen)) return false;
+    _cfg = c;
+    _cfgDirty = false;
+    // The engine adopts through the live write's own door, never a side path.
+    _tune = t;
+    motionSetTuning(_tune);
+    return true;
+}
+
+bool ValenceDevice::adoptPresetsBlob(std::span<const std::byte> blob) {
+    if (!_presets.decode(blob)) return false;
+    _presetsGenSeen = _presets.generation();
+    return true;
+}
+
 void ValenceDevice::attach(Hub& hub) {
     _hub = &hub;
     publishControlOwner(hub);
     publishMachineConfig();
     publishHubStatus();
-    // The engine already holds its factory tuning, so seeding the copy needs
-    // no push; the first applied write is the first push.
-    _tune = motionDefaultTuning();
+    // _tune is the factory set or the adopted one, and the engine already holds
+    // it either way (adoptConfigBlob pushed it), so nothing is pushed here.
     publishMachineModes(hub, _tune);
     publishKineticCards(hub, _tune, kCardLimits | kCardChase | kCardWaveform);
     const MotionCensus mo = motionCensus();
@@ -1098,7 +1125,7 @@ void ValenceDevice::attach(Hub& hub) {
     }
 }
 
-bool ValenceDevice::tick(uint32_t nowMs) {
+uint8_t ValenceDevice::tick(uint32_t nowMs) {
     // force_home dropped the arbiter's latch inside applyIntent; the hub's own
     // ESTOP bit drops HERE, one tick later, because clearEstop() publishes and
     // broadcasts and applyIntent runs inside the hub's intent dispatch.
@@ -1134,6 +1161,14 @@ bool ValenceDevice::tick(uint32_t nowMs) {
         if (_tuneDirty & kCardModes) publishMachineModes(*_hub, _tune);
         publishKineticCards(*_hub, _tune, _tuneDirty);
         _tuneDirty = 0;
+        // Same blob as 0x1000: the tuning write bumped cfg_gen too.
+        _persistArmed = true;
+        _persistDueMs = nowMs + kCfgPersistDebounceMs;
+    }
+    if (_presets.generation() != _presetsGenSeen) {
+        _presetsGenSeen = _presets.generation();
+        _presetsArmed = true;
+        _presetsDueMs = nowMs + kCfgPersistDebounceMs;
     }
 
     if (boardFeatures().has_pattern) {
@@ -1162,11 +1197,16 @@ bool ValenceDevice::tick(uint32_t nowMs) {
         publishHubStatus();
     }
 
+    uint8_t due = 0;
     if (_persistArmed && int32_t(nowMs - _persistDueMs) >= 0) {
         _persistArmed = false;
-        return true;
+        due |= kPersistConfig;
     }
-    return false;
+    if (_presetsArmed && int32_t(nowMs - _presetsDueMs) >= 0) {
+        _presetsArmed = false;
+        due |= kPersistPresets;
+    }
+    return due;
 }
 
 }  // namespace valence

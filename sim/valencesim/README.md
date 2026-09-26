@@ -19,10 +19,11 @@ with no device semantics.
 | Emitter and position truth | `src/SimMotion.cpp` | ideal: renders the arbiter's steering word exactly, so `late`, `resteers`, `catchups` and `stack_free` read 0 |
 | Pattern generator: seven classic patterns, the advanced lanes, the brake | `flagship_p4/src/patterns/PatternEngine.cpp`, compiled verbatim | real |
 | Pattern task plumbing | `src/SimPattern.cpp` | ticked every pass on the one hub thread instead of its own FreeRTOS task |
-| Pattern presets (0x5220) and `background_run` | `PatternPresetStore` inside the delegate | in memory, same as the board today (bd val-wcm) |
+| Pattern presets (0x5220) | `PatternPresetStore` inside the delegate | persisted: `PREFIX.presets` holds the board's NVS `presets` blob, same debounce |
+| `background_run` | the delegate's `PatternSettings` | in memory, same as the board: persisting it waits on an operator ruling (bd val-wcm) |
 | WebSocket port | `../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home | real host binding |
 | `/uitoken` | `src/SimUiToken.cpp` on IXWebSocket's HTTP server | same contract, random bytes instead of HMAC |
-| Config persistence | none | in memory for the life of the process |
+| Config and tuning persistence (0x1000, 0x1030, 0x1120-0x1122, cfg_gen) | `StoredState.h` codec, compiled verbatim | persisted: `PREFIX.cfg` holds the board's NVS `cfg` blob; a file stands in for NVS |
 | Push-to-pair gesture | `--pairing-window` opens the hub's presence window at boot | the board has no gesture yet |
 | Geiger log lines from device code | mute on host (Geiger has no host platform layer) | sim's own lines print |
 | Hub-status heap figure | reported as 0 | no meaningful host answer |
@@ -49,7 +50,7 @@ checkout must exist beside this repo (override with `-DVALENCE_ROOT=`).
 
 ```
 valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
-           [--pairing-window] [--enforce] [--headless] [--no-mdns]
+           [--pairing-window] [--enforce] [--state PREFIX] [--headless] [--no-mdns]
 ```
 
 | Flag | Effect |
@@ -60,6 +61,7 @@ valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
 | `--duration S` | exit after S seconds (0 = until Ctrl-C) |
 | `--pairing-window` | open the presence window at boot: first knock on a fresh ledger gets configure |
 | `--enforce` | an unvouched HELLO lands at `watch`, exactly as on the board |
+| `--state PREFIX` | where the persisted blobs live (`PREFIX.cfg`, `PREFIX.presets`); default `valencesim-state` beside the exe. Delete both for factory values |
 | `--headless`, `--no-mdns`, `machine` | accepted for command-line compatibility; there is no TUI and no mDNS |
 
 **The one deliberate difference from the board:** without `--enforce`, a HELLO

@@ -4,6 +4,7 @@
 
 #include "system/ValenceOta.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -45,8 +46,9 @@ valence::SoftwareCrypto s_cmp;
 bool g_bought = false;
 
 // There is exactly one update at a time (a second is refused), so a flag is
-// the whole of the state.
-bool g_inFlight = false;
+// the whole of the state. Written on the httpd task, read on the hub task
+// (otaInFlight), hence atomic; relaxed, because nothing is published under it.
+std::atomic<bool> g_inFlight{false};
 
 bool tokenOk(httpd_req_t* req) {
     char got[96] = {};
@@ -187,6 +189,8 @@ void otaMarkAppValid() {
     if (err == ESP_OK) GLOGW(kTag, "image bought: %s is now the boot slot", otaRunningSlot());
     else GLOGE(kTag, "mark_app_valid failed: %s", esp_err_to_name(err));
 }
+
+bool otaInFlight() { return g_inFlight.load(std::memory_order_relaxed); }
 
 const char* otaRunningSlot() {
     const esp_partition_t* p = esp_ota_get_running_partition();

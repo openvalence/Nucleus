@@ -7,25 +7,28 @@
 // - The delegate and every retained STATE publisher are ValenceDevice, which
 //   is hardware-free so the host twin (sim/valencesim) runs it verbatim. What
 //   stays here is what only the P4 has: NVS, PSRAM, esp_netif, the task.
-// - THE 0x1000 CONFIG AND ITS cfg_gen ARE PERSISTED IN NVS (namespace
-//   "valence", key "cfg"). The load happens BEFORE the first retained 0x1000
-//   push, so a subscriber's first snapshot is the stored truth and never a
-//   default that a later load overwrites. Adoption is a plain assignment into
-//   the device: it never becomes an intent, an ECHO or a cfg_gen bump.
-// - NVS WRITES RUN ON THE HUB TASK (T5: never in a transport callback) and are
-//   DEBOUNCED by ValenceDevice's kCfgPersistDebounceMs of quiet. Wear
-//   arithmetic: the blob is 40 B, which NVS stores as 3 of its 32 B entries; a
-//   4 KB NVS page holds 126 entries, so ~42 rewrites fill a page and cost one
-//   sector erase. At the debounce floor of one write per 2 s that is one erase
-//   per ~84 s, and the 100,000-cycle endurance floor is then ~97 days of
-//   config being changed without pause -- on ONE page, before NVS wear-levels
-//   across the others. A slider drag is one write, not one per frame.
+// - PERSISTED STATE IS TWO NVS BLOBS in namespace "valence", one per concern:
+//   "cfg" (StoredState.h: 0x1000, 0x1030 and 0x1120-0x1122 with cfg_gen, 86 B)
+//   and "presets" (PatternPresetStore: the 24 slots with their generation,
+//   1,735 B). The device owns what the bytes mean; this file owns only the
+//   byte IO. Both load BEFORE the first retained push, so a subscriber's first
+//   snapshot is the stored truth and never a default a later load overwrites.
+//   Adoption never becomes an intent, an ECHO or a cfg_gen bump.
+// - NVS WRITES RUN ON THE HUB TASK (T5: never in a transport callback), each
+//   DEBOUNCED by ValenceDevice's kCfgPersistDebounceMs of quiet, and are HELD
+//   while an OTA transfer is in flight (otaInFlight()). Wear arithmetic, 4 KB
+//   page = 126 entries of 32 B: "cfg" costs ~5 entries a write (blob index,
+//   data header, 3 data), so ~25 writes fill a page and cost one sector erase;
+//   at the 2 s floor that is one erase per ~50 s, and the 100,000-cycle floor
+//   is ~58 days of tuning without pause on ONE page, before NVS wear-levels
+//   across its five. "presets" costs ~57 entries, ~2 writes a page, but a save
+//   is a deliberate operator act, not a stream. A slider drag is one write.
 // See: Valence SPEC.md §4.2, §6.3, §9.1, §9.3; ValenceDevice.h
 
 #include "ValenceHub.h"
 
 #include <array>
-#include <cmath>
+#include <span>
 #include <optional>
 
 #include <esp_heap_caps.h>
@@ -46,6 +49,7 @@
 #include "ValenceUiToken.h"
 #include "ValenceWsPort.h"
 #include "system/ValenceHttp.h"
+#include "system/ValenceOta.h"
 #include "valence_config.h"
 
 namespace valence {
@@ -71,87 +75,58 @@ constexpr const char* kTag = "hub";
 // plain HTTP on 80 regardless (see ValenceUiToken.h).
 constexpr uint16_t kWsPort = 82;
 
-// ---- NVS persistence for 0x1000 and its cfg_gen ------------------------------
-// One blob, one write. cfg_gen rides WITH the values because §4.2 makes it a
-// property of the config content, not of the boot: a client's `precondition`
-// CAS compares against it, and a generation that restarted at 1 while the
-// values survived would let a stale CAS silently succeed.
+// ---- NVS persistence -----------------------------------------------------------
+// Byte IO only. What a blob holds, its version and its validation belong to
+// the device (StoredState.h, PatternPresetStore); this side never parses one.
 
-constexpr const char* kNvsNamespace = "valence";
-constexpr const char* kNvsCfgKey    = "cfg";
-constexpr uint32_t kCfgMagic   = 0x56434647u;  // "VCFG"
-constexpr uint16_t kCfgVersion = 1;            // bump when StoredConfig changes
-// Quiet time after the last applied change before the write lands. See the
-// wear arithmetic in the file header.
+constexpr const char* kNvsNamespace  = "valence";
+constexpr const char* kNvsCfgKey     = "cfg";
+constexpr const char* kNvsPresetsKey = "presets";
 
-struct CfgBlob {
-    uint32_t     magic;
-    uint16_t     version;
-    uint16_t     cfg_gen;
-    StoredConfig cfg;
-};
-static_assert(sizeof(CfgBlob) == 40, "CfgBlob layout moved: bump kCfgVersion");
+// The larger blob sizes the one scratch both share; they are never live at
+// the same time (boot loads, then hub-task writes, one after the other).
+constexpr size_t kBlobScratchBytes = PatternPresetStore::kBlobBytes;
+static_assert(stored::kConfigBlobBytes <= kBlobScratchBytes, "cfg blob outgrew the scratch");
 
-bool inRange(float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; }
-
-// An out-of-range blob is REJECTED WHOLE, never clamped into shape. Clamping
-// here would be a machine-originated config change, which §4.2 says must bump
-// cfg_gen -- at boot, against a generation we are in the middle of restoring.
-// Falling back to the factory defaults is the one answer that needs no bump.
-bool blobValid(const CfgBlob& b) {
-    const StoredConfig& c = b.cfg;
-    return b.magic == kCfgMagic && b.version == kCfgVersion && b.cfg_gen != 0
-        && inRange(c.window_min,  0.0f, ceiling::rail_mm)
-        && inRange(c.window_max,  0.0f, ceiling::rail_mm)
-        && c.window_min < c.window_max
-        && inRange(c.user_speed,  ceiling::speed_min, ceiling::speed_max)
-        && inRange(c.user_accel,  ceiling::accel_min, ceiling::accel_max)
-        && inRange(c.input_speed, ceiling::speed_min, ceiling::speed_max)
-        && inRange(c.input_accel, ceiling::accel_min, ceiling::accel_max)
-        && inRange(c.input_jerk,  ceiling::jerk_min,  ceiling::jerk_max)
-        && inRange(c.max_rail,    ceiling::rail_min,  ceiling::rail_mm);
-}
-
-// false leaves both outputs untouched, which means the factory defaults stand.
-bool loadStoredConfig(StoredConfig& cfg, uint16_t& gen) {
+// The stored bytes, or an empty span for absent, unreadable or larger than the
+// scratch. A wrong-size blob comes back as-is: rejecting it is the decoder's
+// job, and it does.
+std::span<const std::byte> loadBlob(const char* key, std::span<std::byte> scratch) {
     nvs_handle_t h;
-    if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return false;
-    CfgBlob b{};
-    size_t len = sizeof(b);
-    const esp_err_t err = nvs_get_blob(h, kNvsCfgKey, &b, &len);
+    if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return {};
+    size_t len = scratch.size();
+    const esp_err_t err = nvs_get_blob(h, key, scratch.data(), &len);
     nvs_close(h);
-    if (err != ESP_OK || len != sizeof(b)) return false;
-    if (!blobValid(b)) {
-        GLOGW(kTag, "stored config rejected (magic/version/range) -- factory defaults stand");
-        return false;
-    }
-    cfg = b.cfg;
-    gen = b.cfg_gen;
-    return true;
+    if (err != ESP_OK) return {};
+    return scratch.first(len);
 }
 
 // Hub task only (T5). nvs_commit() blocks on the flash write; the debounce is
-// (ValenceDevice's kCfgPersistDebounceMs) is what keeps that off the tick more
-// than once per debounce interval.
-void saveStoredConfig(const StoredConfig& cfg, uint16_t gen) {
-    nvs_handle_t h;
-    if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) {
-        GLOGW(kTag, "config persist: nvs_open failed");
+// what keeps that off the tick more than once per interval. `blob` may sit in
+// PSRAM: esp_flash_write bounces a non-DRAM source through a 32 B stack buffer
+// (esp_flash_api.c, direct_write), so the cache-off window never reads it.
+void saveBlob(const char* key, std::span<const std::byte> blob) {
+    if (blob.empty()) {
+        GLOGW(kTag, "persist %s: encode failed, nothing written", key);
         return;
     }
-    const CfgBlob b{kCfgMagic, kCfgVersion, gen, cfg};
+    nvs_handle_t h;
+    if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) {
+        GLOGW(kTag, "persist %s: nvs_open failed", key);
+        return;
+    }
     // The write is TIMED because it is a flash write on the hub task: this
     // number is what says whether the debounce is enough, and an unmeasured
     // blocking call on a 5 ms tick is exactly the assumption that has cost
     // this project family a session before (memory-budget.md T27).
     const int64_t t0 = esp_timer_get_time();
-    esp_err_t err = nvs_set_blob(h, kNvsCfgKey, &b, sizeof(b));
+    esp_err_t err = nvs_set_blob(h, key, blob.data(), blob.size());
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
     const uint32_t us = uint32_t(esp_timer_get_time() - t0);
-    if (err != ESP_OK) GLOGW(kTag, "config persist failed: %s", esp_err_to_name(err));
-    else GLOGI(kTag, "config persisted, cfg_gen=%u, %lu us on the hub task",
-               unsigned(gen), static_cast<unsigned long>(us));
+    if (err != ESP_OK) GLOGW(kTag, "persist %s failed: %s", key, esp_err_to_name(err));
+    else GLOGI(kTag, "persisted %s, %u B, %lu us on the hub task", key, unsigned(blob.size()),
+               static_cast<unsigned long>(us));
 }
 
 // ---- the PSRAM-resident box --------------------------------------------------
@@ -166,6 +141,8 @@ void saveStoredConfig(const StoredConfig& cfg, uint16_t gen) {
 // legal here. Do not move ISR-reachable state here by analogy.
 struct HubBox {
     valence::Catalog32 catalog{};
+    // Persist scratch. PSRAM is legal for it: see saveBlob().
+    std::array<std::byte, kBlobScratchBytes> blobScratch{};
     EspClock clock{};
     EspRandom rng{};
     ValenceDevice device{};
@@ -179,6 +156,20 @@ TaskHandle_t g_hubTask = nullptr;
 uint32_t g_ticks = 0;
 uint32_t g_lastEndpointMs = 0;
 uint32_t g_endpointIpv4 = 0;
+// kPersist* bits tick() reported due that no write has landed for yet. Hub
+// task only.
+uint8_t g_persistDue = 0;
+
+// Hub task only. cfg_gen is read HERE, at write time, by which point
+// Hub::update() has already applied this tick's bump (SPEC 4.2).
+void persistDue() {
+    std::span<std::byte> scratch(g_box->blobScratch);
+    if (g_persistDue & kPersistConfig)
+        saveBlob(kNvsCfgKey, scratch.first(g_box->device.encodeConfigBlob(scratch, g_box->hub->cfgGen())));
+    if (g_persistDue & kPersistPresets)
+        saveBlob(kNvsPresetsKey, scratch.first(g_box->device.encodePresetsBlob(scratch)));
+    g_persistDue = 0;
+}
 
 // WELCOME keys 46/47 (RFC-046): the hub's own reachable endpoint. 0/0 omits
 // both from the wire, so a client that connected before DHCP finished simply
@@ -247,9 +238,15 @@ void hubTask(void*) {
         g_box->hub->update(g_box->clock.nowUs());
 
         // The device half: deferred latch clear, the motion plane's STATE, the
-        // 0x1000 republish and the hub-status line. It says when the debounced
-        // config write is due; the write itself is NVS and so lives here.
-        if (g_box->device.tick(nowMs)) saveStoredConfig(g_box->device.config(), g_box->hub->cfgGen());
+        // 0x1000 republish and the hub-status line. It says which debounced
+        // writes are due; the writes themselves are NVS and so live here.
+        // HELD, never dropped, while an update is writing the other app slot:
+        // the motion gate is already down, and an NVS commit (now and then a
+        // sector erase) has no business interleaving with that transfer. A
+        // successful update reboots before the hold drains, so a change made
+        // DURING an update does not survive it; one made before it does.
+        g_persistDue |= g_box->device.tick(nowMs);
+        if (g_persistDue != 0 && !otaInFlight()) persistDue();
         if (uint32_t(nowMs - g_lastEndpointMs) >= 1000u) {
             g_lastEndpointMs = nowMs;
             refreshEndpoint();
@@ -317,13 +314,20 @@ bool hubBegin() {
     }
 
     // BEFORE the Hub exists, so the device is already holding stored truth
-    // when the retained 0x1000 push below seeds the channel. A load that ran
-    // after the first publish would make the first snapshot a lie any
-    // subscriber has already adopted.
-    StoredConfig stored{};
+    // when the retained pushes below seed the channels. A load that ran after
+    // the first publish would make the first snapshot a lie any subscriber has
+    // already adopted. A rejected blob is logged and the factory values stand.
+    std::span<std::byte> scratch(g_box->blobScratch);
     uint16_t storedGen = 0;
-    const bool haveStored = loadStoredConfig(stored, storedGen);
-    if (haveStored) g_box->device.adoptConfig(stored);
+    std::span<const std::byte> blob = loadBlob(kNvsCfgKey, scratch);
+    const bool haveStored = !blob.empty() && g_box->device.adoptConfigBlob(blob, storedGen);
+    if (!blob.empty() && !haveStored)
+        GLOGW(kTag, "stored config rejected (magic/version/size/range) -- factory values stand");
+    blob = loadBlob(kNvsPresetsKey, scratch);
+    if (!blob.empty()) {
+        if (g_box->device.adoptPresetsBlob(blob)) GLOGI(kTag, "pattern presets adopted from NVS");
+        else GLOGW(kTag, "stored presets rejected (magic/version/size/name) -- store starts empty");
+    }
 
     // The arbiter's window and ceilings ARE the stored config: pushed before
     // the hub exists so the first 0x1000 snapshot and the machine agree.

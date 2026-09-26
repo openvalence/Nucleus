@@ -1,0 +1,200 @@
+#pragma once
+
+// StoredState -- the config-generation state the hub keeps across a reboot
+// (0x1000 config, 0x1030 modes, 0x1120-0x1122 tuning, cfg_gen) and its blob
+// codec, hardware-free
+// Constraints:
+// - HARDWARE-FREE and header-only: the P4 composition (NVS), the host twin (a
+//   file) and the native suite all run this one codec.
+// - ONE BLOB PER CONCERN, opening [magic u32][version u8], decoded only at its
+//   exact length. Another version, a short or long read, a non-finite or
+//   out-of-range value: the blob is REJECTED WHOLE and the factory values
+//   stand. A layout change never misreads bytes, and nothing is clamped into
+//   shape at boot (a clamp is a config change, which §4.2 would make bump
+//   cfg_gen in the middle of restoring it).
+// - cfg_gen RIDES WITH EVERY VALUE IT COVERS. Both 0x3000 and the tuning
+//   writers bump it, so all of them share this one blob: one NVS write is
+//   atomic, and a generation can never land without its values or the reverse.
+// - Fields are copied one at a time in host byte order. The blob never leaves
+//   the device that wrote it, so no wire endianness applies, and struct padding
+//   never reaches storage.
+// - overshoot_clamp is stored as the wire's on/off, not the engine multiplier:
+//   "on" is whatever the running engine's factory multiplier is.
+// See: ValenceHub.cpp (NVS key and wear), ValenceDevice.h, bd val-091.11.2
+
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <span>
+
+#include "ValenceCatalog.h"
+#include "motion/ValenceMotion.h"
+
+namespace valence {
+
+// The 0x1000 snapshot and the 0x3000 writer both speak exactly these eight
+// values.
+struct StoredConfig {
+    float window_min  = factory::window_min;
+    float window_max  = factory::window_max;
+    float user_speed  = factory::user_speed;
+    float user_accel  = factory::user_accel;
+    float input_speed = factory::input_speed;
+    float input_accel = factory::input_accel;
+    float input_jerk  = factory::input_jerk;
+    float max_rail    = factory::max_rail;
+
+    bool operator==(const StoredConfig&) const = default;
+};
+
+// ---- tuning bounds ------------------------------------------------------------
+// What 0x3120 clamps to and what a stored set must sit inside. Mirrors the
+// catalog's kinetic-* min/max, which mirror the engine's own clamps.
+namespace tuning_bounds {
+inline constexpr float    jmax_ovr_max      = 2000000.0f;
+inline constexpr float    vmax_ovr_max      = 20.0f;
+inline constexpr float    amax_ovr_max      = 500.0f;
+inline constexpr float    chase_gain_max    = 1.5f;
+inline constexpr float    lookahead_max     = 8.0f;
+inline constexpr float    dense_ms_min      = 10.0f;
+inline constexpr float    dense_ms_max      = 500.0f;
+inline constexpr float    handoff_k_max     = 8.0f;
+inline constexpr uint8_t  curve_policy_max  = 2;
+inline constexpr uint8_t  infeasible_max    = 1;
+inline constexpr float    budget_max        = 1.0f;
+inline constexpr uint8_t  blend_steps_min   = 1;
+inline constexpr uint8_t  blend_steps_max   = 10;
+inline constexpr float    settle_ms_max     = 200.0f;
+}  // namespace tuning_bounds
+
+// "on" is the engine's factory multiplier, never a number chosen here.
+inline float overshootGuardFor(bool on, float factoryGuard) {
+    return on ? (factoryGuard > 0.0f ? factoryGuard : 1.0f) : 0.0f;
+}
+
+// ---- config blob ----------------------------------------------------------------
+
+namespace stored {
+
+inline constexpr uint32_t kConfigMagic   = 0x56434647u;  // "VCFG"
+inline constexpr uint8_t  kConfigVersion = 2;            // bump on ANY layout change
+// magic 4, version 1, cfg_gen 2, config 8 x f32, tuning 8 x f32 + 2 x u32 + 7 x u8
+inline constexpr size_t   kConfigBlobBytes = 4 + 1 + 2 + 32 + 32 + 8 + 7;
+
+namespace detail {
+template <typename T>
+void put(std::span<std::byte> out, size_t& n, T v) {
+    std::memcpy(out.data() + n, &v, sizeof(T));
+    n += sizeof(T);
+}
+template <typename T>
+T get(std::span<const std::byte> in, size_t& n) {
+    T v;
+    std::memcpy(&v, in.data() + n, sizeof(T));
+    n += sizeof(T);
+    return v;
+}
+inline bool in(float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; }
+}  // namespace detail
+
+inline bool configValid(const StoredConfig& c) {
+    using detail::in;
+    return in(c.window_min,  0.0f, ceiling::rail_mm)
+        && in(c.window_max,  0.0f, ceiling::rail_mm)
+        && c.window_min < c.window_max
+        && in(c.user_speed,  ceiling::speed_min, ceiling::speed_max)
+        && in(c.user_accel,  ceiling::accel_min, ceiling::accel_max)
+        && in(c.input_speed, ceiling::speed_min, ceiling::speed_max)
+        && in(c.input_accel, ceiling::accel_min, ceiling::accel_max)
+        && in(c.input_jerk,  ceiling::jerk_min,  ceiling::jerk_max)
+        && in(c.max_rail,    ceiling::rail_min,  ceiling::rail_mm);
+}
+
+inline bool tuningValid(const MotionTuning& t) {
+    using detail::in;
+    namespace b = tuning_bounds;
+    return in(t.jmax_ovr, 0.0f, b::jmax_ovr_max)
+        && in(t.vmax_ovr, 0.0f, b::vmax_ovr_max)
+        && in(t.amax_ovr, 0.0f, b::amax_ovr_max)
+        && in(t.chase_gain, 0.0f, b::chase_gain_max)
+        && in(t.chase_lookahead, 0.0f, b::lookahead_max)
+        && in(float(t.chase_dense_us) / 1000.0f, b::dense_ms_min, b::dense_ms_max)
+        && in(t.handoff_k, 0.0f, b::handoff_k_max)
+        && t.curve_policy <= b::curve_policy_max
+        && t.infeasible_policy <= b::infeasible_max
+        && in(t.smooth_budget, 0.0f, b::budget_max)
+        && in(t.amplitude_budget, 0.0f, b::budget_max)
+        && t.blend_steps >= b::blend_steps_min && t.blend_steps <= b::blend_steps_max
+        && in(float(t.settle_grace_us) / 1000.0f, 0.0f, b::settle_ms_max);
+}
+
+// Returns bytes written: kConfigBlobBytes, or 0 when `out` is too small.
+inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
+                           const MotionTuning& t, uint16_t cfgGen) {
+    using detail::put;
+    if (out.size() < kConfigBlobBytes) return 0;
+    size_t n = 0;
+    put(out, n, kConfigMagic);
+    put(out, n, kConfigVersion);
+    put(out, n, cfgGen);
+    for (float v : {c.window_min, c.window_max, c.user_speed, c.user_accel,
+                    c.input_speed, c.input_accel, c.input_jerk, c.max_rail})
+        put(out, n, v);
+    for (float v : {t.jmax_ovr, t.vmax_ovr, t.amax_ovr, t.chase_gain, t.chase_lookahead,
+                    t.handoff_k, t.smooth_budget, t.amplitude_budget})
+        put(out, n, v);
+    put(out, n, t.chase_dense_us);
+    put(out, n, t.settle_grace_us);
+    for (uint8_t v : {uint8_t(t.chase_ff), uint8_t(t.chase_accel_ff), uint8_t(t.chase_aim_extrap),
+                      t.curve_policy, t.infeasible_policy, t.blend_steps,
+                      uint8_t(t.overshoot_guard > 0.0f)})
+        put(out, n, v);
+    return n;
+}
+
+// All-or-nothing: false leaves every output untouched, so the caller's factory
+// values stand. factoryGuard is the running engine's overshoot multiplier.
+inline bool decodeConfig(std::span<const std::byte> in, float factoryGuard,
+                         StoredConfig& cfgOut, MotionTuning& tuneOut, uint16_t& genOut) {
+    using detail::get;
+    if (in.size() != kConfigBlobBytes) return false;
+    size_t n = 0;
+    if (get<uint32_t>(in, n) != kConfigMagic) return false;
+    if (get<uint8_t>(in, n) != kConfigVersion) return false;
+    const uint16_t gen = get<uint16_t>(in, n);
+    if (gen == 0) return false;
+
+    StoredConfig c;
+    for (float* f : {&c.window_min, &c.window_max, &c.user_speed, &c.user_accel,
+                     &c.input_speed, &c.input_accel, &c.input_jerk, &c.max_rail})
+        *f = get<float>(in, n);
+
+    MotionTuning t;
+    for (float* f : {&t.jmax_ovr, &t.vmax_ovr, &t.amax_ovr, &t.chase_gain, &t.chase_lookahead,
+                     &t.handoff_k, &t.smooth_budget, &t.amplitude_budget})
+        *f = get<float>(in, n);
+    t.chase_dense_us  = get<uint32_t>(in, n);
+    t.settle_grace_us = get<uint32_t>(in, n);
+    std::array<uint8_t, 7> b{};
+    for (uint8_t& v : b) v = get<uint8_t>(in, n);
+    for (size_t i : {0u, 1u, 2u, 6u})
+        if (b[i] > 1) return false;
+    t.chase_ff          = b[0] != 0;
+    t.chase_accel_ff    = b[1] != 0;
+    t.chase_aim_extrap  = b[2] != 0;
+    t.curve_policy      = b[3];
+    t.infeasible_policy = b[4];
+    t.blend_steps       = b[5];
+    t.overshoot_guard   = overshootGuardFor(b[6] != 0, factoryGuard);
+
+    if (!configValid(c) || !tuningValid(t)) return false;
+    cfgOut = c;
+    tuneOut = t;
+    genOut = gen;
+    return true;
+}
+
+}  // namespace stored
+}  // namespace valence

@@ -3,7 +3,8 @@
 // and the REAL kinetic::Engine behind a WebSocket speaking valence.v1
 //
 //   valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
-//              [--pairing-window] [--enforce] [--headless] [--no-mdns]
+//              [--pairing-window] [--enforce] [--state PREFIX]
+//              [--headless] [--no-mdns]
 //
 // Constraints:
 // - HOST-ONLY: never touches a device, never deploys, no pio.
@@ -13,6 +14,11 @@
 // - The loop's 5 ms hub tick matches the P4's hub task; motion is evaluated
 //   every pass (~1 ms), matching the P4's 1 kHz motion tick as closely as a
 //   desktop scheduler allows.
+// - PERSISTENCE IS THE BOARD'S, WITH FILES FOR NVS KEYS: PREFIX.cfg and
+//   PREFIX.presets hold the exact blobs the P4 writes, on the same debounce,
+//   written to a temp file and renamed over the old one so a kill mid-write
+//   leaves the previous blob whole. PREFIX defaults to valencesim-state
+//   beside the exe.
 // See: sim/valencesim/README.md
 
 #include <atomic>
@@ -21,8 +27,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <thread>
 
@@ -63,6 +72,7 @@ struct Options {
     int durationS = 0;
     bool pairingWindow = false;
     bool enforce = false;
+    std::string statePrefix;   // empty = valencesim-state beside the exe
 };
 
 bool parseArgs(int argc, char** argv, Options& o) {
@@ -76,6 +86,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (!std::strcmp(a, "--homed")) o.homed = true;
         else if (!std::strcmp(a, "--pairing-window")) o.pairingWindow = true;
         else if (!std::strcmp(a, "--enforce")) o.enforce = true;
+        else if (!std::strcmp(a, "--state") && hasNext) o.statePrefix = argv[++i];
         // No TUI and no mDNS responder exist; both flags are accepted so the
         // command lines the Phosphor harness uses run unchanged.
         else if (!std::strcmp(a, "--headless") || !std::strcmp(a, "--no-mdns")) continue;
@@ -85,6 +96,41 @@ bool parseArgs(int argc, char** argv, Options& o) {
         }
     }
     return true;
+}
+
+std::filesystem::path exeDir(const char* argv0) {
+#ifdef _WIN32
+    std::array<wchar_t, 1024> buf{};
+    const DWORD n = GetModuleFileNameW(nullptr, buf.data(), DWORD(buf.size()));
+    if (n > 0 && n < buf.size()) return std::filesystem::path(buf.data()).parent_path();
+#endif
+    return std::filesystem::absolute(argv0).parent_path();
+}
+
+// The file's bytes in `scratch`, or an empty span for absent or larger than
+// the scratch (the same answer the P4's loadBlob gives).
+std::span<const std::byte> loadBlob(const std::filesystem::path& p, std::span<std::byte> scratch) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return {};
+    f.read(reinterpret_cast<char*>(scratch.data()), std::streamsize(scratch.size()));
+    const size_t got = size_t(f.gcount());
+    if (got == 0 || f.peek() != std::ifstream::traits_type::eof()) return {};
+    return scratch.first(got);
+}
+
+bool saveBlob(const std::filesystem::path& p, std::span<const std::byte> blob) {
+    if (blob.empty()) return false;
+    std::filesystem::path tmp = p;
+    tmp += ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        f.write(reinterpret_cast<const char*>(blob.data()), std::streamsize(blob.size()));
+        if (!f) return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, p, ec);
+    return !ec;
 }
 
 // Heap, not stack: the catalog pools and the hub's session table are tens of
@@ -97,6 +143,7 @@ struct SimBox {
     std::optional<valence::Hub> hub{};
     bench::ValenceBenchWsPort port{};
     valence::SimUiToken minter{};
+    std::array<std::byte, valence::PatternPresetStore::kBlobBytes> blobScratch{};
 };
 
 }  // namespace
@@ -111,7 +158,8 @@ int main(int argc, char** argv) {
     if (!parseArgs(argc, argv, opt)) {
         std::fprintf(stderr,
                      "usage: valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]\n"
-                     "                  [--pairing-window] [--enforce] [--headless] [--no-mdns]\n");
+                     "                  [--pairing-window] [--enforce] [--state PREFIX]\n"
+                     "                  [--headless] [--no-mdns]\n");
         return 2;
     }
 
@@ -139,6 +187,22 @@ int main(int argc, char** argv) {
     // that floor; --enforce is the device-exact posture.
     box->device.setUnvouchedRole(opt.enforce ? valence::AccessLevel::watch
                                              : valence::AccessLevel::control);
+    // Stored state BEFORE the Hub, exactly as the P4's hubBegin orders it.
+    const std::filesystem::path prefix =
+        opt.statePrefix.empty() ? exeDir(argv[0]) / "valencesim-state" : std::filesystem::path(opt.statePrefix);
+    std::filesystem::path cfgPath = prefix;
+    cfgPath += ".cfg";
+    std::filesystem::path presetsPath = prefix;
+    presetsPath += ".presets";
+    std::span<std::byte> scratch(box->blobScratch);
+    uint16_t storedGen = 0;
+    std::span<const std::byte> blob = loadBlob(cfgPath, scratch);
+    const bool haveStored = !blob.empty() && box->device.adoptConfigBlob(blob, storedGen);
+    if (!blob.empty() && !haveStored)
+        log.logf('W', "valencesim: %s rejected -- factory values stand", cfgPath.string().c_str());
+    blob = loadBlob(presetsPath, scratch);
+    if (!blob.empty() && !box->device.adoptPresetsBlob(blob))
+        log.logf('W', "valencesim: %s rejected -- preset store starts empty", presetsPath.string().c_str());
     box->device.pushConfigToMotion();
 
     box->hub.emplace(box->catalog, g_clock, box->rng, box->device);
@@ -148,6 +212,11 @@ int main(int argc, char** argv) {
                      unsigned(valence::Hub::catalogScratchCapacity()));
         return 1;
     }
+    if (haveStored) {
+        while (hub.cfgGen() != storedGen) hub.bumpConfigGeneration();
+    }
+    log.logf('I', "valencesim: state %s.{cfg,presets}: config %s, cfg_gen %u",
+             prefix.string().c_str(), haveStored ? "stored" : "factory", unsigned(hub.cfgGen()));
     hub.setIdentity(VALENCE_PRODUCT, FIRMWARE_VERSION, kHubName);
     hub.setEndpoint(opt.wsPort, 0x7F000001u);
     box->device.attach(hub);
@@ -197,9 +266,17 @@ int main(int argc, char** argv) {
             lastHubMs = nowMs;
             box->port.loop(nowMs);
             hub.update(g_clock.nowUs());
-            // The persist-due answer is dropped: the twin keeps config in
-            // memory for the life of the process, like a board with no NVS.
-            (void)box->device.tick(nowMs);
+            const uint8_t due = box->device.tick(nowMs);
+            if (due & valence::kPersistConfig) {
+                const size_t n = box->device.encodeConfigBlob(scratch, hub.cfgGen());
+                if (!saveBlob(cfgPath, scratch.first(n)))
+                    log.logf('W', "valencesim: persist %s failed", cfgPath.string().c_str());
+            }
+            if (due & valence::kPersistPresets) {
+                const size_t n = box->device.encodePresetsBlob(scratch);
+                if (!saveBlob(presetsPath, scratch.first(n)))
+                    log.logf('W', "valencesim: persist %s failed", presetsPath.string().c_str());
+            }
         }
         if (opt.durationS > 0 &&
             std::chrono::steady_clock::now() - start > std::chrono::seconds(opt.durationS)) {

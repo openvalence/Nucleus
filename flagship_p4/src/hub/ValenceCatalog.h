@@ -1245,9 +1245,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // may name the same INTENT channel provided their keys never collide.
     // Keys are allocated 1..20 across the three cards and are never reused.
     //
-    // Applied live, NOT yet persisted: a reboot returns the engine's factory
-    // tuning, which the `default` annotations mirror (kinetic::Config).
-    // TODO(val-091.11.2): persist the tuning set and 0x1030 in NVS.
+    // Applied live and persisted with 0x1000 and cfg_gen in one blob
+    // (StoredState.h). The `default` annotations stay the FACTORY values
+    // (kinetic::Config), never the stored ones: SPEC distinguishes default
+    // from current, and current is what the STATE carries.
     auto addKineticLimits = [&]() {
     c.addEntry({.id = ch::kinetic_limits, .name = "kinetic-limits",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1797,9 +1798,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSchemaField({.key = 6, .name = "sensation", .type = CborFieldType::f32_t,  .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     // key 7 `source.background_run`, appended, pairs 0x1200 pattern-state's
-    // field of the same settingKey. Unlike keys 1-6, NOT session-volatile —
-    // applyIntent persists it (coalesced, like max_rail) because it is a
-    // standing policy, not a live pattern param.
+    // field of the same settingKey. A standing policy, not a live pattern
+    // param, but RAM-ONLY: persisting it would let a rebooted machine start
+    // moving unattended, which waits on an operator ruling (bd val-wcm).
     c.addSchemaField({.key = 7, .name = "background_run", .type = CborFieldType::bool_t, .unit = ""});
     };
 
@@ -1843,8 +1844,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // The write half of 0x008A. Every key optional; present keys applied,
     // and the ECHO carries the POST-CLAMP value the handler actually took.
     //
-    // cfg_gen bumps on a real change (SPEC §4.2); not persisted yet
-    // (TODO(val-091.11.2)).
+    // cfg_gen bumps on a real change (SPEC §4.2); persisted with it
+    // (StoredState.h).
     //
     // 5 Hz because these are human dropdown changes, not a control loop. The
     // bounds are the enum ranges the catalog's own option arrays declare, so a

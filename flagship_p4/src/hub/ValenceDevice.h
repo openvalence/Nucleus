@@ -26,6 +26,7 @@
 #include <optional>
 #include <span>
 
+#include "StoredState.h"
 #include "ValenceCatalog.h"
 #include "motion/ValenceMotion.h"
 #include "patterns/PatternPresetStore.h"
@@ -34,21 +35,9 @@
 
 namespace valence {
 
-// The 0x1000 snapshot and the 0x3000 writer both speak exactly these eight
-// values, and so does the P4's NVS blob -- change one and that blob's version
-// changes with it (ValenceHub.cpp, kCfgVersion).
-struct StoredConfig {
-    float window_min  = factory::window_min;
-    float window_max  = factory::window_max;
-    float user_speed  = factory::user_speed;
-    float user_accel  = factory::user_accel;
-    float input_speed = factory::input_speed;
-    float input_accel = factory::input_accel;
-    float input_jerk  = factory::input_jerk;
-    float max_rail    = factory::max_rail;
-
-    bool operator==(const StoredConfig&) const = default;
-};
+// tick()'s persist-due bits: which blob's debounced write is due.
+inline constexpr uint8_t kPersistConfig  = 0x01;  // StoredState.h: 0x1000 + tuning + cfg_gen
+inline constexpr uint8_t kPersistPresets = 0x02;  // PatternPresetStore: the 0x5220 slots
 
 // The consume side of /uitoken as validateToken sees it. A true return
 // CONSUMES the token: single-use is not advisory.
@@ -91,13 +80,22 @@ public:
     // may, and says so on its command line.
     void setUnvouchedRole(AccessLevel r) { _unvouchedRole = r; }
 
-    // Boot adoption. Deliberately NOT an intent and NOT a change: no ECHO, no
-    // dirty flag, no cfg_gen bump. The retained 0x1000 push attach() makes IS
-    // the announcement.
-    void adoptConfig(const StoredConfig& c) {
-        _cfg = c;
-        _cfgDirty = false;
+    // ---- persistence ----------------------------------------------------------
+    // The composition owns STORAGE (NVS on the P4, a file in the twin); this
+    // class owns what the bytes MEAN. Boot adoption is deliberately NOT an
+    // intent and NOT a change: no ECHO, no dirty flag, no cfg_gen bump, and
+    // attach()'s retained pushes ARE the announcement. Call both adopts before
+    // the Hub is built over this delegate. false = the blob was rejected whole
+    // and the factory values stand. The composition restores cfgGen into the
+    // Hub itself: only it holds the Hub at that point.
+    bool adoptConfigBlob(std::span<const std::byte> blob, uint16_t& cfgGen);
+    bool adoptPresetsBlob(std::span<const std::byte> blob);
+    // Bytes written, 0 when `out` is too small.
+    size_t encodeConfigBlob(std::span<std::byte> out, uint16_t cfgGen) const {
+        return stored::encodeConfig(out, _cfg, _tune, cfgGen);
     }
+    size_t encodePresetsBlob(std::span<std::byte> out) const { return _presets.encode(out); }
+
     const StoredConfig& config() const { return _cfg; }
 
     // The stored config IS the arbiter's window and ceilings; this is the one
@@ -109,9 +107,11 @@ public:
     void attach(Hub& hub);
 
     // The device half of one hub tick. Call on the hub task right after
-    // Hub::update(). Returns true when the debounced config write is due; the
-    // composition persists config() with the hub's cfgGen() at that moment.
-    bool tick(uint32_t nowMs);
+    // Hub::update(). Returns the kPersist* bits whose debounced write is due
+    // NOW; each is returned once, so a composition that cannot write yet
+    // holds the bits itself. The config blob takes the hub's cfgGen() at
+    // write time.
+    uint8_t tick(uint32_t nowMs);
 
     // 0x0007 link RSSI in dBm, 0 = no reading. PUSHED IN from whichever task
     // owns the radio; never read on the hub task (see ValenceHub.h).
@@ -156,10 +156,10 @@ private:
 
     StoredConfig _cfg{};
     bool _cfgDirty = false;
-    // The live tuning set behind 0x1030 and 0x1120-0x1122, seeded from the
-    // engine's factory set at attach(). This copy IS the setting; the engine
-    // holds whatever tick() last pushed from it.
-    MotionTuning _tune{};
+    // The live tuning set behind 0x1030 and 0x1120-0x1122: the engine's
+    // factory set until a stored one is adopted. This copy IS the setting; the
+    // engine holds whatever motionSetTuning() last carried from it.
+    MotionTuning _tune = motionDefaultTuning();
     // Which of those four cards an applied write changed, bit per card
     // (ValenceDevice.cpp, kCard*). tick() pushes and republishes, then clears.
     uint8_t _tuneDirty = 0;
@@ -187,10 +187,16 @@ private:
     std::array<std::byte, 4> _sentRoster{};
     bool _patPlaneSent = false;
 
-    // Debounced persist: armed by every applied change, re-armed by the next,
-    // so a slider drag costs ONE write after the operator lets go.
+    // Debounced persist, one timer per blob: armed by every applied change,
+    // re-armed by the next, so a slider drag costs ONE write after the
+    // operator lets go.
     bool _persistArmed = false;
     uint32_t _persistDueMs = 0;
+    bool _presetsArmed = false;
+    uint32_t _presetsDueMs = 0;
+    // The store's generation as last armed or adopted. Every CRUD mutation
+    // bumps the store's own, so a difference IS "the slots changed".
+    uint16_t _presetsGenSeen = _presets.generation();   // declared after _presets
 
     uint32_t _lastMotionMs = 0;
     uint32_t _lastPlanMs = 0;
