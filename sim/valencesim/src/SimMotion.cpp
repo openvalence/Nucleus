@@ -158,6 +158,7 @@ void motionEstop() { g_sim.arbiter().estop(true); }
 void motionEstopClear() { g_sim.arbiter().estop(false); }
 void motionStop() { g_sim.arbiter().stop(); }
 void motionPatternAllow() { g_sim.arbiter().allowPattern(); }
+void motionStreamAllow() { g_sim.arbiter().allowStream(); }
 void motionPause(bool on) { g_sim.arbiter().pause(on); }
 void motionSetUserLimits(float v, float a) { g_sim.arbiter().setUserLimits(v, a); }
 void motionSetInputLimits(float v, float a, float j) { g_sim.arbiter().setInputLimits(v, a, j); }

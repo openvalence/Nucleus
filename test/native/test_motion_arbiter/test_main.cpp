@@ -335,3 +335,43 @@ TEST_CASE("e-stop closes the Pattern gate: clearing the latch never restarts the
     r->arb.allowPattern();
     CHECK(r->submit(MotionSource::Pattern, 150.0f));
 }
+
+TEST_CASE("a stream bundle after STOP is refused and counted; a manual move clears the latch "
+          "and the next bundle after re-arm is accepted") {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    // A live stream mid-stroke: chase points walking away from home.
+    for (int i = 1; i <= 20; ++i) {
+        REQUIRE(r->submit(MotionSource::Stream, 100.0f + 10.0f * float(i)));
+        r->run(10'000);
+    }
+    REQUIRE(std::fabs(r->census().velocity_mm_s) > 10.0f);
+
+    r->arb.stop();
+    const uint32_t rejected = r->census().rejected;
+    // The client keeps streaming through the STOP: every sample is refused.
+    for (int i = 0; i < 50; ++i) {
+        CHECK_FALSE(r->submit(MotionSource::Stream, 400.0f));
+        r->run(10'000);
+    }
+    CHECK(r->census().rejected == rejected + 50);
+    CHECK_FALSE(r->census().busy);
+    const int32_t held = r->emitter.n;
+    for (int i = 0; i < 200; ++i) {
+        CHECK_FALSE(r->submit(MotionSource::Stream, 400.0f));
+        r->run(10'000);
+    }
+    CHECK(r->emitter.n == held);
+
+    // The manual move is accepted through the STOP (SPEC 11.1: it is the new
+    // motion intent), and the hub drops its latch on that acceptance. The
+    // Stream gate stays closed until the delegate sees the clear latch.
+    CHECK(r->submit(MotionSource::Manual, r->census().position_mm + 5.0f));
+    r->run(500'000);
+    CHECK_FALSE(r->submit(MotionSource::Stream, 300.0f));
+    r->arb.allowStream();
+    CHECK(r->submit(MotionSource::Stream, 300.0f));
+    r->run(200'000);
+    CHECK(r->emitter.n != held);
+}

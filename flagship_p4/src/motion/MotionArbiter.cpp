@@ -65,6 +65,7 @@ void MotionArbiter::estop(bool on) {
 
 void MotionArbiter::stop() {
     _pattern_stopped.store(true);
+    _stream_stopped.store(true);
     _brake_req.store(true);
 }
 
@@ -134,6 +135,11 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
         if (in.source == MotionSource::Pattern && _pattern_stopped.load()) {
             ++_rejected;
             GLOGW_EVERY_MS(1000, kTag, "REJECT: pattern stopped");
+            return false;
+        }
+        if (in.source == MotionSource::Stream && _stream_stopped.load()) {
+            ++_rejected;
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: stream stopped");
             return false;
         }
     }

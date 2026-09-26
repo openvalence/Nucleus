@@ -174,12 +174,14 @@ bool motionSubmit(const MotionIntent& intent);
 // calling task before returning, so it does not wait for the motion tick.
 void motionEstop();
 void motionEstopClear();
-// SPEC 11.1 STOP. Any task, never blocks: refuses every Pattern intent from
-// this call on, then brakes the plan in flight to rest at the input decel on
-// the motion task. Only motionPatternAllow(), the generator's start, reopens
-// the Pattern gate; e-stop closes it too (MotionArbiter::stop()).
+// SPEC 11.1 STOP. Any task, never blocks: refuses every Pattern and Stream
+// intent from this call on, then brakes the plan in flight to rest at the
+// input decel on the motion task. Only motionPatternAllow(), the generator's
+// start, reopens the Pattern gate; e-stop closes it too. Only
+// motionStreamAllow() reopens the Stream gate (MotionArbiter::stop()).
 void motionStop();
 void motionPatternAllow();
+void motionStreamAllow();
 void motionPause(bool on);
 
 // Ceiling sets, in millimeters. Ceilings are clamps, never targets; the one

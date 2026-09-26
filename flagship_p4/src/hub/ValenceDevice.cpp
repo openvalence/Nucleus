@@ -913,6 +913,21 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
     const bool isSegment = (channel_id == ch::motion_segment);
     if (channel_id != ch::motion_input && !isSegment) return;
 
+    // SPEC 11.1 STOP, RFC-074: while the hub's STOP latch holds, a bundle is
+    // refused WHOLE, dropped and counted like any §9.2 drop, never NACKed.
+    // That latch is the one home of STOP and clears only on an accepted
+    // source-mapped intent (0x3100 move, pattern_cmd); a sample is not one.
+    // Same task as the latch, both inside Hub::update(), so no bundle lands
+    // between motionStop() and the latch. A clear latch reopens the arbiter's
+    // Stream gate BEFORE any sample is queued.
+    const uint8_t n = bundle.sampleCount();
+    if (_hub != nullptr && _hub->stopLatched()) {
+        motionNoteStream(1, n, n);
+        GLOGW_EVERY_MS(1000, kTag, "STREAM REFUSED: STOP latched, re-arm with a move or a pattern start");
+        return;
+    }
+    motionStreamAllow();
+
     // RFC-030: the session's GRANTED (post-curve-policy) family, looked up
     // once per bundle. Chase points never carry one -- the family is a
     // waveform-reconstruction concept.
@@ -927,7 +942,6 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
 
     uint32_t dropped = 0;
     uint32_t farClamped = 0;
-    const uint8_t n = bundle.sampleCount();
     for (uint8_t i = 0; i < n; ++i) {
         // Nearest-window resolve (§7.2): a wrap-aware signed subtract, safe
         // because the wire stamp is near now by construction (the bundle
