@@ -43,9 +43,11 @@
 
 #include <esp_http_server.h>
 
+#include "ValenceDevice.h"
+
 namespace valence {
 
-class ValenceUiTokenMinter {
+class ValenceUiTokenMinter final : public IUiTokenGate {
 public:
     // Seeds the per-boot HMAC secret from the hardware TRNG. Tokens never
     // survive a reboot, which is correct: a reboot is a trust boundary.
@@ -56,7 +58,7 @@ public:
 
     // Hub task: is this the bytes of a live, unexpired, unused token? A true
     // return CONSUMES it -- single-use is not advisory.
-    bool consume(std::span<const std::byte> token);
+    bool consume(std::span<const std::byte> token) override;
 
     // Fills `body` with the JSON answer. 0 ok / 2 rate-limited.
     uint8_t mintJson(char* body, size_t cap);

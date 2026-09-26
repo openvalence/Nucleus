@@ -2,6 +2,8 @@
 .pio
 /build/
 flagship_*/build/
+# Host sims: CMake build trees, including the fetched IXWebSocket sources.
+sim/*/build/
 
 # Derived from the hand-written sdkconfig.defaults by the IDF build.
 # sdkconfig.defaults is the ONE home for those values (C-1); these are its

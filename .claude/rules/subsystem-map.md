@@ -18,8 +18,10 @@ slowly. For anything finer, ask codebase-memory rather than grepping for
 | `flagship_p4/` | The P4 firmware project: motion, the Valence hub, policy, sockets. Pure ESP-IDF |
 | `flagship_p4/src/` | HP-core sources and the composition root |
 | `flagship_p4/src/hub/` | The Valence hub and its IDF glue: log front door, platform shims, catalog, config |
+| `flagship_p4/src/hub/ValenceDevice.*` | The delegate and every STATE publisher. Hardware-free: the sim compiles it verbatim |
 | `flagship_p4/ulp/` | LP core sources. One directory per project, fixed by the builder |
 | `flagship_p4/sdkconfig.defaults` | Silicon, memory map, PSRAM, radio. Hand-written, tracked |
+| `sim/valencesim/` | The device twin: real hub, catalog, device and engine on a desktop. CMake, never pio |
 | `lib/kinetic` | The trajectory engine (liftable, hardware-free) |
 | `lib/geiger`, `lib/flux` | Logging and LED cores (liftable, hardware-free) |
 | `lib/ruckig` | VENDORED, byte-identical to upstream. Do not restyle or respell (C-11 carve-out) |

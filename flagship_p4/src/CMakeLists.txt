@@ -7,7 +7,8 @@
 # step solvers are real translation units and are listed here. lib/ruckig is
 # BYTE-IDENTICAL to upstream -- wrap, never patch (lib/ruckig/VENDORED.md).
 idf_component_register(SRCS "main.cpp"
-                            "hub/ValenceHub.cpp" "hub/ValenceWsPort.cpp"
+                            "hub/ValenceHub.cpp" "hub/ValenceDevice.cpp"
+                            "hub/ValenceWsPort.cpp"
                             "hub/ValenceUiToken.cpp"
                             "motion/ValenceMotion.cpp"
                             "system/ValenceHttp.cpp" "system/ValenceOta.cpp"

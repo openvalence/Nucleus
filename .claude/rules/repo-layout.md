@@ -5,16 +5,17 @@ paths:
 
 # Where files go
 
-The repo root is a closed set: the per-board projects, `lib/`, `docs/`,
-`tools/`, `artifacts/`, the pins, and the license and readme surface. It is
-not a landing zone. A new loose file at the root is a defect, and a hook
-blocks it (`.claude/hooks/tidy_check.py`).
+The repo root is a closed set: the per-board projects, `lib/`, `sim/`,
+`docs/`, `tools/`, `artifacts/`, the pins, and the license and readme
+surface. It is not a landing zone. A new loose file at the root is a defect,
+and a hook blocks it (`.claude/hooks/tidy_check.py`).
 
 | What | Home | Tracked? |
 |---|---|---|
 | Firmware for one chip | `flagship_<chip>/` -- its OWN PlatformIO project | yes |
 | LP core sources for that chip | `flagship_<chip>/ulp/` -- one directory per project, fixed by the builder | yes |
 | Liftable libraries (hardware-free cores) | `lib/` | yes |
+| Host simulators: the device twin, built with CMake, never by pio | `sim/<name>/` | yes (its `build/` is not) |
 | The Valence surface | `lib/valence`, a symlink to the sibling checkout | the symlink only |
 | Per-run output: captures, traces, sweeps, ELF archives | `artifacts/` | no |
 | Vendor manuals, datasheets, schematics | `docs/reference/` | no |
