@@ -33,6 +33,9 @@ add_executable(valencesim
     src/main.cpp
     src/SimMotion.cpp
     "${NUCLEUS_ROOT}/flagship_p4/src/motion/MotionArbiter.cpp"
+    src/SimPattern.cpp
+    "${NUCLEUS_ROOT}/flagship_p4/src/patterns/PatternEngine.cpp"
+    "${NUCLEUS_ROOT}/flagship_p4/src/patterns/AdvancedPattern.cpp"
     src/SimUiToken.cpp
     "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceDevice.cpp"
     "${BENCH_SRC}/net/WsServerPort.cpp"
@@ -46,6 +49,8 @@ target_include_directories(valencesim PRIVATE
     "${NUCLEUS_ROOT}/lib/kinetic/include"
     "${NUCLEUS_ROOT}/lib/geiger/include"
     "${NUCLEUS_ROOT}/lib/ruckig/include"
+    "${NUCLEUS_ROOT}/lib/strokeengine_patterns/include"
+    "${NUCLEUS_ROOT}/flagship_p4/src/patterns/arduino_compat"
     "${BENCH_SRC}")
 
 target_compile_options(valencesim PRIVATE -O2 -Wall -Wextra)

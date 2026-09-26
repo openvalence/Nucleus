@@ -3,6 +3,10 @@
 # include path is the whole of consuming it: no component, no build step.
 # READ-ONLY: a break there is fixed in flags here, never upstream.
 #
+# lib/strokeengine_patterns is VENDORED and header-only; its <Arduino.h> is
+# the first-party adapter in patterns/arduino_compat (lib/strokeengine_patterns/
+# VENDORED.md).
+#
 # lib/kinetic is header-only too, but the vendored Ruckig it wraps is not: its
 # step solvers are real translation units and are listed here. lib/ruckig is
 # BYTE-IDENTICAL to upstream -- wrap, never patch (lib/ruckig/VENDORED.md).
@@ -11,6 +15,8 @@ idf_component_register(SRCS "main.cpp"
                             "hub/ValenceWsPort.cpp"
                             "hub/ValenceUiToken.cpp"
                             "motion/ValenceMotion.cpp" "motion/MotionArbiter.cpp"
+                            "patterns/ValencePattern.cpp" "patterns/PatternEngine.cpp"
+                            "patterns/AdvancedPattern.cpp"
                             "system/ValenceHttp.cpp" "system/ValenceOta.cpp"
                             "system/ValenceDiag.cpp"
                             "../../lib/ruckig/src/ruckig/brake.cpp"
@@ -29,6 +35,8 @@ idf_component_register(SRCS "main.cpp"
                                     "../../lib/geiger/include"
                                     "../../lib/kinetic/include"
                                     "../../lib/ruckig/include"
+                                    "../../lib/strokeengine_patterns/include"
+                                    "patterns/arduino_compat"
                        # REQUIRES: reached from a header in the PUBLIC include
                        # dirs above. esp_timer (ValencePlatform.h, geiger),
                        # esp_http_server (ValenceUiToken.h, ValenceWsPort.h),

@@ -21,10 +21,20 @@
 
 #include "geiger/geiger.h"
 #include "motion/ValenceMotion.h"
+#include "patterns/ValencePattern.h"
 
 #include "valence/util/byte_io.hpp"
+#include "valence/wire/cbor/cbor_writer.hpp"
 
 namespace valence {
+
+// ---- anti-drift guards: catalog mirror vs the pattern generator ---------------
+// ValenceCatalog.h stays library-only and cannot include the generator; this
+// TU sees both, so it is where the mirror is nailed.
+static_assert(kPresetCapacity == PatternPresetStore::kCapacity, "catalog preset capacity drifted");
+static_assert(kPresetNameMax == PatternPresetStore::kNameMax, "catalog preset name_max drifted");
+static_assert(kPresetPayloadBytes == PatternPresetStore::kPayloadBytes, "catalog preset per_item_max drifted");
+static_assert(kApBaseCount == advpat::BASE_COUNT, "catalog modifier-lane count drifted");
 
 namespace {
 
@@ -121,6 +131,20 @@ std::optional<float> numberOf(const IntentValueField* f) {
 // A uint schema field: clamped, then rounded to the nearest whole value.
 uint32_t wholeIn(float v, float lo, float hi) { return uint32_t(clampf(v, lo, hi) + 0.5f); }
 
+// A bool schema field: a CBOR bool, or a number read as 0 / nonzero. nullopt
+// for anything else, which the caller NACKs INVALID_VALUE.
+std::optional<bool> boolOf(const IntentValueField* f) {
+    if (!f) return std::nullopt;
+    if (f->value.kind == IntentValue::Kind::Bool) return f->value.bool_val;
+    const std::optional<float> v = numberOf(f);
+    if (!v) return std::nullopt;
+    return *v != 0.0f;
+}
+
+// A 0..100 knob as the generator stores it: a whole number, clamped. The
+// generator's own setters clamp again to each control's live bounds.
+int knobOf(float v) { return int(wholeIn(v, 0.0f, 100.0f)); }
+
 // The four tuning cards, one bit each in ValenceDevice::_tuneDirty.
 constexpr uint8_t kCardModes    = 0x01;  // 0x1030
 constexpr uint8_t kCardLimits   = 0x02;  // 0x1120
@@ -178,7 +202,7 @@ void publishControlOwner(Hub& hub) {
 // order for each id exactly; that mirroring is the whole contract (there is no
 // packed struct to static_assert against).
 
-void publishMotion(Hub& hub, const MotionCensus& m) {
+void publishMotion(Hub& hub, const MotionCensus& m, bool genRunning) {
     std::array<std::byte, 9> buf{};
     size_t n = 0;
     packU16(buf, n, wireU16(m.position_mm, 100.0f));   // pos_10um
@@ -189,10 +213,11 @@ void publishMotion(Hub& hub, const MotionCensus& m) {
     packU16(buf, n, wireU16(m.target_mm, 100.0f));     // tgt_10um
     packI16(buf, n, wireI16(m.velocity_mm_s, 10.0f));  // speed
     // flags: homed, homing, gen_running, paused, override, estop, stream.
-    // homing and gen_running are permanently 0 and that is the truth, not a
-    // stub: there is no homing cycle and no pattern generator on this board.
-    packU8(buf, n, uint8_t((m.homed ? 0x01u : 0u) | (m.paused ? 0x08u : 0u) |
-                 (m.estop ? 0x20u : 0u) | (m.stream ? 0x40u : 0u)));
+    // homing is permanently 0 and that is the truth, not a stub: there is no
+    // homing cycle on this board. gen_running is the generator DRIVING, not
+    // merely switched on (patternActive()).
+    packU8(buf, n, uint8_t((m.homed ? 0x01u : 0u) | (genRunning ? 0x04u : 0u) |
+                 (m.paused ? 0x08u : 0u) | (m.estop ? 0x20u : 0u) | (m.stream ? 0x40u : 0u)));
     packU16(buf, n, wireU16(m.demand_mm, 100.0f));     // raw_10um: the asked position
     // AT RATE, not on change. An on-change gate looks like an economy and is a
     // ground-truth hazard on a hero channel: a machine at rest stops pushing,
@@ -310,6 +335,39 @@ void publishKineticCards(Hub& hub, const MotionTuning& t, uint8_t cards) {
     }
 }
 
+// ---- the pattern plane's retained STATE ----------------------------------------
+// ON CHANGE of the bytes last SENT, never on a timer and never on cfg_gen:
+// these channels move on session-volatile writes that bump nothing, and an
+// enabled_mask moves with homed and e-stop, which no write announces.
+
+// The six lanes in BaseId order, which is NOT ascending channel order: the
+// catalog puts them speed-in/out, accel-in/out, depth-1/2 (ValenceCatalog.h).
+constexpr std::array<uint16_t, advpat::BASE_COUNT> kLaneChannels{
+    ch::pattern_adv_mod_depth1,   ch::pattern_adv_mod_depth2,  ch::pattern_adv_mod_speedin,
+    ch::pattern_adv_mod_speedout, ch::pattern_adv_mod_accelin, ch::pattern_adv_mod_accelout};
+
+template <size_t N>
+void publishIfChanged(Hub& hub, uint16_t id, const std::array<std::byte, N>& buf, size_t written,
+                      std::array<std::byte, N>& sent, bool force) {
+    if (!force && buf == sent) return;
+    sent = buf;
+    publishPacked(hub, id, buf, written);
+}
+
+// ---- store items (SPEC §8.7) ---------------------------------------------------
+// An item is {slot, name, kind, payload}, keyed by the registry's blob_keys in
+// ascending order. The payload rides as an opaque bstr; the name is what lets a
+// client label a slot, because the roster carries none.
+size_t encodePresetItem(std::span<std::byte> out, uint8_t slot, const PatternPresetStore::Slot& s) {
+    CborWriter w(out);
+    w.mapHeader(4);
+    w.key(uint64_t(blob::slot)).uintVal(slot);
+    w.key(uint64_t(blob::name)).tstrVal(s.nameView());
+    w.key(uint64_t(blob::kind)).tstrVal(kPresetKind);
+    w.key(uint64_t(blob::payload)).bstrVal(std::as_bytes(std::span(s.payload)));
+    return w.size();
+}
+
 }  // namespace
 
 // ---- HubDelegate ---------------------------------------------------------------
@@ -334,6 +392,11 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     if (channel_id == ch::home) return applyHome(requested);
     if (channel_id == ch::modes_set) return applyModes(requested, cfgChanged);
     if (channel_id == ch::kinetic_set) return applyTuning(requested, cfgChanged);
+    // Session-volatile, all three: cfg_gen does not move (cfgChanged stays
+    // false). The presets' own change signal is the roster generation.
+    if (channel_id == ch::pattern_cmd) return applyPattern(requested);
+    if (channel_id == ch::pattern_advanced_cmd) return applyPatternAdvanced(requested);
+    if (channel_id == ch::pattern_presets_cmd) return applyPresets(requested);
     if (channel_id != ch::config_set) {
         // Every op on 0x0005 the hub does not handle itself (stop / hold /
         // pause / resume / override / bypass). The library's contract is
@@ -472,6 +535,232 @@ Ret ValenceDevice::applyTuning(const IntentValueMap& requested, bool& cfgChanged
     return Ret::ok(applied);
 }
 
+// ---- 0x3200 pattern-cmd, 0x3210 pattern-advanced-cmd, 0x3220 presets ----------
+// All three write ONE PatternSettings, the device's own copy, validate the
+// whole request BEFORE touching it (a NACK changes nothing), and echo what the
+// copy then holds. tick() hands the copy to the generator's task.
+
+// Keys 1-6 are the generator's run and stroke knobs and all six are refused
+// together while e-stop is latched or the machine is unhomed, which is exactly
+// when 0x1200's enabled_mask drops bits 0-5. Key 7 (background_run) is a
+// standing policy, accepted at all times: its mask bit never drops.
+Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
+    const auto* f1 = findField(requested, 1);  // running
+    const auto* f2 = findField(requested, 2);  // pattern
+    const auto* f3 = findField(requested, 3);  // speed
+    const auto* f4 = findField(requested, 4);  // depth
+    const auto* f5 = findField(requested, 5);  // stroke
+    const auto* f6 = findField(requested, 6);  // sensation
+    const auto* f7 = findField(requested, 7);  // background_run
+    const bool live = f1 || f2 || f3 || f4 || f5 || f6;
+    if (!live && !f7) return Ret::err(NackCode::INVALID_VALUE);
+    if (live) {
+        const MotionCensus c = motionCensus();
+        if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+        if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
+    }
+    if ((f1 && !boolOf(f1)) || (f7 && !boolOf(f7))) return Ret::err(NackCode::INVALID_VALUE);
+    for (const auto* f : {f2, f3, f4, f5, f6})
+        if (f && !numberOf(f)) return Ret::err(NackCode::INVALID_VALUE);
+
+    PatternSettings& p = _pat;
+    if (f1) p.running = *boolOf(f1);
+    if (f2) p.setPattern(int(wholeIn(*numberOf(f2), 0.0f, float(PatternSettings::kPatternCount - 1))));
+    if (f3) p.speed = PatternSettings::percent(*numberOf(f3));
+    if (f4) p.depth = PatternSettings::percent(*numberOf(f4));
+    if (f5) p.stroke = PatternSettings::percent(*numberOf(f5));
+    if (f6) p.sensation = PatternSettings::percent(*numberOf(f6));
+    if (f7) p.background_run = *boolOf(f7);
+    _patDirty = true;
+
+    IntentValueMap applied{};
+    uint32_t n = 0;
+    if (f1) applied.fields[n++] = {1, IntentValue::ofBool(p.running)};
+    if (f2) applied.fields[n++] = {2, IntentValue::ofU64(p.pattern)};
+    if (f3) applied.fields[n++] = {3, IntentValue::ofF32(p.speed)};
+    if (f4) applied.fields[n++] = {4, IntentValue::ofF32(p.depth)};
+    if (f5) applied.fields[n++] = {5, IntentValue::ofF32(p.stroke)};
+    if (f6) applied.fields[n++] = {6, IntentValue::ofF32(p.sensation)};
+    if (f7) applied.fields[n++] = {7, IntentValue::ofBool(p.background_run)};
+    applied.count = n;
+    return Ret::ok(applied);
+}
+
+// Refused only while e-stop is latched, which is when every pattern-advanced
+// and lane enabled_mask bit drops. None of these knobs moves the machine by
+// itself (only 0x3200 running does), so none is gated on homed. Base controls
+// apply in key order (max depth before min depth), each re-coupling the depth
+// pair, and the echo reads back AFTER all of them.
+Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
+    if (motionCensus().estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+    constexpr uint8_t kLastKey = uint8_t(9 + 6 * advpat::BASE_COUNT - 1);   // 44
+    bool any = false;
+    for (uint8_t key = 1; key <= kLastKey; ++key) {
+        const auto* f = findField(requested, key);
+        if (!f) continue;
+        if (key == 1 ? !boolOf(f) : !numberOf(f)) return Ret::err(NackCode::INVALID_VALUE);
+        any = true;
+    }
+    if (!any) return Ret::err(NackCode::INVALID_VALUE);
+
+    advpat::Settings& ap = _pat.ap;
+    if (const auto* f = findField(requested, 1)) _pat.ap_mode = *boolOf(f);
+    if (const auto* f = findField(requested, 2)) ap.master.set(knobOf(*numberOf(f)));
+    for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id)
+        if (const auto* f = findField(requested, uint8_t(3 + id))) ap.setBase(id, knobOf(*numberOf(f)));
+    for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
+        advpat::Modifier& m = ap.byId(id)->modifier;
+        std::array<int, 6> v{m.amplitude, m.in_step, m.in_wait, m.out_step, m.out_wait, m.offset};
+        for (uint8_t sub = 0; sub < 6; ++sub)
+            if (const auto* f = findField(requested, uint8_t(9 + 6 * id + sub))) v[sub] = knobOf(*numberOf(f));
+        m.set(v[0], v[1], v[2], v[3], v[4], v[5]);
+    }
+    _patDirty = true;
+
+    IntentValueMap applied{};
+    uint32_t n = 0;
+    for (uint8_t key = 1; key <= kLastKey; ++key) {
+        if (!findField(requested, key)) continue;
+        if (key == 1) {
+            applied.fields[n++] = {1, IntentValue::ofBool(_pat.ap_mode)};
+            continue;
+        }
+        uint64_t out = 0;
+        if (key == 2) {
+            out = ap.master.value;
+        } else if (key < 9) {
+            out = ap.byId(uint8_t(key - 3))->value;
+        } else {
+            const advpat::Modifier& m = ap.byId(uint8_t((key - 9) / 6))->modifier;
+            const std::array<uint8_t, 6> lane{m.amplitude, m.in_step, m.in_wait,
+                                               m.out_step, m.out_wait, m.offset};
+            out = lane[size_t((key - 9) % 6)];
+        }
+        applied.fields[n++] = {key, IntentValue::ofU64(out)};
+    }
+    applied.count = n;
+    return Ret::ok(applied);
+}
+
+// The four SPEC §8.7 verbs, op-select ordinals per the catalog's own labels
+// {reserved, save, load, delete, rename}. save captures LIVE state (a client
+// payload, an import, is not offered); load applies through the same clamps
+// an intent takes and engages the advanced generator, and its truth arrives on
+// the ordinary pattern-plane STATE. The echoed name is the STORE's copy.
+Ret ValenceDevice::applyPresets(const IntentValueMap& requested) {
+    const auto op = numberOf(findField(requested, 1));
+    const auto slotV = numberOf(findField(requested, 2));
+    if (!op || !slotV || *slotV < 0.0f || *slotV >= float(PatternPresetStore::kCapacity))
+        return Ret::err(NackCode::INVALID_VALUE);
+    const uint8_t slot = uint8_t(wholeIn(*slotV, 0.0f, float(PatternPresetStore::kCapacity - 1)));
+    const auto* nameF = findField(requested, 3);
+    const std::string_view name =
+        (nameF && nameF->value.kind == IntentValue::Kind::Tstr) ? nameF->value.tstr_val : std::string_view{};
+
+    const uint32_t verb = wholeIn(*op, 0.0f, 255.0f);
+    switch (verb) {
+        case 1:   // save
+            if (!_presets.save(slot, name, _pat.capturePreset())) return Ret::err(NackCode::INVALID_VALUE);
+            GLOGI(kTag, "preset saved: slot %u", unsigned(slot));
+            break;
+        case 2: {  // load
+            if (motionCensus().estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+            const PatternPresetStore::Slot* s = _presets.slot(slot);
+            if (s == nullptr) return Ret::err(NackCode::INVALID_VALUE);
+            _pat.applyPreset(s->payload);
+            _patDirty = true;
+            GLOGI(kTag, "preset loaded: slot %u", unsigned(slot));
+            break;
+        }
+        case 3:   // delete
+            if (!_presets.remove(slot)) return Ret::err(NackCode::INVALID_VALUE);
+            GLOGI(kTag, "preset deleted: slot %u", unsigned(slot));
+            break;
+        case 4:   // rename
+            if (!_presets.rename(slot, name)) return Ret::err(NackCode::INVALID_VALUE);
+            break;
+        default:
+            return Ret::err(NackCode::INVALID_VALUE);
+    }
+    IntentValueMap applied{};
+    applied.fields[0] = {1, IntentValue::ofU64(verb)};
+    applied.fields[1] = {2, IntentValue::ofU64(slot)};
+    applied.count = 2;
+    if (verb == 1 || verb == 4) {
+        applied.fields[2] = {3, IntentValue::ofTstr(_presets.slot(slot)->nameView())};
+        applied.count = 3;
+    }
+    return Ret::ok(applied);
+}
+
+// The generator runs on its own task and sees only whole copies; the stroke
+// frame is the stored config's, stamped in at push time so the two can never
+// disagree about the window.
+void ValenceDevice::pushPattern() {
+    PatternSettings s = _pat;
+    s.frame = {_cfg.window_min, _cfg.window_max, _cfg.input_speed, _cfg.input_accel};
+    patternSetSettings(s);
+}
+
+void ValenceDevice::publishPatternPlane(const MotionCensus& mo) {
+    Hub& hub = *_hub;
+    const bool force = !_patPlaneSent;
+    _patPlaneSent = true;
+    const PatternSettings& p = _pat;
+    {
+        // enabled_mask: bits 0-5 are applyPattern()'s own refusals, bit 6
+        // (background_run) never drops.
+        const uint8_t mask = uint8_t(((mo.estop || !mo.homed) ? 0x00u : 0x3Fu) | 0x40u);
+        std::array<std::byte, 20> buf{};
+        size_t n = 0;
+        packU8(buf, n, p.running ? 1 : 0);
+        packU8(buf, n, p.pattern);
+        packF32(buf, n, p.speed);
+        packF32(buf, n, p.depth);
+        packF32(buf, n, p.stroke);
+        packF32(buf, n, p.sensation);
+        packU8(buf, n, mask);
+        packU8(buf, n, p.background_run ? 1 : 0);
+        publishIfChanged(hub, ch::pattern_state, buf, n, _sentPatState, force);
+    }
+    {
+        const advpat::Settings& ap = p.ap;
+        std::array<std::byte, 9> buf{};
+        size_t n = 0;
+        packU8(buf, n, p.ap_mode ? 1 : 0);
+        packU8(buf, n, ap.master.value);
+        packU8(buf, n, ap.max_depth.value);
+        packU8(buf, n, ap.min_depth.value);
+        packU8(buf, n, ap.in_speed.value);
+        packU8(buf, n, ap.out_speed.value);
+        packU8(buf, n, ap.in_accel.value);
+        packU8(buf, n, ap.out_accel.value);
+        packU8(buf, n, mo.estop ? 0x00 : 0xFF);   // applyPatternAdvanced()'s one refusal
+        publishIfChanged(hub, ch::pattern_advanced, buf, n, _sentApBase, force);
+    }
+    for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
+        const advpat::Modifier& m = p.ap.byId(id)->modifier;
+        std::array<std::byte, 7> buf{};
+        size_t n = 0;
+        packU8(buf, n, m.amplitude);
+        packU8(buf, n, m.in_step);
+        packU8(buf, n, m.in_wait);
+        packU8(buf, n, m.out_step);
+        packU8(buf, n, m.out_wait);
+        packU8(buf, n, m.offset);
+        packU8(buf, n, mo.estop ? 0x00 : 0x3F);
+        publishIfChanged(hub, kLaneChannels[id], buf, n, _sentApMod[id], force);
+    }
+    {
+        std::array<std::byte, 4> buf{};
+        size_t n = 0;
+        packU16(buf, n, _presets.generation());
+        packU8(buf, n, _presets.count());
+        packU8(buf, n, PatternPresetStore::kCapacity);
+        publishIfChanged(hub, ch::pattern_presets_roster, buf, n, _sentRoster, force);
+    }
+}
+
 // ---- 0x3100 move ---------------------------------------------------------------
 // MANUAL source: the wire operator is the one driving. The arbiter lets a
 // Manual intent through an unhomed machine (the push-to-home case a local
@@ -549,6 +838,10 @@ std::optional<uint8_t> ValenceDevice::sourceForChannel(uint16_t channel_id) {
     if (channel_id == ch::move) return uint8_t(MotionSource::Manual);
     if (channel_id == ch::motion_input || channel_id == ch::motion_segment)
         return uint8_t(MotionSource::Stream);
+    // The generator's run/stop writer. Ownership is what lets a source release
+    // stop it (onSourceOwnership); the advanced and preset writers only set
+    // knobs and own nothing.
+    if (channel_id == ch::pattern_cmd) return uint8_t(MotionSource::Pattern);
     return std::nullopt;
 }
 
@@ -571,6 +864,13 @@ bool ValenceDevice::canClearEstop() {
 // the latch as the spec requires.
 void ValenceDevice::onEstop(uint8_t cause, uint8_t origin) {
     motionEstop();
+    // The generator stops with the machine and stays stopped: clearing the
+    // latch never restarts it. The arbiter already refuses its strokes; this
+    // makes 0x1200's running tell the same truth.
+    if (_pat.running) {
+        _pat.running = false;
+        _patDirty = true;
+    }
     GLOGW(kTag, "ESTOP latched: cause=%u origin=%u", unsigned(cause), unsigned(origin));
     (void)cause;
     (void)origin;
@@ -657,6 +957,38 @@ void ValenceDevice::onSessionLeft(uint32_t session_id) {
     (void)session_id;
 }
 
+// §11.4: the hub only RELEASES here on a session's way out (owner 0), whether
+// it went STALE or was torn down; the reason is deliberately not consulted.
+// The generator is the one hub-autonomous source, and background_run is the
+// operator's standing answer to "keep going with nobody attached?".
+void ValenceDevice::onSourceOwnership(uint8_t source_id, uint32_t owner_session, uint8_t reason) {
+    if (owner_session != 0 || source_id != uint8_t(MotionSource::Pattern)) return;
+    if (_pat.ownerReleased()) {
+        _patDirty = true;
+        GLOGI(kTag, "pattern stopped: its session released it (reason %u), background_run off",
+              unsigned(reason));
+    } else if (_pat.running) {
+        GLOGW(kTag, "pattern running UNATTENDED: its session released it, background_run on");
+    }
+    (void)reason;
+}
+
+// §8.7 store items over BLOB_REQ ns=1. The hub has already enforced the
+// declaring entry's access floor; an empty slot answers nullopt, which the hub
+// NACKs CHUNK_UNAVAILABLE (honest and enumerable).
+std::optional<HubDelegate::BlobView> ValenceDevice::readBlob(uint8_t ns, uint8_t store_id, uint8_t slot) {
+    if (!boardFeatures().has_pattern || ns != blob_ns::store || store_id != kPresetStoreId)
+        return std::nullopt;
+    const PatternPresetStore::Slot* s = _presets.slot(slot);
+    if (s == nullptr) return std::nullopt;
+    const size_t n = encodePresetItem(_blobScratch, slot, *s);
+    if (n == 0) return std::nullopt;
+    BlobView v;
+    v.bytes = std::span<const std::byte>(_blobScratch.data(), n);
+    v.generation = _presets.generation();
+    return v;
+}
+
 // ---- retained STATE --------------------------------------------------------------
 
 void ValenceDevice::publishHubStatus() {
@@ -717,10 +1049,14 @@ void ValenceDevice::attach(Hub& hub) {
     publishMachineModes(hub, _tune);
     publishKineticCards(hub, _tune, kCardLimits | kCardChase | kCardWaveform);
     const MotionCensus mo = motionCensus();
-    publishMotion(hub, mo);
+    publishMotion(hub, mo, patternActive());
     publishPlanStrip(hub, mo);
     publishMotionDiag(hub, mo);
     publishOdometer(hub, mo);
+    if (boardFeatures().has_pattern) {
+        pushPattern();
+        publishPatternPlane(mo);
+    }
 }
 
 bool ValenceDevice::tick(uint32_t nowMs) {
@@ -742,7 +1078,7 @@ bool ValenceDevice::tick(uint32_t nowMs) {
     const MotionCensus mo = motionCensus();
     if (uint32_t(nowMs - _lastMotionMs) >= 33u) {
         _lastMotionMs = nowMs;
-        publishMotion(*_hub, mo);
+        publishMotion(*_hub, mo, patternActive());
     }
     if (uint32_t(nowMs - _lastPlanMs) >= 50u) {
         _lastPlanMs = nowMs;
@@ -761,11 +1097,20 @@ bool ValenceDevice::tick(uint32_t nowMs) {
         _tuneDirty = 0;
     }
 
+    if (boardFeatures().has_pattern) {
+        if (_patDirty) {
+            _patDirty = false;
+            pushPattern();
+        }
+        publishPatternPlane(mo);
+    }
+
     const bool dirty = _cfgDirty;
     _cfgDirty = false;
     if (dirty || (_cfgEverSent && !(_lastPublishedCfg == _cfg))) {
         pushConfigToMotion();
         publishMachineConfig();
+        _patDirty = true;   // the stroke frame is this config's window
         // Re-armed, not accumulated: the write lands only after the changes
         // stop. cfg_gen is read at write time, by which point Hub::update() has
         // already applied this tick's bump (§4.2).

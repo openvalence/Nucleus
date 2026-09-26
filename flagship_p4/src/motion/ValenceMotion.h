@@ -33,7 +33,9 @@ inline constexpr uint8_t kAnomalyKinds = 11;
 // Origin of an intent. It picks the ceiling SET and the gating, nothing else.
 enum class MotionSource : uint8_t {
     Manual = 0,   // operator-driven: user ceilings, bypasses every gate but e-stop
-    Stream = 1    // machine-driven: input ceilings, every gate applies
+    Stream = 1,   // machine-driven: input ceilings, every gate applies
+    Pattern = 2   // machine-driven, the on-hub generator: gated and clamped as
+                  // Stream is, but never counted as the live stream (0x1100)
 };
 
 // A point move, or a waveform span when duration_us is nonzero.

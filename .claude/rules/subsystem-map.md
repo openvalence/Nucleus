@@ -20,6 +20,8 @@ slowly. For anything finer, ask codebase-memory rather than grepping for
 | `flagship_p4/src/hub/` | The Valence hub and its IDF glue: log front door, platform shims, catalog, config |
 | `flagship_p4/src/hub/ValenceDevice.*` | The delegate and every STATE publisher. Hardware-free: the sim compiles it verbatim |
 | `flagship_p4/src/motion/MotionArbiter.*` | Every motion gate, the window clamp, limit sets and feedforward, emitter and clock injected. Hardware-free: the sim compiles it verbatim; `ValenceMotion.cpp` is only its task host |
+| `flagship_p4/src/patterns/` | The pattern generator: `PatternEngine` (hardware-free, the sim compiles it verbatim), its settings value and preset store, and `ValencePattern.cpp`, its board task host. Strokes leave as intents through `motionSubmit()` |
+| `lib/strokeengine_patterns` | VENDORED StrokeEngine pattern classes, verbatim (`VENDORED.md`); `<Arduino.h>` comes from `flagship_p4/src/patterns/arduino_compat/` |
 | `flagship_p4/ulp/` | LP core sources. One directory per project, fixed by the builder |
 | `flagship_p4/sdkconfig.defaults` | Silicon, memory map, PSRAM, radio. Hand-written, tracked |
 | `sim/valencesim/` | The device twin: real hub, catalog, device and engine on a desktop. CMake, never pio |
@@ -44,6 +46,7 @@ hub.**
 |---|---|---|
 | `app_main` | HP | Boot report, subsystem start, periodic liveness line (free/maxblock for both heaps, LP counters) |
 | LP emitter (`ulp/lp_quad.c`) | LP | Quadrature edges from a phase accumulator. Its signed edge count is position truth |
+| `Pattern` (`patterns/ValencePattern.cpp`) | HP core 1, priority 4 | The pattern generator: wakes when a half-stroke is due or settings arrive, submits it as an intent. Below the hub (5) and the motion task (6); stack `kPatternTaskStackBytes` |
 | `esp_hosted` / WiFi / lwIP tasks | HP | Owned by the drivers, not by us. Their callbacks are not our task (`transport.md` T5) |
 
 The hub task and the motion task land with the port (`val-091.3`,

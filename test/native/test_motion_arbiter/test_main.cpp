@@ -195,3 +195,22 @@ TEST_CASE("a frame move is not motion: force_home re-anchors and parks for one t
     CHECK(c.position_mm == doctest::Approx(0.0f));
     CHECK(c.plan_mm == doctest::Approx(0.0f).epsilon(0.001));
 }
+
+TEST_CASE("Pattern source: gated and window-clamped like Stream, never the live stream") {
+    auto r = rig();
+    CHECK_FALSE(r->submit(MotionSource::Pattern, 100.0f));   // unhomed
+    r->arb.forceHome(500.0f);
+    r->arb.setWindow(100.0f, 200.0f, 400.0f);
+    r->run(1000);
+    r->arb.pause(true);
+    CHECK_FALSE(r->submit(MotionSource::Pattern, 150.0f));
+    r->arb.pause(false);
+    REQUIRE(r->submit(MotionSource::Pattern, 350.0f));
+    CHECK(r->census().demand_mm == doctest::Approx(200.0f));
+    r->run(5000);
+    const MotionCensus c = r->census();
+    CHECK(c.busy);
+    CHECK_FALSE(c.stream);
+    REQUIRE(r->submit(MotionSource::Stream, 150.0f));
+    CHECK(r->census().stream);
+}

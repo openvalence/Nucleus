@@ -189,7 +189,7 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
     }
     ++_intents;
     _demand_mm = target;
-    _stream    = !manual;
+    _stream    = in.source == MotionSource::Stream;
     return true;
 }
 

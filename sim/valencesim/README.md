@@ -17,6 +17,9 @@ with no device semantics.
 | Arbiter: gates, window clamp, limit sets, feedforward, census | `flagship_p4/src/motion/MotionArbiter.cpp`, compiled verbatim | real |
 | Motion task plumbing | `src/SimMotion.cpp` | a ring on the one hub thread instead of FreeRTOS queues; census refreshed every pass, not at 50 Hz |
 | Emitter and position truth | `src/SimMotion.cpp` | ideal: renders the arbiter's steering word exactly, so `late`, `resteers`, `catchups` and `stack_free` read 0 |
+| Pattern generator: seven classic patterns, the advanced lanes, the brake | `flagship_p4/src/patterns/PatternEngine.cpp`, compiled verbatim | real |
+| Pattern task plumbing | `src/SimPattern.cpp` | ticked every pass on the one hub thread instead of its own FreeRTOS task |
+| Pattern presets (0x5220) and `background_run` | `PatternPresetStore` inside the delegate | in memory, same as the board today (bd val-wcm) |
 | WebSocket port | `../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home | real host binding |
 | `/uitoken` | `src/SimUiToken.cpp` on IXWebSocket's HTTP server | same contract, random bytes instead of HMAC |
 | Config persistence | none | in memory for the life of the process |

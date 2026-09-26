@@ -24,10 +24,12 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
 - `python tools/canon_lint.py` gates every substantive change; zero findings
   is the bar.
 - Host tests for the liftable libraries (`lib/geiger`, `lib/flux`,
-  `lib/kinetic`) and the shared motion core
-  (`flagship_p4/src/motion/MotionArbiter.*`, suite `test_motion_arbiter`) are
-  the check a namespace rename or a gate change is gated on: `pio test
-  -e native` from the root project, all four suites named in the output
+  `lib/kinetic`), the shared motion core
+  (`flagship_p4/src/motion/MotionArbiter.*`, suite `test_motion_arbiter`) and
+  the pattern generator (`flagship_p4/src/patterns/`, suite
+  `test_pattern_engine`) are the check a namespace rename or a gate change is
+  gated on: `pio test -e native` from the root project, all five suites named
+  in the output
   (T10 -- the runner misreports, so read the suite names and the exit code).
 
 ## The bench

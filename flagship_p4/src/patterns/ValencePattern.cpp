@@ -1,0 +1,116 @@
+// ValencePattern -- the generator's board host: the pattern task, its settings
+// slot, and the census read it gates on
+// Constraints:
+// - NO GENERATOR LOGIC LIVES HERE. Every scheduling, mapping and gating
+//   decision is PatternEngine (hardware-free, shared with the host twin).
+// - THE ENGINE IS TOUCHED BY THE PATTERN TASK ONLY. Settings cross in through
+//   a depth-one queue written with xQueueOverwrite; the one value that crosses
+//   out, active(), is a relaxed atomic bool nothing orders against.
+// - Core 1 at priority 4: below the motion task (6), which must never wait on
+//   a stroke, and below the hub (5), whose task watchdog buys OTA rollback.
+//   The work per wake is a few float operations and one queue send.
+// - The engine and the task stack are INTERNAL RAM: the engine is a file-scope
+//   static and the stack is a plain xTaskCreatePinnedToCore allocation.
+// See: ValencePattern.h, PatternEngine.h, bd val-091.12
+
+#include "ValencePattern.h"
+
+#include <atomic>
+
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
+
+#include "PatternEngine.h"
+#include "geiger/geiger.h"
+#include "motion/ValenceMotion.h"
+
+namespace valence {
+namespace {
+
+constexpr const char* kTag = "pattern";
+
+// The longest the task sleeps with nothing due. It bounds how late a gate
+// change it only sees through the census (homed, a stream ending) is noticed;
+// e-stop never waits on it, the arbiter parks on the calling task.
+constexpr uint32_t kIdleWaitMs = 20;
+
+class PatternTask {
+public:
+    bool begin();
+    void setSettings(const PatternSettings& s) {
+        if (_queue == nullptr) return;
+        xQueueOverwrite(_queue, &s);
+        if (_task != nullptr) xTaskNotifyGive(_task);
+    }
+    bool active() const { return _active.load(std::memory_order_relaxed); }
+    uint32_t stackFree() const { return _task ? uint32_t(uxTaskGetStackHighWaterMark(_task)) : 0; }
+
+private:
+    static void taskTrampoline(void* self) { static_cast<PatternTask*>(self)->run(); }
+    void run();
+
+    PatternEngine _engine{};
+    TaskHandle_t  _task = nullptr;
+    QueueHandle_t _queue = nullptr;
+    std::atomic<bool> _active{false};
+};
+
+PatternTask g_pattern;
+
+bool PatternTask::begin() {
+    _queue = xQueueCreate(1, sizeof(PatternSettings));
+    if (_queue == nullptr) return false;
+    if (xTaskCreatePinnedToCore(&PatternTask::taskTrampoline, "Pattern", kPatternTaskStackBytes,
+                                this, 4, &_task, 1) != pdPASS) {
+        return false;
+    }
+    GLOGI(kTag, "pattern generator up: 7 classic patterns + advanced, stack %lu B",
+          static_cast<unsigned long>(kPatternTaskStackBytes));
+    return true;
+}
+
+void PatternTask::run() {
+    uint32_t wait_ms = kIdleWaitMs;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms));
+        PatternSettings s;
+        if (xQueueReceive(_queue, &s, 0) == pdTRUE) _engine.apply(s);
+
+        const uint64_t now_us = uint64_t(esp_timer_get_time());
+        const MotionCensus c = motionCensus();
+        PatternInputs in;
+        in.homed         = c.homed;
+        in.estop         = c.estop;
+        in.paused        = c.paused;
+        in.stream_active = c.stream;
+        in.position_mm   = c.position_mm;
+        in.velocity_mm_s = c.velocity_mm_s;
+        if (const auto it = _engine.tick(now_us, in)) {
+            if (!motionSubmit(*it)) GLOGW_EVERY_MS(1000, kTag, "stroke dropped: motion queue full");
+        }
+        _active.store(_engine.active(), std::memory_order_relaxed);
+
+        // Sleep until the next half-stroke is due, woken early by a settings
+        // push; at least one tick so a due time already past cannot spin.
+        const uint64_t due = _engine.nextDueUs();
+        uint32_t ms = kIdleWaitMs;
+        if (due != 0) {
+            const uint64_t after = uint64_t(esp_timer_get_time());
+            ms = due > after ? uint32_t((due - after + 999u) / 1000u) : 1u;
+            if (ms > kIdleWaitMs) ms = kIdleWaitMs;
+            if (ms == 0) ms = 1;
+        }
+        wait_ms = ms;
+    }
+}
+
+}  // namespace
+
+bool patternBegin() { return g_pattern.begin(); }
+void patternSetSettings(const PatternSettings& s) { g_pattern.setSettings(s); }
+bool patternActive() { return g_pattern.active(); }
+uint32_t patternStackFree() { return g_pattern.stackFree(); }
+
+}  // namespace valence

@@ -7,9 +7,9 @@
 //
 // Constraints:
 // - HOST-ONLY: never touches a device, never deploys, no pio.
-// - ONE hub thread. The Hub, ValenceDevice and SimMotion are called from the
-//   loop below and nowhere else (T5). IXWebSocket connection threads only feed
-//   the port's RX rings and the /uitoken slot table.
+// - ONE hub thread. The Hub, ValenceDevice, SimMotion and SimPattern are
+//   called from the loop below and nowhere else (T5). IXWebSocket connection
+//   threads only feed the port's RX rings and the /uitoken slot table.
 // - The loop's 5 ms hub tick matches the P4's hub task; motion is evaluated
 //   every pass (~1 ms), matching the P4's 1 kHz motion tick as closely as a
 //   desktop scheduler allows.
@@ -34,6 +34,7 @@
 #endif
 
 #include "SimMotion.h"
+#include "SimPattern.h"
 #include "SimUiToken.h"
 #include "common/HostPlatform.h"
 #include "common/SessionLog.h"
@@ -42,6 +43,7 @@
 #include "hub/valence_config.h"
 #include "motion/ValenceMotion.h"
 #include "net/WsServerPort.h"
+#include "patterns/ValencePattern.h"
 
 namespace {
 
@@ -125,6 +127,7 @@ int main(int argc, char** argv) {
 
     auto box = std::make_unique<SimBox>();
     valence::motionBegin();
+    valence::patternBegin();
 
     if (!valence::buildValenceCatalog(box->catalog, valence::boardFeatures())) {
         std::fprintf(stderr, "valencesim: catalog build overflowed a Catalog32 pool\n");
@@ -186,6 +189,9 @@ int main(int argc, char** argv) {
     while (!g_stop) {
         const uint64_t nowUs = g_clock.nowUs64();
         const uint32_t nowMs = uint32_t(nowUs / 1000);
+        // Generator first, so a stroke it emits is planned on this same pass,
+        // as the P4's motion task plans at arrival.
+        valence::simPatternTick(nowUs);
         valence::simMotionTick(nowUs);
         if (uint32_t(nowMs - lastHubMs) >= 5u) {
             lastHubMs = nowMs;

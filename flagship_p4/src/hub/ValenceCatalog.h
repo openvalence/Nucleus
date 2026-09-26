@@ -131,23 +131,20 @@ inline constexpr uint16_t pattern_presets        = 0x5220;  // STORE·pattern, f
 }  // namespace ch
 
 // MIRROR of PatternPresetStore::{kCapacity,kNameMax,kPayloadBytes}
-// (include/comms/PatternPresetStore.h), same forced-duplication rule as
-// kApBaseCount above (this header stays library-only; PatternPresetStore.h is
-// itself hardware-free but still a cross-module include this header has never
-// taken). SlopSyncHubService.cpp carries a static_assert pinning these
-// together, so drift fails the FIRMWARE build, not a silent wire mismatch.
+// (flagship_p4/src/patterns/PatternPresetStore.h), same forced-duplication
+// rule as `factory`/`ceiling` below: this header stays library-only.
+// ValenceDevice.cpp sees both and static_asserts them together, so drift
+// fails the build, not the wire.
 inline constexpr uint8_t kPresetCapacity = 24;
 inline constexpr uint8_t kPresetNameMax = 32;
 inline constexpr uint8_t kPresetPayloadBytes = 40;
+// The preset store's identity, published in its STORE descriptor and answered
+// by ValenceDevice::readBlob(). store_id 1 is the trust ledger.
+inline constexpr uint8_t kPresetStoreId = 2;
+inline constexpr const char* kPresetKind = "pattern.frayd";
 
-// MIRROR of advpat::BASE_COUNT (include/motion/AdvancedPattern.h), same forced-
-// duplication rule as `factory`/`ceiling` below: this header must stay
-// buildable with nothing but the library (native tests, the sim), and
-// AdvancedPattern.h — though itself hardware-free — is still a cross-module
-// dependency this header has never taken. SlopSyncHubService.cpp DOES include
-// PatternEngine.h (and therefore AdvancedPattern.h) and carries a static_assert
-// pinning this to advpat::BASE_COUNT, so drift fails the FIRMWARE build, not a
-// silent wire mismatch.
+// MIRROR of advpat::BASE_COUNT (flagship_p4/src/patterns/AdvancedPattern.h),
+// same rule and the same static_assert home as the preset mirror above.
 inline constexpr uint8_t kApBaseCount = 6;
 
 // ---- motion-anomaly EVENT: the `body` (40) sub-map keys ---------------------
@@ -196,8 +193,6 @@ struct DeviceFeatures {
     // Gates the PATTERN GENERATOR: every pattern-* channel and the 0x5220
     // preset store. A hub with no generator advertising pattern-state would
     // publish a permanently stopped generator, which is the dead-gauge lie.
-    // TODO(val-091.12): port the generator, then this can be true on a board
-    // that carries one.
     bool has_pattern        = false;
 };
 
@@ -1681,7 +1676,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .defaultPriority = Priority::background,
                 .hasCategory = true, .category = valence::ui_categories::library,
                 .hasRank = true, .rank = valence::ui_ranks::detail});
-    c.addStoreDescriptor({.storeId = 2, .kind = "pattern.frayd",
+    c.addStoreDescriptor({.storeId = kPresetStoreId, .kind = kPresetKind,
                           .capacity = kPresetCapacity,
                           .perItemMax = kPresetPayloadBytes,
                           .nameMax = kPresetNameMax});

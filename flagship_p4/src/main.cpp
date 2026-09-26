@@ -35,6 +35,7 @@
 #include <ulp_lp_core.h>
 #include "hub/ValenceHub.h"
 #include "motion/ValenceMotion.h"
+#include "patterns/ValencePattern.h"
 #include "system/ValenceDiag.h"
 #include "system/ValenceOta.h"
 #include "secrets.h"
@@ -323,6 +324,7 @@ struct StackWatch {
 StackWatch g_stacks[] = {
     {"ValenceHub",  valence::kHubTaskStackBytes},
     {"Motion",   valence::kMotionTaskStackBytes},
+    {"Pattern",  valence::kPatternTaskStackBytes},
     {"app_main", uint32_t(CONFIG_ESP_MAIN_TASK_STACK_SIZE)},
 };
 void note_stack(size_t i, uint32_t free_bytes) {
@@ -369,6 +371,11 @@ extern "C" void app_main() {
     printf("\n--- motion path (arbiter + kinetic + LP emitter) ---\n");
     const bool motion_ok = valence::motionBegin();
     if (!motion_ok) printf("--- motion path FAILED to start ---\n");
+
+    // The pattern generator: AFTER motion (it gates on motionCensus()) and
+    // BEFORE the hub (the hub's boot publish pushes it its first settings).
+    // Non-fatal: a machine with no generator still takes streams and moves.
+    if (!valence::patternBegin()) printf("--- pattern generator FAILED to start ---\n");
 
     // The Valence hub. Independent of the emitters above by construction: it
     // owns its own task on core 1 and shares no peripheral with them, so a hub
@@ -426,7 +433,8 @@ extern "C" void app_main() {
         const valence::MotionCensus mo = valence::motionCensus();
         note_stack(0, census.stackFree);
         note_stack(1, mo.stack_free);
-        note_stack(2, uint32_t(uxTaskGetStackHighWaterMark(nullptr)));
+        note_stack(2, valence::patternStackFree());
+        note_stack(3, uint32_t(uxTaskGetStackHighWaterMark(nullptr)));
         printf("[flagship_p4] %lus  int_free=%u int_max=%u  psram_free=%u psram_max=%u  "
                "parlio=%s  lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
                "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu  "

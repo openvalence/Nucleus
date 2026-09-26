@@ -28,6 +28,8 @@
 
 #include "ValenceCatalog.h"
 #include "motion/ValenceMotion.h"
+#include "patterns/PatternPresetStore.h"
+#include "patterns/PatternSettings.h"
 #include "valence/hub/hub.hpp"
 
 namespace valence {
@@ -62,12 +64,13 @@ public:
 // Operator ruling 2026-09-21: the board acts like a normal machine with no
 // motor, no Modbus drive and no current sensor. The motion plane is REAL --
 // the arbiter, the engine and the LP emitter are all live -- so it is
-// advertised; the two absent subsystems are what stays gated.
+// advertised, and so is the pattern generator that drives it
+// (flagship_p4/src/patterns/); the two absent subsystems are what stays gated.
 inline DeviceFeatures boardFeatures() {
     DeviceFeatures feat{};
     feat.has_motion  = true;
     feat.has_drive   = false;  // no Modbus drive on this board (val-091)
-    feat.has_pattern = false;  // no pattern engine ported yet (val-091.12)
+    feat.has_pattern = true;
     return feat;
 }
 
@@ -127,6 +130,8 @@ public:
                         const BundleView& bundle) override;
     void onSessionJoined(uint32_t session_id) override;
     void onSessionLeft(uint32_t session_id) override;
+    void onSourceOwnership(uint8_t source_id, uint32_t owner_session, uint8_t reason) override;
+    std::optional<BlobView> readBlob(uint8_t ns, uint8_t store_id, uint8_t slot) override;
 
 private:
     Result<IntentValueMap, NackCode> applyMove(const IntentValueMap& requested);
@@ -134,6 +139,11 @@ private:
     Result<IntentValueMap, NackCode> applyModes(const IntentValueMap& requested, bool& cfgChanged);
     Result<IntentValueMap, NackCode> applyTuning(const IntentValueMap& requested, bool& cfgChanged);
     void noteTuning(const MotionTuning& next, bool& cfgChanged);
+    Result<IntentValueMap, NackCode> applyPattern(const IntentValueMap& requested);
+    Result<IntentValueMap, NackCode> applyPatternAdvanced(const IntentValueMap& requested);
+    Result<IntentValueMap, NackCode> applyPresets(const IntentValueMap& requested);
+    void pushPattern();
+    void publishPatternPlane(const MotionCensus& mo);
 
     void publishHubStatus();
     void publishMachineConfig();
@@ -157,6 +167,23 @@ private:
     // tick(), one tick later. DEFERRED on purpose: Hub::clearEstop() publishes
     // and broadcasts, and applyIntent runs inside the hub's intent dispatch.
     bool _clearLatch = false;
+
+    // The live pattern generator settings. This copy IS the setting (the
+    // delegate is its one writer); the generator's task runs on whatever
+    // tick() last pushed, with the stroke frame filled from _cfg at push time.
+    PatternSettings _pat{};
+    bool _patDirty = false;
+    PatternPresetStore _presets{};
+    // readBlob()'s answer lives here until the hub's next call (hub.hpp's
+    // BlobView contract); re-encoded on every resume, never cached.
+    std::array<std::byte, 128> _blobScratch{};
+    // Last bytes SENT per pattern-plane channel: each republishes on a change
+    // of its own bytes, including an enabled_mask that moved with homed/estop.
+    std::array<std::byte, 20> _sentPatState{};
+    std::array<std::byte, 9> _sentApBase{};
+    std::array<std::array<std::byte, 7>, advpat::BASE_COUNT> _sentApMod{};
+    std::array<std::byte, 4> _sentRoster{};
+    bool _patPlaneSent = false;
 
     // Debounced persist: armed by every applied change, re-armed by the next,
     // so a slider drag costs ONE write after the operator lets go.
