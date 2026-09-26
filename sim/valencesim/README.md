@@ -14,8 +14,9 @@ with no device semantics.
 | Catalog | `flagship_p4/src/hub/ValenceCatalog.h` + `boardFeatures()` | real, same etag as the board |
 | Delegate and every STATE publisher | `flagship_p4/src/hub/ValenceDevice.cpp`, compiled verbatim | real |
 | Motion planner | `lib/kinetic` (`kinetic::Engine` over vendored Ruckig) | real |
-| Arbiter gates | `src/SimMotion.cpp` | host copy of `ValenceMotion.cpp`'s `MotionArbiter` |
-| Emitter and position truth | `src/SimMotion.cpp` | ideal: the plan, quantized to steps |
+| Arbiter: gates, window clamp, limit sets, feedforward, census | `flagship_p4/src/motion/MotionArbiter.cpp`, compiled verbatim | real |
+| Motion task plumbing | `src/SimMotion.cpp` | a ring on the one hub thread instead of FreeRTOS queues; census refreshed every pass, not at 50 Hz |
+| Emitter and position truth | `src/SimMotion.cpp` | ideal: renders the arbiter's steering word exactly, so `late`, `resteers`, `catchups` and `stack_free` read 0 |
 | WebSocket port | `../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home | real host binding |
 | `/uitoken` | `src/SimUiToken.cpp` on IXWebSocket's HTTP server | same contract, random bytes instead of HMAC |
 | Config persistence | none | in memory for the life of the process |

@@ -32,6 +32,7 @@ file(GLOB RUCKIG_SRC "${NUCLEUS_ROOT}/lib/ruckig/src/ruckig/*.cpp")
 add_executable(valencesim
     src/main.cpp
     src/SimMotion.cpp
+    "${NUCLEUS_ROOT}/flagship_p4/src/motion/MotionArbiter.cpp"
     src/SimUiToken.cpp
     "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceDevice.cpp"
     "${BENCH_SRC}/net/WsServerPort.cpp"

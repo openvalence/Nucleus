@@ -19,6 +19,7 @@ slowly. For anything finer, ask codebase-memory rather than grepping for
 | `flagship_p4/src/` | HP-core sources and the composition root |
 | `flagship_p4/src/hub/` | The Valence hub and its IDF glue: log front door, platform shims, catalog, config |
 | `flagship_p4/src/hub/ValenceDevice.*` | The delegate and every STATE publisher. Hardware-free: the sim compiles it verbatim |
+| `flagship_p4/src/motion/MotionArbiter.*` | Every motion gate, the window clamp, limit sets and feedforward, emitter and clock injected. Hardware-free: the sim compiles it verbatim; `ValenceMotion.cpp` is only its task host |
 | `flagship_p4/ulp/` | LP core sources. One directory per project, fixed by the builder |
 | `flagship_p4/sdkconfig.defaults` | Silicon, memory map, PSRAM, radio. Hand-written, tracked |
 | `sim/valencesim/` | The device twin: real hub, catalog, device and engine on a desktop. CMake, never pio |
