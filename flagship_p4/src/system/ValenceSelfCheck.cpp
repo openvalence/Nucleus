@@ -3,10 +3,13 @@
 
 #include "system/ValenceSelfCheck.h"
 
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <optional>
 
 #include <driver/gpio.h>
+#include <driver/i2c_master.h>
 #include <esp_err.h>
 #include <nvs.h>
 
@@ -14,6 +17,7 @@
 #include "hub/ValenceHub.h"
 #include "system/BoardPins.h"
 #include "system/SelfCheck.h"
+#include "system/Supervisor.h"
 #include "system/ValencePower.h"
 
 namespace valence {
@@ -32,6 +36,59 @@ selfcheck::Table g_table;
 bool g_ran = false;
 
 // ---- the reads ---------------------------------------------------------------
+
+// One block from the board monitor: write the register id, read its length.
+// The private bus belongs to ValencePower, which opens it first with the
+// driver's automatic port choice, so it is HP port 0. A second I2C master
+// opened before powerBegin() would break that.
+// TODO(val-091.33): take the bus handle from ValencePower instead.
+esp_err_t readMonitorBlock(uint8_t reg, uint8_t* out, size_t len) {
+    i2c_master_bus_handle_t bus = nullptr;
+    esp_err_t err = i2c_master_get_bus_handle(I2C_NUM_0, &bus);
+    if (err != ESP_OK) return err;
+    i2c_device_config_t cfg{};
+    cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    cfg.device_address = SV_I2C_ADDR;
+    cfg.scl_speed_hz = 400000;
+    i2c_master_dev_handle_t dev = nullptr;
+    err = i2c_master_bus_add_device(bus, &cfg, &dev);
+    if (err != ESP_OK) return err;
+    err = i2c_master_transmit_receive(dev, &reg, 1, out, len, 10);
+    i2c_master_bus_rm_device(dev);
+    return err;
+}
+
+void checkBoardMonitor() {
+    std::array<uint8_t, SV_IDENT_LEN> ident{};
+    esp_err_t err = readMonitorBlock(SV_REG_IDENT, ident.data(), ident.size());
+    if (err != ESP_OK) {
+        g_table.record(Check::board_monitor, Verdict::fail,
+                       "no answer at 0x%02x (%s): monitor missing or blank",
+                       unsigned(SV_I2C_ADDR), esp_err_to_name(err));
+    } else {
+        SvIdent id{};
+        selfcheck::judgeMonitorIdent(g_table, sv_ident_decode(ident.data(), ident.size(), &id), id);
+    }
+    if (g_table.entry(Check::board_monitor).result != Verdict::pass) {
+        g_table.record(Check::rails, Verdict::skipped, "needs the board monitor");
+        g_table.record(Check::bus_window, Verdict::skipped, "needs the board monitor");
+        g_table.record(Check::regen_clamp, Verdict::skipped, "needs the board monitor");
+        return;
+    }
+    std::array<uint8_t, SV_STATUS_LEN> status{};
+    err = readMonitorBlock(SV_REG_STATUS, status.data(), status.size());
+    SvStatus s{};
+    const int e = (err == ESP_OK) ? sv_status_decode(status.data(), status.size(), &s) : -1;
+    if (e != SV_OK) {
+        for (Check c : {Check::rails, Check::bus_window, Check::regen_clamp})
+            g_table.record(c, Verdict::fail, "STATUS read failed (%s, sv %d)",
+                           esp_err_to_name(err), e);
+        return;
+    }
+    selfcheck::judgeRails(g_table, s);
+    selfcheck::judgeBusWindow(g_table, s);
+    selfcheck::judgeRegenClamp(g_table, s);
+}
 
 void checkPowerMonitor(std::optional<PowerReading>& reading) {
     using selfcheck::kDieMaxC;
@@ -190,17 +247,12 @@ void selfCheckHoldMotorOff() {
 bool selfCheckRun(const SelfCheckFacts& facts) {
     std::optional<PowerReading> reading;
 
-    g_table.record(Check::board_monitor, Verdict::skipped,
-                   "monitor firmware and link not landed (val-091.19, val-091.20)");
-    g_table.record(Check::rails, Verdict::skipped,
-                   "rails are read by the board monitor (val-091.19)");
+    // The monitor's read fills board-monitor, rails, bus-window and
+    // regen-clamp; table order is still the report order.
+    checkBoardMonitor();
     checkPowerMonitor(reading);
-    g_table.record(Check::bus_window, Verdict::skipped,
-                   "+BUS and VIN_RAW are read only by the board monitor (val-091.19)");
     checkMotorRailOff(reading);
     checkSwitchFault();
-    g_table.record(Check::regen_clamp, Verdict::skipped,
-                   "the clamp test pulse is a board-monitor command (val-091.19)");
     checkEStop();
     if (facts.lpEdges > 0) {
         g_table.record(Check::quadrature, Verdict::pass,

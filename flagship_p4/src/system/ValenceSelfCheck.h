@@ -14,8 +14,9 @@
 // - Results ride the log channel 0x0008 through ValenceLogBridge: FAIL is
 //   GLOGE, SKIPPED is GLOGW, both on the wire; PASS is GLOGI, console and
 //   /diag only. Tag "selfcheck".
-// - selfCheckRun() blocks on I2C for a few ms (ValencePower.h) and on nothing
-//   else. Its state is the ~1 KB table in BSS.
+// - selfCheckRun() blocks on the private I2C bus and on nothing else: the
+//   power monitor's read (ValencePower.h) and two board-monitor blocks at a
+//   10 ms timeout each (Supervisor.h). Its state is the ~1 KB table in BSS.
 // See: SelfCheck.h, BoardPins.h, bd val-091.21
 
 #include <cstdint>

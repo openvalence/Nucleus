@@ -1,6 +1,7 @@
 // test_self_check -- native doctest suite for the boot self-check table
 // Constraints:
-// - Hardware-free: the table and the E-stop decode only. The reads live in
+// - Hardware-free: the table, the E-stop decode and the board-monitor judges
+//   over sealed Supervisor.h blocks. The reads live in
 //   ValenceSelfCheck.cpp and are bench work (val-091.21).
 // - The gate under test is the ruling, not the code: motor power opens only
 //   when EVERY entry passed; skipped and pending hold it shut.
@@ -133,4 +134,119 @@ TEST_CASE("result names") {
     CHECK(std::string(sc::resultName(Result::fail)) == "FAIL");
     CHECK(std::string(sc::resultName(Result::skipped)) == "SKIPPED");
     CHECK(std::string(sc::resultName(Result::pending)) == "PENDING");
+}
+
+// ---- board monitor judges (Supervisor.h blocks) -----------------------------
+
+namespace {
+
+SvStatus healthyStatus() {
+    SvStatus s{};
+    s.mv[SV_CH_VIN_RAW] = 36100;
+    s.mv[SV_CH_BUS] = 35900;
+    s.mv[SV_CH_12V] = 12070;
+    s.mv[SV_CH_5V] = 5050;
+    s.mv[SV_CH_5V_SYS] = 5000;
+    s.mv[SV_CH_3V3_ACC] = 3300;
+    return s;
+}
+
+}  // namespace
+
+TEST_CASE("monitor IDENT: a sealed block on this link version passes") {
+    SvIdent in{};
+    in.link_version = SV_LINK_VERSION;
+    in.fw_major = 0;
+    in.fw_minor = 1;
+    in.fw_patch = 2;
+    in.image_crc32 = 0xDEADBEEFu;
+    uint8_t wire[SV_IDENT_LEN] = {};
+    sv_ident_encode(&in, wire);
+    SvIdent out{};
+    Table t;
+    sc::judgeMonitorIdent(t, sv_ident_decode(wire, SV_IDENT_LEN, &out), out);
+    CHECK(t.entry(Check::board_monitor).result == Result::pass);
+    CHECK(std::string(t.entry(Check::board_monitor).reason.data()).find("0.1.2") != std::string::npos);
+
+    wire[3] ^= 0xFF;   // magic byte, CRC now wrong too: the block is refused whole
+    sc::judgeMonitorIdent(t, sv_ident_decode(wire, SV_IDENT_LEN, &out), out);
+    CHECK(t.entry(Check::board_monitor).result == Result::fail);
+}
+
+TEST_CASE("monitor IDENT: another link version fails") {
+    SvIdent id{};
+    id.link_version = uint8_t(SV_LINK_VERSION + 1);
+    Table t;
+    sc::judgeMonitorIdent(t, SV_OK, id);
+    CHECK(t.entry(Check::board_monitor).result == Result::fail);
+}
+
+TEST_CASE("rails and bus window: a healthy STATUS passes both") {
+    Table t;
+    const SvStatus s = healthyStatus();
+    sc::judgeRails(t, s);
+    sc::judgeBusWindow(t, s);
+    sc::judgeRegenClamp(t, s);
+    CHECK(t.entry(Check::rails).result == Result::pass);
+    CHECK(t.entry(Check::bus_window).result == Result::pass);
+    // The clamp TEST is not sequenced, so a quiet clamp is still not a pass.
+    CHECK(t.entry(Check::regen_clamp).result == Result::skipped);
+}
+
+TEST_CASE("rails: a motion-critical rail fault fails, an accessory warn passes") {
+    Table t;
+    SvStatus s = healthyStatus();
+    s.warns = SV_W_3V3_ACC;
+    sc::judgeRails(t, s);
+    CHECK(t.entry(Check::rails).result == Result::pass);
+    s.faults_live = SV_F_12V;
+    sc::judgeRails(t, s);
+    CHECK(t.entry(Check::rails).result == Result::fail);
+}
+
+TEST_CASE("untrusted readings never pass: first scan pending, monitor VDD out") {
+    Table t;
+    SvStatus s = healthyStatus();
+    s.faults_live = SV_F_BOOT;
+    sc::judgeRails(t, s);
+    sc::judgeBusWindow(t, s);
+    CHECK(t.entry(Check::rails).result == Result::skipped);
+    CHECK(t.entry(Check::bus_window).result == Result::skipped);
+    s.faults_live = SV_F_VDD;
+    sc::judgeRails(t, s);
+    sc::judgeBusWindow(t, s);
+    CHECK(t.entry(Check::rails).result == Result::fail);
+    CHECK(t.entry(Check::bus_window).result == Result::fail);
+}
+
+TEST_CASE("bus window: input stage, overvoltage, and the 24-36 V window") {
+    Table t;
+    SvStatus s = healthyStatus();
+    s.faults_live = SV_F_INPUT_STAGE;
+    sc::judgeBusWindow(t, s);
+    CHECK(t.entry(Check::bus_window).result == Result::fail);
+    s.faults_live = SV_F_BUS_OV;
+    sc::judgeBusWindow(t, s);
+    CHECK(t.entry(Check::bus_window).result == Result::fail);
+    s.faults_live = 0;
+    s.mv[SV_CH_BUS] = 0;   // USB-only bench: no motor supply
+    sc::judgeBusWindow(t, s);
+    CHECK(t.entry(Check::bus_window).result == Result::fail);
+    s.mv[SV_CH_BUS] = 24000;
+    sc::judgeBusWindow(t, s);
+    CHECK(t.entry(Check::bus_window).result == Result::pass);
+    s.mv[SV_CH_BUS] = 44500;   // at the clamp: outside the supply window
+    sc::judgeBusWindow(t, s);
+    CHECK(t.entry(Check::bus_window).result == Result::fail);
+}
+
+TEST_CASE("regen clamp: a live clamp fault fails") {
+    Table t;
+    SvStatus s = healthyStatus();
+    s.faults_live = SV_F_CLAMP_STUCK;
+    sc::judgeRegenClamp(t, s);
+    CHECK(t.entry(Check::regen_clamp).result == Result::fail);
+    s.faults_live = SV_F_SHUNT_HOT;
+    sc::judgeRegenClamp(t, s);
+    CHECK(t.entry(Check::regen_clamp).result == Result::fail);
 }
