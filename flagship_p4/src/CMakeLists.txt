@@ -47,7 +47,7 @@ idf_component_register(SRCS "main.cpp"
                        # with an all-components include set and so hides a
                        # missing entry from every pio build; ninja's own
                        # __idf_src target is the check.
-                       PRIV_REQUIRES app_update esp_driver_i2c esp_driver_parlio esp_event esp_netif
+                       PRIV_REQUIRES app_update esp_driver_i2c esp_event esp_netif
                                      esp_wifi lwip nvs_flash spi_flash
                                      espressif__esp_hosted
                                      espressif__esp_wifi_remote)

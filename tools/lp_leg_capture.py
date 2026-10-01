@@ -3,11 +3,13 @@
 The instrument for val-091.4 item 2 and val-091.8. The bench firmware repeats
 +20 / -20 / reversal every ~14.6 s.
 
-PROBE MAP: the bench declares LPG15 = A on CH2 and LPG12 = B on CH1, and that
-declaration is REVERSED against the hardware -- measured, see PROBE IDENTITY
-below. A phase reading cannot notice, because a swapped probe pair and a
-swapped emitter table decode identically. Pass ORIGIN and read the identity
-line before trusting any polarity claim from this tool.
+PROBE MAP: A is LPG3 (QUAD_A, TP601 on the Flagship) and B is LPG5 (QUAD_B,
+TP604); the declared map is A on CH2, B on CH1. The emitter moved off
+LPG15/LPG12 with the board pin map, so val-091.8's measured probe swap belongs
+to the old pads and the map must be re-confirmed. A phase reading cannot
+notice a swap, because a swapped probe pair and a swapped emitter table decode
+identically. Pass ORIGIN and read the identity line before trusting any
+polarity claim from this tool.
 
 NEVER switch this instrument to 50 ohm and never touch the :CALibration tree;
 both can destroy it (archived SlopDrive-32 repo,
@@ -109,26 +111,26 @@ for attempt in range(1, TRIES + 1):
               % (legs[0][0], legs[0][1], legs[1][0], legs[1][1],
                  (held >> 1) & 1, held & 1))
         print('POLARITY: a POSITIVE move renders gray %+d as decoded -> %s leads '
-              'on the declared probe map (want +1, A = LPG15 = CH2)'
+              'on the declared probe map (want +1, A = LPG3 = CH2)'
               % (legs[0][0], 'A' if legs[0][0] == 1 else 'B'))
         # PROBE IDENTITY, the bit no phase reading can supply. Phase alone is
         # mirror-symmetric: a swapped probe pair and a swapped emitter table
         # produce the SAME decode, which is why val-091.8 could not separate
         # them. The ABSOLUTE edge count does separate them. lp_quad.c walks
-        # (LPG15, LPG12) = (0,0) (1,0) (1,1) (0,1) over k = count mod 4 from the
+        # (LPG3, LPG5) = (0,0) (1,0) (1,1) (0,1) over k = count mod 4 from the
         # LP core's first edge, so the park level pair names the pins outright
         # once k is known. k = (ORIGIN + census steps) mod 4, where ORIGIN is
         # the free-running 'edges' count at the pre-bench park, read off the
         # console. The reversal parks at census steps = -1.
         if ORIGIN is not None:
             k = (ORIGIN - 1) % 4
-            hi15 = k in (1, 2)
-            want = 'HIGH' if hi15 else 'LOW'
+            hi_a = k in (1, 2)
+            want = 'HIGH' if hi_a else 'LOW'
             ch = 1 if (held >> 1) & 1 else 2
-            print('PROBE IDENTITY: origin %d, k=%d -> LPG15 parks %s; '
-                  'measured CH1=%d CH2=%d, so LPG15 is on CH%d (declared: CH2)'
+            print('PROBE IDENTITY: origin %d, k=%d -> LPG3 parks %s; '
+                  'measured CH1=%d CH2=%d, so LPG3 is on CH%d (declared: CH2)'
                   % (ORIGIN, k, want, (held >> 1) & 1, held & 1,
-                     ch if hi15 else (2 if ch == 1 else 1)))
+                     ch if hi_a else (2 if ch == 1 else 1)))
         print('ILLEGAL TRANSITIONS: %d' % d['bad'])
         break
 else:

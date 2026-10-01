@@ -210,8 +210,8 @@ uint64_t loadOrMintInstanceId() {
 }
 
 // ---- the hub task ------------------------------------------------------------
-// CORE 1. The LP core owns motion and the PARLIO emitter is pure DMA, so HP
-// core 1 carries nothing else; core 0 runs app_main and the esp_hosted SDIO
+// CORE 1. The LP core renders motion's edges, so HP core 1 carries no
+// emitter; core 0 runs app_main and the esp_hosted SDIO
 // service that the whole network path depends on. Keeping the hub's 5 ms tick
 // and its bounded socket writes off the core that services the radio bridge is
 // the same separation the S3 makes between comms and real time, drawn where

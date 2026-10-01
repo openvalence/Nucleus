@@ -24,13 +24,13 @@
 #include "ulp_lp_core_gpio.h"
 #include "hal/rtc_io_ll.h"
 #include "riscv/csr.h"
+#include "../src/system/BoardPins.h"
 
-// LPG15 and LPG12: the mirrored through-holes opposite the PARLIO pair, so one
-// probe setup measures both emitters and the comparison stays honest. LPG15 is
-// also LPRXD -- driving it costs the LP core its serial INPUT, which bring-up
-// does not need. Move the emitter pin before giving up the console.
-#define PIN_A LP_IO_NUM_15
-#define PIN_B LP_IO_NUM_12
+// QUAD_A and QUAD_B, the only pads this core drives (BoardPins.h). On the
+// Flagship they reach the drive through the 74AHCT125 and are tapped on
+// TP601/TP604; on a bare stamp, probe LPG3 and LPG5.
+#define PIN_A BOARD_GPIO_QUAD_A
+#define PIN_B BOARD_GPIO_QUAD_B
 
 // How close to a deadline the re-steer loop stops looking. Inside this window
 // the FINE loop runs alone and keeps its measured shape. 2,000 cycles = 50 us

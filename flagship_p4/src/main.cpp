@@ -1,24 +1,18 @@
-// flagship_p4 -- Nucleus bring-up on the OSSM Flagship: silicon report,
-// the PARLIO and LP core quadrature emitters side by side for the scope, and
-// the network up through the C6
+// flagship_p4 -- Nucleus bring-up on the OSSM Flagship: silicon report, the
+// LP core quadrature emitter, and the network up through the C6
 // Constraints:
 // - BENCH FIRMWARE, not the product. Pure ESP-IDF on purpose: the ULP binary
 //   reaches the final link only in an IDF project (platformio.ini header).
-// - PIN_A/PIN_B/PIN_SYNC are the only HP pins driven. The LP core drives
-//   LPG15/LPG12 (ulp/lp_quad.c). Nothing else depends on either choice.
-// - PARLIO replays a time-sampled bitmap from DMA, so edge placement quantizes
-//   to kParlioClockHz. That quantization is the thing being measured -- do not
-//   "fix" it by raising the clock without recording the old number first.
+// - Every pin is a BoardPins.h name. The LP core drives QUAD_A/QUAD_B
+//   (ulp/lp_quad.c); nothing in this file drives a board net.
 // - The LP core clock is MEASURED, never assumed. kLpCyclesPerEdge is exact,
 //   so scope edges/s times kLpCyclesPerEdge IS the LP clock.
 // - WiFi is esp_wifi_remote over esp_hosted: the esp_wifi_* calls below run on
 //   the C6. Pins and bus live in sdkconfig.defaults, credentials in secrets.h.
 // See: docs/flagship-board.md section 8, bd val-091
 
-#include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <driver/parlio_tx.h>
 #include <esp_chip_info.h>
 #include <esp_event.h>
 #include <esp_flash.h>
@@ -38,42 +32,10 @@
 #include "patterns/ValencePattern.h"
 #include "system/ValenceDiag.h"
 #include "system/ValenceOta.h"
+#include "system/BoardPins.h"
 #include "system/ValencePower.h"
 #include "secrets.h"
 #include "ulp_main.h"
-
-// ---- PARLIO emitter geometry ---------------------------------------------------
-
-// The Stamp-P4 alternates castellated and through-hole down each edge. G17 and
-// G21 are both through-hole and sit four positions apart, enough clearance for
-// two probes. The LP core test uses the mirrored pair LPG15/LPG12 opposite.
-static constexpr gpio_num_t PIN_A = GPIO_NUM_17;
-static constexpr gpio_num_t PIN_B = GPIO_NUM_21;
-// SYNC pulses high for the first samples of every buffer. It rides the SAME
-// DMA payload as A and B, so it marks the loop boundary exactly: trigger the
-// scope here and the wrap is always at the left edge of the window.
-static constexpr gpio_num_t PIN_SYNC = GPIO_NUM_38;   // strapping pin, but only at reset
-
-// Sample clock. 208.608 steps/mm at 950 mm/s is 198,178 transitions/s, a
-// 5.05 us step; 10 MHz quantizes that to 2%, 1 MHz to 20%.
-static constexpr uint32_t kParlioClockHz = 1000000;   // LOW-SPEED TEST
-
-static constexpr double kPeakTransitionsPerSec = 4172.0;   // 20 mm/s at 208.608 steps/mm
-
-// One full sweep: peak -> 0 -> peak, then the DMA wraps and repeats.
-static constexpr uint32_t kSweepMs = 400;
-
-// One quadrature cycle: 00 -> 01 -> 11 -> 10, Gray coded so exactly one line
-// changes per transition. That property is what makes it quadrature.
-static constexpr uint8_t kGray[4] = {0b00, 0b01, 0b11, 0b10};
-
-static constexpr size_t kSamples     = size_t(uint64_t(kParlioClockHz) * kSweepMs / 1000);
-static constexpr size_t kBufBytes    = kSamples * 4 / 8;   // 4 bits per sample
-static constexpr size_t kSyncSamples = 50;                 // 50 us marker
-static uint8_t* g_pattern = nullptr;
-
-static parlio_tx_unit_handle_t g_tx = nullptr;
-static double g_raw_total = 0, g_tgt_total = 0, g_peak = 0;   // seam bookkeeping
 
 // ---- LP core emitter steering ---------------------------------------------------
 
@@ -160,88 +122,6 @@ static bool wifi_up() {
     return true;
 }
 
-// ---- PARLIO pattern -------------------------------------------------------------
-
-// Time-sampled bitmap, LSB-first, four bits per sample (A, B, SYNC, unused).
-// Step timing is a PHASE ACCUMULATOR in exact fixed point: phase advances by
-// (rate / clock) each sample and a transition fires on every crossing. The
-// emitted instant is never fed back into the next edge's reference, so the
-// quantization error is bounded at one sample and NEVER ACCUMULATES.
-static void build_pattern() {
-    memset(g_pattern, 0, kBufBytes);
-    const double half = double(kSamples) / 2.0;
-
-    // THE BUFFER MUST HOLD A WHOLE NUMBER OF COMPLETE QUADRATURE CYCLES. It
-    // loops, and the Gray index restarts at 0 on every wrap. If the total
-    // transition count is not a multiple of 4 the sequence JUMPS at the seam,
-    // an illegal both-lines-change the drive will flag or miscount. Scale the
-    // peak by a fraction of a percent so the integral lands exactly.
-    const double raw_total = kPeakTransitionsPerSec * double(kSamples)
-                          / (2.0 * double(kParlioClockHz));
-    const double tgt_total = 4.0 * std::round(raw_total / 4.0);
-    const double peak      = kPeakTransitionsPerSec * (tgt_total / raw_total);
-    g_raw_total = raw_total; g_tgt_total = tgt_total; g_peak = peak;
-
-    uint64_t phase = 0;   // Q32 fraction of one transition
-    uint32_t gray  = 0;
-
-    for (size_t s = 0; s < kSamples; ++s) {
-        // V-shaped velocity: PEAK at both ends, zero in the middle. The DMA
-        // wrap lands at FULL SPEED where a seam is glaring; the reversal is
-        // still tested, at the center of the buffer.
-        const double frac = fabs(1.0 - double(s) / half);
-        const double rate = peak * frac;   // transitions/s
-
-        phase += uint64_t((rate / double(kParlioClockHz)) * 4294967296.0);
-        gray  += uint32_t(phase >> 32);
-        phase &= 0xFFFFFFFFull;
-
-        uint8_t v = kGray[gray & 3];
-        if (s < kSyncSamples) v |= 0b100;   // SYNC on bit 2
-        const size_t bit = s * 4;
-        for (int k = 0; k < 3; ++k)
-            if (v & (1u << k))
-                g_pattern[(bit + k) / 8] |= uint8_t(1u << ((bit + k) % 8));
-    }
-}
-
-static bool start_parlio() {
-    // DMA reads this, so it must be internal and DMA-capable, not PSRAM.
-    g_pattern = static_cast<uint8_t*>(heap_caps_malloc(kBufBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
-    if (!g_pattern) { printf("alloc of %u bytes failed\n", unsigned(kBufBytes)); return false; }
-    build_pattern();
-
-    parlio_tx_unit_config_t cfg = {};
-    cfg.clk_src               = PARLIO_CLK_SRC_DEFAULT;
-    cfg.data_width            = 4;
-    cfg.clk_in_gpio_num       = GPIO_NUM_NC;
-    cfg.input_clk_src_freq_hz = 0;
-    cfg.output_clk_freq_hz    = kParlioClockHz;
-    cfg.clk_out_gpio_num      = GPIO_NUM_NC;
-    cfg.valid_gpio_num        = GPIO_NUM_NC;
-    cfg.trans_queue_depth     = 4;
-    cfg.max_transfer_size     = kBufBytes;
-    cfg.dma_burst_size        = 16;
-    cfg.sample_edge           = PARLIO_SAMPLE_EDGE_POS;
-    cfg.bit_pack_order        = PARLIO_BIT_PACK_ORDER_LSB;
-    for (auto& g : cfg.data_gpio_nums) g = GPIO_NUM_NC;
-    cfg.data_gpio_nums[0] = PIN_A;
-    cfg.data_gpio_nums[1] = PIN_B;
-    cfg.data_gpio_nums[2] = PIN_SYNC;
-
-    esp_err_t err = parlio_new_tx_unit(&cfg, &g_tx);
-    if (err != ESP_OK) { printf("parlio_new_tx_unit failed: %s\n", esp_err_to_name(err)); return false; }
-    err = parlio_tx_unit_enable(g_tx);
-    if (err != ESP_OK) { printf("parlio_tx_unit_enable failed: %s\n", esp_err_to_name(err)); return false; }
-
-    parlio_transmit_config_t tcfg = {};
-    tcfg.idle_value              = 0;
-    tcfg.flags.loop_transmission = true;   // gapless, runs until disable()
-    err = parlio_tx_unit_transmit(g_tx, g_pattern, kBufBytes * 8, &tcfg);
-    if (err != ESP_OK) { printf("parlio_tx_unit_transmit failed: %s\n", esp_err_to_name(err)); return false; }
-    return true;
-}
-
 // ---- LP core -----------------------------------------------------------------
 
 static bool start_lp_core() {
@@ -283,26 +163,9 @@ static void report() {
     printf("IDF          : %s\n", esp_get_idf_version());
 }
 
-static void report_parlio() {
-    const double step_us = 1e6 / g_peak;
-    printf("\n--- PARLIO quadrature, V-profile (wrap at FULL SPEED) ---\n");
-    printf("pins         : A=GPIO%d  B=GPIO%d  SYNC=GPIO%d\n", int(PIN_A), int(PIN_B), int(PIN_SYNC));
-    printf("sample clock : %lu Hz -> %.3f us quantization\n",
-           static_cast<unsigned long>(kParlioClockHz), 1e6 / double(kParlioClockHz));
-    printf("peak rate    : %.0f transitions/s\n", g_peak);
-    printf("step at peak : %.3f us -> quantization is %.1f%% of a step\n",
-           step_us, 100.0 / (step_us * double(kParlioClockHz) / 1e6));
-    printf("profile      : peak -> 0 -> peak over %lu ms, wrap at PEAK\n", static_cast<unsigned long>(kSweepMs));
-    printf("seam         : %.2f transitions raw -> snapped to %.0f (x4 exact)\n", g_raw_total, g_tgt_total);
-    printf("               peak trimmed %.4f%% so the loop closes in phase\n",
-           100.0 * (g_peak - kPeakTransitionsPerSec) / kPeakTransitionsPerSec);
-    printf("buffer       : %lu samples, %lu bytes internal DMA\n",
-           static_cast<unsigned long>(kSamples), static_cast<unsigned long>(kBufBytes));
-}
-
 static void report_lp() {
     printf("\n--- LP core quadrature (ulp/lp_quad.c), 40 MHz XTAL ---\n");
-    printf("pins         : A=LPG15  B=LPG12   (LPG15 is also LPRXD: LP UART RX is sacrificed)\n");
+    printf("pins         : A=LPG%d  B=LPG%d (QUAD_A, QUAD_B)\n", BOARD_GPIO_QUAD_A, BOARD_GPIO_QUAD_B);
     printf("cycles/edge  : %lu exact  ->  f_LP = scope edges/s x %lu\n",
            static_cast<unsigned long>(kLpCyclesPerEdge), static_cast<unsigned long>(kLpCyclesPerEdge));
     printf("LP image     : %u bytes embedded (reserve-sized; real program ~2.4 KB per size on ulp_main.elf)\n",
@@ -355,10 +218,6 @@ extern "C" void app_main() {
     // The motor current monitor, before motion: its latched ALERT can hold the
     // motor switch open. Non-fatal; a bare stamp has no part fitted.
     valence::powerBegin();
-
-    const bool parlio_ok = start_parlio();
-    if (parlio_ok) report_parlio();
-    else           printf("\n--- PARLIO emitter FAILED to start ---\n");
 
     const bool lp_ok = start_lp_core();
     if (lp_ok) report_lp();
@@ -441,7 +300,7 @@ extern "C" void app_main() {
         note_stack(2, valence::patternStackFree());
         note_stack(3, uint32_t(uxTaskGetStackHighWaterMark(nullptr)));
         printf("[flagship_p4] %lus  int_free=%u int_max=%u  psram_free=%u psram_max=%u  "
-               "parlio=%s  lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
+               "lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
                "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu  "
                "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu "
                "faults=%lu\n",
@@ -450,7 +309,6 @@ extern "C" void app_main() {
                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
                unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
-               g_tx ? "running" : "down",
                lp_ok ? "running" : "down",
                static_cast<unsigned long>(ulp_g_edges),
                static_cast<unsigned long>(ulp_g_late),

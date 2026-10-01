@@ -78,7 +78,7 @@ CONFIG_FREERTOS_HZ=1000
 # app_main's stack. RAISED 3,584 -> 6,144 ON A MEASUREMENT: under the val-091.9
 # workload the deepest free was 796 B of 3,584, 22 % headroom [verified
 # 2026-09-21 -- uxTaskGetStackHighWaterMark, COM15]. app_main is not a parked
-# task here -- it runs the whole boot sequence (parlio, LP core, esp_hosted
+# task here -- it runs the whole boot sequence (LP core, esp_hosted
 # WiFi bring-up, hubBegin, motionBegin) and then owns the 5 s liveness loop
 # forever, so its deep path is boot and boot is the path least often re-walked
 # on a bench. T21's ban is on sizing DOWN without a mark; this is the other
