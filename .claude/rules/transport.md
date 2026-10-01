@@ -71,6 +71,11 @@ wire-visible is ever respelled FROM this repo (`governance.md` §6).
 - **Clients.** The MFP plugin and the verifier (`tools/valence_probe.py`)
   both live in the Valence repo. `LiveWireTest` refuses to run homed; run it
   TWICE back to back, which is the T3 check.
+- **Ground Truth, the hub's half (NON-NEGOTIABLE).** Every echo and every
+  STATE publish reports the APPLIED, post-clamp value, never the requested
+  one: a client that shows the request shows a machine that does not exist.
+  The client half (adopt on load, no optimistic state) and the UI render traps
+  are Phosphor's `.claude/rules/webui.md`; this repo serves no UI tree.
 
 ## The radio link: the C6 is a NIC, not a peer
 
