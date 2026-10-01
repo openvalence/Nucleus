@@ -48,9 +48,9 @@ delete `.pio`.** That trap and the rest are in
   versions, deployment state, milestones, open bugs, pending rulings. Status
   never goes into prose.
 
-## The machine repo
+## The archived machine repo (legacy reference)
 
-`../SlopDrive-32` is the archived three-board machine (ESP32-S3 + ESP32-C5 +
+`../../SlopDrive-32` (outside the OpenValence workspace, READ-ONLY) is the archived three-board machine (ESP32-S3 + ESP32-C5 +
 RP2350) and stays where it is. It is the reference this board is measured
 against and the case file for every trap this firmware does not inherit: the
 UART bridge, the AsyncTCP lifetime hunt, the heap-corruption record. Its rules
