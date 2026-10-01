@@ -1039,7 +1039,7 @@ std::optional<HubDelegate::BlobView> ValenceDevice::readBlob(uint8_t ns, uint8_t
 // ---- retained STATE --------------------------------------------------------------
 
 void ValenceDevice::publishHubStatus() {
-    // 4+4+1+1+4 = 14 B, matching the 0x0007 layout in ValenceCatalog.h.
+    // 4+4+1+1+4 = 14 B, matching the 0x0006 layout in ValenceCatalog.h.
     const int8_t rssi = _linkRssi.load(std::memory_order_relaxed);
     std::array<std::byte, 14> buf{};
     std::span<std::byte> s(buf);

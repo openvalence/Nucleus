@@ -66,7 +66,7 @@ inline DeviceFeatures boardFeatures() {
 // ---- supplied by the composition --------------------------------------------
 // deviceNowUs(): the 64-bit monotonic clock motion plans against. It MUST be
 // the clock the linked ValenceMotion implementation reads, or every stream
-// anchor lands at the wrong instant. deviceFreeHeapBytes(): the 0x0007 heap
+// anchor lands at the wrong instant. deviceFreeHeapBytes(): the 0x0006 heap
 // figure; 0 where the host has no meaningful answer.
 uint64_t deviceNowUs();
 uint32_t deviceFreeHeapBytes();
@@ -113,7 +113,7 @@ public:
     // write time.
     uint8_t tick(uint32_t nowMs);
 
-    // 0x0007 link RSSI in dBm, 0 = no reading. PUSHED IN from whichever task
+    // 0x0006 link RSSI in dBm, 0 = no reading. PUSHED IN from whichever task
     // owns the radio; never read on the hub task (see ValenceHub.h).
     void setLinkRssi(int8_t rssi) { _linkRssi.store(rssi, std::memory_order_relaxed); }
 
