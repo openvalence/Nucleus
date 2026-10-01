@@ -52,7 +52,7 @@ checkout must exist beside this repo (override with `-DVALENCE_ROOT=`).
 
 ```
 valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
-           [--pairing-window] [--enforce] [--state PREFIX] [--headless] [--no-mdns]
+           [--pairing-window] [--state PREFIX] [--headless] [--no-mdns] [--enforce]
 ```
 
 | Flag | Effect |
@@ -62,15 +62,13 @@ valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
 | `--homed` | force_home at boot with the stored max rail, so motion is accepted at once |
 | `--duration S` | exit after S seconds (0 = until Ctrl-C) |
 | `--pairing-window` | open the presence window at boot: first knock on a fresh ledger gets configure |
-| `--enforce` | an unvouched HELLO lands at `watch`, exactly as on the board |
 | `--state PREFIX` | where the persisted blobs live (`PREFIX.cfg`, `PREFIX.presets`, `PREFIX.iid`); default `valencesim-state` beside the exe. Delete `.cfg` and `.presets` for factory values; deleting `.iid` makes the twin a different hub |
-| `--headless`, `--no-mdns`, `machine` | accepted for command-line compatibility; there is no TUI and no mDNS |
+| `--headless`, `--no-mdns`, `--enforce`, `machine` | accepted for command-line compatibility; there is no TUI and no mDNS, and the device posture is the only one |
 
-**The one deliberate difference from the board:** without `--enforce`, a HELLO
-that no pairing token and no live `/uitoken` vouches for lands at `control`,
-not `watch`. Phosphor's device tests were written against that floor
-(`pairing-roundtrip.mjs` asserts it). Run with `--enforce` and
-`valence-auth.mjs --expect-enforced` to prove the device posture.
+A HELLO that no pairing token and no live `/uitoken` vouches for lands at
+`watch`, exactly as on the board (SPEC §12.2, §12.3). A test that sends intents
+mints `/uitoken` per connect (`acquireToken` in valence-js); run
+`valence-auth.mjs --expect-enforced` to prove the posture.
 
 Kill any stale `valencesim` on 80/82 first, or a test talks to the wrong
 binary.

@@ -3,8 +3,8 @@
 // and the REAL kinetic::Engine behind a WebSocket speaking valence.v1
 //
 //   valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
-//              [--pairing-window] [--enforce] [--state PREFIX]
-//              [--headless] [--no-mdns]
+//              [--pairing-window] [--state PREFIX]
+//              [--headless] [--no-mdns] [--enforce]
 //
 // Constraints:
 // - HOST-ONLY: never touches a device, never deploys, no pio.
@@ -95,7 +95,6 @@ struct Options {
     bool homed = false;
     int durationS = 0;
     bool pairingWindow = false;
-    bool enforce = false;
     std::string statePrefix;   // empty = valencesim-state beside the exe
 };
 
@@ -109,11 +108,13 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (!std::strcmp(a, "--duration") && hasNext) o.durationS = std::atoi(argv[++i]);
         else if (!std::strcmp(a, "--homed")) o.homed = true;
         else if (!std::strcmp(a, "--pairing-window")) o.pairingWindow = true;
-        else if (!std::strcmp(a, "--enforce")) o.enforce = true;
         else if (!std::strcmp(a, "--state") && hasNext) o.statePrefix = argv[++i];
-        // No TUI and no mDNS responder exist; both flags are accepted so the
-        // command lines the Phosphor harness uses run unchanged.
-        else if (!std::strcmp(a, "--headless") || !std::strcmp(a, "--no-mdns")) continue;
+        // No TUI and no mDNS responder exist, and --enforce names what is now
+        // the only posture; all three are accepted so older command lines run
+        // unchanged.
+        else if (!std::strcmp(a, "--headless") || !std::strcmp(a, "--no-mdns") ||
+                 !std::strcmp(a, "--enforce"))
+            continue;
         else {
             std::fprintf(stderr, "valencesim: unknown flag '%s'\n", a);
             return false;
@@ -208,8 +209,8 @@ int main(int argc, char** argv) {
     if (!parseArgs(argc, argv, opt)) {
         std::fprintf(stderr,
                      "usage: valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]\n"
-                     "                  [--pairing-window] [--enforce] [--state PREFIX]\n"
-                     "                  [--headless] [--no-mdns]\n");
+                     "                  [--pairing-window] [--state PREFIX]\n"
+                     "                  [--headless] [--no-mdns] [--enforce]\n");
         return 2;
     }
 
@@ -235,11 +236,6 @@ int main(int argc, char** argv) {
         return 1;
     }
     box->device.bindTokenGate(&box->minter);
-    // The P4 lands an unvouched HELLO at watch. The twin floats it at control
-    // unless --enforce, because the Phosphor device tests were written against
-    // that floor; --enforce is the device-exact posture.
-    box->device.setUnvouchedRole(opt.enforce ? valence::AccessLevel::watch
-                                             : valence::AccessLevel::control);
     // Stored state BEFORE the Hub, exactly as the P4's hubBegin orders it.
     const std::filesystem::path prefix =
         opt.statePrefix.empty() ? exeDir(argv[0]) / "valencesim-state" : std::filesystem::path(opt.statePrefix);
@@ -286,8 +282,6 @@ int main(int argc, char** argv) {
     log.logf('I', "valencesim: %s %s, catalog %u entries, %u B, etag %s", VALENCE_PRODUCT,
              FIRMWARE_VERSION, unsigned(box->catalog.count), unsigned(hub.catalogEncodedBytes()),
              etagHex.data());
-    log.logf('I', "valencesim: unvouched HELLO lands at %s",
-             opt.enforce ? "watch (--enforce, device-exact)" : "control (sim floor)");
 
     if (opt.homed) {
         const float stroke = valence::motionForceHome(box->device.config().max_rail);
