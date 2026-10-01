@@ -19,6 +19,7 @@ with no device semantics.
 | Emitter and position truth | `src/SimMotion.cpp` | ideal: renders the arbiter's steering word exactly, so `late`, `resteers`, `catchups` and `stack_free` read 0 |
 | Pattern generator: seven classic patterns, the advanced lanes, the brake | `flagship_p4/src/patterns/PatternEngine.cpp`, compiled verbatim | real |
 | Pattern task plumbing | `src/SimPattern.cpp` | ticked every pass on the one hub thread instead of its own FreeRTOS task |
+| Durable hub identity (WELCOME identity key 5, SPEC §6.3) | minted once like the board's `hub_iid` NVS key | persisted: `PREFIX.iid`, 8 bytes little-endian |
 | Pattern presets (0x5220) | `PatternPresetStore` inside the delegate | persisted: `PREFIX.presets` holds the board's NVS `presets` blob, same debounce |
 | `background_run` | the delegate's `PatternSettings` | in memory, same as the board: persisting it waits on an operator ruling (bd val-wcm) |
 | WebSocket port | `../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home | real host binding |
@@ -61,7 +62,7 @@ valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
 | `--duration S` | exit after S seconds (0 = until Ctrl-C) |
 | `--pairing-window` | open the presence window at boot: first knock on a fresh ledger gets configure |
 | `--enforce` | an unvouched HELLO lands at `watch`, exactly as on the board |
-| `--state PREFIX` | where the persisted blobs live (`PREFIX.cfg`, `PREFIX.presets`); default `valencesim-state` beside the exe. Delete both for factory values |
+| `--state PREFIX` | where the persisted blobs live (`PREFIX.cfg`, `PREFIX.presets`, `PREFIX.iid`); default `valencesim-state` beside the exe. Delete `.cfg` and `.presets` for factory values; deleting `.iid` makes the twin a different hub |
 | `--headless`, `--no-mdns`, `machine` | accepted for command-line compatibility; there is no TUI and no mDNS |
 
 **The one deliberate difference from the board:** without `--enforce`, a HELLO

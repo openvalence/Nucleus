@@ -19,9 +19,10 @@
 //   desktop scheduler allows.
 // - PERSISTENCE IS THE BOARD'S, WITH FILES FOR NVS KEYS: PREFIX.cfg and
 //   PREFIX.presets hold the exact blobs the P4 writes, on the same debounce,
-//   written to a temp file and renamed over the old one so a kill mid-write
-//   leaves the previous blob whole. PREFIX defaults to valencesim-state
-//   beside the exe.
+//   and PREFIX.iid holds the P4's hub_iid (WELCOME identity key 5, SPEC §6.3)
+//   as 8 bytes little-endian. Each is written to a temp file and renamed over
+//   the old one so a kill mid-write leaves the previous blob whole. PREFIX
+//   defaults to valencesim-state beside the exe.
 // See: sim/valencesim/README.md
 
 #include <atomic>
@@ -156,6 +157,28 @@ bool saveBlob(const std::filesystem::path& p, std::span<const std::byte> blob) {
     return !ec;
 }
 
+// The P4's loadOrMintInstanceId(): minted once, never 0, kept across boots. A
+// file that is not exactly 8 nonzero bytes is replaced by a fresh mint.
+uint64_t loadOrMintInstanceId(const std::filesystem::path& p, valence::IRandom& rng,
+                              bench::SessionLog& log) {
+    std::array<std::byte, 8> raw{};
+    const std::span<const std::byte> got = loadBlob(p, raw);
+    uint64_t id = 0;
+    if (got.size() == raw.size()) {
+        for (size_t i = 0; i < raw.size(); ++i) id |= uint64_t(raw[i]) << (8 * i);
+        if (id != 0) return id;
+    }
+    do {
+        id = (uint64_t(rng.nextU32()) << 32) | rng.nextU32();
+    } while (id == 0);
+    for (size_t i = 0; i < raw.size(); ++i) raw[i] = std::byte((id >> (8 * i)) & 0xFF);
+    if (!saveBlob(p, raw))
+        log.logf('W', "valencesim: persist %s failed -- identity lasts this run only",
+                 p.string().c_str());
+    log.logf('I', "valencesim: %s held no identity -- minted a new one", p.string().c_str());
+    return id;
+}
+
 // Heap, not stack: the catalog pools and the hub's session table are tens of
 // KB, and the Hub sits in an optional so the catalog is FILLED before the Hub
 // constructor encodes it (the same order the P4's HubBox keeps).
@@ -224,6 +247,8 @@ int main(int argc, char** argv) {
     cfgPath += ".cfg";
     std::filesystem::path presetsPath = prefix;
     presetsPath += ".presets";
+    std::filesystem::path iidPath = prefix;
+    iidPath += ".iid";
     std::span<std::byte> scratch(box->blobScratch);
     uint16_t storedGen = 0;
     std::span<const std::byte> blob = loadBlob(cfgPath, scratch);
@@ -245,9 +270,12 @@ int main(int argc, char** argv) {
     if (haveStored) {
         while (hub.cfgGen() != storedGen) hub.bumpConfigGeneration();
     }
-    log.logf('I', "valencesim: state %s.{cfg,presets}: config %s, cfg_gen %u",
+    log.logf('I', "valencesim: state %s.{cfg,presets,iid}: config %s, cfg_gen %u",
              prefix.string().c_str(), haveStored ? "stored" : "factory", unsigned(hub.cfgGen()));
     hub.setIdentity(VALENCE_PRODUCT, FIRMWARE_VERSION, kHubName);
+    hub.setHubInstanceId(loadOrMintInstanceId(iidPath, box->rng, log));
+    log.logf('I', "valencesim: hub_instance_id %016llx",
+             static_cast<unsigned long long>(hub.hubInstanceId()));
     hub.setEndpoint(opt.wsPort, 0x7F000001u);
     box->device.attach(hub);
 
