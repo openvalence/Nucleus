@@ -31,14 +31,14 @@ values is not information, it is a flag (§3).
 |---|---|
 | Wire numbers (frames, CBOR keys, NACK codes, channels, limits) | Valence repo `spec/registry/registry.yaml` (sibling checkout, pinned by `valence.pin`) |
 | Protocol behavior | Valence repo `spec/SPEC.md` |
-| This machine's device-channel allocation | not yet allocated; it lands with the hub port (board `val-091.3`) and gets a row here in the same commit |
+| This machine's device-channel allocation | the `ch::` namespace in `flagship_p4/src/hub/ValenceCatalog.h` |
 | Governance law | this file |
 | Engineering doctrine | the other files in `.claude/rules/` |
 | Volatile project/device state (fw versions, deployment, milestones) | the Beads dev board (`bd`, `val-` prefix) |
 | Operator preferences | `CLAUDE.md` (repo root, gitignored) |
 | Firmware version constant | `FIRMWARE_VERSION` in `flagship_p4/src/hub/valence_config.h` |
 | Per-board silicon, memory-map and radio configuration | `flagship_<chip>/sdkconfig.defaults` (hand-written) and `flagship_<chip>/platformio.ini` |
-| Hardware design rationale for the PCB | `docs/flagship-board.md` |
+| Hardware design rationale for the PCB | the Hardware repo, `../Hardware/flagship/design-considerations.md` (`docs/flagship-board.md` is a forwarding stub) |
 | Subsystem deep detail | that subsystem's own README / spec |
 | Public docs site content | Valence repo docs-site, generated from its spec homes, never hand-forked |
 
@@ -185,3 +185,4 @@ that file's header; it is the one home for which checks exist.
 | 2026-09-21 | ECOSYSTEM RENAME LANDED. No live mention of "slop" anywhere; commit history excepted. The protocol repo is VALENCE (library `lib/valence`, namespace `valence::`, lint `tools/valence_lint.py`), consumed here through `lib/valence` -> `../Valence/lib/valence` and pinned by `valence.pin` (was `slopsync.pin`). Wire strings landed with RFC-060 upstream and are respelled here in the same pass, superseding the 2026-09-20 NAMING row's "nothing wire-visible is respelled here": ws subprotocol `valence.v1`, endpoint `/valence`. The catalog etag moved 0034d22cc3b11512 -> 5bba8cb1a2f618c0 (T11: one `desc` string is protocol bytes). vmotion/vglow/vlog, Phosphor, Canon, Valence Sim, Valence Trace follow the same table. SlopDrive-32 survives ONLY as a citation of the archived S3-era reference, marked as archived at every site. | operator |
 | 2026-09-21 | FIRMWARE RENAME: "Valence Drive" / "Vdrive" becomes **NUCLEUS** (full name Valence Nucleus; the hub every bond attaches to). The repo folder is `Nucleus`; the board prefix stays `val-` and the project dir stays `flagship_p4/`. One wire-visible string moved with it: `VALENCE_PRODUCT` in `flagship_p4/src/hub/valence_config.h`, `"ValenceDrive"` -> `"Nucleus"`, the product field the hub sends in HELLO/WELCOME identity (key 37); `VALENCE_HUB_NAME` followed as `"valence-p4"` -> `"nucleus-p4"`. Earlier amendment rows keep their historical wording. "Valence" alone still means the protocol. | operator |
 | 2026-09-21 | LIBRARY RENAME: the three first-party libraries are **Flux** (`lib/flux`, `flux::`, LED grammar, was vglow), **Kinetic** (`lib/kinetic`, `kinetic::`, motion planner, was vmotion -- which also collided with VMware vMotion), and **Geiger** (`lib/geiger`, `geiger::`, logging, was vlog). The log macros are `GLOGT/D/I/W/E/F` and `GLOGx_EVERY_MS`, the compile floor is `GEIGER_COMPILE_LEVEL`, and the canon_lint checks are `printf-outside-geiger` and `led-outside-flux`. The motion catalog channels are respelled on the wire in the same pass (T11): `kinetic-diag/-limits/-chase/-waveform/-set`, with `ch::sm_*` becoming `ch::kinetic_*`. The catalog etag moved 5bba8cb1a2f618c0 -> 5f4635e7e419a966. Rows above this one keep their original spellings: they are history, not current names. | operator |
+| 2026-10-01 | MAP OF TRUTH, two C-3 corrections (val-091.5): the device-channel allocation row names its home, `ch::` in `ValenceCatalog.h`, which landed with the hub port without the promised row; the PCB rationale row follows the 2026-09-22 move to the Hardware repo. No law changed. RECORDED AS VETO-ABLE. | agent, operator veto pending |
