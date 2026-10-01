@@ -13,10 +13,12 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
 
 - pio: `%USERPROFILE%\.platformio\penv\Scripts\platformio.exe`, host
   Windows 11.
-- **Run it from PowerShell, never Git Bash.** A Git Bash invocation of a built
-  binary has returned exit 127 with no output while the same binary ran
-  correctly under PowerShell. A Bash 127 is a shell artifact, never a broken
-  build or a broken suite.
+- **Run it under PowerShell semantics: `pwsh.exe -NoProfile -Command "..."`,
+  called from the Bash tool** (never the PowerShell tool and never
+  Start-Process, whose children open a console window on the operator's
+  screen). A bare Git Bash invocation of a built binary has returned exit 127
+  with no output while the same binary ran correctly under PowerShell. A Bash
+  127 is a shell artifact, never a broken build or a broken suite.
 - Build: `pio run -d flagship_p4`. Flash: `pio run -d flagship_p4 -t upload`.
   `-d` is not optional: each board is **its own PlatformIO project**
   (`governance.md` §6), and the reason is the ULP build hook, which resolves
@@ -28,8 +30,8 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
   (`flagship_p4/src/motion/MotionArbiter.*`, suite `test_motion_arbiter`) and
   the pattern generator (`flagship_p4/src/patterns/`, suite
   `test_pattern_engine`) are the check a namespace rename or a gate change is
-  gated on: `pio test -e native` from the root project, all five suites named
-  in the output
+  gated on: `pio test -e native` from the root project, every suite under
+  `test/native/` named in the output
   (T10 -- the runner misreports, so read the suite names and the exit code).
 
 ## The bench
