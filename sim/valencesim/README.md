@@ -24,9 +24,9 @@ with no device semantics.
 | WebSocket port | `../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home | real host binding |
 | `/uitoken` | `src/SimUiToken.cpp` on IXWebSocket's HTTP server | same contract, random bytes instead of HMAC |
 | Config and tuning persistence (0x1000, 0x1030, 0x1120-0x1122, cfg_gen) | `StoredState.h` codec, compiled verbatim | persisted: `PREFIX.cfg` holds the board's NVS `cfg` blob; a file stands in for NVS |
-| Push-to-pair gesture | `--pairing-window` opens the hub's presence window at boot | the board has no gesture yet |
-| Geiger log lines from device code | mute on host (Geiger has no host platform layer) | sim's own lines print |
-| Hub-status heap figure | reported as 0 | no meaningful host answer |
+| Push-to-pair gesture | `--pairing-window` opens the hub's presence window at boot | the board's PAIR-button gesture is bd val-9u0.10; the twin follows it (bd val-sf7.6) |
+| Geiger log lines from device code | `lib/geiger`'s host platform layer (`GEIGER_HOST_PLATFORM`), drained on the hub thread into the sim's log | real: device lines print beside the sim's own, stamped with the hub clock |
+| Hub-status (0x0006) heap figure | reported as 0 | the `deviceFreeHeapBytes()` contract in `ValenceDevice.h`: 0 where the host has no meaningful answer |
 
 Parity is one-way: the firmware is never edited to close a sim gap. Anything
 marked as a copy above is a drift seam and is tracked on the board.

@@ -4,11 +4,12 @@
 //   GLOGW_EVERY_MS(1000, "arbiter", "intent rejected: %s", why);   // per-site
 //
 // Constraints:
-// - THREE PLATFORM BRANCHES, ONE MACRO SURFACE: Arduino, pure ESP-IDF, and a
-//   mute host build. Each branch supplies the same names -- port(), logger(),
-//   drainToSinks(), GEIGER_EMIT, GEIGER_NOW_MS -- so a call site never spells a
-//   platform. A branch that binds only some of them leaves every GLOGx on that
-//   host compiling to ((void)0), which is silent and looks like working code.
+// - FOUR PLATFORM BRANCHES, ONE MACRO SURFACE: Arduino, pure ESP-IDF, a host
+//   binary that opts in with GEIGER_HOST_PLATFORM, and a mute host build. Each
+//   live branch supplies the same names -- port(), logger(), drainToSinks(),
+//   GEIGER_EMIT, GEIGER_NOW_MS -- so a call site never spells a platform. A
+//   branch that binds only some of them leaves every GLOGx on that host
+//   compiling to ((void)0), which is silent and looks like working code.
 // - GLOG* is callable from any FreeRTOS task on either core: bounded format
 //   plus spinlock'd slot copy, never blocks, never allocates. NOT ISR-safe.
 // - Exactly ONE task calls drainToSinks(); sinks run on that task only.
@@ -213,7 +214,52 @@ inline void drainToSinks() { logger().drain(); }
 #define GEIGER_EMIT(lvl, tag, ...) ::geiger::logger().logf(lvl, tag, __VA_ARGS__)
 #define GEIGER_NOW_MS() (uint32_t)(esp_timer_get_time() / 1000)
 
-// ---- Host builds ------------------------------------------------------------
+// ---- Host platform layer, opt-in --------------------------------------------
+// For a desktop binary that compiles device code and must hear it (the device
+// twin in sim/). The composition root defines hostNowMs() so records carry
+// that binary's one clock, and registers its own sink: a host binary already
+// owns its stdout, so this branch adds no console sink of its own.
+
+#elif defined(GEIGER_HOST_PLATFORM)
+#include <mutex>
+
+namespace geiger {
+
+// Supplied by the composition root, never defined here.
+uint32_t hostNowMs();
+
+class HostPort final : public IPort {
+public:
+    uint32_t nowMs() override { return hostNowMs(); }
+    uint8_t coreId() override { return 0xFF; }   // Record: 0xFF = host
+    void lock() override { _m.lock(); }
+    void unlock() override { _m.unlock(); }
+
+private:
+    std::mutex _m;
+};
+
+using FirmwareLog = LogCore<64, 4>;
+
+// Same floor as the ESP-IDF branch, so the twin hears what the board hears.
+inline HostPort& port() {
+    static HostPort p;
+    return p;
+}
+inline FirmwareLog& logger() {
+    static FirmwareLog l(port(), Level::Debug);
+    return l;
+}
+
+// Pumped from exactly one thread.
+inline void drainToSinks() { logger().drain(); }
+
+}  // namespace geiger
+
+#define GEIGER_EMIT(lvl, tag, ...) ::geiger::logger().logf(lvl, tag, __VA_ARGS__)
+#define GEIGER_NOW_MS() ::geiger::hostNowMs()
+
+// ---- Host builds without a platform -----------------------------------------
 // No platform, no sink, no clock: the native suites drive LogCore directly and
 // nothing under test emits through the macro surface.
 

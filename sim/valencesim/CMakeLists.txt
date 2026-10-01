@@ -53,6 +53,9 @@ target_include_directories(valencesim PRIVATE
     "${NUCLEUS_ROOT}/flagship_p4/src/patterns/arduino_compat"
     "${BENCH_SRC}")
 
+# Device GLOG sites are audible here; without it Geiger's host branch is mute.
+target_compile_definitions(valencesim PRIVATE GEIGER_HOST_PLATFORM)
+
 target_compile_options(valencesim PRIVATE -O2 -Wall -Wextra)
 
 # Standalone exe: no libstdc++/libgcc/winpthread DLL hunting.

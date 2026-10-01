@@ -11,6 +11,9 @@
 // - ONE hub thread. The Hub, ValenceDevice, SimMotion and SimPattern are
 //   called from the loop below and nowhere else (T5). IXWebSocket connection
 //   threads only feed the port's RX rings and the /uitoken slot table.
+// - DEVICE GLOG LINES: Geiger's host platform layer (GEIGER_HOST_PLATFORM in
+//   CMakeLists.txt) is drained on the hub thread only, into the sim's own
+//   SessionLog, so a run reads as one stream.
 // - The loop's 5 ms hub tick matches the P4's hub task; motion is evaluated
 //   every pass (~1 ms), matching the P4's 1 kHz motion tick as closely as a
 //   desktop scheduler allows.
@@ -47,6 +50,7 @@
 #include "SimUiToken.h"
 #include "common/HostPlatform.h"
 #include "common/SessionLog.h"
+#include "geiger/geiger.h"
 #include "hub/ValenceCatalog.h"
 #include "hub/ValenceDevice.h"
 #include "hub/valence_config.h"
@@ -64,6 +68,25 @@ void onSignal(int) { g_stop = true; }
 bench::HostClock g_clock;
 
 constexpr const char* kHubName = "valencesim";
+
+class GeigerToSessionLog final : public geiger::ISink {
+public:
+    explicit GeigerToSessionLog(bench::SessionLog& log) : _log(log) {}
+
+    void write(const geiger::Record& r) override {
+        const auto s = static_cast<unsigned long>(r.ms / 1000u);
+        const auto ms = static_cast<unsigned long>(r.ms % 1000u);
+        if (r.lost != 0) {
+            _log.logf(geiger::levelChar(r.level), "%7lu.%03lu %-10s %s  (+%u lost)", s, ms, r.tag,
+                      r.msg, unsigned(r.lost));
+        } else {
+            _log.logf(geiger::levelChar(r.level), "%7lu.%03lu %-10s %s", s, ms, r.tag, r.msg);
+        }
+    }
+
+private:
+    bench::SessionLog& _log;
+};
 
 struct Options {
     uint16_t wsPort = 82;
@@ -153,6 +176,10 @@ uint64_t deviceNowUs() { return g_clock.nowUs64(); }
 uint32_t deviceFreeHeapBytes() { return 0; }
 }  // namespace valence
 
+namespace geiger {
+uint32_t hostNowMs() { return g_clock.nowMs32(); }
+}  // namespace geiger
+
 int main(int argc, char** argv) {
     Options opt;
     if (!parseArgs(argc, argv, opt)) {
@@ -172,6 +199,9 @@ int main(int argc, char** argv) {
 
     bench::SessionLog log;
     log.setEcho(true);
+    // Declared before the first GLOG can fire and outlives every drain below.
+    GeigerToSessionLog geigerSink(log);
+    geiger::logger().addSink(&geigerSink);
 
     auto box = std::make_unique<SimBox>();
     valence::motionBegin();
@@ -267,6 +297,7 @@ int main(int argc, char** argv) {
             box->port.loop(nowMs);
             hub.update(g_clock.nowUs());
             const uint8_t due = box->device.tick(nowMs);
+            geiger::drainToSinks();
             if (due & valence::kPersistConfig) {
                 const size_t n = box->device.encodeConfigBlob(scratch, hub.cfgGen());
                 if (!saveBlob(cfgPath, scratch.first(n)))
@@ -285,6 +316,7 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
+    geiger::drainToSinks();
     box->minter.stop();
     box->port.stop();
 #ifdef _WIN32
