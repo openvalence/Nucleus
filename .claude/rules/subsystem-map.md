@@ -18,7 +18,9 @@ slowly. For anything finer, ask codebase-memory rather than grepping for
 | `flagship_p4/` | The P4 firmware project: motion, the Valence hub, policy, sockets. Pure ESP-IDF |
 | `flagship_p4/src/` | HP-core sources and the composition root |
 | `flagship_p4/src/hub/` | The Valence hub and its IDF glue: platform shims, the WS port, the UI token, catalog, config |
-| `flagship_p4/src/system/` | Board services on port 80: the shared HTTP server, OTA, and the `/diag` archive (the Geiger archive sink) |
+| `flagship_p4/src/system/` | Board services: on port 80 the shared HTTP server, OTA and the `/diag` archive (the Geiger archive sink); off it, the motor current monitor |
+| `flagship_p4/src/system/PowerMonitor.h` | The motor current monitor's register layer (U11, INA228 or INA237 on one footprint): identification, calibration, decoding, alert limits. Hardware-free; suite `test_power_monitor` |
+| `flagship_p4/src/system/ValencePower.*` | `PowerMonitor.h`'s IDF host: the private I2C bus, the boot-time chip choice, reads and the latched ALERT re-arm. `app_main` calls `powerBegin()` before motion |
 | `flagship_p4/src/hub/ValenceDevice.*` | The delegate and every STATE publisher. Hardware-free: the sim compiles it verbatim |
 | `flagship_p4/src/hub/UiTokenTable.h` | The `/uitoken` slot table, rate gate and HMAC derivation, lock injected. Hardware-free: the sim compiles it verbatim; `ValenceUiToken.cpp` is only its board host (spinlock, secret, the :80 route). Suite `test_ui_token` |
 | `flagship_p4/src/motion/MotionArbiter.*` | Every motion gate, the window clamp, limit sets and feedforward, emitter and clock injected. Hardware-free: the sim compiles it verbatim; `ValenceMotion.cpp` is only its task host |
