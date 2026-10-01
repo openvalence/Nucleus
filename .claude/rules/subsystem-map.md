@@ -17,7 +17,8 @@ slowly. For anything finer, ask codebase-memory rather than grepping for
 |---|---|
 | `flagship_p4/` | The P4 firmware project: motion, the Valence hub, policy, sockets. Pure ESP-IDF |
 | `flagship_p4/src/` | HP-core sources and the composition root |
-| `flagship_p4/src/hub/` | The Valence hub and its IDF glue: log front door, platform shims, catalog, config |
+| `flagship_p4/src/hub/` | The Valence hub and its IDF glue: platform shims, the WS port, the UI token, catalog, config |
+| `flagship_p4/src/system/` | Board services on port 80: the shared HTTP server, OTA, and the `/diag` archive (the Geiger archive sink) |
 | `flagship_p4/src/hub/ValenceDevice.*` | The delegate and every STATE publisher. Hardware-free: the sim compiles it verbatim |
 | `flagship_p4/src/motion/MotionArbiter.*` | Every motion gate, the window clamp, limit sets and feedforward, emitter and clock injected. Hardware-free: the sim compiles it verbatim; `ValenceMotion.cpp` is only its task host |
 | `flagship_p4/src/patterns/` | The pattern generator: `PatternEngine` (hardware-free, the sim compiles it verbatim), its settings value and preset store, and `ValencePattern.cpp`, its board task host. Strokes leave as intents through `motionSubmit()` |
@@ -29,7 +30,7 @@ slowly. For anything finer, ask codebase-memory rather than grepping for
 | `lib/geiger`, `lib/flux` | Logging and LED cores (liftable, hardware-free) |
 | `lib/ruckig` | VENDORED, byte-identical to upstream. Do not restyle or respell (C-11 carve-out) |
 | `lib/valence` | Symlink to the sibling Valence repo, pinned by `valence.pin`. READ-ONLY from here |
-| `docs/` | Prose that outlives a run; `docs/flagship-board.md` is the PCB's design rationale |
+| `docs/` | Prose that outlives a run; `docs/flagship-board.md` forwards to the PCB rationale in the Hardware repo |
 | `tools/` | Instruments. Mostly gitignored; the tracked ones are named in `.gitignore` |
 | `artifacts/` | Per-run output. Gitignored except the anchor |
 
@@ -44,15 +45,15 @@ hub.**
 
 | Runner | Core | Role |
 |---|---|---|
-| `app_main` | HP | Boot report, subsystem start, periodic liveness line (free/maxblock for both heaps, LP counters) |
+| `app_main` | HP core 0, with the `esp_hosted` SDIO service | Boot report, subsystem start, periodic liveness line (free/maxblock for both heaps, LP counters, stack high-water) |
+| `Motion` (`motion/ValenceMotion.cpp`) | HP core 1, priority 6 | Hosts the MotionArbiter: plans on intent arrival, hands the LP core a velocity each tick. Stack `kMotionTaskStackBytes`, the deep one (`motion-control.md`) |
+| `ValenceHub` (`hub/ValenceHub.cpp`) | HP core 1, priority 5 | The hub, single-task by design (`transport.md` T5), and the one Geiger drain. Stack `kHubTaskStackBytes` |
 | LP emitter (`ulp/lp_quad.c`) | LP | Quadrature edges from a phase accumulator. Its signed edge count is position truth |
 | `Pattern` (`patterns/ValencePattern.cpp`) | HP core 1, priority 4 | The pattern generator: wakes when a half-stroke is due or settings arrive, submits it as an intent. Below the hub (5) and the motion task (6); stack `kPatternTaskStackBytes` |
 | `esp_hosted` / WiFi / lwIP tasks | HP | Owned by the drivers, not by us. Their callbacks are not our task (`transport.md` T5) |
 
-The hub task and the motion task land with the port (`val-091.3`,
-`val-091.4`); their core and priority assignment gets a row here in the commit
-that creates them, not before. Task stacks are internal RAM
-(`governance.md` §6).
+Every stack size and the measurement behind it live on its constant, never
+here. Task stacks are internal RAM (`governance.md` §6).
 
 ## One fact, one home (C-1)
 
@@ -60,13 +61,13 @@ Stop grepping for these. They live in exactly one place.
 
 | Fact | Home |
 |---|---|
-| Firmware version | not yet allocated |
+| Firmware version | `FIRMWARE_VERSION` in `flagship_p4/src/hub/valence_config.h` |
 | Silicon revision, flash size, PSRAM, ULP reserve, radio pins | `flagship_p4/sdkconfig.defaults` |
 | Build entry point, upload port, board id | `flagship_p4/platformio.ini` |
 | Wire numbers, CBOR keys, NACK codes, channels | sibling `Valence/spec/registry/registry.yaml` |
 | Protocol behavior | sibling `Valence/spec/SPEC.md` |
-| This machine's channel allocation | not yet allocated; lands with the hub port |
-| PCB design rationale and the bench measurements behind it | `docs/flagship-board.md` |
+| This machine's channel allocation | the `ch::` namespace in `flagship_p4/src/hub/ValenceCatalog.h` |
+| PCB design rationale and the bench measurements behind it | `../Hardware/flagship/design-considerations.md` |
 | Versions, deployment state, milestones, open bugs, rulings | the dev board (`bd`) |
 
 ## First moves that are never wasted
