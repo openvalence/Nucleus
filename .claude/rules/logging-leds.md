@@ -8,8 +8,8 @@ paths:
 Carried from the archived machine repo (SlopDrive-32
 `.claude/rules/logging-leds.md`). Self-contained ecosystem modules:
 hardware-free core plus thin platform glue. `lib/geiger` and `lib/flux` hold
-the cores; their IDF glue twins land with the
-hub port. Both are header-only via an explicit include path.
+the cores, both header-only via an explicit include path. Geiger's IDF glue
+is live; Flux has none yet because no LED is fitted.
 
 ## Logging goes through Geiger. Only.
 
@@ -17,8 +17,9 @@ hub port. Both are header-only via an explicit include path.
   format plus spinlock slot copy; never blocks, never allocates, NOT ISR-safe.
 - Throttle with `GLOGx_EVERY_MS`. Compile floor `GEIGER_COMPILE_LEVEL`.
 - **ONE drain point**, on one task, with sinks implementing `geiger::ISink`
-  registered in one place. The glue file that owns it names itself when it
-  lands; there is never a second drain.
+  registered in one place. The hub task is that task
+  (`geiger::drainToSinks`); the archive sink is
+  `flagship_p4/src/system/ValenceDiag.cpp`. There is never a second drain.
 - **No `printf` debug output in firmware, and no new log macros.** Enforced by
   canon_lint `printf-outside-geiger` and `new-log-macro`, scoped to the hub
   sources. Exactly one file is exempt from both, because it IS the front door
