@@ -56,8 +56,8 @@ argument.
 - Memory and concurrency reasoning is never the thing that gets shortened.
   Stack cost, heap/BSS/PSRAM placement, and which task or core a callback runs
   on are stated before a change is called done.
-- Single-implementation indirection that doctrine mandates -- the VLog and
-  VGlow sole paths, the MotionArbiter sole-caller rule -- is law, not
+- Single-implementation indirection that doctrine mandates -- the Geiger and
+  Flux sole paths, the MotionArbiter sole-caller rule -- is law, not
   speculative abstraction to delete.
 - A SPEC-defined protocol field is not dead weight because one implementation
   currently ignores it. The spec decides; changes ride the RFC ritual.
