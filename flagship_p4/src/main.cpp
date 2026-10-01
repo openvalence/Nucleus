@@ -38,6 +38,7 @@
 #include "patterns/ValencePattern.h"
 #include "system/ValenceDiag.h"
 #include "system/ValenceOta.h"
+#include "system/ValencePower.h"
 #include "secrets.h"
 #include "ulp_main.h"
 
@@ -350,6 +351,10 @@ extern "C" void app_main() {
     // the boot sequence is precisely the history a bench console loses.
     const bool diag_ok = valence::diagBegin();
     if (!diag_ok) printf("--- diagnostics archive FAILED to allocate ---\n");
+
+    // The motor current monitor, before motion: its latched ALERT can hold the
+    // motor switch open. Non-fatal; a bare stamp has no part fitted.
+    valence::powerBegin();
 
     const bool parlio_ok = start_parlio();
     if (parlio_ok) report_parlio();

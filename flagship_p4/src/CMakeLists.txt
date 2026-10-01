@@ -18,7 +18,7 @@ idf_component_register(SRCS "main.cpp"
                             "patterns/ValencePattern.cpp" "patterns/PatternEngine.cpp"
                             "patterns/AdvancedPattern.cpp"
                             "system/ValenceHttp.cpp" "system/ValenceOta.cpp"
-                            "system/ValenceDiag.cpp"
+                            "system/ValenceDiag.cpp" "system/ValencePower.cpp"
                             "../../lib/ruckig/src/ruckig/brake.cpp"
                             "../../lib/ruckig/src/ruckig/position_first_step1.cpp"
                             "../../lib/ruckig/src/ruckig/position_first_step2.cpp"
@@ -47,7 +47,7 @@ idf_component_register(SRCS "main.cpp"
                        # with an all-components include set and so hides a
                        # missing entry from every pio build; ninja's own
                        # __idf_src target is the check.
-                       PRIV_REQUIRES app_update esp_driver_parlio esp_event esp_netif
+                       PRIV_REQUIRES app_update esp_driver_i2c esp_driver_parlio esp_event esp_netif
                                      esp_wifi lwip nvs_flash spi_flash
                                      espressif__esp_hosted
                                      espressif__esp_wifi_remote)
