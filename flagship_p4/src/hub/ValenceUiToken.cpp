@@ -1,14 +1,12 @@
 // ValenceUiTokenMinter -- implementation. See ValenceUiToken.h for the CORS
-// rule, the port-80 rule and the spinlock placement; nothing is restated here.
-//
-// token = HMAC(boot secret, counter || now)[0..15] (RFC-028.3). The HMAC makes
-// it unguessable; the slot table makes it single-use and expiring. Both halves
-// are required -- a stateless token cannot be revoked on use.
+// rule, the port-80 rule and the spinlock placement, and UiTokenTable.h for the
+// token itself; nothing is restated here.
 
 #include "ValenceUiToken.h"
 
 #include <cstdio>
 #include <cstring>
+#include <optional>
 
 #include <esp_random.h>
 #include <esp_timer.h>
@@ -18,7 +16,6 @@
 #include "system/ValenceHttp.h"
 
 #include "valence/core/crypto.hpp"
-#include "valence/wire/hmac_sha256.hpp"
 
 namespace valence {
 
@@ -93,7 +90,7 @@ bool ValenceUiTokenMinter::attachRoutes() {
         return false;
     }
     GLOGI(kTag, "GET /uitoken on :80 (no CORS headers, by design; %lu ms TTL, control tier)",
-          static_cast<unsigned long>(kTtlMs));
+          static_cast<unsigned long>(UiTokenTable::kTtlMs));
     return true;
 }
 
@@ -101,74 +98,38 @@ uint8_t ValenceUiTokenMinter::mintJson(char* body, size_t cap) {
     const uint32_t now = nowMs();
 
     // ---- Pass 1 (locked, ~1 us): rate limit + claim a counter ---------------
-    // One mint per kMinIntervalMs, device-wide. A page needs exactly one token
-    // per session, so this is generous for real use and flattens the
-    // spray-requests-and-grab-whichever-lands pattern.
-    uint32_t counter = 0;
     portENTER_CRITICAL(&s_mux);
-    if (_lastMintMs != 0 && (now - _lastMintMs) < kMinIntervalMs) {
-        portEXIT_CRITICAL(&s_mux);
+    const std::optional<uint32_t> counter = _table.claimMint(now);
+    portEXIT_CRITICAL(&s_mux);
+    if (!counter) {
         snprintf(body, cap, "{\"ok\":false,\"error\":\"rate_limited\"}");
         return 2;
     }
-    _lastMintMs = now;
-    counter = ++_counter;
-    portEXIT_CRITICAL(&s_mux);
 
     // ---- The HMAC runs UNLOCKED, deliberately -------------------------------
     // portENTER_CRITICAL disables interrupts and four SHA-256 compressions are
-    // tens of microseconds -- rude for a job that shares nothing. The claimed
-    // counter already makes every mint's material unique.
-    std::array<std::byte, 8> material{};
-    for (size_t i = 0; i < 4; ++i) material[i] = std::byte((counter >> (8 * i)) & 0xFF);
-    for (size_t i = 0; i < 4; ++i) material[4 + i] = std::byte((now >> (8 * i)) & 0xFF);
-    auto mac = valence::hmacSha256(std::span<const std::byte>(_secret),
-                                    std::span<const std::byte>(material));
-    std::array<std::byte, kTokenBytes> tok{};
-    for (size_t i = 0; i < kTokenBytes; ++i) tok[i] = mac[i];
+    // tens of microseconds -- rude for a job that shares nothing.
+    const UiTokenTable::Token tok = UiTokenTable::derive(_secret, *counter, now);
 
     // ---- Pass 2 (locked, ~1 us): install ------------------------------------
-    // Oldest-expiring slot loses. Four is deliberately small: this is a
-    // handshake credential, not a session store.
     portENTER_CRITICAL(&s_mux);
-    size_t victim = 0;
-    for (size_t i = 1; i < kSlots; ++i) {
-        if (_slots[i].used && !_slots[victim].used) { victim = i; continue; }
-        if (_slots[i].used == _slots[victim].used && _slots[i].expiresMs < _slots[victim].expiresMs)
-            victim = i;
-    }
-    _slots[victim].token = tok;
-    _slots[victim].expiresMs = now + kTtlMs;
-    _slots[victim].used = false;
+    _table.install(tok, now);
     ++_minted;
     portEXIT_CRITICAL(&s_mux);
 
-    char hex[kTokenBytes * 2 + 1];
+    char hex[UiTokenTable::kTokenBytes * 2 + 1];
     hexEncode(std::span<const std::byte>(tok), hex);
     // "tier" is stated so a client never has to guess what it got, and so the
     // ceiling is documented at the point of issue.
     snprintf(body, cap, "{\"ok\":true,\"token\":\"%s\",\"ttl_ms\":%lu,\"tier\":\"control\"}",
-             hex, static_cast<unsigned long>(kTtlMs));
+             hex, static_cast<unsigned long>(UiTokenTable::kTtlMs));
     return 0;
 }
 
 bool ValenceUiTokenMinter::consume(std::span<const std::byte> token) {
-    if (token.size() != kTokenBytes) return false;
     const uint32_t now = nowMs();
-    bool hit = false;
     portENTER_CRITICAL(&s_mux);
-    for (auto& s : _slots) {
-        if (s.used) continue;
-        if (int32_t(now - s.expiresMs) >= 0) {   // wrap-safe expiry compare
-            s.used = true;
-            continue;
-        }
-        if (s_cmp.constantTimeEqual(std::span<const std::byte>(s.token), token)) {
-            s.used = true;   // single-use: consumed whether or not anything follows
-            hit = true;
-            break;
-        }
-    }
+    const bool hit = _table.consume(token, now, s_cmp);
     portEXIT_CRITICAL(&s_mux);
     if (hit) ++_consumed;
     return hit;

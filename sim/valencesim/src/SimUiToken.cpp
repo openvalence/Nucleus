@@ -2,11 +2,12 @@
 
 #include "SimUiToken.h"
 
+#include <array>
 #include <cstdio>
+#include <optional>
+#include <random>
 
 #include <ixwebsocket/IXHttpServer.h>
-
-#include "valence/core/crypto.hpp"
 
 namespace valence {
 
@@ -16,7 +17,10 @@ uint32_t nowMs() { return uint32_t(deviceNowUs() / 1000); }
 
 }  // namespace
 
-SimUiToken::SimUiToken() = default;
+SimUiToken::SimUiToken() {
+    std::random_device rd;
+    for (auto& b : _secret) b = std::byte(rd() & 0xFF);
+}
 
 SimUiToken::~SimUiToken() { stop(); }
 
@@ -57,60 +61,39 @@ void SimUiToken::stop() {
 
 int SimUiToken::mint(std::string& body) {
     const uint32_t now = nowMs();
-    std::array<std::byte, kTokenBytes> tok{};
+    std::optional<uint32_t> counter;
     {
         std::lock_guard<std::mutex> lk(_m);
-        if (_everMinted && (now - _lastMintMs) < kMinIntervalMs) {
-            body = "{\"ok\":false,\"error\":\"rate_limited\"}";
-            return 429;
-        }
-        _everMinted = true;
-        _lastMintMs = now;
-        for (auto& b : tok) b = std::byte(_rd() & 0xFF);
-
-        // Oldest-expiring slot loses, used slots first, exactly as on the P4.
-        size_t victim = 0;
-        for (size_t i = 1; i < kSlots; ++i) {
-            if (_slots[i].used && !_slots[victim].used) { victim = i; continue; }
-            if (_slots[i].used == _slots[victim].used && _slots[i].expiresMs < _slots[victim].expiresMs)
-                victim = i;
-        }
-        _slots[victim].token = tok;
-        _slots[victim].expiresMs = now + kTtlMs;
-        _slots[victim].used = false;
+        counter = _table.claimMint(now);
+    }
+    if (!counter) {
+        body = "{\"ok\":false,\"error\":\"rate_limited\"}";
+        return 429;
+    }
+    const UiTokenTable::Token tok = UiTokenTable::derive(_secret, *counter, now);
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _table.install(tok, now);
     }
 
-    std::array<char, kTokenBytes * 2 + 1> hex{};
+    std::array<char, UiTokenTable::kTokenBytes * 2 + 1> hex{};
     static constexpr char kHex[] = "0123456789abcdef";
-    for (size_t i = 0; i < kTokenBytes; ++i) {
+    for (size_t i = 0; i < UiTokenTable::kTokenBytes; ++i) {
         hex[i * 2] = kHex[(uint8_t(tok[i]) >> 4) & 0x0F];
         hex[i * 2 + 1] = kHex[uint8_t(tok[i]) & 0x0F];
     }
     std::array<char, 128> out{};
     std::snprintf(out.data(), out.size(),
                   "{\"ok\":true,\"token\":\"%s\",\"ttl_ms\":%lu,\"tier\":\"control\"}", hex.data(),
-                  static_cast<unsigned long>(kTtlMs));
+                  static_cast<unsigned long>(UiTokenTable::kTtlMs));
     body = out.data();
     return 200;
 }
 
 bool SimUiToken::consume(std::span<const std::byte> token) {
-    if (token.size() != kTokenBytes) return false;
     const uint32_t now = nowMs();
-    SoftwareCrypto cmp;
     std::lock_guard<std::mutex> lk(_m);
-    for (auto& s : _slots) {
-        if (s.used) continue;
-        if (int32_t(now - s.expiresMs) >= 0) {
-            s.used = true;
-            continue;
-        }
-        if (cmp.constantTimeEqual(std::span<const std::byte>(s.token), token)) {
-            s.used = true;
-            return true;
-        }
-    }
-    return false;
+    return _table.consume(token, now, _cmp);
 }
 
 }  // namespace valence

@@ -23,7 +23,8 @@ with no device semantics.
 | Pattern presets (0x5220) | `PatternPresetStore` inside the delegate | persisted: `PREFIX.presets` holds the board's NVS `presets` blob, same debounce |
 | `background_run` | the delegate's `PatternSettings` | in memory, same as the board: persisting it waits on an operator ruling (bd val-wcm) |
 | WebSocket port | `../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home | real host binding |
-| `/uitoken` | `src/SimUiToken.cpp` on IXWebSocket's HTTP server | same contract, random bytes instead of HMAC |
+| `/uitoken` token: slot table, rate gate, HMAC derivation | `flagship_p4/src/hub/UiTokenTable.h`, compiled verbatim | real |
+| `/uitoken` endpoint | `src/SimUiToken.cpp` on IXWebSocket's HTTP server, a `std::mutex` for the board's spinlock | same contract, on 127.0.0.1 |
 | Config and tuning persistence (0x1000, 0x1030, 0x1120-0x1122, cfg_gen) | `StoredState.h` codec, compiled verbatim | persisted: `PREFIX.cfg` holds the board's NVS `cfg` blob; a file stands in for NVS |
 | Push-to-pair gesture | `--pairing-window` opens the hub's presence window at boot | the board's PAIR-button gesture is bd val-9u0.10; the twin follows it (bd val-sf7.6) |
 | Geiger log lines from device code | `lib/geiger`'s host platform layer (`GEIGER_HOST_PLATFORM`), drained on the hub thread into the sim's log | real: device lines print beside the sim's own, stamped with the hub clock |

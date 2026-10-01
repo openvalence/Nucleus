@@ -20,6 +20,7 @@ slowly. For anything finer, ask codebase-memory rather than grepping for
 | `flagship_p4/src/hub/` | The Valence hub and its IDF glue: platform shims, the WS port, the UI token, catalog, config |
 | `flagship_p4/src/system/` | Board services on port 80: the shared HTTP server, OTA, and the `/diag` archive (the Geiger archive sink) |
 | `flagship_p4/src/hub/ValenceDevice.*` | The delegate and every STATE publisher. Hardware-free: the sim compiles it verbatim |
+| `flagship_p4/src/hub/UiTokenTable.h` | The `/uitoken` slot table, rate gate and HMAC derivation, lock injected. Hardware-free: the sim compiles it verbatim; `ValenceUiToken.cpp` is only its board host (spinlock, secret, the :80 route). Suite `test_ui_token` |
 | `flagship_p4/src/motion/MotionArbiter.*` | Every motion gate, the window clamp, limit sets and feedforward, emitter and clock injected. Hardware-free: the sim compiles it verbatim; `ValenceMotion.cpp` is only its task host |
 | `flagship_p4/src/patterns/` | The pattern generator: `PatternEngine` (hardware-free, the sim compiles it verbatim), its settings value and preset store, and `ValencePattern.cpp`, its board task host. Strokes leave as intents through `motionSubmit()` |
 | `lib/strokeengine_patterns` | VENDORED StrokeEngine pattern classes, verbatim (`VENDORED.md`); `<Arduino.h>` comes from `flagship_p4/src/patterns/arduino_compat/` |

@@ -21,6 +21,8 @@
 //   one, which is the class that reaches a user who never opened the UI.
 // - Properties: single-use, ~60 s TTL, rate-limited, CONTROL tier and never
 //   configure -- a browser-borne credential must not re-key the trust ledger.
+//   The slot table, rate gate and derivation are UiTokenTable.h, the one copy
+//   the sim compiles too; this class owns only the lock, the secret and :80.
 // - THE SPINLOCK IS A FILE-SCOPE STATIC IN THE .cpp, not a member (T4 and
 //   T2 together): this object is a member of the PSRAM-resident hub box, and
 //   a portMUX_TYPE must live in internal RAM -- the compare-and-set it is
@@ -43,6 +45,7 @@
 
 #include <esp_http_server.h>
 
+#include "UiTokenTable.h"
 #include "ValenceDevice.h"
 
 namespace valence {
@@ -67,23 +70,10 @@ public:
     uint32_t consumed() const { return _consumed; }
 
 private:
-    static constexpr size_t kTokenBytes = 16;        // = valence limits::token_bytes
-    static constexpr size_t kSlots = 4;              // a few tabs' worth, no more
-    static constexpr uint32_t kTtlMs = 60000;        // RFC-029 §4: short
-    static constexpr uint32_t kMinIntervalMs = 250;  // rate limit, per device
-
-    struct Slot {
-        std::array<std::byte, kTokenBytes> token{};
-        uint32_t expiresMs = 0;
-        bool used = true;   // an unminted slot is "already used"
-    };
-
     static esp_err_t handleGet(httpd_req_t* req);
 
-    std::array<Slot, kSlots> _slots{};
-    std::array<std::byte, 32> _secret{};
-    uint32_t _counter = 0;
-    uint32_t _lastMintMs = 0;
+    UiTokenTable _table{};             // every access holds s_mux
+    UiTokenTable::Secret _secret{};    // written once in begin(), read-only after
     uint32_t _minted = 0;
     uint32_t _consumed = 0;
 };
