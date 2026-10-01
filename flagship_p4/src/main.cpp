@@ -33,7 +33,9 @@
 #include "system/ValenceDiag.h"
 #include "system/ValenceOta.h"
 #include "system/BoardPins.h"
+#include "system/ValenceLogBridge.h"
 #include "system/ValencePower.h"
+#include "system/ValenceSelfCheck.h"
 #include "secrets.h"
 #include "ulp_main.h"
 
@@ -50,6 +52,7 @@ extern const uint8_t ulp_main_bin_end[]   asm("_binary_ulp_main_bin_end");
 // ---- network -------------------------------------------------------------------
 
 static volatile bool g_got_ip = false;
+static bool g_hosted_ok = false;   // the C6 answered over SDIO; app_main only
 static char g_ip[16] = "-";
 
 static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
@@ -88,6 +91,7 @@ static bool wifi_up() {
     esp_hosted_coprocessor_fwver_t ver = {};
     rc = esp_hosted_get_coprocessor_fwversion(&ver);
     printf("C6 slave firmware: rc=%d version %u.%u.%u\n", rc, unsigned(ver.major1), unsigned(ver.minor1), unsigned(ver.patch1));
+    g_hosted_ok = (rc == 0);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     err = esp_wifi_init(&cfg);
@@ -205,6 +209,11 @@ void note_stack(size_t i, uint32_t free_bytes) {
 // ---- entry -------------------------------------------------------------------
 
 extern "C" void app_main() {
+    // BEFORE ANYTHING, the delay included: motor power stays off until the
+    // self-check proves the board (val-091.21). The 100k pull-downs hold the
+    // switch off through reset; this makes it an actively driven low.
+    valence::selfCheckHoldMotorOff();
+
     // USB-Serial/JTAG needs a moment to re-enumerate after flash; print into
     // the void otherwise. Same courtesy the IDF LP example extends.
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -254,6 +263,15 @@ extern "C" void app_main() {
     // that cannot be updated or dumped still runs.
     valence::otaBegin();
     if (diag_ok) valence::diagAttachRoutes();
+
+    // The self-check runs LAST so it can judge everything above, and after the
+    // log bridge so its verdict reaches the wire (0x0008) through the hub
+    // task's drain. Motor power stays off whatever it returns.
+    if (!valence::logBridgeBegin()) printf("--- log bridge FAILED: Geiger sink table full ---\n");
+    valence::SelfCheckFacts facts;
+    facts.lpEdges = ulp_g_edges;
+    facts.hostLink = g_hosted_ok;
+    valence::selfCheckRun(facts);
     printf("\n");
 
     // Liveness line every 5 s.
@@ -269,6 +287,8 @@ extern "C" void app_main() {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(5000));
         ++n;
+        if (n % 12 == 0) valence::selfCheckRemind();   // once a minute
+        const valence::SelfCheckSummary sc = valence::selfCheckSummary();
         const valence::HubCensus census = valence::hubCensus();
         // THE BUY (val-091.16). THREE conditions, and the third is the one that
         // is easy to leave out: hubBegin() returning true says the hub was
@@ -303,7 +323,7 @@ extern "C" void app_main() {
                "lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
                "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu  "
                "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu "
-               "faults=%lu\n",
+               "faults=%lu  selfcheck=%s:%u/%u %s\n",
                static_cast<unsigned long>(n * 5),
                unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
@@ -329,6 +349,7 @@ extern "C" void app_main() {
                static_cast<unsigned long>(mo.intents),
                static_cast<unsigned long>(mo.rejected),
                static_cast<unsigned long>(mo.stack_free),
-               static_cast<unsigned long>(mo.emitter_faults));
+               static_cast<unsigned long>(mo.emitter_faults),
+               sc.allowed ? "pass" : "held", unsigned(sc.failed), unsigned(sc.skipped), sc.first);
     }
 }
