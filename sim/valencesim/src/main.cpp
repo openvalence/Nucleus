@@ -19,7 +19,7 @@
 //   desktop scheduler allows.
 // - PERSISTENCE IS THE BOARD'S, WITH FILES FOR NVS KEYS: PREFIX.cfg and
 //   PREFIX.presets hold the exact blobs the P4 writes, on the same debounce,
-//   and PREFIX.iid holds the P4's hub_iid (WELCOME identity key 5, SPEC ง6.3)
+//   and PREFIX.iid holds the P4's hub_iid (WELCOME identity key 5, SPEC ยง6.3)
 //   as 8 bytes little-endian. Each is written to a temp file and renamed over
 //   the old one so a kill mid-write leaves the previous blob whole. PREFIX
 //   defaults to valencesim-state beside the exe.
