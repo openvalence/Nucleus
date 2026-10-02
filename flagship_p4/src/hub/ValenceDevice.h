@@ -26,6 +26,7 @@
 #include <optional>
 #include <span>
 
+#include "IngressDropTally.h"
 #include "StoredState.h"
 #include "ValenceCatalog.h"
 #include "motion/ValenceMotion.h"
@@ -262,6 +263,9 @@ private:
     // The store's generation as last armed or adopted. Every CRUD mutation
     // bumps the store's own, so a difference IS "the slots changed".
     uint16_t _presetsGenSeen = _presets.generation();   // declared after _presets
+
+    // The hub half of 0x1111 sync_dropped, folded every tick.
+    IngressDropTally _ingressDrops{};
 
     uint32_t _lastMotionMs = 0;
     uint32_t _lastPlanMs = 0;

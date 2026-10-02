@@ -268,7 +268,8 @@ void publishPlanStrip(Hub& hub, const MotionCensus& m) {
     publishPacked(hub, ch::plan_strip, buf, n);
 }
 
-void publishMotionDiag(Hub& hub, const MotionCensus& m) {
+// hubDropped: bundles the hub dropped whole at ingress (IngressDropTally.h).
+void publishMotionDiag(Hub& hub, const MotionCensus& m, uint32_t hubDropped) {
     std::array<std::byte, 92> buf{};
     size_t n = 0;
     packU32(buf, n, m.plans);
@@ -285,7 +286,11 @@ void publishMotionDiag(Hub& hub, const MotionCensus& m) {
     // sync_enqueued: every decoded sample that was not dropped reached the
     // arbiter, because the delegate submits inside the same loop that counts.
     packU32(buf, n, m.stream_samples - m.stream_dropped);
-    packU32(buf, n, m.stream_dropped);
+    // sync_dropped: the arbiter's refused samples plus the bundles the hub
+    // dropped whole at ingress, PAUSE included (SPEC 11.1, RFC-074 clause 4).
+    // A dropped bundle counts ONE: the library keeps no sample count for it,
+    // so the field understates samples rather than inventing them.
+    packU32(buf, n, m.stream_dropped + hubDropped);
     // sync_seg_bundles is not separated here: both stream channels land in one
     // counter, and splitting it would need a second pair the census does not
     // carry. It reads 0, which understates rather than invents.
@@ -1391,7 +1396,7 @@ void ValenceDevice::attach(Hub& hub) {
     const MotionCensus mo = motionCensus();
     publishMotion(hub, mo, patternActive());
     publishPlanStrip(hub, mo);
-    publishMotionDiag(hub, mo);
+    publishMotionDiag(hub, mo, _ingressDrops.total());
     publishOdometer(hub, mo);
     if (boardFeatures().has_pattern) {
         pushPattern();
@@ -1435,6 +1440,15 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     // a strip that is only news while a plan runs.
     const MotionCensus mo = motionCensus();
 
+    // Every tick, not at the 1 Hz publish: a slot's counter dies with its
+    // session, and a coarser read loses whatever it dropped since the last.
+    for (size_t i = 0;; ++i) {
+        const HubSession* s = _hub->sessionBySlot(i);
+        if (s == nullptr) break;
+        _ingressDrops.observe(i, s->occupied() ? s->session_id : 0,
+                              _hub->streamIngressCounters(i).dropped);
+    }
+
     // The schedule_horizon and flipped enabled_mask bits follow the segments
     // grants and the rail's state, which no write announces.
     const bool horizonOpen = !publishGrantLive(ch::motion_segment);
@@ -1462,7 +1476,7 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     }
     if (uint32_t(nowMs - _lastSlowMs) >= 1000u) {
         _lastSlowMs = nowMs;
-        publishMotionDiag(*_hub, mo);
+        publishMotionDiag(*_hub, mo, _ingressDrops.total());
         publishOdometer(*_hub, mo);
     }
 
