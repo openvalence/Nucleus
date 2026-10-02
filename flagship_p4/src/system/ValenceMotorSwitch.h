@@ -24,6 +24,11 @@
 
 namespace valence {
 
+// The board's switch task stack, in bytes, and the one home for that number:
+// the create site and main.cpp's high-water watch both read it here.
+// TODO(val-091.56): size from a high-water mark under estop, release and a fault.
+inline constexpr uint32_t kMotorSwitchTaskStackBytes = 4096;
+
 struct MotorSwitchStatus {
     motorswitch::State state      = motorswitch::State::off;
     motorswitch::Fault last_fault = motorswitch::Fault::none;
@@ -48,5 +53,8 @@ MotorSwitchStatus motorSwitchStatus();
 // Board only: MSW_FLT_N read now, true = asserted (low). The self-check's
 // switch-fault entry reads it here so the pin has one reader module.
 bool motorSwitchFaultLine();
+// Board only: the switch task's stack high-water headroom, bytes; 0 before
+// motorSwitchBegin().
+uint32_t motorSwitchStackFree();
 
 }  // namespace valence

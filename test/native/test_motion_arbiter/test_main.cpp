@@ -63,12 +63,17 @@ public:
     int      parks = 0;
 };
 
-// Built on the heap (rig()): the arbiter holds a KB-scale engine.
+// Built on the heap (rig()): the arbiter holds a KB-scale engine. A rig is a
+// powered machine unless a case says otherwise: the switch host's push is
+// part of the board's boot, not of the arbiter's.
 struct Rig {
     TestEmitter emitter;
     MotionArbiter arb{emitter, &testNowUs};
 
-    Rig() { arb.begin(g_now_us); }
+    explicit Rig(bool powered = true) {
+        arb.begin(g_now_us);
+        arb.setMotorPowered(powered);
+    }
 
     bool submit(MotionSource src, float target_mm) {
         MotionIntent in;
@@ -188,6 +193,78 @@ TEST_CASE("e-stop refuses every source, parks on the calling task, drops homed w
     r->run(1000);
     CHECK_FALSE(r->submit(MotionSource::Stream, 50.0f));
     r->arb.pause(false);
+    CHECK(r->submit(MotionSource::Stream, 50.0f));
+}
+
+TEST_CASE("motor power off: boots refusing every source, the jog under override included") {
+    auto r = std::make_unique<Rig>(false);
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    CHECK_FALSE(r->census().motor_on);
+    CHECK_FALSE(r->submit(MotionSource::Manual, 100.0f));
+    CHECK_FALSE(r->submit(MotionSource::Stream, 100.0f));
+    CHECK_FALSE(r->submit(MotionSource::Pattern, 100.0f));
+    r->arb.override();
+    CHECK_FALSE(r->submit(MotionSource::Manual, 100.0f));
+    CHECK(r->census().rejected == 4);
+    r->run(100'000);
+    CHECK(r->emitter.n == 0);
+    // Power on is not a loss: home survives it, and the operator's jog moves.
+    r->arb.setMotorPowered(true);
+    CHECK(r->census().motor_on);
+    CHECK(r->census().homed);
+    CHECK(r->submit(MotionSource::Manual, 100.0f));
+}
+
+TEST_CASE("a power loss mid-move parks on the calling task, drops homed, and nothing resumes") {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Stream, 200.0f));
+    r->run(50'000);
+    REQUIRE(r->emitter.q8 != 0);
+    const int parks = r->emitter.parks;
+
+    r->arb.setMotorPowered(false);
+    CHECK(r->emitter.q8 == 0);
+    CHECK(r->emitter.parks == parks + 1);
+    const int32_t held = r->emitter.n;
+    r->run(200'000);
+    CHECK(r->emitter.n == held);
+    MotionCensus c = r->census();
+    CHECK_FALSE(c.motor_on);
+    CHECK_FALSE(c.homed);
+    // The abandoned plan is reset on the owning task, so a release can see rest.
+    CHECK_FALSE(c.busy);
+    CHECK_FALSE(r->submit(MotionSource::Stream, 100.0f));
+
+    // Power back: still parked, still unhomed; the stream needs a home first.
+    r->arb.setMotorPowered(true);
+    r->run(200'000);
+    CHECK(r->emitter.n == held);
+    CHECK_FALSE(r->submit(MotionSource::Stream, 100.0f));
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    CHECK(r->submit(MotionSource::Stream, 100.0f));
+}
+
+TEST_CASE("the release sequence on a power-cutting hub: estop, power off, release, power on, home, resume") {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    r->arb.estop(true);
+    r->arb.setMotorPowered(false);   // the switch host's push after the cut
+    r->run(10'000);
+    r->arb.estop(false);
+    CHECK(r->census().paused);
+    // Pre-charging: released, paused, unpowered. Home lands; resume still
+    // finds the power gate shut.
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    r->arb.pause(false);
+    CHECK_FALSE(r->submit(MotionSource::Stream, 50.0f));
+    r->arb.setMotorPowered(true);
+    CHECK(r->census().homed);
     CHECK(r->submit(MotionSource::Stream, 50.0f));
 }
 

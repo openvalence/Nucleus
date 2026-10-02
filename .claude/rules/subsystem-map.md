@@ -25,6 +25,8 @@ slowly. For anything finer, ask codebase-memory rather than grepping for
 | `flagship_p4/src/system/Supervisor.h` | The P4 to board monitor (U12, CH32V003) link: register ids, block layouts, CRCs, encoders and decoders. C/C++ common subset, shared verbatim with `flagship_ch32v003/`. Contract: `docs/supervisor.md`. Suite `test_supervisor` |
 | `flagship_p4/src/system/SelfCheck.h` | The boot self-check table: named checks in the ruling's order, each pass/fail/skipped with a reason; motor power only when every entry passed, plus the board-monitor judges over `Supervisor.h` blocks. Hardware-free; suite `test_self_check` |
 | `flagship_p4/src/system/ValenceSelfCheck.*` | `SelfCheck.h`'s IDF host: holds MOTOR_EN and PRECHARGE_EN low from `app_main`'s first line, runs the checks once after the hub is up, re-logs the summary each minute |
+| `flagship_p4/src/system/MotorSwitch.h` | The motor switch (U2, TPS48111) as a state machine: off, precharging, on, faulted; the pre-charge window and its derivation, the inrush, EN-node and MOTOR_V+ checks, the fault latch. Hardware-free; suite `test_motor_switch` |
+| `flagship_p4/src/system/ValenceMotorSwitch.*` | The door (`.h`, IDF-free: the delegate and the sim call it) and the board host (`.cpp`): the switch task, ADC1 on MSW_IMON and EN_NODE, the INA ALERT re-arm, the cut on the calling task under one spinlock, and the push of `on` to the arbiter's power gate. `sim/valencesim/src/SimMotorSwitch.cpp` is the twin's host |
 | `flagship_p4/src/system/ValenceLogBridge.*` | The Geiger sink that publishes Warn and above on the Valence log channel 0x0008, only from the hub task's drain |
 | `flagship_p4/src/hub/ValenceDevice.*` | The delegate and every STATE publisher. Hardware-free: the sim compiles it verbatim |
 | `flagship_p4/src/hub/UiTokenTable.h` | The `/uitoken` slot table, rate gate and HMAC derivation, lock injected. Hardware-free: the sim compiles it verbatim; `ValenceUiToken.cpp` is only its board host (spinlock, secret, the :80 route). Suite `test_ui_token` |
@@ -58,6 +60,7 @@ hub.**
 | `Motion` (`motion/ValenceMotion.cpp`) | HP core 1, priority 6 | Hosts the MotionArbiter: plans on intent arrival, hands the LP core a velocity each tick. Stack `kMotionTaskStackBytes`, the deep one (`motion-control.md`) |
 | `ValenceHub` (`hub/ValenceHub.cpp`) | HP core 1, priority 5 | The hub, single-task by design (`transport.md` T5), and the one Geiger drain, so the log bridge's sink runs here. Stack `kHubTaskStackBytes` |
 | LP emitter (`ulp/lp_quad.c`) | LP | Quadrature edges from a phase accumulator. Its signed edge count is position truth |
+| `MotorSw` (`system/ValenceMotorSwitch.cpp`) | HP core 0, priority 5 | The motor switch's host: a 5 ms watch on MSW_FLT_N and the EN node, the pre-charge window, the enable request's INA re-arm. Stack `kMotorSwitchTaskStackBytes` |
 | `Pattern` (`patterns/ValencePattern.cpp`) | HP core 1, priority 4 | The pattern generator: wakes when a half-stroke is due or settings arrive, submits it as an intent. Below the hub (5) and the motion task (6); stack `kPatternTaskStackBytes` |
 | `esp_hosted` / WiFi / lwIP tasks | HP | Owned by the drivers, not by us. Their callbacks are not our task (`transport.md` T5) |
 

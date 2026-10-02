@@ -7,11 +7,11 @@
 // - Owner: app_main, and only app_main. selfCheckHoldMotorOff() is its FIRST
 //   call; selfCheckRun() runs once, after hubBegin() and logBridgeBegin();
 //   selfCheckSummary() and selfCheckRemind() run from the liveness loop. No
-//   other task touches the table (cpp-safety.md concurrency). The one
-//   exception is motorPowerCut(): any task, two GPIO level writes, no table.
-// - MOTOR_EN, PRECHARGE_EN and ESTOP_BYP are driven LOW here and NEVER high.
-//   The pre-charge and enable sequence is not written (val-091.24), so even a
-//   passing table leaves motor power off, and the summary says so.
+//   other task touches the table (cpp-safety.md concurrency).
+// - MOTOR_EN, PRECHARGE_EN and ESTOP_BYP are driven LOW here and never high
+//   here. Raising the first two is the motor switch module's alone
+//   (ValenceMotorSwitch.h), and app_main hands it this table's verdict: a
+//   table that did not pass holds motor power off for the boot.
 // - Results ride the log channel 0x0008 through ValenceLogBridge: FAIL is
 //   GLOGE, SKIPPED is GLOGW, both on the wire; PASS is GLOGI, console and
 //   /diag only. Tag "selfcheck".
@@ -33,11 +33,6 @@ struct SelfCheckFacts {
 // Drives MOTOR_EN, PRECHARGE_EN and ESTOP_BYP low and configures the input
 // pins the check reads. Call before anything else in app_main.
 void selfCheckHoldMotorOff();
-
-// The ESTOP power cut (SPEC 11.2, estop_cuts_power): MOTOR_EN and PRECHARGE_EN
-// low. Any task; the pads are outputs from selfCheckHoldMotorOff() on. Nothing
-// here ever drives them high: the enable sequence is val-091.24's.
-void motorPowerCut();
 
 // Runs every check in table order and logs each result plus a summary.
 // Returns motorPowerAllowed() of the finished table.

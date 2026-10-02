@@ -27,7 +27,7 @@
 
 #include "MotionArbiter.h"
 #include "geiger/geiger.h"
-#include "system/ValenceSelfCheck.h"
+#include "system/ValenceMotorSwitch.h"
 #include "ulp_main.h"
 
 namespace valence {
@@ -250,10 +250,11 @@ bool motionSubmit(const MotionIntent& in) { return g_motion.submit(in); }
 void motionEstop() {
     // Power first: the cut is the stop on this board, the park only keeps the
     // emitter from rendering into a dead drive.
-    motorPowerCut();
+    motorSwitchCut();
     g_motion.arbiter().estop(true);
 }
 void motionEstopClear() { g_motion.arbiter().estop(false); }
+void motionSetMotorPowered(bool on) { g_motion.arbiter().setMotorPowered(on); }
 void motionPause(bool on) { g_motion.pause(on); }
 void motionPatternAllow() { g_motion.arbiter().allowPattern(); }
 void motionSetEstopCutsPower(bool cuts) { g_motion.arbiter().setEstopCutsPower(cuts); }

@@ -37,6 +37,7 @@
 #include <freertos/task.h>
 
 #include "geiger/geiger.h"
+#include "motion/ValenceMotion.h"
 #include "system/BoardPins.h"
 #include "system/ValencePower.h"
 
@@ -61,8 +62,6 @@ constexpr int kImonSamples = 4;
 // The INA's ALERT releases the EN node when DIAG_ALRT is read; C404 10 nF
 // into the ~28k EN divider settles in ~1.5 ms (5 tau).
 constexpr uint32_t kRearmSettleMs = 2;
-// TODO(val-091.56): size from a high-water mark under estop/release/fault.
-constexpr uint32_t kMotorSwitchTaskStackBytes = 4096;
 
 constexpr gpio_num_t pin(int n) { return static_cast<gpio_num_t>(n); }
 
@@ -82,6 +81,8 @@ std::atomic<bool> g_enableReq{false};
 // state | last_fault << 8 | faults << 16, written under g_mux, read anywhere.
 std::atomic<uint32_t> g_status{0};
 TaskHandle_t g_task = nullptr;
+// What the arbiter last heard (motionSetMotorPowered), the switch task's alone.
+bool g_pushedOn = false;
 
 // The switch task's alone after motorSwitchBegin().
 adc_oneshot_unit_handle_t g_adc = nullptr;
@@ -245,6 +246,13 @@ void taskMain(void*) {
         portEXIT_CRITICAL(&g_mux);
 
         if (changed) logTransition(is, f, r);
+        // Every entry into and exit from `on`, a cut from another task
+        // included, reaches the arbiter from here and only from here.
+        const bool on = is == State::on;
+        if (on != g_pushedOn) {
+            g_pushedOn = on;
+            motionSetMotorPowered(on);
+        }
     }
 }
 
@@ -309,5 +317,10 @@ MotorSwitchStatus motorSwitchStatus() {
 }
 
 bool motorSwitchFaultLine() { return gpio_get_level(pin(BOARD_GPIO_MSW_FLT_N)) == 0; }
+
+uint32_t motorSwitchStackFree() {
+    // IDF reports BYTES, not the vanilla FreeRTOS words.
+    return g_task != nullptr ? uint32_t(uxTaskGetStackHighWaterMark(g_task)) : 0;
+}
 
 }  // namespace valence

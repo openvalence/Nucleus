@@ -34,6 +34,7 @@
 #include "system/ValenceOta.h"
 #include "system/BoardPins.h"
 #include "system/ValenceLogBridge.h"
+#include "system/ValenceMotorSwitch.h"
 #include "system/ValencePower.h"
 #include "system/ValenceSelfCheck.h"
 #include "secrets.h"
@@ -194,6 +195,7 @@ StackWatch g_stacks[] = {
     {"Motion",   valence::kMotionTaskStackBytes},
     {"Pattern",  valence::kPatternTaskStackBytes},
     {"app_main", uint32_t(CONFIG_ESP_MAIN_TASK_STACK_SIZE)},
+    {"MotorSw",  valence::kMotorSwitchTaskStackBytes},
 };
 void note_stack(size_t i, uint32_t free_bytes) {
     if (free_bytes == 0 || free_bytes >= g_stacks[i].worst_free) return;
@@ -227,6 +229,12 @@ extern "C" void app_main() {
     // The motor current monitor, before motion: its latched ALERT can hold the
     // motor switch open. Non-fatal; a bare stamp has no part fitted.
     valence::powerBegin();
+
+    // The motor switch's host, state off, BEFORE the self-check: the table's
+    // motor-rail entries read its state, and the switch needs the power
+    // monitor above for its ALERT re-arm and MOTOR_V+. It enables nothing
+    // until the self-check's verdict below says so.
+    if (!valence::motorSwitchBegin()) printf("--- motor switch host FAILED: motor power stays off ---\n");
 
     const bool lp_ok = start_lp_core();
     if (lp_ok) report_lp();
@@ -266,12 +274,13 @@ extern "C" void app_main() {
 
     // The self-check runs LAST so it can judge everything above, and after the
     // log bridge so its verdict reaches the wire (0x0008) through the hub
-    // task's drain. Motor power stays off whatever it returns.
+    // task's drain. Its verdict is the motor switch's gate: a pass runs the
+    // enable sequence now, anything else holds motor power off for the boot.
     if (!valence::logBridgeBegin()) printf("--- log bridge FAILED: Geiger sink table full ---\n");
     valence::SelfCheckFacts facts;
     facts.lpEdges = ulp_g_edges;
     facts.hostLink = g_hosted_ok;
-    valence::selfCheckRun(facts);
+    valence::motorSwitchSetSelfCheck(valence::selfCheckRun(facts));
     printf("\n");
 
     // Liveness line every 5 s.
@@ -319,11 +328,13 @@ extern "C" void app_main() {
         note_stack(1, mo.stack_free);
         note_stack(2, valence::patternStackFree());
         note_stack(3, uint32_t(uxTaskGetStackHighWaterMark(nullptr)));
+        note_stack(4, valence::motorSwitchStackFree());
+        const valence::MotorSwitchStatus msw = valence::motorSwitchStatus();
         printf("[flagship_p4] %lus  int_free=%u int_max=%u  psram_free=%u psram_max=%u  "
                "lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
                "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu  "
                "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu "
-               "faults=%lu  selfcheck=%s:%u/%u %s\n",
+               "faults=%lu  selfcheck=%s:%u/%u %s  msw=%s\n",
                static_cast<unsigned long>(n * 5),
                unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
@@ -350,6 +361,7 @@ extern "C" void app_main() {
                static_cast<unsigned long>(mo.rejected),
                static_cast<unsigned long>(mo.stack_free),
                static_cast<unsigned long>(mo.emitter_faults),
-               sc.allowed ? "pass" : "held", unsigned(sc.failed), unsigned(sc.skipped), sc.first);
+               sc.allowed ? "pass" : "held", unsigned(sc.failed), unsigned(sc.skipped), sc.first,
+               valence::motorswitch::stateName(msw.state));
     }
 }

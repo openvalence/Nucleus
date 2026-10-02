@@ -94,6 +94,7 @@ struct MotionCensus {
     uint32_t stack_free     = 0;   // motion task stack high-water headroom, bytes
     bool     homed          = false;
     bool     estop          = false;
+    bool     motor_on       = false;  // the motor switch is `on`: the arbiter's power gate
     bool     paused         = false;
     bool     override_mode  = false;  // SPEC 11.1 override: the rail is the operator's
     bool     returning      = false;  // the `return` move is running
@@ -181,6 +182,9 @@ bool motionSubmit(const MotionIntent& intent);
 void motionEstop();
 // The RELEASE (SPEC 11.2): lands in PAUSE, never in motion.
 void motionEstopClear();
+// The motor switch's host pushes `on` here (MotionArbiter::setMotorPowered()).
+// Any task, never blocks; a loss parks the emitter before it returns.
+void motionSetMotorPowered(bool on);
 // SPEC 11.1 PAUSE. Any task, never blocks: on refuses every intent from this
 // call on, then brakes the plan in flight to rest at the input decel on the
 // motion task. off is `resume`, the only clear. e-stop closes the Pattern gate

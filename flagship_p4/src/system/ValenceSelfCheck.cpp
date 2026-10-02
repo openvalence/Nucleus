@@ -207,7 +207,7 @@ void logEntry(Check c) {
 void logSummary() {
     const SelfCheckSummary s = selfCheckSummary();
     if (s.allowed) {
-        GLOGW(kTag, "motor power stays OFF: all %u passed, enable sequence not built (val-091.24)",
+        GLOGI(kTag, "motor power ALLOWED: all %u passed, the enable sequence runs",
               unsigned(selfcheck::kCheckCount));
     } else if (s.failed > 0) {
         GLOGE(kTag, "motor power held OFF: %u failed, %u skipped; first: %s",
@@ -242,11 +242,6 @@ void selfCheckHoldMotorOff() {
     in.mode = GPIO_MODE_INPUT;
     in.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&in);
-}
-
-void motorPowerCut() {
-    gpio_set_level(pin(BOARD_GPIO_MOTOR_EN), 0);
-    gpio_set_level(pin(BOARD_GPIO_PRECHARGE_EN), 0);
 }
 
 bool selfCheckRun(const SelfCheckFacts& facts) {

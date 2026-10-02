@@ -73,6 +73,17 @@ void MotionArbiter::estop(bool on) {
           _cuts_power ? ", unhomed" : "");
 }
 
+void MotionArbiter::setMotorPowered(bool on) {
+    if (!_powered.exchange(on) || on) return;
+    // A loss, not a boot: no plan renders into the dead drive, and no return
+    // queued before it starts when power comes back.
+    _return_req.store(false);
+    _power_settled.store(false);
+    _emitter.park();
+    _homed = false;
+    GLOGW(kTag, "MOTOR POWER LOST: emitter parked at %.3f mm, unhomed", double(positionMm()));
+}
+
 void MotionArbiter::pause(bool on) {
     if (!on) {
         // A brake the owning task has not run yet belongs to the pause being
@@ -150,6 +161,13 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
     if (_estop) {
         ++_rejected;
         GLOGW_EVERY_MS(1000, kTag, "REJECT: e-stop");
+        return false;
+    }
+    // Neither does motor power: a plan rendered into an unpowered drive moves
+    // position truth and not the carriage.
+    if (!_powered.load()) {
+        ++_rejected;
+        GLOGW_EVERY_MS(1000, kTag, "REJECT: motor power off");
         return false;
     }
     // PAUSE suspends every source (SPEC 11.1). Under override the operator's
@@ -337,6 +355,19 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         return;
     }
 
+    // Unpowered: parked, and the abandoned plan reset ONCE per loss on this
+    // task, for the same reason as the e-stop branch above.
+    if (!_powered.load()) {
+        _brake_req.store(false);
+        _returning = false;
+        _emitter.park();
+        if (!_power_settled.exchange(true)) {
+            _engine.resetAt(toNorm(positionMm()), now_us);
+            _p_cmd_mm = positionMm();
+        }
+        return;
+    }
+
     // A FRAME MOVE IS NOT MOTION. force_home re-origins the count and a window
     // change rescales normalized units, so both make plan_mm and position_mm
     // jump by up to the whole rail while the carriage stands still. Left alone
@@ -467,6 +498,7 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.rejected       = _rejected;
     c.homed          = _homed;
     c.estop          = _estop;
+    c.motor_on       = _powered.load();
     c.paused         = _paused.load();
     c.override_mode  = _override.load();
     c.returning      = _returning;

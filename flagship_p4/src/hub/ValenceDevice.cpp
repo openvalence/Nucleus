@@ -25,6 +25,7 @@
 #include "geiger/geiger.h"
 #include "motion/ValenceMotion.h"
 #include "patterns/ValencePattern.h"
+#include "system/ValenceMotorSwitch.h"
 
 #include "valence/util/byte_io.hpp"
 #include "valence/wire/cbor/cbor_writer.hpp"
@@ -647,6 +648,8 @@ Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
     if (live) {
         const MotionCensus c = motionCensus();
         if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+        // Only a start is motion; a knob turned with the switch off is not.
+        if (f1 && boolOf(f1).value_or(false) && !c.motor_on) return refuseUnpowered("pattern start");
         if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
     }
     if ((f1 && !boolOf(f1)) || (f7 && !boolOf(f7))) return Ret::err(NackCode::INVALID_VALUE);
@@ -867,6 +870,7 @@ void ValenceDevice::publishPatternPlane(const MotionCensus& mo) {
 Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     const MotionCensus c = motionCensus();
     if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+    if (!c.motor_on) return refuseUnpowered("move");
     if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
     const bool overrideOn = _hub != nullptr &&
                             (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
@@ -889,6 +893,16 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     applied.count = 1;
     applied.fields[0] = {1, IntentValue::ofF32(clampf(in.target_mm, lo, hi))};
     return Ret::ok(applied);
+}
+
+// The arbiter's power gate as a NACK: INTERLOCK (0x0402, registry.yaml
+// nack_codes, "hub-specific safety interlock"). The reason rides the log
+// channel, because a delegate's refusal carries a code and no NACK detail.
+Ret ValenceDevice::refuseUnpowered(const char* what) {
+    const MotorSwitchStatus sw = motorSwitchStatus();
+    GLOGW_EVERY_MS(1000, kTag, "%s refused INTERLOCK: motor power is off (switch %s, last fault: %s)",
+                   what, motorswitch::stateName(sw.state), motorswitch::faultName(sw.last_fault));
+    return Ret::err(NackCode::INTERLOCK);
 }
 
 // The rail is a source's while the stream or the generator owns it, or the
@@ -1043,9 +1057,21 @@ std::optional<uint8_t> ValenceDevice::sourceForChannel(uint16_t channel_id) {
 // arbiter's latch here keeps both sides in lockstep: both land in PAUSE.
 // Release never rehomes: a power-cutting ESTOP left homed false, and motion
 // stays refused until force_home and then resume.
+// The release asks for motor power back (the enable sequence, val-091.24).
+// The switch's own fault line still low is the latched cause unresolved:
+// refused. A self-check that holds power off is not the latch's cause: the
+// release lands in PAUSE with the switch off, and the arbiter's power gate
+// refuses motion until it is on.
 bool ValenceDevice::canClearEstop() {
     const MotionCensus c = motionCensus();
     if (c.busy || c.step_q8 != 0) return false;
+    const motorswitch::Refusal why = motorSwitchRequestEnable();
+    if (why == motorswitch::Refusal::fault_line) {
+        GLOGW(kTag, "release refused CLEAR_REFUSED: %s", motorswitch::refusalName(why));
+        return false;
+    }
+    if (why != motorswitch::Refusal::none)
+        GLOGW(kTag, "release: motor power stays off, %s", motorswitch::refusalName(why));
     motionEstopClear();
     return true;
 }
@@ -1055,6 +1081,7 @@ bool ValenceDevice::canClearEstop() {
 // the latch as the spec requires.
 void ValenceDevice::onEstop(uint8_t cause, uint8_t origin) {
     motionEstop();
+    ++_estopInitiations;
     _returnPending = false;   // the arbiter dropped override and the return
     // The generator stops with the machine and stays stopped: clearing the
     // latch never restarts it (the arbiter's Pattern gate stays closed until a
@@ -1321,6 +1348,21 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     if (_homeDone) {
         _homeDone = false;
         _hub->setHomeRequired(false);
+    }
+    // A motor switch fault already cut power with no ESTOP behind it. Latch
+    // one, cause fault (SPEC 11.2), so the release is the explicit re-enable
+    // and a power-cutting hub lands unhomed. The hub is its own initiator, at
+    // its highest tier. The seq counts this delegate's initiations: the
+    // library exposes no estop_seq to continue from.
+    const MotorSwitchStatus sw = motorSwitchStatus();
+    if (sw.faults != _mswFaultsSeen) {
+        _mswFaultsSeen = sw.faults;
+        if (!_hub->estopLatched()) {
+            GLOGE(kTag, "motor switch fault (%s): latching ESTOP, cause fault",
+                  motorswitch::faultName(sw.last_fault));
+            _hub->latchEstop(safety_causes::fault, uint8_t(AccessLevel::configure),
+                             uint16_t(_estopInitiations + 1));
+        }
     }
     // The motion plane, from ONE census so no two channels disagree about the
     // same instant. 0x1100 publishes at rate under its 60 Hz ceiling; 0x1110 is

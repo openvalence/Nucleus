@@ -22,6 +22,7 @@
 #include "hub/ValenceDevice.h"
 #include "motion/MotionArbiter.h"
 #include "motion/ValenceMotion.h"
+#include "system/ValenceMotorSwitch.h"
 
 namespace valence {
 namespace {
@@ -154,10 +155,13 @@ bool motionBegin() {
     return true;
 }
 bool motionSubmit(const MotionIntent& in) { return g_sim.submit(in); }
-// No motor switch here: the sim declares estop_cuts_power false, so ESTOP is
-// the arbiter's halt and nothing else.
-void motionEstop() { g_sim.arbiter().estop(true); }
+// The board's order: the power cut first (SimMotorSwitch.cpp), then the halt.
+void motionEstop() {
+    motorSwitchCut();
+    g_sim.arbiter().estop(true);
+}
 void motionEstopClear() { g_sim.arbiter().estop(false); }
+void motionSetMotorPowered(bool on) { g_sim.arbiter().setMotorPowered(on); }
 void motionPause(bool on) { g_sim.arbiter().pause(on); }
 void motionPatternAllow() { g_sim.arbiter().allowPattern(); }
 void motionSetEstopCutsPower(bool cuts) { g_sim.arbiter().setEstopCutsPower(cuts); }

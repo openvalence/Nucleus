@@ -21,12 +21,13 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 - **Firm and wired:** quadrature A/B (LP core), the private I2C bus (motor
   current monitor, and the board monitor's IDENT/STATUS at boot), the C6 SDIO
   link, the USB console, the E-stop pair and its bypass (boot self-check).
-- **Provisional and wired:** MOTOR_EN and PRECHARGE_EN (held low from the
-  first line of `app_main`), MSW_FLT_N (read once by the self-check).
+- **Provisional and wired:** the motor switch: MOTOR_EN and PRECHARGE_EN
+  (held low from the first line of `app_main`, raised only by the enable
+  sequence), MSW_FLT_N, MSW_IMON and EN_NODE (the switch task's watch).
 - **Firm and unwired:** board monitor SWIO, status LED data, fan PWM and tach,
   PAIR button, DBG marker, all thirteen accessory LP pads, PD_INT.
-- **Provisional and unwired:** EN_NODE, MSW_IMON, CLAMP_MON, SHUNT_TEMP,
-  THERM, RS485 TX/RX/DE, DRV_ALM, DRV_RDY, HOME button.
+- **Provisional and unwired:** CLAMP_MON, SHUNT_TEMP, THERM, RS485
+  TX/RX/DE, DRV_ALM, DRV_RDY, HOME button.
 - Every unwired row has a bead under val-091 (column "Owed").
 
 ## Motion and motor power
@@ -35,11 +36,11 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 |---|---|---|---|---|---|
 | Quadrature A to the drive, through the always-on 74AHCT125 gate 1 (U10) to J4 MOTION, tapped on TP601 | `/DRV.QUAD_A` | GPIO3 (LPG3), stamp pad 45 | LP core emitter: `ulp/lp_quad.c:32` (PIN_A), edge table at `:77`; steered by `motion/ValenceMotion.cpp:77` | Firm: SPEC 2026-09-23 "P4 pin map after the LP-quadrature-only ruling" | scope rerun val-091.18; reset pull-down hw-7mo |
 | Quadrature B, gate 2 (U10), TP604 | `/DRV.QUAD_B` | GPIO5 (LPG5), pad 35 | same, `ulp/lp_quad.c:33` | Firm: same row | same |
-| Motor switch main-FET enable: INP of the motor switch controller (U2, TPS48111), 100k pull-down R409 | `/MSW.MOTOR_EN` | GPIO21, pad 22 | Driven LOW, never high: `system/ValenceSelfCheck.cpp:225` from `main.cpp:215` | Provisional (hw-kzr) | enable sequence val-091.24 |
-| Pre-charge enable: INP_G of U2, through R412 100 R, 100k pull-down R410 | `/MSW.PRECHARGE_EN` | GPIO22, pad 21 | Driven LOW, same site | Provisional | val-091.24 |
-| Motor switch fault: U2 FLT_T and FLT_I tied, 10k pull-up R411, active low | `/MSW.MSW_FLT_N` | GPIO20, pad 23 | Read once at boot: `ValenceSelfCheck.cpp:140` | Provisional | runtime watch val-091.24; split hw-3qf |
-| Motor switch current monitor: U2 IMON (8.25k), ADC1 | `/MSW.MSW_IMON` | GPIO19, pad 24 | nothing | Provisional (ADC1-bound) | val-091.24 |
-| EN/UVLO wired-OR node of U2: pulled low by the INA ALERT, the bus overvoltage trip (Q405), the E-stop (Q901) and the board monitor's FAULT_N; ADC1, ~1.8 V running, ~0 V tripped | `/MSW.EN_NODE` | GPIO23, pad 20 | nothing | Provisional (ADC1-bound) | val-091.24 |
+| Motor switch main-FET enable: INP of the motor switch controller (U2, TPS48111), 100k pull-down R409 | `/MSW.MOTOR_EN` | GPIO21, pad 22 | Driven LOW from `app_main`'s first line (`system/ValenceSelfCheck.cpp`, `selfCheckHoldMotorOff`); HIGH only in `on`, after a full pre-charge window (`system/MotorSwitch.h`), written by `system/ValenceMotorSwitch.cpp` `driveLocked` | Provisional (hw-kzr) | bench val-091.56 |
+| Pre-charge enable: INP_G of U2, through R412 100 R, 100k pull-down R410 | `/MSW.PRECHARGE_EN` | GPIO22, pad 21 | Driven LOW, same sites; HIGH for the 150 ms window only (`MotorSwitch.h` `kPrechargeUs`, its derivation on the constant) | Provisional | bench val-091.56 |
+| Motor switch fault: U2 FLT_T and FLT_I tied, 10k pull-up R411, active low | `/MSW.MSW_FLT_N` | GPIO20, pad 23 | Read at boot by the self-check through `motorSwitchFaultLine()`, then every 5 ms by the switch task: low latches the switch faulted and the hub ESTOP, cause fault (`ValenceDevice.cpp` `tick`) | Provisional | split hw-3qf; bench val-091.56 |
+| Motor switch current monitor: U2 IMON (8.25k), ADC1 | `/MSW.MSW_IMON` | GPIO19, pad 24 | ADC1 oneshot, calibrated, 4-sample mean, 0.15 V/A; judged at the end of the pre-charge window against `kInrushCeilingA` (`MotorSwitch.h`) | Provisional (ADC1-bound) | bench val-091.56 |
+| EN/UVLO wired-OR node of U2: pulled low by the INA ALERT, the bus overvoltage trip (Q405), the E-stop (Q901) and the board monitor's FAULT_N; ADC1, ~1.8 V running, ~0 V tripped | `/MSW.EN_NODE` | GPIO23, pad 20 | ADC1 oneshot, every 5 ms: under `kEnNodeMinV` while pre-charging or on latches faulted (`en_node`); read fresh after the INA ALERT re-arm on every enable | Provisional (ADC1-bound) | cause naming val-091.57; bench val-091.56 |
 
 ## Private I2C bus and the board monitor
 
@@ -47,10 +48,10 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 |---|---|---|---|---|---|
 | SDA: motor current monitor (U11, INA237 or INA228, 0x40, A0/A1 to GND) and board monitor (U12, CH32V003, 0x2C, not ruled); 4.7k pull-up R24 | `/I2C.INA_SDA` | GPIO34, pad 33 | `system/ValencePower.cpp:24` (its own constant), bus opened at `:89`; the self-check borrows it, `ValenceSelfCheck.cpp:45` | Firm: SPEC 2026-09-23 pin-map-after-LP row | move to BoardPins.h val-091.33; test pads hw-kcu |
 | SCL, 4.7k pull-up R25 | `/I2C.INA_SCL` | GPIO36, pad 47 | `ValencePower.cpp:25` | Firm | same |
-| U11 ALERT, latched: joins the EN node above, cuts motor power with no firmware | `/MSW.EN_NODE` | (GPIO23) | re-arm API `powerTakeAlerts()` exists, nothing calls it | Firm | val-091.24 |
+| U11 ALERT, latched: joins the EN node above, cuts motor power with no firmware | `/MSW.EN_NODE` | (GPIO23) | DIAG_ALRT read (`powerTakeAlerts()`) by the switch task on every enable request, before the window, its over-current and over-voltage flags logged: that read plus the MOTOR_EN toggle is the re-arm (`ValenceMotorSwitch.cpp` `serviceEnable`) | Firm | bench val-091.56 |
 | SWIO to the board monitor's PD1 through R1102 100 R (10k pull-up R1101; rescue pad TP1101) | `/MON.MON_SWIO` | GPIO50, pad 10 | nothing | Firm: SPEC 2026-09-23 board-monitor row | val-091.20 |
-| Board monitor FAULT_N (U12 PC7 through R1121 1k): can cut motor power, never enable it | onto `/MSW.EN_NODE` | (GPIO23) | nothing | Firm | val-091.19, val-091.24 |
-| Board monitor's own ADC taps (VIN_RAW, +BUS, +12V, +5V, +5V_SYS, +3V3_ACC, SHUNT_TEMP, CLAMP_MON), CLAMP_TRIM PWM, PUMP_FLT (PC0), status LED bank (PC6) | U12 local | not on the P4 | IDENT and STATUS blocks (`system/Supervisor.h`) read once at boot by the self-check, `ValenceSelfCheck.cpp:61`; no runtime poll, no heartbeat | Firm (address not ruled) | val-091.19, val-091.24 |
+| Board monitor FAULT_N (U12 PC7 through R1121 1k): can cut motor power, never enable it | onto `/MSW.EN_NODE` | (GPIO23) | seen only as an EN-node drop (row above), cause not read | Firm | val-091.19, val-091.57 |
+| Board monitor's own ADC taps (VIN_RAW, +BUS, +12V, +5V, +5V_SYS, +3V3_ACC, SHUNT_TEMP, CLAMP_MON), CLAMP_TRIM PWM, PUMP_FLT (PC0), status LED bank (PC6) | U12 local | not on the P4 | IDENT and STATUS blocks (`system/Supervisor.h`) read once at boot by the self-check, `ValenceSelfCheck.cpp:61`; no runtime poll, no heartbeat | Firm (address not ruled) | val-091.19, val-091.57 |
 
 ## Regen clamp, thermal, fan
 
@@ -113,7 +114,7 @@ unless noted.
 
 | Function | Net | P4 pad | Firmware today | Firmness |
 |---|---|---|---|---|
-| SDIO 3.0 4-bit to the stacked Stamp-AddOn C6: CLK 43, CMD 44, D0-D3 45-48, slave reset 42 | stamp-internal header | not on stamp pads | `flagship_p4/sdkconfig.defaults:64-74` (Kconfig owns them), brought up in `main.cpp:71` (`wifi_up`), version read at `:92` and judged by the self-check's host-link entry | Firm: stamp hardware |
+| SDIO 3.0 4-bit to the stacked Stamp-AddOn C6: CLK 43, CMD 44, D0-D3 45-48, slave reset 42 | stamp-internal header | not on stamp pads | `flagship_p4/sdkconfig.defaults:64-74` (Kconfig owns them), brought up in `main.cpp:72` (`wifi_up`), version read at `:93` and judged by the self-check's host-link entry | Firm: stamp hardware |
 | USB-C on the stamp: USB-Serial/JTAG console and the serial rescue path | G24/G25 | pads 43/44 NC on the board | IDF console | Firm |
 | USB 2.0 host pair, MIPI DSI lanes, stamp 5V_USB_IN | NC | pads 40/41, 57-64, 15 | none | Firm |
 | Stamp VIN (from the 5 V buck), SYS_5V out (+5V_SYS), SOC_3.3V out (+3V3_SYS) | `+5V`, `+5V_SYS`, `+3V3_SYS` | pads 14, 39, 28 | none | Firm |

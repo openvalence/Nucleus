@@ -161,6 +161,7 @@ private:
     Result<IntentValueMap, NackCode> applyPatternAdvanced(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applyPresets(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applySafety(const IntentValueMap& requested);
+    Result<IntentValueMap, NackCode> refuseUnpowered(const char* what);
     bool railOwned() const;
     bool segmentsGrantLive() const;
     void haltGenerator();
@@ -215,6 +216,10 @@ private:
     // arbiter's census.returns moves past _returnsAtRequest, or by ESTOP.
     bool _returnPending = false;
     uint32_t _returnsAtRequest = 0;
+    // ESTOP initiations this delegate has seen (onEstop runs once per latch),
+    // and the motor switch's fault count as tick() last acted on it.
+    uint16_t _estopInitiations = 0;
+    uint16_t _mswFaultsSeen = 0;
 
     // The live pattern generator settings. This copy IS the setting (the
     // delegate is its one writer); the generator's task runs on whatever

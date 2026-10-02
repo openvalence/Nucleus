@@ -58,6 +58,7 @@
 #include "motion/ValenceMotion.h"
 #include "net/WsServerPort.h"
 #include "patterns/ValencePattern.h"
+#include "system/ValenceMotorSwitch.h"
 
 namespace {
 
@@ -229,6 +230,7 @@ int main(int argc, char** argv) {
 
     auto box = std::make_unique<SimBox>();
     valence::motionBegin();
+    valence::motorSwitchBegin();
     valence::patternBegin();
 
     if (!valence::buildValenceCatalog(box->catalog, valence::boardFeatures())) {
