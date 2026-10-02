@@ -39,20 +39,16 @@ bool g_ran = false;
 // ---- the reads ---------------------------------------------------------------
 
 // One block from the board monitor: write the register id, read its length.
-// The private bus belongs to ValencePower, which opens it first with the
-// driver's automatic port choice, so it is HP port 0. A second I2C master
-// opened before powerBegin() would break that.
-// TODO(val-091.33): take the bus handle from ValencePower instead.
+// The private bus belongs to ValencePower; the monitor joins it per read.
 esp_err_t readMonitorBlock(uint8_t reg, uint8_t* out, size_t len) {
-    i2c_master_bus_handle_t bus = nullptr;
-    esp_err_t err = i2c_master_get_bus_handle(I2C_NUM_0, &bus);
-    if (err != ESP_OK) return err;
+    i2c_master_bus_handle_t bus = powerI2cBus();
+    if (bus == nullptr) return ESP_ERR_INVALID_STATE;
     i2c_device_config_t cfg{};
     cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
     cfg.device_address = SV_I2C_ADDR;
     cfg.scl_speed_hz = 400000;
     i2c_master_dev_handle_t dev = nullptr;
-    err = i2c_master_bus_add_device(bus, &cfg, &dev);
+    esp_err_t err = i2c_master_bus_add_device(bus, &cfg, &dev);
     if (err != ESP_OK) return err;
     err = i2c_master_transmit_receive(dev, &reg, 1, out, len, 10);
     i2c_master_bus_rm_device(dev);

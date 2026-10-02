@@ -13,8 +13,9 @@
 // - Absent or unrecognized part is non-fatal: powerChip() reports none and the
 //   machine runs without current sensing. Homing and the boot self-check
 //   decide what that refuses; this module only reports.
-// - The bus (SDA G34, SCL G36, 0x40) is also the board monitor's (val-091.19);
-//   that device joins this bus handle, it does not open a second one.
+// - The bus (BOARD_GPIO_INA_SDA / _SCL, U11 at 0x40) is also the board
+//   monitor's (val-091.19); that device joins powerI2cBus(), it never opens a
+//   second master on these pins.
 // - State: a few dozen bytes of BSS plus the IDF driver's small internal-heap
 //   allocation at begin; nothing in PSRAM.
 // See: flagship_p4/src/system/PowerMonitor.h, Hardware flagship/SPEC.md,
@@ -22,6 +23,8 @@
 
 #include <cstdint>
 #include <optional>
+
+#include <driver/i2c_types.h>
 
 #include "system/PowerMonitor.h"
 
@@ -43,6 +46,12 @@ PowerChip powerChip();
 // One snapshot of the latest conversion. nullopt with no part or on an I2C
 // error.
 std::optional<PowerReading> powerRead();
+
+// The private bus, for the other devices on it. nullptr before powerBegin()
+// or when the bus itself failed to open; a missing U11 still leaves the bus
+// open. Joiners add and remove their own device handles; the bus handle is
+// never deleted.
+i2c_master_bus_handle_t powerI2cBus();
 
 // Reads DIAG_ALRT, which clears the latched ALERT (ina2xx::kFlag*). nullopt
 // with no part or on an I2C error, in which case the latch is NOT cleared.

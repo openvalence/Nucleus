@@ -11,6 +11,7 @@
 #include <driver/i2c_master.h>
 
 #include "geiger/geiger.h"
+#include "system/BoardPins.h"
 
 namespace valence {
 
@@ -18,11 +19,10 @@ namespace {
 
 constexpr const char* kTag = "power";
 
-// Pin map and address: Hardware flagship/SPEC.md (2026-09-23 pin-map and
-// sensing rows). The board fits 4.7k pull-ups; the internal ones only keep a
-// bare stamp's lines from floating.
-constexpr gpio_num_t kPinSda     = GPIO_NUM_34;
-constexpr gpio_num_t kPinScl     = GPIO_NUM_36;
+// The board fits 4.7k pull-ups; the internal ones only keep a bare stamp's
+// lines from floating.
+constexpr gpio_num_t kPinSda     = static_cast<gpio_num_t>(BOARD_GPIO_INA_SDA);
+constexpr gpio_num_t kPinScl     = static_cast<gpio_num_t>(BOARD_GPIO_INA_SCL);
 constexpr uint16_t   kAddress    = 0x40;
 constexpr uint32_t   kSclHz      = 400000;
 constexpr int        kTimeoutMs  = 10;
@@ -136,6 +136,8 @@ bool powerBegin() {
 }
 
 PowerChip powerChip() { return g_chip; }
+
+i2c_master_bus_handle_t powerI2cBus() { return g_bus; }
 
 std::optional<PowerReading> powerRead() {
     if (g_chip == PowerChip::none) return std::nullopt;

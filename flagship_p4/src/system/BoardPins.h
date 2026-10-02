@@ -4,9 +4,8 @@
 //   macros only: no IDF types, no namespaces. C++ callers cast at the use
 //   site (static_cast<gpio_num_t>(BOARD_GPIO_X)).
 // - The one home for a P4 pin number in this project (architecture.md
-//   section 1). Two exceptions, both owned elsewhere: the C6 SDIO pins live in
-//   sdkconfig.defaults because Kconfig consumes them, and ValencePower.cpp
-//   still spells the private I2C pair (bd val-091.33).
+//   section 1). One exception, owned elsewhere: the C6 SDIO pins live in
+//   sdkconfig.defaults because Kconfig consumes them.
 // - LPGn is LP_IO n is GPIO n, verified on silicon (val-091.4). The LP core
 //   drives QUAD_A and QUAD_B and NOTHING ELSE; every other LP pad is optional
 //   accessory I/O for HP peripherals through the GPIO matrix, never the LP
