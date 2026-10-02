@@ -1,5 +1,5 @@
-// PatternEngine -- half-stroke scheduling, the pattern-to-millimeter mapping,
-// and the brake
+// PatternEngine -- half-stroke scheduling and the brake, shared by both
+// generators, and each generator's own pattern-to-millimeter mapping
 // Constraints:
 // - HARDWARE-FREE (PatternEngine.h). Compiled verbatim by the board, the host
 //   twin and test_pattern_engine.
@@ -44,7 +44,7 @@ uint32_t strokeUs(float seconds) { return uint32_t(clampf(seconds, kMinStrokeS, 
 // ---- settings ---------------------------------------------------------------
 
 void PatternEngine::apply(const PatternSettings& s) {
-    const bool start = (s.running && !_s.running) || (s.adv_running && !_s.adv_running);
+    const bool start = running(s) && !running(_s);
     _s = s;
     if (start) {
         _stroke_index = 0;
@@ -55,14 +55,12 @@ void PatternEngine::apply(const PatternSettings& s) {
 // ---- the gate ---------------------------------------------------------------
 
 bool PatternEngine::wantsMotion(const PatternInputs& in) const {
-    // The arbiter refuses a Pattern intent on each of these too; gating here
+    // The arbiter refuses a generator intent on each of these too; gating here
     // keeps the generator from spending strokes into a refusal, and yielding to
     // a live stream keeps two machine-driven sources from interleaving plans.
-    if (!(_s.running || _s.adv_running) || !in.homed || in.estop || in.paused || in.stream_active)
-        return false;
+    if (!running(_s) || !in.homed || in.estop || in.paused || in.stream_active) return false;
     if (!(_s.frame.win_max > _s.frame.win_min) || !(_s.frame.input_speed > 0.0f)) return false;
-    if (_s.adv_running) return _s.ap.master.value > 0;
-    return _s.speed > 0.0f && _s.stroke > 0.0f;
+    return moves(_s);
 }
 
 // ---- the tick ---------------------------------------------------------------
@@ -87,7 +85,7 @@ std::optional<MotionIntent> PatternEngine::tick(uint64_t now_us, const PatternIn
     }
     if (now_us < _due_us) return std::nullopt;
 
-    const std::optional<Stroke> st = _s.adv_running ? nextAdvanced(in) : nextClassic(now_us, in);
+    const std::optional<Stroke> st = next(now_us, in);
     if (!st) {
         _due_us = now_us + kPollUs;
         return std::nullopt;
@@ -100,7 +98,7 @@ std::optional<MotionIntent> PatternEngine::tick(uint64_t now_us, const PatternIn
     if (!st->moves) return std::nullopt;
 
     MotionIntent it;
-    it.source       = _s.adv_running ? MotionSource::Advanced : MotionSource::Pattern;
+    it.source       = _source;
     it.target_mm    = st->target_mm;
     it.duration_us  = st->duration_us;
     it.has_end_vel  = true;
@@ -110,7 +108,7 @@ std::optional<MotionIntent> PatternEngine::tick(uint64_t now_us, const PatternIn
 
 // ---- classic patterns -------------------------------------------------------
 
-Pattern& PatternEngine::patternAt(uint8_t idx) {
+Pattern& ClassicGenerator::patternAt(uint8_t idx) {
     switch (idx) {
         case 1:  return _teasing;
         case 2:  return _robo;
@@ -122,8 +120,7 @@ Pattern& PatternEngine::patternAt(uint8_t idx) {
     }
 }
 
-std::optional<PatternEngine::Stroke> PatternEngine::nextClassic(uint64_t now_us,
-                                                                const PatternInputs& in) {
+std::optional<PatternEngine::Stroke> ClassicGenerator::next(uint64_t now_us, const PatternInputs& in) {
     const PatternFrame& f = _s.frame;
     const float span = f.win_max - f.win_min;
     const int stroke_steps = int(_s.stroke / 100.0f * float(kAbstractSteps));
@@ -166,7 +163,8 @@ std::optional<PatternEngine::Stroke> PatternEngine::nextClassic(uint64_t now_us,
 
 // ---- the advanced generator -------------------------------------------------
 
-std::optional<PatternEngine::Stroke> PatternEngine::nextAdvanced(const PatternInputs& in) {
+// Counts strokes, never time: the clock argument is unused.
+std::optional<PatternEngine::Stroke> AdvancedGenerator::next(uint64_t, const PatternInputs& in) {
     const PatternFrame& f = _s.frame;
     const advpat::StrokePlan sp = _s.ap.planStroke(_stroke_index);
     const float target = f.win_min + sp.target_frac * (f.win_max - f.win_min);
@@ -185,13 +183,15 @@ std::optional<PatternEngine::Stroke> PatternEngine::nextAdvanced(const PatternIn
 // ---- the brake --------------------------------------------------------------
 
 // A point intent at the carriage's braking point under the input accel: the
-// arbiter plans it at arrival as a stop from the live (p, v).
+// arbiter plans it at arrival as a stop from the live (p, v). Stamped with this
+// generator's source, so it lands while the rail is still free or still its
+// own, and is refused once the other generator holds it (RFC-093).
 MotionIntent PatternEngine::brake(const PatternInputs& in) const {
     const PatternFrame& f = _s.frame;
     const float a = f.input_accel > 0.0f ? f.input_accel : 1.0f;
     const float v = in.velocity_mm_s;
     MotionIntent it;
-    it.source    = _s.adv_running ? MotionSource::Advanced : MotionSource::Pattern;
+    it.source    = _source;
     it.target_mm = clampf(in.position_mm + v * std::fabs(v) / (2.0f * a), f.win_min, f.win_max);
     return it;
 }

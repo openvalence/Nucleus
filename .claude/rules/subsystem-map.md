@@ -31,7 +31,7 @@ slowly. For anything finer, ask codebase-memory rather than grepping for
 | `flagship_p4/src/hub/ValenceDevice.*` | The delegate and every STATE publisher. Hardware-free: the sim compiles it verbatim |
 | `flagship_p4/src/hub/UiTokenTable.h` | The `/uitoken` slot table, rate gate and HMAC derivation, lock injected. Hardware-free: the sim compiles it verbatim; `ValenceUiToken.cpp` is only its board host (spinlock, secret, the :80 route). Suite `test_ui_token` |
 | `flagship_p4/src/motion/MotionArbiter.*` | Every motion gate, the window clamp, limit sets and feedforward, emitter and clock injected. Hardware-free: the sim compiles it verbatim; `ValenceMotion.cpp` is only its task host |
-| `flagship_p4/src/patterns/` | The pattern generator: `PatternEngine` (hardware-free, the sim compiles it verbatim), its settings value and preset store, and `ValencePattern.cpp`, its board task host. Strokes leave as intents through `motionSubmit()` |
+| `flagship_p4/src/patterns/` | The two generators, separate rail sources (RFC-093): `ClassicGenerator` and `AdvancedGenerator` on the shared `PatternEngine` scheduler (hardware-free, the sim compiles it verbatim), their settings value and preset store, and `ValencePattern.cpp`, their board task host. Strokes leave as intents through `motionSubmit()` |
 | `lib/strokeengine_patterns` | VENDORED StrokeEngine pattern classes, verbatim (`VENDORED.md`); `<Arduino.h>` comes from `flagship_p4/src/patterns/arduino_compat/` |
 | `flagship_p4/ulp/` | LP core sources. One directory per project, fixed by the builder |
 | `flagship_ch32v003/` | The board monitor's own PlatformIO project (bare metal, ch32v003fun): `src/monitor_core.c` holds every decision and is hardware-free (suite `test_supervisor`), `src/main.c` is the chip glue. The P4 programs it over SWIO; its image ships inside the Nucleus OTA |
@@ -61,7 +61,7 @@ hub.**
 | `ValenceHub` (`hub/ValenceHub.cpp`) | HP core 1, priority 5 | The hub, single-task by design (`transport.md` T5), and the one Geiger drain, so the log bridge's sink runs here. Stack `kHubTaskStackBytes` |
 | LP emitter (`ulp/lp_quad.c`) | LP | Quadrature edges from a phase accumulator. Its signed edge count is position truth |
 | `MotorSw` (`system/ValenceMotorSwitch.cpp`) | HP core 0, priority 5 | The motor switch's host: a 5 ms watch on MSW_FLT_N and the EN node, the pre-charge window, the enable request's INA re-arm. Stack `kMotorSwitchTaskStackBytes` |
-| `Pattern` (`patterns/ValencePattern.cpp`) | HP core 1, priority 4 | The pattern generator: wakes when a half-stroke is due or settings arrive, submits it as an intent. Below the hub (5) and the motion task (6); stack `kPatternTaskStackBytes` |
+| `Pattern` (`patterns/ValencePattern.cpp`) | HP core 1, priority 4 | Both generators: wakes when either's half-stroke is due or settings arrive, submits it as an intent. Below the hub (5) and the motion task (6); stack `kPatternTaskStackBytes` |
 | `esp_hosted` / WiFi / lwIP tasks | HP | Owned by the drivers, not by us. Their callbacks are not our task (`transport.md` T5) |
 
 Every stack size and the measurement behind it live on its constant, never

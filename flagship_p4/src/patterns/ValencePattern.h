@@ -1,7 +1,7 @@
 #pragma once
 
-// ValencePattern -- the pattern generator's one door: hand it settings, ask
-// whether it is driving
+// ValencePattern -- the generators' one door: hand them settings, ask whether
+// either is driving
 // Constraints:
 // - The generator OWNS NOTHING the hub needs back. The hub delegate owns the
 //   live PatternSettings and pushes whole copies; the generator's strokes
@@ -25,7 +25,8 @@ namespace valence {
 // and its KB-scale Ruckig temporaries run on the motion task -- so its
 // deepest path is one Geiger line (a 128 B record plus newlib's float
 // vsnprintf frame, ~1.5 KB) over a MotionCensus copy (~0.3 KB) and the
-// engine's own frames; 4,096 B leaves roughly a third of it spare.
+// engine's own frames; 4,096 B leaves roughly a third of it spare. The two
+// generators tick one after the other, so the deepest path is one of them.
 inline constexpr uint32_t kPatternTaskStackBytes = 4096;
 
 // Brings up the generator and, on the board, its task. Must run AFTER
@@ -34,7 +35,7 @@ bool patternBegin();
 
 void patternSetSettings(const PatternSettings& s);
 
-// True while the generator is driving the machine (PatternEngine::active()).
+// True while either generator is driving the machine (PatternEngine::active()).
 // Any task.
 bool patternActive();
 

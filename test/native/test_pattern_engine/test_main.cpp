@@ -1,4 +1,4 @@
-// test_pattern_engine -- native doctest suite for the shared pattern generator
+// test_pattern_engine -- native doctest suite for the two pattern generators
 // Constraints:
 // - Hardware-free and deterministic: a synthetic microsecond clock and a
 //   synthetic motion plane. No IDF, no FreeRTOS, no arbiter.
@@ -26,6 +26,8 @@
 
 using valence::MotionIntent;
 using valence::MotionSource;
+using valence::AdvancedGenerator;
+using valence::ClassicGenerator;
 using valence::PatternEngine;
 using valence::PatternInputs;
 using valence::PatternPresetStore;
@@ -94,8 +96,8 @@ bool sameIntent(const MotionIntent& a, const MotionIntent& b) {
 TEST_CASE("classic pattern: deterministic for a fixed knob set and clock") {
     for (uint8_t pat = 0; pat < PatternSettings::kPatternCount; ++pat) {
         CAPTURE(int(pat));
-        auto a = std::make_unique<PatternEngine>();
-        auto b = std::make_unique<PatternEngine>();
+        auto a = std::make_unique<ClassicGenerator>();
+        auto b = std::make_unique<ClassicGenerator>();
         PatternSettings s = baseSettings();
         s.pattern = pat;
         s.sensation = 80.0f;
@@ -114,7 +116,7 @@ TEST_CASE("classic pattern: deterministic for a fixed knob set and clock") {
 }
 
 TEST_CASE("classic stroke: waveform half-strokes inside the window, reversing at rest") {
-    PatternEngine e;
+    ClassicGenerator e;
     e.apply(baseSettings());
     uint64_t now = 5'000'000;
     const auto r = run(e, now, 10000, homedIdle());
@@ -139,8 +141,8 @@ TEST_CASE("classic stroke: waveform half-strokes inside the window, reversing at
 }
 
 TEST_CASE("advanced generator: a modulator set is deterministic and stays in the window") {
-    auto a = std::make_unique<PatternEngine>();
-    auto b = std::make_unique<PatternEngine>();
+    auto a = std::make_unique<AdvancedGenerator>();
+    auto b = std::make_unique<AdvancedGenerator>();
     a->apply(advancedSettings());
     b->apply(advancedSettings());
     uint64_t ta = 3'000'000, tb = 3'000'000;
@@ -151,6 +153,7 @@ TEST_CASE("advanced generator: a modulator set is deterministic and stays in the
     float deepest = kWinMin, shallowest_in = kWinMax;
     for (size_t i = 0; i < ra.size(); ++i) {
         CHECK(sameIntent(ra[i].it, rb[i].it));
+        CHECK(ra[i].it.source == MotionSource::Advanced);
         CHECK(ra[i].it.target_mm >= kWinMin);
         CHECK(ra[i].it.target_mm <= kWinMax);
         if (i % 2 == 0) {
@@ -165,7 +168,7 @@ TEST_CASE("advanced generator: a modulator set is deterministic and stays in the
 TEST_CASE("gates: no stroke while unhomed, e-stopped, paused, stopped or yielding") {
     const PatternInputs homed = homedIdle();
     auto gated = [&](PatternInputs in, PatternSettings s) {
-        PatternEngine e;
+        ClassicGenerator e;
         e.apply(s);
         uint64_t now = 1'000'000;
         return run(e, now, 3000, in).size();
@@ -192,8 +195,36 @@ TEST_CASE("gates: no stroke while unhomed, e-stopped, paused, stopped or yieldin
     CHECK(gated(homed, PatternSettings{}) == 0);
 }
 
+TEST_CASE("RFC-093: each generator runs on its own flag and stamps its own source") {
+    const PatternInputs homed = homedIdle();
+    auto count = [&](PatternEngine& e, const PatternSettings& s) {
+        e.apply(s);
+        uint64_t now = 1'000'000;
+        return run(e, now, 3000, homed);
+    };
+    // The advanced flag alone never moves the classic generator, and the
+    // classic flag alone never moves the advanced one.
+    PatternSettings adv = advancedSettings();
+    REQUIRE_FALSE(adv.running);
+    auto classic = std::make_unique<ClassicGenerator>();
+    CHECK(count(*classic, adv).empty());
+    PatternSettings cls = baseSettings();
+    cls.ap.master.set(60);
+    auto advanced = std::make_unique<AdvancedGenerator>();
+    CHECK(count(*advanced, cls).empty());
+
+    classic = std::make_unique<ClassicGenerator>();
+    const auto rc = count(*classic, cls);
+    REQUIRE_FALSE(rc.empty());
+    for (const auto& x : rc) CHECK(x.it.source == MotionSource::Pattern);
+    advanced = std::make_unique<AdvancedGenerator>();
+    const auto ra = count(*advanced, adv);
+    REQUIRE_FALSE(ra.empty());
+    for (const auto& x : ra) CHECK(x.it.source == MotionSource::Advanced);
+}
+
 TEST_CASE("stopping mid-stroke brakes once, at the braking point") {
-    PatternEngine e;
+    ClassicGenerator e;
     e.apply(baseSettings());
     uint64_t now = 1'000'000;
     PatternInputs in = homedIdle();
@@ -215,7 +246,7 @@ TEST_CASE("stopping mid-stroke brakes once, at the braking point") {
 }
 
 TEST_CASE("a stream taking over does not get a brake from the generator") {
-    PatternEngine e;
+    ClassicGenerator e;
     e.apply(baseSettings());
     uint64_t now = 1'000'000;
     PatternInputs in = homedIdle();

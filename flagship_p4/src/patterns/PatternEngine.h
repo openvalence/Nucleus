@@ -1,22 +1,29 @@
 #pragma once
 
-// PatternEngine -- the stroke generator: the seven StrokeEngine patterns and
-// the fray-d advanced set, turned into one MotionIntent per half-stroke
+// PatternEngine -- the stroke scheduler both generators share, and the two
+// generators: ClassicGenerator (the seven StrokeEngine patterns) and
+// AdvancedGenerator (the fray-d set with its modulators), each turning its
+// own program into one MotionIntent per half-stroke
 // Constraints:
 // - HARDWARE-FREE and LIFTABLE: time enters as tick()'s argument, the motion
 //   plane's state as PatternInputs, and every stroke leaves as a returned
 //   MotionIntent the HOST submits through motionSubmit(). The engine never
 //   touches the arbiter, the emitter or a queue (architecture.md section 2:
 //   input sources submit intents, the arbiter is the sole caller).
+// - TWO SOURCES, NEVER A MODE (RFC-093): each generator is its own instance
+//   with its own run flag, stroke count and schedule, and stamps its own
+//   MotionSource on every intent. The arbiter, not this file, keeps them off
+//   the rail together.
 // - EVENT-DRIVEN, NEVER CLOCKED: one intent per half-stroke, planned by the
 //   arbiter at arrival. tick() only asks "is the next half-stroke due"; it
 //   computes no positions on a clock.
 // - OWNED BY ONE TASK. apply() and tick() run on the host's pattern task (the
 //   sim's one thread). Settings arrive as whole copies (PatternSettings.h).
-// - The vendored patterns read millis(); tick() sets the Arduino adapter's
-//   clock from now_us before every call into one. One engine per task.
-// - Holds seven pattern objects (~0.8 KB). Host it at file scope, never as a
-//   stack local.
+// - The vendored patterns read millis(); ClassicGenerator sets the Arduino
+//   adapter's clock from now_us before every call into one. One classic
+//   generator per task.
+// - ClassicGenerator holds seven pattern objects (~0.8 KB). Host both at file
+//   scope, never as stack locals.
 // See: PatternSettings.h, ValencePattern.h, lib/strokeengine_patterns,
 // .claude/rules/motion-control.md
 
@@ -36,8 +43,8 @@
 
 namespace valence {
 
-// The motion plane's state as the generator gates on it, read by the host
-// from one motionCensus() per tick.
+// The motion plane's state as a generator gates on it, read by the host from
+// one motionCensus() per tick.
 struct PatternInputs {
     bool  homed         = false;
     bool  estop         = false;
@@ -47,9 +54,11 @@ struct PatternInputs {
     float velocity_mm_s = 0.0f;
 };
 
+// ---- the scheduler ----------------------------------------------------------
+
 class PatternEngine {
 public:
-    // A running false -> true transition restarts the stroke count, so every
+    // A run false -> true transition restarts the stroke count, so every
     // start opens with an in-stroke and a fresh modulator cycle.
     void apply(const PatternSettings& s);
 
@@ -57,8 +66,8 @@ public:
     // brake when the generator stops wanting motion mid-stroke.
     std::optional<MotionIntent> tick(uint64_t now_us, const PatternInputs& in);
 
-    // True while the generator is driving: running, every gate open, and a
-    // speed that moves. 0x1100's gen_running flag.
+    // True while this generator is driving: running, every gate open, and a
+    // speed that moves. 0x1100's gen_running flag is either generator's.
     bool active() const { return _active; }
 
     // When tick() next has work, 0 when idle. A host sleeps until then.
@@ -66,22 +75,54 @@ public:
 
     uint32_t strokeIndex() const { return _stroke_index; }
 
-private:
+protected:
+    explicit PatternEngine(MotionSource source) : _source(source) {}
+    // Never destroyed through the base.
+    ~PatternEngine() = default;
+
     struct Stroke {
         bool     moves = false;       // false: a zero-travel half-stroke, nothing to send
         float    target_mm = 0.0f;
         uint32_t duration_us = 0;
     };
 
-    bool wantsMotion(const PatternInputs& in) const;
-    // nullopt: nothing due yet (a StopNGo pause), or the pattern holds.
-    std::optional<Stroke> nextClassic(uint64_t now_us, const PatternInputs& in);
-    std::optional<Stroke> nextAdvanced(const PatternInputs& in);
-    MotionIntent brake(const PatternInputs& in) const;
+    // This generator's own run/stop flag in the shared settings.
+    virtual bool running(const PatternSettings& s) const = 0;
+    // The knob set moves the machine at all (a speed above zero).
+    virtual bool moves(const PatternSettings& s) const = 0;
+    // The next half-stroke. nullopt: nothing due yet (a StopNGo pause), or
+    // the pattern holds.
+    virtual std::optional<Stroke> next(uint64_t now_us, const PatternInputs& in) = 0;
+
     float fromMm(const PatternInputs& in) const { return _have_prev ? _prev_target_mm : in.position_mm; }
-    Pattern& patternAt(uint8_t idx);
 
     PatternSettings _s{};
+    uint32_t _stroke_index = 0;
+
+private:
+    bool wantsMotion(const PatternInputs& in) const;
+    MotionIntent brake(const PatternInputs& in) const;
+
+    const MotionSource _source;
+    bool     _active = false;
+    uint64_t _due_us = 0;          // when the next half-stroke is due
+    uint64_t _stroke_end_us = 0;   // when the half-stroke in flight lands
+    bool     _have_prev = false;   // _prev_target_mm is the last stroke's target
+    float    _prev_target_mm = 0.0f;
+};
+
+// ---- the two generators -----------------------------------------------------
+
+// Source Pattern: plays PatternSettings' classic set, runs on `running`.
+class ClassicGenerator final : public PatternEngine {
+public:
+    ClassicGenerator() : PatternEngine(MotionSource::Pattern) {}
+
+private:
+    bool running(const PatternSettings& s) const override { return s.running; }
+    bool moves(const PatternSettings& s) const override { return s.speed > 0.0f && s.stroke > 0.0f; }
+    std::optional<Stroke> next(uint64_t now_us, const PatternInputs& in) override;
+    Pattern& patternAt(uint8_t idx);
 
     SimpleStroke    _simple{"Simple Stroke"};
     TeasingPounding _teasing{"Teasing Pounding"};
@@ -90,13 +131,18 @@ private:
     Deeper          _deeper{"Deeper"};
     StopNGo         _stopngo{"Stop'n'Go"};
     Insist          _insist{"Insist"};
+};
 
-    uint32_t _stroke_index = 0;
-    bool     _active = false;
-    uint64_t _due_us = 0;          // when the next half-stroke is due
-    uint64_t _stroke_end_us = 0;   // when the half-stroke in flight lands
-    bool     _have_prev = false;   // _prev_target_mm is the last stroke's target
-    float    _prev_target_mm = 0.0f;
+// Source Advanced: plays PatternSettings' advanced set and its modulators,
+// runs on `adv_running`.
+class AdvancedGenerator final : public PatternEngine {
+public:
+    AdvancedGenerator() : PatternEngine(MotionSource::Advanced) {}
+
+private:
+    bool running(const PatternSettings& s) const override { return s.adv_running; }
+    bool moves(const PatternSettings& s) const override { return s.ap.master.value > 0; }
+    std::optional<Stroke> next(uint64_t now_us, const PatternInputs& in) override;
 };
 
 }  // namespace valence

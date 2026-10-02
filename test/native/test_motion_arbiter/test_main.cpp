@@ -29,6 +29,7 @@ using valence::MotionCensus;
 using valence::MotionEmitter;
 using valence::MotionIntent;
 using valence::MotionSource;
+using valence::ClassicGenerator;
 using valence::PatternEngine;
 using valence::PatternInputs;
 using valence::PatternSettings;
@@ -411,7 +412,7 @@ TEST_CASE("pause brakes a running generator, which parks; resume re-arms it with
     auto r = rig();
     r->arb.forceHome(DEFAULT_MAX_RAIL_MM);
     r->run(1000);
-    auto gen = std::make_unique<PatternEngine>();
+    auto gen = std::make_unique<ClassicGenerator>();
     gen->apply(runningPattern());
 
     // Run until a half-stroke is moving fast: a stop mid-stroke is the case
