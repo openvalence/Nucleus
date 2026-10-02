@@ -50,23 +50,35 @@ SteerWord steerWord(float v_mm_s) {
 // ---- cross-task -------------------------------------------------------------
 
 void MotionArbiter::estop(bool on) {
-    _estop = on;
     if (!on) {
+        // Release lands in PAUSE (SPEC 11.2): latched BEFORE the e-stop gate
+        // opens, so no intent finds both gates open in between.
+        pause(true);
         _estop_settled = false;
+        _estop = false;
         return;
     }
+    _estop = true;
     // Park on the CALLING task. The ENGINE is not touched here: it belongs to
     // the owning task, which resets it on the next tick (see evaluate()).
-    _pattern_stopped.store(true);   // clearing the latch never restarts the generator
+    _pattern_stopped.store(true);   // releasing the latch never restarts the generator
     _emitter.park();
-    _homed = false;      // an abandoned plan leaves the carriage where it fell
-    GLOGW(kTag, "ESTOP: emitter parked at %.3f mm", double(positionMm()));
+    // A power cut leaves the carriage limp wherever it coasted: the position
+    // reference is gone. A halt keeps power, so it keeps home.
+    if (_cuts_power) _homed = false;
+    GLOGW(kTag, "ESTOP: emitter parked at %.3f mm%s", double(positionMm()),
+          _cuts_power ? ", unhomed" : "");
 }
 
-void MotionArbiter::stop() {
-    _pattern_stopped.store(true);
-    _stream_stopped.store(true);
-    _brake_req.store(true);
+void MotionArbiter::pause(bool on) {
+    if (!on) {
+        // A brake the owning task has not run yet belongs to the pause being
+        // cleared; left set it would brake the first plan after resume.
+        _brake_req.store(false);
+        _paused.store(false);
+        return;
+    }
+    if (!_paused.exchange(true)) _brake_req.store(true);
 }
 
 void MotionArbiter::setWindow(float lo, float hi, float rail) {
@@ -86,12 +98,11 @@ float MotionArbiter::forceHome(float stroke_mm) {
     _origin    = _emitter.count();
     _frame_moved = true;   // 0.0 mm now means a different emitter count
     _rail      = stroke;
-    _estop     = false;
-    _estop_settled = false;
     _homed     = true;
     // The engine reseeds itself at rest on the next accepted intent; nothing
-    // here may call into it, this runs on the hub task.
-    GLOGW(kTag, "FORCE HOME: homed asserted at 0.0 mm, stroke %.1f mm, e-stop cleared "
+    // here may call into it, this runs on the hub task. The e-stop latch is
+    // NOT touched: the hub's release path drops it (estop(false)), into PAUSE.
+    GLOGW(kTag, "FORCE HOME: homed asserted at 0.0 mm, stroke %.1f mm "
                 "-- no homing cycle ran (RFC-025)", double(stroke));
     return stroke;
 }
@@ -119,27 +130,23 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
         GLOGW_EVERY_MS(1000, kTag, "REJECT: e-stop");
         return false;
     }
+    // PAUSE suspends every source (SPEC 11.1).
+    if (_paused.load()) {
+        ++_rejected;
+        GLOGW_EVERY_MS(1000, kTag, "REJECT: paused");
+        return false;
+    }
     // Manual bypasses the rest (the push-to-home case): an operator must be
-    // able to move an unhomed or paused machine, and only to move it.
+    // able to move an unhomed machine, and only to move it.
     if (in.source != MotionSource::Manual) {
         if (!_homed) {
             ++_rejected;
             GLOGW_EVERY_MS(1000, kTag, "REJECT: not homed");
             return false;
         }
-        if (_paused) {
-            ++_rejected;
-            GLOGW_EVERY_MS(1000, kTag, "REJECT: paused");
-            return false;
-        }
         if (in.source == MotionSource::Pattern && _pattern_stopped.load()) {
             ++_rejected;
             GLOGW_EVERY_MS(1000, kTag, "REJECT: pattern stopped");
-            return false;
-        }
-        if (in.source == MotionSource::Stream && _stream_stopped.load()) {
-            ++_rejected;
-            GLOGW_EVERY_MS(1000, kTag, "REJECT: stream stopped");
             return false;
         }
     }
@@ -217,7 +224,7 @@ kinetic::Limits MotionArbiter::limitsFor(bool manual) const {
 
 // ---- the tick ---------------------------------------------------------------
 
-// SPEC 11.1 STOP, owning task only: the engine's own SETTLE brake, planned
+// SPEC 11.1 PAUSE, owning task only: the engine's own SETTLE brake, planned
 // from the plan's (p, v, a) -- continuous with what the emitter is rendering,
 // unlike a census read -- at the input decel, and never a reversal. It also
 // drops every scheduled plan (Engine::brake).
@@ -226,7 +233,7 @@ void MotionArbiter::brakeToRest(uint64_t now_us) {
     [[maybe_unused]] const float v = _engine.velocityAt(now_us) * span();   // log only
     if (!_engine.brake(now_us)) return;
     _demand_mm = toMm(_engine.snapshot(now_us).target);   // where it comes to rest
-    GLOGI(kTag, "STOP: braking from %.1f mm/s", double(v));
+    GLOGI(kTag, "PAUSE: braking from %.1f mm/s", double(v));
 }
 
 void MotionArbiter::applyTuning(const MotionTuning& t) {
@@ -376,7 +383,7 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.rejected       = _rejected;
     c.homed          = _homed;
     c.estop          = _estop;
-    c.paused         = _paused;
+    c.paused         = _paused.load();
     c.busy           = _engine.isBusy(now_us);
     c.mode           = s.mode;
     c.plan_kind      = s.plan_kind;

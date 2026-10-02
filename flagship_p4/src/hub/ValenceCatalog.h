@@ -22,7 +22,7 @@
 //   `desc` strings are the only unbounded cost and must stay tight.
 //   0x0003/0x0004/0x0005/0x0007 layouts are pinned by the hub's own encoders
 //   (buildSafetyPayload / buildControlOwnerPayload / handleIntent's
-//   ESTOP_CLEAR path / emitTakeoverEvent) — not free to reshape here without
+//   release path / emitTakeoverEvent) — not free to reshape here without
 //   changing the hub in lockstep.
 //   Wire sizes are noted per entry so a budget overrun is caught by eye;
 //   there is no packed struct to static_assert against.
@@ -268,25 +268,25 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // bitfield8, cause u8, owner_session u32, estop_seq u16, modes bitfield8).
     // Do NOT reshape it.  [9 B]
     //
-    // `modes` (manual_override + bypass_limits): SAFETY-domain state — they
-    // render near the rail in a UI, but they change what the machine does
-    // with a motion command, so every surface needs them on the retained,
-    // critical-priority snapshot rather than a legacy HTTP endpoint. Written
-    // via 0x0005 ops override_on/off + bypass_on/off. Append-only: bytes 0..7
-    // keep their meaning and offsets exactly.
+    // `word` bits 1 and 2 (STOP, HOLD) are retired and always zero (RFC-085);
+    // their labels say so, because a label is all a generic client can show.
+    // `modes` (override + home_required, RFC-085): latched MODES, not stop
+    // edges. override is written by the 0x0005 override/return pair;
+    // home_required by the hub on a power-cutting ESTOP, cleared by a
+    // completed home. Append-only: bytes 0..7 keep their meaning and offsets.
     c.addEntry({.id = valence::channels::safety, .name = "safety",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::critical});
     c.addBitfieldField({.name = "word", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f},
-                       {"estop", "stop", "hold", "pause"});
+                       {"estop", "retired", "retired", "pause"});
     c.addLayoutField({.name = "cause", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f});
     c.addLayoutField({.name = "owner_session", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f});
     c.addLayoutField({.name = "estop_seq", .type = PackedFieldType::u16, .unit = "count", .scale = 1.0f});
     c.addBitfieldField({.name = "modes", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f},
-                       {"override", "bypass"});
+                       {"override", "home_required"});
 
     // ---- "control-owner" — STATE, critical, on-change -----------------------
     // Matches Hub::buildControlOwnerPayload(): 4 × {source u8, owner u32}, in
@@ -308,11 +308,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
 
     // ---- "safety-intents" — INTENT, critical, modest rate -------------------
     // The client sends {1:"op"} where op is a safety_ops:: value (estop=6 and
-    // estop_clear=1 are hub-handled; the rest reach the delegate and the hub
-    // latches the result — RFC-025a).
+    // release=1 are hub-handled; the rest reach the delegate and the hub
+    // latches the result — RFC-025a, RFC-085).
     //
     // *** THE ACCESS FLOOR IS `watch`, AND THAT IS THE POINT (RFC-025b). ***
-    // `estop` and `stop` are ROLE-EXEMPT: anyone connected — including a
+    // `estop` and `pause` are ROLE-EXEMPT: anyone connected — including a
     // watch-only session — may stop this machine. §11.2's "safety outranks
     // authorization", generalized. The failure mode of getting this backwards
     // is "the person standing in the room cannot stop the machine", which is
@@ -320,8 +320,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // bounded by the §9.3 intent rate limiter above (20 Hz here) and is a
     // named, accepted risk in §12.1.
     //
-    // Everything else — hold/pause/resume/estop_clear/override/bypass —
-    // requires `control`, expressed as index-aligned `option_access` (catalog
+    // Everything else — release/resume/override/return — requires
+    // `control`, expressed as index-aligned `option_access` (catalog
     // key 17) on the enum-valued `op` field rather than as hub-side code,
     // because a GENERIC client renders this channel from the catalog and must
     // know which ops it may offer. A client that honors key 17 grays the
@@ -335,26 +335,28 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // be empty (an unnamed choice is unrenderable, and the decoder rejects
     // one outright). Its access is `control`, the strict side, so wire value 0
     // is never the cheapest thing on this channel to reach; it NACKs
-    // UNSUPPORTED_OP at the delegate regardless.
+    // UNSUPPORTED_OP at the delegate regardless. The four numbers RFC-085
+    // retired (2 stop, 3 hold, 9 and 10 the bypass pair) keep their index as
+    // "retired" at `control` and NACK UNSUPPORTED_OP the same way.
     c.addEntry({.id = valence::channels::safety_intents, .name = "safety-intents",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::watch, .maxRateHz = 20.0f,
                 .defaultPriority = Priority::critical});
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                             .role = "action.safety"},
-                           {"reserved", "estop_clear", "stop", "hold", "pause", "resume",
-                            "estop", "override_on", "override_off", "bypass_on", "bypass_off"},
+                           {"reserved", "release", "retired", "retired", "pause", "resume",
+                            "estop", "override", "return", "retired", "retired"},
                            {AccessLevel::control,  // 0  (placeholder, never an op)
-                            AccessLevel::control,  // 1  estop_clear
-                            AccessLevel::watch,    // 2  stop          ROLE-EXEMPT
-                            AccessLevel::control,  // 3  hold
-                            AccessLevel::control,  // 4  pause
+                            AccessLevel::control,  // 1  release
+                            AccessLevel::control,  // 2  retired (stop)
+                            AccessLevel::control,  // 3  retired (hold)
+                            AccessLevel::watch,    // 4  pause         ROLE-EXEMPT
                             AccessLevel::control,  // 5  resume
                             AccessLevel::watch,    // 6  estop         ROLE-EXEMPT
-                            AccessLevel::control,  // 7  override_on
-                            AccessLevel::control,  // 8  override_off
-                            AccessLevel::control,  // 9  bypass_on
-                            AccessLevel::control});// 10 bypass_off
+                            AccessLevel::control,  // 7  override
+                            AccessLevel::control,  // 8  return
+                            AccessLevel::control,  // 9  retired (bypass_on)
+                            AccessLevel::control});// 10 retired (bypass_off)
 
     // ---- "hub-status" — STATE, background, 1 Hz -----------------------------
     // Slow health telemetry.  [4+4+1+1 = 10 B]
@@ -541,7 +543,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .group = "Manual limits",
                       .desc = "Speed ceiling for moves YOU drive by hand. Kept gentle by default: "
                               "it is a ceiling, not a target.",
-                      .role = roles::limit_user_speed, .step = 1.0f,
+                      .role = roles::limit_jog_speed, .step = 1.0f,
                       .settingKey = 3, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
@@ -551,7 +553,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .group = "Manual limits",
                       .desc = "How hard a hand-driven move is allowed to pick up speed. Lower "
                               "feels softer at the start and end of every move.",
-                      .role = roles::limit_user_accel, .step = 10.0f,
+                      .role = roles::limit_jog_accel, .step = 10.0f,
                       .settingKey = 4, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm_s2});
@@ -1809,7 +1811,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // BENCH ops (RFC-025, safety-reviewed) that make motorless dev work
     // possible at all.
     //
-    // *** OP 2 (force_home) CLEARS AN E-STOP LATCH. *** That is exactly why
+    // *** OP 2 (force_home) RELEASES AN E-STOP LATCH INTO PAUSE. *** That is exactly why
     // RFC-025 placed these under safety review rather than in a convenience
     // bucket, and why they are `control` and rate-capped like every other op
     // here. Op 2 declares the machine homed WITHOUT a homing cycle, so the
@@ -1834,7 +1836,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                            {"reserved", "home", "force_home", "clear_override"},
                            {AccessLevel::control,   // 0 (placeholder, never an op)
                             AccessLevel::control,   // 1 home
-                            AccessLevel::control,   // 2 force_home  — CLEARS THE E-STOP LATCH
+                            AccessLevel::control,   // 2 force_home  — RELEASES THE E-STOP LATCH
                             AccessLevel::control}); // 3 clear_override
     c.addSchemaField({.key = 2, .name = "stroke", .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 2000.0f});

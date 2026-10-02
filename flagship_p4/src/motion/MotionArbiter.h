@@ -15,11 +15,11 @@
 //   snapshot) touch the engine and run on ONE task, the host's motion task.
 //   accept() calls commit(), which nests KB-scale Ruckig temporaries on that
 //   task's stack (T1, memory-budget.md T21).
-// - CROSS-TASK methods (estop, stop, allowPattern, allowStream, pause, the
-//   limit and window setters, forceHome, noteStream) never touch the engine. They write flags
-//   and scalars the owning task reads on its next pass; estop() also parks the
-//   emitter on the CALLING task, because an e-stop that waits for a tick is
-//   not one.
+// - CROSS-TASK methods (estop, pause, allowPattern, setEstopCutsPower, the
+//   limit and window setters, forceHome, noteStream) never touch the engine.
+//   They write flags and scalars the owning task reads on its next pass;
+//   estop() also parks the emitter on the CALLING task, because an e-stop that
+//   waits for a tick is not one.
 // - The object holds a kinetic::Engine (KB-scale). Host it at file scope in
 //   INTERNAL RAM: never a stack local, never PSRAM, which is unreachable while
 //   the flash cache is off and the sampler must not fault during an OTA write.
@@ -119,20 +119,23 @@ public:
     MotionCensus snapshot(uint64_t now_us);
 
     // Any task.
+    // SPEC 11.2. on: parks the emitter on the CALLING task, closes the Pattern
+    // gate, and drops homed when the hub declares estop_cuts_power. off is the
+    // RELEASE and lands in PAUSE, never in motion.
     void estop(bool on);
-    // SPEC 11.1 STOP. Closes the Pattern and Stream gates, THEN asks the
-    // owning task to brake the plan in flight to rest at the input decel. That
-    // order is the guarantee: a half-stroke or a stream sample queued before
-    // the stop is either refused at accept() or already accepted and braked.
-    // estop(true) closes the Pattern gate too.
-    void stop();
-    // Reopens the Pattern gate. The generator's own start is the one caller.
+    // SPEC 11.1 PAUSE. on: latches, THEN asks the owning task to brake the
+    // plan in flight to rest at the input decel. That order is the guarantee:
+    // a half-stroke or a stream sample queued before the pause is either
+    // refused at accept() or already accepted and braked. off is `resume`, the
+    // only clear; the hub refuses it while ESTOP, override or home_required
+    // holds, so this never sees those cases.
+    void pause(bool on);
+    // Reopens the Pattern gate estop(true) closed. The generator's own start
+    // is the one caller.
     void allowPattern() { _pattern_stopped.store(false); }
-    // Reopens the Stream gate. The one caller is the hub delegate, on a bundle
-    // that finds the hub's STOP latch clear: that latch is the one home of
-    // STOP, and this gate only closes the queue window behind it (RFC-074).
-    void allowStream() { _stream_stopped.store(false); }
-    void pause(bool on) { _paused = on; }
+    // The hub's estop_cuts_power declaration (SPEC 11.2): true, the motor is
+    // limp after an ESTOP and the position reference is gone.
+    void setEstopCutsPower(bool cuts) { _cuts_power = cuts; }
     void setUserLimits(float v, float a) { _user_v = v; _user_a = a; }
     void setInputLimits(float v, float a, float j) { _in_v = v; _in_a = a; _in_j = j; }
     void setWindow(float lo, float hi, float rail);
@@ -182,12 +185,12 @@ private:
 
     volatile bool _homed  = false;
     volatile bool _estop  = false;
-    volatile bool _paused = false;
+    volatile bool _cuts_power = true;
     bool _estop_settled = false;  // the engine has been reset since the latch
-    // STOP, written by stop()/allowPattern()/estop() on any task. Atomics, not
+    // Written by pause()/estop()/allowPattern() on any task. Atomics, not
     // volatile: the gate store must be visible before the brake request is.
+    std::atomic<bool> _paused{false};
     std::atomic<bool> _pattern_stopped{false};
-    std::atomic<bool> _stream_stopped{false};
     std::atomic<bool> _brake_req{false};
     // Set by setWindow()/forceHome() on any task, consumed by evaluate() on
     // the owning task: the mm FRAME moved, the carriage did not.

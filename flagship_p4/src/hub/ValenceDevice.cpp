@@ -379,7 +379,7 @@ size_t encodePresetItem(std::span<std::byte> out, uint8_t slot, const PatternPre
 // ---- HubDelegate ---------------------------------------------------------------
 
 // §12.2. A HELLO nothing vouches for is a WORKING STATE, not a failure: at
-// WATCH it can subscribe to everything and use the role-exempt stop and estop
+// WATCH it can subscribe to everything and use the role-exempt pause and estop
 // ops. Only a live single-use /uitoken credential upgrades to CONTROL, and
 // never to configure -- a browser-borne credential must not be able to re-key
 // the trust ledger. The trust ledger itself is the other door and is the hub's
@@ -793,27 +793,36 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
 }
 
 // ---- 0x0005 safety-intents ------------------------------------------------------
-// STOP (SPEC 11.1) is the one op applied here. estop and estop_clear never
-// reach the delegate (the hub owns both); every other op -- hold, pause,
-// resume, override, bypass -- is UNSUPPORTED_OP, so the hub latches NOTHING
-// for it. Acceptance is what makes the hub latch STOP in 0x0003, and any
-// accepted source-mapped intent clears it. Never refused: stopping needs no
-// homing and no role (the catalog marks it watch, ROLE-EXEMPT).
+// The delegate half of SPEC 11.1. estop and release never reach here (the hub
+// owns both). The hub latches PAUSE on an accepted pause and clears it on an
+// accepted resume, and has already refused a resume under ESTOP, override or
+// home_required, so resume needs no gate of its own. override and return are
+// the rail-bound mode (val-091.35); until it lands they and the four retired
+// numbers are UNSUPPORTED_OP, so the hub latches NOTHING for them.
 Ret ValenceDevice::applySafety(const IntentValueMap& requested) {
-    if (fieldU64(findField(requested, 1), 0) != safety_ops::stop)
-        return Ret::err(NackCode::UNSUPPORTED_OP);
-    // The generator's running state drops FIRST, on this call, then
-    // motionStop() closes the arbiter's Pattern gate and only then asks for
-    // the brake. The gate is what closes the preemption window: the pattern
-    // task (core 1, priority 4) can hold a half-stroke it built from the old
-    // settings across this whole call, and submits it after. That stroke is
-    // refused at accept, or was accepted before the gate closed and is braked.
-    haltGenerator();
-    motionStop();
-    GLOGW(kTag, "STOP: generator halted, braking to rest");
+    const uint64_t op = fieldU64(findField(requested, 1), 0);
+    switch (op) {
+        case safety_ops::pause:
+            // Never refused: pausing needs no homing and no role (the catalog
+            // marks it watch, ROLE-EXEMPT). The arbiter latches BEFORE it asks
+            // for the brake, which closes the preemption window: the pattern
+            // task (core 1, priority 4) can hold a half-stroke it built before
+            // this call and submit it after; accept() refuses it, or it was
+            // accepted first and is braked. The generator keeps its settings
+            // and parks on the census's paused bit, so resume re-arms it.
+            motionPause(true);
+            GLOGW(kTag, "PAUSE: every source suspended, braking to rest");
+            break;
+        case safety_ops::resume:
+            motionPause(false);
+            GLOGI(kTag, "RESUME: sources re-armed");
+            break;
+        default:
+            return Ret::err(NackCode::UNSUPPORTED_OP);
+    }
     IntentValueMap applied{};
     applied.count = 1;
-    applied.fields[0] = {1, IntentValue::ofU64(safety_ops::stop)};
+    applied.fields[0] = {1, IntentValue::ofU64(op)};
     return Ret::ok(applied);
 }
 
@@ -841,14 +850,15 @@ Ret ValenceDevice::applyHome(const IntentValueMap& requested) {
 
         case 2: {  // force_home {stroke}
             // *** HAZARD, RFC-025. The hazard note lives on motionForceHome()
-            // in ValenceMotion.h; do not restate it (C-1). What matters
-            // HERE is the lockstep: the arbiter's latch drops inside that
-            // call, and the hub's own ESTOP bit is dropped by tick() on the
-            // next hub tick, because clearEstop() broadcasts and this runs
-            // inside the hub's own intent dispatch.
+            // in ValenceMotion.h; do not restate it (C-1). A completed home
+            // clears home_required, and on this bench op it also releases a
+            // held ESTOP latch into PAUSE. Both are tick()'s, on the next hub
+            // tick: releaseEstop() and setHomeRequired() publish and
+            // broadcast, and this runs inside the hub's own intent dispatch.
             const float asked = fieldF32(findField(requested, 2), 250.0f);
             const float stroke = motionForceHome(asked);
             _clearLatch = true;
+            _homeDone = true;
             applied.count = 2;
             applied.fields[0] = {1, IntentValue::ofU64(2)};
             applied.fields[1] = {2, IntentValue::ofF32(stroke)};
@@ -884,10 +894,11 @@ std::optional<uint8_t> ValenceDevice::sourceForChannel(uint16_t channel_id) {
 // §11.2 (b): the machine-domain precondition the library cannot see. The
 // emitter's steering word IS that answer -- 0 means parked, and the engine
 // resets itself one motion tick after the latch, so busy falls too.
-// This is also the ONE hook the hub calls on the clear path and the hub
-// guarantees the clear proceeds iff it returns true, so dropping the
-// arbiter's latch here keeps both sides in lockstep. Clearing never
-// rehomes: homed stays false and motion stays refused until force_home.
+// This is also the ONE hook the hub calls on the release path and the hub
+// guarantees the release proceeds iff it returns true, so dropping the
+// arbiter's latch here keeps both sides in lockstep: both land in PAUSE.
+// Release never rehomes: a power-cutting ESTOP left homed false, and motion
+// stays refused until force_home and then resume.
 bool ValenceDevice::canClearEstop() {
     const MotionCensus c = motionCensus();
     if (c.busy || c.step_q8 != 0) return false;
@@ -921,20 +932,10 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
     const bool isSegment = (channel_id == ch::motion_segment);
     if (channel_id != ch::motion_input && !isSegment) return;
 
-    // SPEC 11.1 STOP, RFC-074: while the hub's STOP latch holds, a bundle is
-    // refused WHOLE, dropped and counted like any §9.2 drop, never NACKed.
-    // That latch is the one home of STOP and clears only on an accepted
-    // source-mapped intent (0x3100 move, pattern_cmd); a sample is not one.
-    // Same task as the latch, both inside Hub::update(), so no bundle lands
-    // between motionStop() and the latch. A clear latch reopens the arbiter's
-    // Stream gate BEFORE any sample is queued.
+    // SPEC 11.1 PAUSE: the hub drops a source-mapped bundle whole while PAUSE
+    // is latched and never calls this. A sample queued before the latch is
+    // refused at accept() by the arbiter's own pause gate.
     const uint8_t n = bundle.sampleCount();
-    if (_hub != nullptr && _hub->stopLatched()) {
-        motionNoteStream(1, n, n);
-        GLOGW_EVERY_MS(1000, kTag, "STREAM REFUSED: STOP latched, re-arm with a move or a pattern start");
-        return;
-    }
-    motionStreamAllow();
 
     // RFC-030: the session's GRANTED (post-curve-policy) family, looked up
     // once per bundle. Chase points never carry one -- the family is a
@@ -1107,6 +1108,8 @@ bool ValenceDevice::adoptPresetsBlob(std::span<const std::byte> blob) {
 
 void ValenceDevice::attach(Hub& hub) {
     _hub = &hub;
+    // The declaration's one home is the composition's setEstopCutsPower().
+    motionSetEstopCutsPower(hub.estopCutsPower());
     publishControlOwner(hub);
     publishMachineConfig();
     publishHubStatus();
@@ -1126,16 +1129,20 @@ void ValenceDevice::attach(Hub& hub) {
 }
 
 uint8_t ValenceDevice::tick(uint32_t nowMs) {
-    // force_home dropped the arbiter's latch inside applyIntent; the hub's own
-    // ESTOP bit drops HERE, one tick later, because clearEstop() publishes and
-    // broadcasts and applyIntent runs inside the hub's intent dispatch.
-    // canClearEstop() still gates it, so the two never disagree.
+    // force_home's two hub-side effects, one tick after applyIntent because
+    // both publish and broadcast and applyIntent runs inside the hub's intent
+    // dispatch. The release runs canClearEstop(), so the hub and the arbiter
+    // land in PAUSE together or not at all.
     if (_clearLatch) {
         _clearLatch = false;
         if (_hub->estopLatched()) {
-            if (_hub->clearEstop()) GLOGW(kTag, "ESTOP latch cleared by force_home");
-            else GLOGW(kTag, "force_home could not clear the ESTOP latch: motion is not parked");
+            if (_hub->releaseEstop()) GLOGW(kTag, "ESTOP released by force_home: PAUSE, resume to run");
+            else GLOGW(kTag, "force_home could not release the ESTOP latch: motion is not parked");
         }
+    }
+    if (_homeDone) {
+        _homeDone = false;
+        _hub->setHomeRequired(false);
     }
 
     // The motion plane, from ONE census so no two channels disagree about the

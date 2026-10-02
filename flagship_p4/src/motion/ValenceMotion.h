@@ -171,18 +171,21 @@ bool motionBegin();
 bool motionSubmit(const MotionIntent& intent);
 
 // Absolute, and the one gate no source bypasses. Parks the emitter on the
-// calling task before returning, so it does not wait for the motion tick.
+// calling task before returning, so it does not wait for the motion tick; on
+// the board it also drops the motor switch first (SPEC 11.2, H1 path).
 void motionEstop();
+// The RELEASE (SPEC 11.2): lands in PAUSE, never in motion.
 void motionEstopClear();
-// SPEC 11.1 STOP. Any task, never blocks: refuses every Pattern and Stream
-// intent from this call on, then brakes the plan in flight to rest at the
-// input decel on the motion task. Only motionPatternAllow(), the generator's
-// start, reopens the Pattern gate; e-stop closes it too. Only
-// motionStreamAllow() reopens the Stream gate (MotionArbiter::stop()).
-void motionStop();
-void motionPatternAllow();
-void motionStreamAllow();
+// SPEC 11.1 PAUSE. Any task, never blocks: on refuses every intent from this
+// call on, then brakes the plan in flight to rest at the input decel on the
+// motion task. off is `resume`, the only clear. e-stop closes the Pattern gate
+// and only motionPatternAllow(), the generator's start, reopens it.
 void motionPause(bool on);
+void motionPatternAllow();
+// The hub's estop_cuts_power declaration: true, an ESTOP leaves the machine
+// unhomed. The composition declares it once on the Hub; the delegate hands
+// the Hub's answer here at attach.
+void motionSetEstopCutsPower(bool cuts);
 
 // Ceiling sets, in millimeters. Ceilings are clamps, never targets; the one
 // exception is a deadline-less Manual point move, which plans AT the user
@@ -203,8 +206,9 @@ void motionNoteStream(uint32_t bundles, uint32_t samples, uint32_t dropped);
 // *** HAZARD, RFC-025. DECLARES the machine homed at 0.0 mm and ASSERTS a
 // stroke nothing measured. On a rig with a motor attached that is a collision
 // hazard: the arbiter will plan moves across a window that may not physically
-// exist. It also CLEARS THE E-STOP LATCH, deliberately -- on a motorless rig a
-// latch is the resting state, so gating this op behind it would make it
+// exist. It never touches the e-stop latch itself: the hub delegate releases a
+// held latch after it, into PAUSE (SPEC 11.2), deliberately -- on a motorless
+// rig a latch is the resting state, so gating this op behind it would make it
 // unusable for its entire purpose. Control-gated and rate-capped on the wire
 // (0x3101 op 2). Returns the stroke actually adopted.
 float motionForceHome(float stroke_mm);

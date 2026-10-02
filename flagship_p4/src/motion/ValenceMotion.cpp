@@ -27,6 +27,7 @@
 
 #include "MotionArbiter.h"
 #include "geiger/geiger.h"
+#include "system/ValenceSelfCheck.h"
 #include "ulp_main.h"
 
 namespace valence {
@@ -93,7 +94,7 @@ class MotionTask {
 public:
     bool begin();
     bool submit(const MotionIntent& in);     // any task: enqueue and wake
-    void stop();                             // any task: gate, brake request, wake
+    void pause(bool on);                     // any task: gate, brake request, wake
     void setTuning(const MotionTuning& t);   // any task: overwrite the one slot
     MotionCensus census() const;
     MotionArbiter& arbiter() { return _arb; }
@@ -162,10 +163,10 @@ bool MotionTask::submit(const MotionIntent& in) {
     return true;
 }
 
-void MotionTask::stop() {
-    _arb.stop();
+void MotionTask::pause(bool on) {
+    _arb.pause(on);
     // Brakes at arrival, not on the tick.
-    if (_task != nullptr) xTaskNotifyGive(_task);
+    if (on && _task != nullptr) xTaskNotifyGive(_task);
 }
 
 void MotionTask::setTuning(const MotionTuning& t) {
@@ -234,12 +235,16 @@ MotionCensus MotionTask::census() const {
 
 bool motionBegin() { return g_motion.begin(); }
 bool motionSubmit(const MotionIntent& in) { return g_motion.submit(in); }
-void motionEstop() { g_motion.arbiter().estop(true); }
+void motionEstop() {
+    // Power first: the cut is the stop on this board, the park only keeps the
+    // emitter from rendering into a dead drive.
+    motorPowerCut();
+    g_motion.arbiter().estop(true);
+}
 void motionEstopClear() { g_motion.arbiter().estop(false); }
-void motionStop() { g_motion.stop(); }
+void motionPause(bool on) { g_motion.pause(on); }
 void motionPatternAllow() { g_motion.arbiter().allowPattern(); }
-void motionStreamAllow() { g_motion.arbiter().allowStream(); }
-void motionPause(bool on) { g_motion.arbiter().pause(on); }
+void motionSetEstopCutsPower(bool cuts) { g_motion.arbiter().setEstopCutsPower(cuts); }
 void motionSetUserLimits(float v, float a) { g_motion.arbiter().setUserLimits(v, a); }
 void motionSetInputLimits(float v, float a, float j) { g_motion.arbiter().setInputLimits(v, a, j); }
 void motionSetWindow(float lo, float hi, float rail) { g_motion.arbiter().setWindow(lo, hi, rail); }

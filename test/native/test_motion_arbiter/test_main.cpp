@@ -114,18 +114,48 @@ TEST_CASE("unhomed: Manual moves, a Stream source is refused") {
     CHECK(r->census().intents == 1);
 }
 
-TEST_CASE("paused: Stream refused, Manual still moves") {
+TEST_CASE("PAUSE refuses every source, Manual included; resume is the only re-arm") {
     auto r = rig();
     r->arb.forceHome(500.0f);
     r->run(1000);
     r->arb.pause(true);
+    CHECK(r->census().paused);
     CHECK_FALSE(r->submit(MotionSource::Stream, 100.0f));
-    CHECK(r->submit(MotionSource::Manual, 100.0f));
+    CHECK_FALSE(r->submit(MotionSource::Pattern, 100.0f));
+    CHECK_FALSE(r->submit(MotionSource::Manual, 100.0f));
+    CHECK(r->census().rejected == 3);
+    // A second pause is idempotent and never a second latch.
+    r->arb.pause(true);
+    CHECK_FALSE(r->submit(MotionSource::Manual, 100.0f));
     r->arb.pause(false);
+    CHECK_FALSE(r->census().paused);
     CHECK(r->submit(MotionSource::Stream, 100.0f));
+    CHECK(r->submit(MotionSource::Manual, 120.0f));
 }
 
-TEST_CASE("e-stop refuses every source, parks on the calling task, drops homed") {
+TEST_CASE("PAUSE brakes a moving carriage to rest and holds it") {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 300.0f));
+    r->run(400'000);
+    const float v0 = r->census().velocity_mm_s;
+    REQUIRE(std::fabs(v0) > 10.0f);
+    const float p0 = r->census().position_mm;
+    r->arb.pause(true);
+    r->run(2'000'000);
+    const MotionCensus c = r->census();
+    CHECK_FALSE(c.busy);
+    CHECK(c.velocity_mm_s == doctest::Approx(0.0f));
+    // A controlled decel in its own direction, short of the old target.
+    CHECK(c.position_mm >= p0);
+    CHECK(c.position_mm < 300.0f);
+    const int32_t held = r->emitter.n;
+    r->run(500'000);
+    CHECK(r->emitter.n == held);
+}
+
+TEST_CASE("e-stop refuses every source, parks on the calling task, drops homed when it cuts power") {
     auto r = rig();
     r->arb.forceHome(500.0f);
     r->run(1000);
@@ -146,9 +176,33 @@ TEST_CASE("e-stop refuses every source, parks on the calling task, drops homed")
     CHECK_FALSE(c.homed);
     CHECK_FALSE(c.busy);
 
+    // Release lands in PAUSE, never in motion (SPEC 11.2).
     r->arb.estop(false);
-    CHECK(r->submit(MotionSource::Manual, 50.0f));
+    const MotionCensus after = r->census();
+    CHECK_FALSE(after.estop);
+    CHECK(after.paused);
+    CHECK_FALSE(after.homed);
+    CHECK_FALSE(r->submit(MotionSource::Manual, 50.0f));
+    // The sequence: release, PAUSE unhomed, home, resume.
+    r->arb.forceHome(500.0f);
+    r->run(1000);
     CHECK_FALSE(r->submit(MotionSource::Stream, 50.0f));
+    r->arb.pause(false);
+    CHECK(r->submit(MotionSource::Stream, 50.0f));
+}
+
+TEST_CASE("e-stop on a hub that does not cut power is a halt that keeps home") {
+    auto r = rig();
+    r->arb.setEstopCutsPower(false);
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    r->arb.estop(true);
+    CHECK(r->census().homed);
+    r->arb.estop(false);
+    CHECK(r->census().paused);
+    CHECK(r->census().homed);
+    r->arb.pause(false);
+    CHECK(r->submit(MotionSource::Stream, 50.0f));
 }
 
 TEST_CASE("window clamp: Stream held in the window, Manual reaches the whole rail") {
@@ -256,7 +310,7 @@ bool generatorPass(Rig& r, PatternEngine& gen, MotionIntent* last) {
 
 }  // namespace
 
-TEST_CASE("stop halts a running generator and no further intent is submitted") {
+TEST_CASE("pause brakes a running generator, which parks; resume re-arms it with no new start") {
     auto r = rig();
     r->arb.forceHome(DEFAULT_MAX_RAIL_MM);
     r->run(1000);
@@ -275,11 +329,9 @@ TEST_CASE("stop halts a running generator and no further intent is submitted") {
     REQUIRE(std::fabs(v0) >= 100.0f);
     const float p0 = r->census().position_mm;
 
-    // The hub's stop, in its order: running drops, then gate plus brake.
-    PatternSettings stopped = runningPattern();
-    stopped.running = false;
-    gen->apply(stopped);
-    r->arb.stop();
+    // The hub's pause: the latch, then the brake. The generator keeps its
+    // settings and parks on the census's paused bit.
+    r->arb.pause(true);
     const uint32_t intents = r->census().intents;
 
     // The preemption window: a half-stroke the pattern task built from the
@@ -302,6 +354,7 @@ TEST_CASE("stop halts a running generator and no further intent is submitted") {
     const MotionCensus after = r->census();
     CHECK(after.intents == intents);
     CHECK_FALSE(gen->active());
+    CHECK(after.paused);
     CHECK_FALSE(after.busy);
     CHECK(after.velocity_mm_s == doctest::Approx(0.0f));
     // A controlled decel: it stops within braking distance of where it was,
@@ -313,22 +366,23 @@ TEST_CASE("stop halts a running generator and no further intent is submitted") {
     for (int i = 0; i < 2000; ++i) generatorPass(*r, *gen, nullptr);
     CHECK(r->emitter.n == held);
 
-    // A start is what reopens it.
-    r->arb.allowPattern();
-    gen->apply(runningPattern());
+    // resume is what re-arms it; no new start is needed.
+    r->arb.pause(false);
     int restarted = 0;
     for (int i = 0; i < 1000; ++i) restarted += generatorPass(*r, *gen, nullptr) ? 1 : 0;
     CHECK(restarted >= 1);
 }
 
-TEST_CASE("e-stop closes the Pattern gate: clearing the latch never restarts the generator") {
+TEST_CASE("e-stop closes the Pattern gate: releasing the latch never restarts the generator") {
     auto r = rig();
     r->arb.forceHome(500.0f);
     r->run(1000);
     REQUIRE(r->submit(MotionSource::Pattern, 100.0f));
     r->arb.estop(true);
     r->run(1000);
-    r->arb.forceHome(500.0f);   // drops the latch and rehomes
+    r->arb.estop(false);
+    r->arb.forceHome(500.0f);
+    r->arb.pause(false);
     r->run(1000);
     CHECK_FALSE(r->submit(MotionSource::Pattern, 150.0f));
     CHECK(r->submit(MotionSource::Stream, 150.0f));
@@ -336,8 +390,8 @@ TEST_CASE("e-stop closes the Pattern gate: clearing the latch never restarts the
     CHECK(r->submit(MotionSource::Pattern, 150.0f));
 }
 
-TEST_CASE("a stream bundle after STOP is refused and counted; a manual move clears the latch "
-          "and the next bundle after re-arm is accepted") {
+TEST_CASE("a stream sample under PAUSE is refused and counted; no motion intent clears it, "
+          "resume does") {
     auto r = rig();
     r->arb.forceHome(500.0f);
     r->run(1000);
@@ -348,9 +402,9 @@ TEST_CASE("a stream bundle after STOP is refused and counted; a manual move clea
     }
     REQUIRE(std::fabs(r->census().velocity_mm_s) > 10.0f);
 
-    r->arb.stop();
+    r->arb.pause(true);
     const uint32_t rejected = r->census().rejected;
-    // The client keeps streaming through the STOP: every sample is refused.
+    // The client keeps streaming through the PAUSE: every sample is refused.
     for (int i = 0; i < 50; ++i) {
         CHECK_FALSE(r->submit(MotionSource::Stream, 400.0f));
         r->run(10'000);
@@ -364,13 +418,10 @@ TEST_CASE("a stream bundle after STOP is refused and counted; a manual move clea
     }
     CHECK(r->emitter.n == held);
 
-    // The manual move is accepted through the STOP (SPEC 11.1: it is the new
-    // motion intent), and the hub drops its latch on that acceptance. The
-    // Stream gate stays closed until the delegate sees the clear latch.
-    CHECK(r->submit(MotionSource::Manual, r->census().position_mm + 5.0f));
-    r->run(500'000);
-    CHECK_FALSE(r->submit(MotionSource::Stream, 300.0f));
-    r->arb.allowStream();
+    // A motion intent is not a re-arm (SPEC 11.1): only resume clears PAUSE.
+    CHECK_FALSE(r->submit(MotionSource::Manual, r->census().position_mm + 5.0f));
+    CHECK(r->emitter.n == held);
+    r->arb.pause(false);
     CHECK(r->submit(MotionSource::Stream, 300.0f));
     r->run(200'000);
     CHECK(r->emitter.n != held);

@@ -165,10 +165,12 @@ private:
     uint8_t _tuneDirty = 0;
     StoredConfig _lastPublishedCfg{};
     bool _cfgEverSent = false;
-    // force_home cleared the arbiter's latch; the hub's own ESTOP bit drops in
-    // tick(), one tick later. DEFERRED on purpose: Hub::clearEstop() publishes
-    // and broadcasts, and applyIntent runs inside the hub's intent dispatch.
+    // force_home asks tick() to release a held ESTOP and to clear
+    // home_required, one tick later. DEFERRED on purpose: Hub::releaseEstop()
+    // and Hub::setHomeRequired() publish and broadcast, and applyIntent runs
+    // inside the hub's intent dispatch.
     bool _clearLatch = false;
+    bool _homeDone = false;
 
     // The live pattern generator settings. This copy IS the setting (the
     // delegate is its one writer); the generator's task runs on whatever

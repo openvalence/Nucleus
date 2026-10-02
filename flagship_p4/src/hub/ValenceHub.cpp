@@ -349,6 +349,9 @@ bool hubBegin() {
         return false;
     }
     g_box->hub->setIdentity(VALENCE_PRODUCT, FIRMWARE_VERSION, VALENCE_HUB_NAME);
+    // SPEC 11.2: ESTOP opens the motor switch on this board (motionEstop()),
+    // so an ESTOP is a category 0 stop that loses home.
+    g_box->hub->setEstopCutsPower(true);
     g_box->hub->setHubInstanceId(loadOrMintInstanceId());
     refreshEndpoint();
 

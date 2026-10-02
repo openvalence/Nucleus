@@ -269,6 +269,8 @@ int main(int argc, char** argv) {
     log.logf('I', "valencesim: state %s.{cfg,presets,iid}: config %s, cfg_gen %u",
              prefix.string().c_str(), haveStored ? "stored" : "factory", unsigned(hub.cfgGen()));
     hub.setIdentity(VALENCE_PRODUCT, FIRMWARE_VERSION, kHubName);
+    // No motor switch on a desktop: ESTOP is a halt that keeps home (SPEC 11.2).
+    hub.setEstopCutsPower(false);
     hub.setHubInstanceId(loadOrMintInstanceId(iidPath, box->rng, log));
     log.logf('I', "valencesim: hub_instance_id %016llx",
              static_cast<unsigned long long>(hub.hubInstanceId()));

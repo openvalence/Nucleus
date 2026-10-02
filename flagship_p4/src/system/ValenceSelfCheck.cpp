@@ -244,6 +244,11 @@ void selfCheckHoldMotorOff() {
     gpio_config(&in);
 }
 
+void motorPowerCut() {
+    gpio_set_level(pin(BOARD_GPIO_MOTOR_EN), 0);
+    gpio_set_level(pin(BOARD_GPIO_PRECHARGE_EN), 0);
+}
+
 bool selfCheckRun(const SelfCheckFacts& facts) {
     std::optional<PowerReading> reading;
 
