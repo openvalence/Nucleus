@@ -736,11 +736,12 @@ Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
     return Ret::ok(applied);
 }
 
-// The four SPEC §8.7 verbs, op-select ordinals per the catalog's own labels
-// {reserved, save, load, delete, rename}. save captures LIVE state (a client
-// payload, an import, is not offered); load applies through the same clamps
-// an intent takes and engages the advanced generator, and its truth arrives on
-// the ordinary pattern-plane STATE. The echoed name is the STORE's copy.
+// The four SPEC §8.7 verbs; the op-select ordinals are the registry's store_ops
+// (RFC-067), which the catalog's labels {reserved, save, load, delete, rename}
+// index-align with. save captures LIVE state (a client payload, an import, is
+// not offered); load applies through the same clamps an intent takes and
+// engages the advanced generator, and its truth arrives on the ordinary
+// pattern-plane STATE. The echoed name is the STORE's copy.
 Ret ValenceDevice::applyPresets(const IntentValueMap& requested) {
     const auto op = numberOf(findField(requested, 1));
     const auto slotV = numberOf(findField(requested, 2));
@@ -753,11 +754,11 @@ Ret ValenceDevice::applyPresets(const IntentValueMap& requested) {
 
     const uint32_t verb = wholeIn(*op, 0.0f, 255.0f);
     switch (verb) {
-        case 1:   // save
+        case store_ops::save:
             if (!_presets.save(slot, name, _pat.capturePreset())) return Ret::err(NackCode::INVALID_VALUE);
             GLOGI(kTag, "preset saved: slot %u", unsigned(slot));
             break;
-        case 2: {  // load
+        case store_ops::load: {
             if (motionCensus().estop) return Ret::err(NackCode::ESTOP_ACTIVE);
             const PatternPresetStore::Slot* s = _presets.slot(slot);
             if (s == nullptr) return Ret::err(NackCode::INVALID_VALUE);
@@ -766,11 +767,11 @@ Ret ValenceDevice::applyPresets(const IntentValueMap& requested) {
             GLOGI(kTag, "preset loaded: slot %u", unsigned(slot));
             break;
         }
-        case 3:   // delete
+        case store_ops::delete_item:
             if (!_presets.remove(slot)) return Ret::err(NackCode::INVALID_VALUE);
             GLOGI(kTag, "preset deleted: slot %u", unsigned(slot));
             break;
-        case 4:   // rename
+        case store_ops::rename:
             if (!_presets.rename(slot, name)) return Ret::err(NackCode::INVALID_VALUE);
             break;
         default:

@@ -2111,10 +2111,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "pattern-presets-cmd" — INTENT, control ----------------------------
-    // The CRUD writer behind the 0x0095 store / 0x0096 roster pair (RFC-021).
-    // {1:"op", 2:"slot", 3:"name"}. `op` is RFC-019's OPEN `action.<name>`
-    // convention (no registry change needed, same as 0x0005's action.safety):
-    // index 0 is the mandatory non-empty placeholder, never a real op.
+    // The CRUD writer behind the 0x5220 store / 0x1220 roster pair (RFC-021).
+    // {1:"op", 2:"slot", 3:"name"}. `op` is the registered action.store op
+    // select (RFC-067): options index-aligned with registry store_ops, no
+    // option beyond them, index 0 the mandatory non-empty filler (SPEC 8.9).
+    // delete is destructive by registration (SPEC 8.8), so no mask restates it.
     //
     // `slot` addresses directly — the client picks it (normally the roster's
     // first free entry), there is no name-keyed dedup the way the retired
@@ -2127,7 +2128,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
                 .defaultPriority = Priority::normal});
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
-                            .role = "action.preset"},
+                            .role = "action.store"},
                            {"reserved", "save", "load", "delete", "rename"});
     c.addSchemaField({.key = 2, .name = "slot", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = float(kPresetCapacity - 1)});
