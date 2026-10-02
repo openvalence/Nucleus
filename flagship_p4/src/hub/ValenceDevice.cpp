@@ -675,9 +675,13 @@ Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
     for (const auto* f : {f2, f3, f4, f5, f6})
         if (f && !numberOf(f)) return Ret::err(NackCode::INVALID_VALUE);
 
+    // RFC-093: a start takes the rail, refused while the advanced generator
+    // holds it (the arbiter logs whose it is); a stop hands it back.
+    if (f1 && *boolOf(f1) && !motionAcquireRail(MotionSource::Pattern))
+        return Ret::err(NackCode::SOURCE_CONFLICT);
     PatternSettings& p = _pat;
     if (f1) p.running = *boolOf(f1);
-    if (f1 && p.running) motionPatternAllow();   // a start is the one thing that reopens it
+    if (f1 && !p.running) motionReleaseRail(MotionSource::Pattern);
     if (f2) p.setPattern(int(wholeIn(*numberOf(f2), 0.0f, float(PatternSettings::kPatternCount - 1))));
     if (f3) p.speed = PatternSettings::percent(*numberOf(f3));
     if (f4) p.depth = PatternSettings::percent(*numberOf(f4));
@@ -1096,9 +1100,9 @@ void ValenceDevice::onEstop(uint8_t cause, uint8_t origin) {
     motionEstop();
     ++_estopInitiations;
     _returnPending = false;   // the arbiter dropped override and the return
-    // The generator stops with the machine and stays stopped: clearing the
-    // latch never restarts it (the arbiter's Pattern gate stays closed until a
-    // start). This makes 0x1200's running tell the same truth.
+    // The generators stop with the machine and stay stopped: clearing the
+    // latch never restarts one (the arbiter's rail stays closed until a
+    // start). This makes each running flag tell the same truth.
     haltGenerator();
     GLOGW(kTag, "ESTOP latched: cause=%u origin=%u", unsigned(cause), unsigned(origin));
     (void)cause;
@@ -1211,6 +1215,7 @@ void ValenceDevice::onSourceOwnership(uint8_t source_id, uint32_t owner_session,
     if (owner_session != 0 || source_id != uint8_t(MotionSource::Pattern)) return;
     if (_pat.ownerReleased()) {
         _patDirty = true;
+        motionReleaseRail(MotionSource::Pattern);
         GLOGI(kTag, "pattern stopped: its session released it (reason %u), background_run off",
               unsigned(reason));
     } else if (_pat.running) {

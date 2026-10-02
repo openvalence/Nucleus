@@ -31,13 +31,21 @@ namespace valence {
 inline constexpr uint8_t kAnomalyKinds = 11;
 
 // Origin of an intent. It picks the ceiling SET and the gating, nothing else.
+// The value is the SPEC 11.4 source id the hub publishes on control-owner, and
+// the hub library reports ids 0..3 only: a fifth source needs a Valence change.
 enum class MotionSource : uint8_t {
     Manual = 0,   // operator-driven, the jog: jog ceilings, bypasses homed;
                   // under PAUSE only with override (SPEC 11.1)
     Stream = 1,   // machine-driven: input ceilings, every gate applies
-    Pattern = 2   // machine-driven, the on-hub generator: gated and clamped as
+    Pattern = 2,  // machine-driven, the classic generator: gated and clamped as
                   // Stream is, but never counted as the live stream (0x1100)
+    Advanced = 3  // machine-driven, the advanced generator: gated as Pattern is.
+                  // The two generators never share the rail (RFC-093)
 };
+
+// Each source's name, indexed by its id. The catalog's control-owner option
+// labels are the same strings, pinned by a static_assert in ValenceDevice.cpp.
+inline constexpr std::array<const char*, 4> kMotionSourceNames{"Jog", "Stream", "Classic", "Advanced"};
 
 // A point move, or a waveform span when duration_us is nonzero.
 struct MotionIntent {
@@ -201,10 +209,14 @@ void motionSetMotorPowered(bool on);
 void motionSetCommissioned(bool on);
 // SPEC 11.1 PAUSE. Any task, never blocks: on refuses every intent from this
 // call on, then brakes the plan in flight to rest at the input decel on the
-// motion task. off is `resume`, the only clear. e-stop closes the Pattern gate
-// and only motionPatternAllow(), the generator's start, reopens it.
+// motion task. off is `resume`, the only clear.
 void motionPause(bool on);
-void motionPatternAllow();
+// RFC-093: a generator's start acquires the rail and its stop releases it
+// (MotionArbiter::acquireRail()). False is SOURCE_CONFLICT: the other
+// generator holds it. e-stop takes the rail from both; only a start reopens
+// it. Any task, never blocks.
+bool motionAcquireRail(MotionSource generator);
+void motionReleaseRail(MotionSource generator);
 // The hub's estop_cuts_power declaration: true, an ESTOP leaves the machine
 // unhomed. The composition declares it once on the Hub; the delegate hands
 // the Hub's answer here at attach.

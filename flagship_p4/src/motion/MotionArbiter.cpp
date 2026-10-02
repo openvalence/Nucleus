@@ -29,6 +29,12 @@ constexpr float kTrackHz = 50.0f;
 // as a stroke, so dither around a standstill never inflates the odometer.
 constexpr float kStrokeMinMm = 1.0f;
 
+bool isGenerator(MotionSource s) { return s == MotionSource::Pattern || s == MotionSource::Advanced; }
+
+[[maybe_unused]] const char* sourceName(uint8_t id) {
+    return id < kMotionSourceNames.size() ? kMotionSourceNames[id] : "none";
+}
+
 }  // namespace
 
 // ---- the steering word ------------------------------------------------------
@@ -65,13 +71,30 @@ void MotionArbiter::estop(bool on) {
     _estop = true;
     // Park on the CALLING task. The ENGINE is not touched here: it belongs to
     // the owning task, which resets it on the next tick (see evaluate()).
-    _pattern_stopped.store(true);   // releasing the latch never restarts the generator
+    _rail_gen.store(kRailClosed);   // releasing the latch never restarts a generator
     _emitter.park();
     // A power cut leaves the carriage limp wherever it coasted: the position
     // reference is gone. A halt keeps power, so it keeps home.
     if (_cuts_power) _homed = false;
     GLOGW(kTag, "ESTOP: emitter parked at %.3f mm%s", double(positionMm()),
           _cuts_power ? ", unhomed" : "");
+}
+
+bool MotionArbiter::acquireRail(MotionSource generator) {
+    if (!isGenerator(generator)) return false;
+    const uint8_t want = uint8_t(generator);
+    uint8_t held = _rail_gen.load();
+    while (held == kRailFree || held == kRailClosed) {
+        if (_rail_gen.compare_exchange_weak(held, want)) return true;
+    }
+    if (held == want) return true;
+    GLOGW(kTag, "SOURCE_CONFLICT: %s start refused, rail owned by %s", sourceName(want), sourceName(held));
+    return false;
+}
+
+void MotionArbiter::releaseRail(MotionSource generator) {
+    uint8_t held = uint8_t(generator);
+    _rail_gen.compare_exchange_strong(held, kRailFree);
 }
 
 void MotionArbiter::setMotorPowered(bool on) {
@@ -210,10 +233,19 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
             GLOGW_EVERY_MS(1000, kTag, "REJECT: not homed");
             return false;
         }
-        if (in.source == MotionSource::Pattern && _pattern_stopped.load()) {
-            ++_rejected;
-            GLOGW_EVERY_MS(1000, kTag, "REJECT: pattern stopped");
-            return false;
+        if (isGenerator(in.source)) {
+            const uint8_t held = _rail_gen.load();
+            if (held == kRailClosed) {
+                ++_rejected;
+                GLOGW_EVERY_MS(1000, kTag, "REJECT: generators stopped by e-stop");
+                return false;
+            }
+            if (held != kRailFree && held != uint8_t(in.source)) {
+                ++_rejected;
+                GLOGW_EVERY_MS(1000, kTag, "REJECT: %s, rail owned by %s",
+                               sourceName(uint8_t(in.source)), sourceName(held));
+                return false;
+            }
         }
     }
 

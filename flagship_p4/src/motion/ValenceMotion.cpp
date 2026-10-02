@@ -251,7 +251,8 @@ void motionEstopClear() { g_motion.arbiter().estop(false); }
 void motionSetMotorPowered(bool on) { g_motion.arbiter().setMotorPowered(on); }
 void motionSetCommissioned(bool on) { g_motion.arbiter().setCommissioned(on); }
 void motionPause(bool on) { g_motion.pause(on); }
-void motionPatternAllow() { g_motion.arbiter().allowPattern(); }
+bool motionAcquireRail(MotionSource g) { return g_motion.arbiter().acquireRail(g); }
+void motionReleaseRail(MotionSource g) { g_motion.arbiter().releaseRail(g); }
 void motionSetEstopCutsPower(bool cuts) { g_motion.arbiter().setEstopCutsPower(cuts); }
 void motionOverride() { g_motion.override(); }
 void motionReturn() { g_motion.returnToPause(); }

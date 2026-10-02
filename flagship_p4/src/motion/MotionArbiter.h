@@ -15,8 +15,8 @@
 //   snapshot) touch the engine and run on ONE task, the host's motion task.
 //   accept() calls commit(), which nests KB-scale Ruckig temporaries on that
 //   task's stack (T1, memory-budget.md T21).
-// - CROSS-TASK methods (estop, pause, override, returnToPause, allowPattern,
-//   setEstopCutsPower, setMotorPowered, setCommissioned, the limit and window setters,
+// - CROSS-TASK methods (estop, pause, override, returnToPause, acquireRail,
+//   releaseRail, setEstopCutsPower, setMotorPowered, setCommissioned, the limit and window setters,
 //   forceHome, noteStream) never touch the engine.
 //   They write flags and scalars the owning task reads on its next pass;
 //   estop() and a power loss also park the emitter on the CALLING task,
@@ -120,9 +120,9 @@ public:
     MotionCensus snapshot(uint64_t now_us);
 
     // Any task.
-    // SPEC 11.2. on: parks the emitter on the CALLING task, closes the Pattern
-    // gate, and drops homed when the hub declares estop_cuts_power. off is the
-    // RELEASE and lands in PAUSE, never in motion.
+    // SPEC 11.2. on: parks the emitter on the CALLING task, takes the rail
+    // from both generators, and drops homed when the hub declares
+    // estop_cuts_power. off is the RELEASE and lands in PAUSE, never in motion.
     void estop(bool on);
     // SPEC 11.1 PAUSE. on: latches, THEN asks the owning task to brake the
     // plan in flight to rest at the input decel. That order is the guarantee:
@@ -140,9 +140,15 @@ public:
     // returns() counts once. Manual intents are refused while it runs. A no-op
     // without override.
     void returnToPause() { if (_override.load()) _return_req.store(true); }
-    // Reopens the Pattern gate estop(true) closed. The generator's own start
-    // is the one caller.
-    void allowPattern() { _pattern_stopped.store(false); }
+    // SPEC 11.4, RFC-093: the classic and advanced generators are two sources
+    // that never share the rail. A generator's start acquires it: true when
+    // the rail is free, closed by e-stop, or already this generator's; false
+    // is SOURCE_CONFLICT while the other holds it, and the reason goes to the
+    // log channel. Its stop releases it, a no-op unless `generator` holds it.
+    // A released generator's own brake still lands until the other acquires.
+    // Any source but Pattern or Advanced is refused.
+    bool acquireRail(MotionSource generator);
+    void releaseRail(MotionSource generator);
     // The hub's estop_cuts_power declaration (SPEC 11.2): true, the motor is
     // limp after an ESTOP and the position reference is gone.
     void setEstopCutsPower(bool cuts) { _cuts_power = cuts; }
@@ -234,14 +240,19 @@ private:
     std::atomic<bool> _power_settled{false};
     volatile bool _cuts_power = true;
     bool _estop_settled = false;  // the engine has been reset since the latch
-    // Written by pause()/estop()/allowPattern() on any task. Atomics, not
-    // volatile: the gate store must be visible before the brake request is.
+    // Written by pause()/estop() on any task. Atomics, not volatile: the gate
+    // store must be visible before the brake request is.
     std::atomic<bool> _paused{false};
     std::atomic<bool> _override{false};
     std::atomic<bool> _flipped{false};
     std::atomic<bool> _return_req{false};
-    std::atomic<bool> _pattern_stopped{false};
     std::atomic<bool> _brake_req{false};
+    // Which generator holds the rail: a MotionSource id, kRailFree, or
+    // kRailClosed after an e-stop until a start. ONE word so an e-stop racing
+    // a start can never leave the gate open with no holder.
+    static constexpr uint8_t kRailFree   = 0xFF;
+    static constexpr uint8_t kRailClosed = 0xFE;
+    std::atomic<uint8_t> _rail_gen{kRailFree};
     // Owning task only. _pause_pos_mm is where the last pause brought the
     // machine to rest (the return target); _returns counts completed returns.
     bool     _rail_frame  = false;

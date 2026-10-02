@@ -470,10 +470,11 @@ TEST_CASE("pause brakes a running generator, which parks; resume re-arms it with
     CHECK(restarted >= 1);
 }
 
-TEST_CASE("e-stop closes the Pattern gate: releasing the latch never restarts the generator") {
+TEST_CASE("e-stop takes the rail from both generators: releasing the latch never restarts one") {
     auto r = rig();
     r->arb.forceHome(500.0f);
     r->run(1000);
+    REQUIRE(r->arb.acquireRail(MotionSource::Pattern));
     REQUIRE(r->submit(MotionSource::Pattern, 100.0f));
     r->arb.estop(true);
     r->run(1000);
@@ -482,9 +483,45 @@ TEST_CASE("e-stop closes the Pattern gate: releasing the latch never restarts th
     r->arb.pause(false);
     r->run(1000);
     CHECK_FALSE(r->submit(MotionSource::Pattern, 150.0f));
+    CHECK_FALSE(r->submit(MotionSource::Advanced, 150.0f));
     CHECK(r->submit(MotionSource::Stream, 150.0f));
-    r->arb.allowPattern();
-    CHECK(r->submit(MotionSource::Pattern, 150.0f));
+    // Either generator's start reopens it, and it holds the rail.
+    CHECK(r->arb.acquireRail(MotionSource::Advanced));
+    CHECK(r->submit(MotionSource::Advanced, 150.0f));
+    CHECK_FALSE(r->submit(MotionSource::Pattern, 150.0f));
+}
+
+TEST_CASE("RFC-093: the two generators never share the rail, and nothing hands it over") {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    CHECK_FALSE(r->arb.acquireRail(MotionSource::Stream));
+    CHECK_FALSE(r->arb.acquireRail(MotionSource::Manual));
+
+    REQUIRE(r->arb.acquireRail(MotionSource::Pattern));
+    CHECK(r->arb.acquireRail(MotionSource::Pattern));          // a repeated start is idempotent
+    CHECK_FALSE(r->arb.acquireRail(MotionSource::Advanced));   // SOURCE_CONFLICT
+    CHECK(r->submit(MotionSource::Pattern, 100.0f));
+    CHECK_FALSE(r->submit(MotionSource::Advanced, 120.0f));
+    // A release by the generator that does not hold it changes nothing.
+    r->arb.releaseRail(MotionSource::Advanced);
+    CHECK_FALSE(r->arb.acquireRail(MotionSource::Advanced));
+
+    // The classic stop frees it; its own brake still lands until another
+    // generator takes the rail.
+    r->arb.releaseRail(MotionSource::Pattern);
+    CHECK(r->submit(MotionSource::Pattern, 110.0f));
+    REQUIRE(r->arb.acquireRail(MotionSource::Advanced));
+    CHECK(r->submit(MotionSource::Advanced, 140.0f));
+    CHECK_FALSE(r->submit(MotionSource::Pattern, 100.0f));
+    CHECK_FALSE(r->arb.acquireRail(MotionSource::Pattern));
+
+    // PAUSE suspends the advanced generator as it does every source.
+    r->arb.pause(true);
+    CHECK_FALSE(r->submit(MotionSource::Advanced, 160.0f));
+    r->run(2000);
+    r->arb.pause(false);
+    CHECK(r->submit(MotionSource::Advanced, 160.0f));
 }
 
 TEST_CASE("a stream sample under PAUSE is refused and counted; no motion intent clears it, "
