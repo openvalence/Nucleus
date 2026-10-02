@@ -1502,7 +1502,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
 
     // ---- "pattern-advanced" — STATE, normal, on-change ----------------------
     // Advanced mode's 8 BASE controls (advpat::Settings, everything except
-    // the per-control cyclic Modifier — see 0x008F..0x0094 for those).
+    // the per-control modulators, 0x1211..0x1216). Their advgen.* roles
+    // (RFC-081) are the advanced generator's binding: one each per catalog
+    // (SPEC 8.8), so the 0x3210 writer's mirror fields carry none. ap_mode is
+    // advgen.mode because 0x1200 also plays the pattern.select set.
     // Replaces the ad-hoc JSON keys POST /api/pattern used to carry
     // (ap_mode/ap_speed/ap_max_depth/ap_min_depth/ap_in_speed/ap_out_speed/
     // ap_in_accel/ap_out_accel, undiscoverable by a generic client) with 8
@@ -1529,6 +1532,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .dflt = SettingDefault::ofBool(false),
                       .group = "Advanced pattern",
                       .desc = "Drive the generator with Advanced mode instead of the classic patterns.",
+                      .role = roles::advgen_mode,
                       .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "master", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
@@ -1536,6 +1540,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Advanced pattern",
                       .desc = "Overall stroke speed. 0 holds position.",
+                      .role = roles::advgen_master,
                       .step = 1.0f, .settingKey = 2, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::percent});
@@ -1544,6 +1549,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .dflt = SettingDefault::ofInt(10),
                       .group = "Depth window",
                       .desc = "Deepest point of the stroke (the in-stroke target).",
+                      .role = roles::advgen_depth_max,
                       .step = 1.0f, .settingKey = 3, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::percent});
@@ -1552,6 +1558,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Depth window",
                       .desc = "Shallowest point of the stroke (the out-stroke target).",
+                      .role = roles::advgen_depth_min,
                       .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::percent});
@@ -1560,6 +1567,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .dflt = SettingDefault::ofInt(100),
                       .group = "Speed",
                       .desc = "In-stroke speed, as a percentage of master speed.",
+                      .role = roles::advgen_speed_in,
                       .step = 1.0f, .settingKey = 5, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::percent});
@@ -1568,6 +1576,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .dflt = SettingDefault::ofInt(100),
                       .group = "Speed",
                       .desc = "Out-stroke speed, as a percentage of master speed.",
+                      .role = roles::advgen_speed_out,
                       .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::percent});
@@ -1576,6 +1585,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .dflt = SettingDefault::ofInt(40),
                       .group = "Acceleration",
                       .desc = "How hard the in-stroke accelerates.",
+                      .role = roles::advgen_accel_in,
                       .step = 1.0f, .settingKey = 7, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::percent});
@@ -1584,6 +1594,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .dflt = SettingDefault::ofInt(40),
                       .group = "Acceleration",
                       .desc = "How hard the out-stroke accelerates.",
+                      .role = roles::advgen_accel_out,
                       .step = 1.0f, .settingKey = 8, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::percent});
