@@ -12,6 +12,7 @@
 #include <cmath>
 
 #include "geiger/geiger.h"
+#include "valence/generated/registry_constants.hpp"
 
 namespace valence {
 namespace {
@@ -549,6 +550,12 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
 }
 
 // ---- factory tuning ---------------------------------------------------------
+
+kinetic::Config MotionArbiter::engineConfig() {
+    kinetic::Config c;
+    c.dwell_span_norm = limits::segment_dwell_span;
+    return c;
+}
 
 MotionTuning motionDefaultTuning() {
     const kinetic::Config cfg{};

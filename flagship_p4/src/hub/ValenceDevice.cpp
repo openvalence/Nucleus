@@ -75,10 +75,6 @@ constexpr const char* kTag = "hub";
 // then a sector erase, on the hub task at the intent rate.
 constexpr uint32_t kCfgPersistDebounceMs = 2000;
 
-// 0x2101 field 3's "no end velocity" sentinel. 0 is a legitimate slope, so it
-// cannot mean absent; INT16_MIN is the value the catalog reserves.
-constexpr int16_t kSegNoEndVel = -32768;
-
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 // ---- packed-layout writers ---------------------------------------------------
@@ -1156,9 +1152,10 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
             if (durMs == 0) { ++dropped; continue; }  // durationless points belong on 0x2100
             in.duration_us  = uint32_t(durMs) * 1000u;
             in.curve_family = curveFamily;
-            // -32768 is the NO-END-VELOCITY sentinel: 0 is a legitimate
-            // slope (a reversal ends AT rest), so 0 cannot mean absent.
-            if (endV != kSegNoEndVel) {
+            // SPEC 5.4 `unspecified`: 0 is a real slope (a reversal ends AT
+            // rest), so absence is the registry's sentinel. Unspecified leaves
+            // has_end_vel false and the engine resolves it (SPEC 9.6).
+            if (endV != limits::segment_end_vel_unspecified) {
                 in.end_vel_mm_s = float(endV) / 1000.0f * span;
                 in.has_end_vel  = true;
             }

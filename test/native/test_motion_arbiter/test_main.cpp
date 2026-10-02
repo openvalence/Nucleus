@@ -15,9 +15,10 @@
 #include <limits>
 #include <memory>
 
-// Named here so the dependency finder builds them; the .cpp below needs both.
+// Named here so the dependency finder builds them; the .cpp below needs all three.
 #include "geiger/geiger.h"
 #include "kinetic/kinetic.hpp"
+#include "valence/generated/registry_constants.hpp"
 
 #include "../../../flagship_p4/src/motion/MotionArbiter.cpp"
 #include "../../../flagship_p4/src/patterns/AdvancedPattern.cpp"
@@ -604,6 +605,29 @@ TEST_CASE("a 32-segment bundle spanning the 1000 ms schedule horizon parks whole
     CHECK(c.intents == 32);
     CHECK(c.rejected == 0);
     CHECK(c.failures == 0);
+}
+
+TEST_CASE("the dwell rule runs at the registry's span: a re-commanded hold reports dwell_zeroed, kind 10") {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    MotionIntent in;
+    in.source = MotionSource::Stream;
+    in.target_mm = 200.0f;
+    in.duration_us = 132'000;
+    in.has_end_vel = true;
+    in.end_vel_mm_s = 0.0f;
+    REQUIRE(r->arb.accept(in, g_now_us));
+    // Re-sent while the hold is still in flight. TODO(val-091.59): a re-send
+    // after the machine came to rest is re-seeded and escapes the rule.
+    r->run(60'000);
+    in.end_vel_mm_s = -900.0f;   // a stale tangent on the re-sent hold
+    REQUIRE(r->arb.accept(in, g_now_us));
+    r->run(200'000);
+    r->arb.drainAnomalies();
+    const MotionCensus c = r->census();
+    CHECK(c.anom[size_t(kinetic::AnomalyType::DwellZeroed)] == 1);
+    CHECK(c.anom[size_t(kinetic::AnomalyType::HandoffBounded)] == 0);
 }
 
 TEST_CASE("flip: targets mirror in, positions and the window mirror out, the engine stays physical") {

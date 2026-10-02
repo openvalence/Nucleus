@@ -170,6 +170,10 @@ public:
     float rail() const { return _rail; }
 
 private:
+    // The engine's construction config: kinetic's defaults plus the protocol
+    // values kinetic is handed rather than spelling (the dwell span).
+    static kinetic::Config engineConfig();
+
     // The engine's frame: its normalized 0..1 is the travel window, or the
     // whole rail while the operator jogs under override (the engine clamps to
     // its frame, so lifting the window means widening the frame).
@@ -196,7 +200,7 @@ private:
     MotionEmitter& _emitter;
     Clock          _now_us;
 
-    kinetic::Engine _engine{};
+    kinetic::Engine _engine{engineConfig()};
 
     float _win_min = 0.0f;
     float _win_max = DEFAULT_MAX_RAIL_MM;

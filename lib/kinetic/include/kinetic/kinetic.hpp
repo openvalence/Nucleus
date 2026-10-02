@@ -409,6 +409,13 @@ struct Config {
     // it did before this knob existed, whatever k says.
     float handoff_chord_factor = 1.5f;
 
+    // ---- DWELL SPAN (the dwell rule, see commitWaveform) --------------------
+    // Normalized distance under which a timed segment re-commanding the
+    // previous segment's target is a HOLD. A protocol value, so this header
+    // never spells it: the glue injects it (Valence: the registry's
+    // limits.segment_dwell_span, SPEC 9.6). 0 disables the rule.
+    float dwell_span_norm = 0.0f;
+
     // ---- OVERSHOOT GUARD (option A of the 2026-07-30 bench shoot-out) -------
     // The legality scan constrains v/a/j and the WINDOW. It has never
     // constrained "did this plan sail past the endpoint the sender asked for",
@@ -1196,9 +1203,6 @@ private:
         Mode     mode = Mode::Idle;
         float    jerk_frac = 1.0f;
     };
-    // Below this span a timed segment is a DWELL (see the dwell rule in
-    // commitWaveform); 2% of the window, under any real stroke.
-    static constexpr double   kDwellSpanNorm = 0.02;
     // Chase jerk-scale knee: demand fraction of vmax at which full jerk
     // authority returns (see commitChase).
     static constexpr double   kChaseJerkKneeFrac = 0.5;
@@ -1378,7 +1382,7 @@ private:
         // TARGET, never position (2026-08-09: cost 54 mm of dropped steps).
         // Strokes alternate targets, so a real stroke chain never matches.
         const bool dwell = _prev_wave_tgt_ok &&
-            std::fabs(target - _prev_wave_tgt) < kDwellSpanNorm;
+            std::fabs(target - _prev_wave_tgt) < (double)_cfg.dwell_span_norm;
         _prev_wave_tgt = target;
         _prev_wave_tgt_ok = true;
         if (dwell && cmd.has_end_vel && vf != 0.0) {

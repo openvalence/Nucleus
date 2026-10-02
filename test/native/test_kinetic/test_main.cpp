@@ -30,6 +30,7 @@
 #include <doctest/doctest.h>
 
 #include "kinetic/kinetic.hpp"
+#include "valence/generated/registry_constants.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -1113,7 +1114,9 @@ TEST_CASE("Settle grace coasts at the end velocity, then brakes when the stream 
 TEST_CASE("Dwell rule: a re-commanded hold's declared arrival velocity is ignored") {
     // The measured pathology: a client re-sends its hold point ~1 Hz with a
     // stale spline tangent. Honoring vf whips through the hold at 3.4 norm/s.
+    // The span is the protocol's, injected exactly as the arbiter does.
     auto cfg = liveTuning();
+    cfg.dwell_span_norm = valence::limits::segment_dwell_span;
     Engine e(cfg, 0.60f);
     Command c;
     c.target = 0.60f; c.duration_us = 132 * (uint32_t)kMs;
