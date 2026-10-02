@@ -32,6 +32,9 @@ namespace {
 
 constexpr float kFactoryGuard = 1.25f;
 
+// The decode out-param the config cases do not inspect.
+valence::StoredModes g_modes;
+
 // A tuning set with every field off its zero value and inside its bounds.
 MotionTuning sampleTuning() {
     MotionTuning t;
@@ -67,7 +70,7 @@ StoredConfig sampleConfig() {
 
 std::array<std::byte, stored::kConfigBlobBytes> encodedConfig(uint16_t gen = 7) {
     std::array<std::byte, stored::kConfigBlobBytes> b{};
-    REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), gen) == b.size());
+    REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), valence::StoredModes{}, gen) == b.size());
     return b;
 }
 
@@ -78,7 +81,7 @@ TEST_CASE("config blob: round trip carries config, tuning and cfg_gen") {
     StoredConfig c;
     MotionTuning t;
     uint16_t gen = 0;
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, gen));
+    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, g_modes, gen));
     CHECK(c == sampleConfig());
     CHECK(t == sampleTuning());
     CHECK(gen == 4242);
@@ -88,15 +91,15 @@ TEST_CASE("config blob: overshoot is stored as on/off and re-derived from the fa
     MotionTuning off = sampleTuning();
     off.overshoot_guard = 0.0f;
     std::array<std::byte, stored::kConfigBlobBytes> b{};
-    REQUIRE(stored::encodeConfig(b, sampleConfig(), off, 1) == b.size());
+    REQUIRE(stored::encodeConfig(b, sampleConfig(), off, valence::StoredModes{}, 1) == b.size());
     StoredConfig c;
     MotionTuning t;
     uint16_t gen = 0;
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, gen));
+    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, g_modes, gen));
     CHECK(t.overshoot_guard == 0.0f);
 
     const auto on = encodedConfig();
-    REQUIRE(stored::decodeConfig(on, 2.0f, c, t, gen));
+    REQUIRE(stored::decodeConfig(on, 2.0f, c, t, g_modes, gen));
     CHECK(t.overshoot_guard == 2.0f);   // a new engine factory value wins
 }
 
@@ -107,7 +110,7 @@ TEST_CASE("config blob: every rejection leaves the factory values standing") {
         StoredConfig c = factoryCfg;
         MotionTuning t = factoryTune;
         uint16_t gen = 99;
-        CHECK_FALSE(stored::decodeConfig(in, kFactoryGuard, c, t, gen));
+        CHECK_FALSE(stored::decodeConfig(in, kFactoryGuard, c, t, g_modes, gen));
         CHECK(c == factoryCfg);
         CHECK(t == factoryTune);
         CHECK(gen == 99);
@@ -146,28 +149,28 @@ TEST_CASE("config blob: every rejection leaves the factory values standing") {
     }
     SUBCASE("cfg_gen 0") {
         std::array<std::byte, stored::kConfigBlobBytes> b{};
-        REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), 0) == b.size());
+        REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), valence::StoredModes{}, 0) == b.size());
         expectRejected(b);
     }
     SUBCASE("out-of-range tuning is rejected whole, never clamped") {
         MotionTuning t = sampleTuning();
         t.blend_steps = 11;
         std::array<std::byte, stored::kConfigBlobBytes> b{};
-        REQUIRE(stored::encodeConfig(b, sampleConfig(), t, 1) == b.size());
+        REQUIRE(stored::encodeConfig(b, sampleConfig(), t, valence::StoredModes{}, 1) == b.size());
         expectRejected(b);
     }
     SUBCASE("non-finite config is rejected whole") {
         StoredConfig c = sampleConfig();
         c.jog_accel = std::numeric_limits<float>::quiet_NaN();
         std::array<std::byte, stored::kConfigBlobBytes> b{};
-        REQUIRE(stored::encodeConfig(b, c, sampleTuning(), 1) == b.size());
+        REQUIRE(stored::encodeConfig(b, c, sampleTuning(), valence::StoredModes{}, 1) == b.size());
         expectRejected(b);
     }
 }
 
 TEST_CASE("config blob: encode refuses a short buffer") {
     std::array<std::byte, stored::kConfigBlobBytes - 1> small{};
-    CHECK(stored::encodeConfig(small, sampleConfig(), sampleTuning(), 1) == 0);
+    CHECK(stored::encodeConfig(small, sampleConfig(), sampleTuning(), valence::StoredModes{}, 1) == 0);
 }
 
 // ---- presets -------------------------------------------------------------------
@@ -270,10 +273,41 @@ TEST_CASE("config blob: a pre-rename v2 blob decodes into the jog fields") {
     StoredConfig c;
     MotionTuning t;
     uint16_t gen = 0;
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, gen));
+    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, g_modes, gen));
     CHECK(gen == 31);
     CHECK(c.jog_speed == 64.0f);
     CHECK(c.jog_accel == 333.0f);
     CHECK(c.input_speed == 800.0f);
     CHECK(c.max_rail == 300.0f);
+}
+
+TEST_CASE("config blob: v3 carries the schedule horizon; a v2 blob migrates to the 250 ms default") {
+    std::array<std::byte, stored::kConfigBlobBytes> b{};
+    valence::StoredModes m;
+    m.horizon = 2;
+    REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), m, 9) == b.size());
+    StoredConfig c;
+    MotionTuning t;
+    valence::StoredModes got;
+    uint16_t gen = 0;
+    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    CHECK(got.horizon == 2);
+    CHECK(valence::kHorizonMs[got.horizon] == 1000);
+
+    // The same bytes cut back to the v2 layout and relabeled v2: the tail the
+    // old firmware never wrote takes the factory value.
+    std::array<std::byte, stored::kConfigV2Bytes> v2{};
+    std::memcpy(v2.data(), b.data(), v2.size());
+    v2[4] = std::byte{2};
+    got.horizon = 1;
+    REQUIRE(stored::decodeConfig(v2, kFactoryGuard, c, t, got, gen));
+    CHECK(got.horizon == 0);
+    CHECK(valence::kHorizonMs[got.horizon] == 250);
+
+    // An ordinal past the select's options is rejected whole.
+    b[b.size() - 1] = std::byte{3};
+    CHECK_FALSE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    // A v3 label on v2 bytes is a length mismatch, never a misread.
+    v2[4] = std::byte{3};
+    CHECK_FALSE(stored::decodeConfig(v2, kFactoryGuard, c, t, got, gen));
 }

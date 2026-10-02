@@ -1166,18 +1166,20 @@ private:
     // commit()).
     static constexpr uint64_t kAnchorMaxLateUs = 50000;
     // Scheduled-anchor LEAD bound, and the ceiling on how long a scheduled
-    // successor may suppress the settle boundary. At or above the hub's
-    // `max_future_schedule_ms` (250 ms, Valence registry), never under it.
-    static constexpr uint64_t kAnchorMaxLeadUs = 500000;
+    // successor may suppress the settle boundary. At or above the largest
+    // schedule horizon a hub may grant, `schedule_horizon_max_ms` (1000 ms,
+    // Valence registry, RFC-087), never under it.
+    static constexpr uint64_t kAnchorMaxLeadUs = 1000000;
     static constexpr float    kDetailAnchorLead = -97.0f;   // see PlanFailed
-    // Anchored plans parked at once. The bound that matters is the registry's
-    // `max_future_schedule_ms` (250 ms) over the shortest segment a client
-    // streams: the field's 41 ms cadence needs 7, so 8 covers the hub's own
-    // ceiling with a slot to spare, and a client's 110 ms lookahead needs 3.
-    // CEILING: a chain of segments under ~31 ms streamed at the full 250 ms
-    // schedule window overflows and is refused (kDetailScheduleFull), which is
-    // countable, unlike the silent eviction a shallower queue performs.
-    static constexpr size_t   kScheduleDepth = 8;
+    // Anchored plans parked at once, sized to the largest schedule horizon
+    // (RFC-087): a full segments bundle is 32 segments, and at the 1000 ms
+    // horizon that is 1000 ms of 32/s, every one parked ahead of its start.
+    // CEILING: segments under ~31 ms streamed across the full 1000 ms horizon
+    // overflow and are refused (kDetailScheduleFull), which is countable,
+    // unlike the silent eviction a shallower queue performs. Each slot is a
+    // whole PlanSlot (a Ruckig trajectory, ~0.6 KB): this depth is the bulk of
+    // the Engine's size, and the Engine lives in INTERNAL RAM.
+    static constexpr size_t   kScheduleDepth = 32;
     static constexpr float    kDetailScheduleFull = -96.0f;  // see PlanFailed
 
     // A complete plan, off to one side. A queued slot holds a command

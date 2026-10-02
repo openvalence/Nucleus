@@ -34,6 +34,7 @@
 // citation of the ARCHIVED S3-era reference repo (SlopDrive-32), never a file
 // in this tree; this board's twin of that code is ValenceHub.cpp.
 
+#include <array>
 #include <cstdint>
 
 #include "valence/channel/catalog.hpp"
@@ -224,6 +225,12 @@ inline constexpr float max_rail    = 500.0f;      // DEFAULT_MAX_RAIL_MM
 // drives it defaults on.
 inline constexpr uint8_t overshoot_clamp   = 1;
 }  // namespace factory
+
+// ---- The schedule horizon (RFC-087, SPEC 5.4) ---------------------------------
+// The three steps a segments grant may advertise, indexed by 0x1030's
+// schedule_horizon ordinal. 500 has no registry name; SPEC 5.4 lists it.
+inline constexpr std::array<uint16_t, 3> kHorizonMs{
+    uint16_t(limits::max_future_schedule_ms), 500, uint16_t(limits::schedule_horizon_max_ms)};
 
 // ---- Hard firmware ceilings advertised as `min`/`max` -----------------------
 // The bounds WebUI::applySettings actually clamps to (src/ui/WebUI.cpp), NOT
@@ -1122,8 +1129,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "machine-modes" — STATE, elevated, on-change -----------------------
-    // One live MODE setting: overshoot_clamp, which arms kinetic's overshoot
-    // guard. motion_backend is READ-ONLY (no setting_key): this board has one
+    // Live MODE settings: overshoot_clamp, which arms kinetic's overshoot
+    // guard, and schedule_horizon (RFC-087), the segments grants' horizon.
+    // motion_backend is READ-ONLY (no setting_key): this board has one
     // backend, soldered, and a select it could not honor would be a control
     // that drives nothing. home_style exists only with has_drive, because
     // both homing cycles it picks between need a drive. blend_mode_reserved and
@@ -1153,7 +1161,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // category rather than more fields on 0x0081 (see ch::machine_modes for
     // the enabled_mask arithmetic that makes the split structural).
     //
-    // Layout [5 B, 6 B with has_drive], all u8 — small enough that the
+    // Layout [6 B, 7 B with has_drive], all u8 — small enough that the
     // on-change cadence costs nothing, and every value is an enum the catalog
     // names, so a generic client renders it without knowing this device
     // exists. ValenceDevice.cpp's publishMachineModes() packs the same bytes.
@@ -1190,21 +1198,22 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                      {"off", "on"});
     // Bit i gates the i-th setting-annotated field, same rule as 0x0081.
     // Neither reserved byte nor motion_backend carries a setting_key, so
-    // overshoot_clamp is bit 0 and home_style, where it exists, bit 1.
+    // overshoot_clamp is bit 0, home_style (where it exists) bit 1, and
+    // schedule_horizon the next bit.
     if (feat.has_drive) {
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
                             .desc = "Which of these the machine will accept right now.",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
-                           {"overshoot_clamp", "home_style"});
+                           {"overshoot_clamp", "home_style", "schedule_horizon"});
     } else {
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
                             .desc = "Which of these the machine will accept right now.",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
-                           {"overshoot_clamp"});
+                           {"overshoot_clamp", "schedule_horizon"});
     }
     // Which path actually drives the motor. READ-ONLY: the backend is what is
     // soldered, so there is no choice for a setting to make.
@@ -1218,18 +1227,31 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .flags = valence::setting_flags::advanced,
                       .hasRank = true, .rank = valence::ui_ranks::advanced},
                      {"step-dir", "modbus", "quadrature"});
-    // APPENDED LAST so its absence shifts no offset. Needs a drive: one cycle
-    // feels for the hard stops through it, the other hands it the whole job.
-    if (!feat.has_drive) return;
-    c.addSelectField({.name = "home_style", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+    // Needs a drive: one cycle feels for the hard stops through it, the other
+    // hands it the whole job.
+    if (feat.has_drive) {
+        c.addSelectField({.name = "home_style", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .dflt = SettingDefault::ofInt(0),
+                          .group = "Motion behavior",
+                          .desc = "How the machine finds home: feel for the hard stops itself, or "
+                                  "hand the whole cycle to the drive.",
+                          .settingKey = 6, .flags = valence::setting_flags::advanced,
+                          .hasSettingKey = true,
+                          .hasRank = true, .rank = valence::ui_ranks::advanced},
+                         {"sensorless sweep", "drive built-in"});
+    }
+    // RFC-087: the schedule horizon a segments grant advertises (kHorizonMs).
+    // Refused INTERLOCK while any session holds a segments grant, because the
+    // grant's horizon is a commitment for its life (SPEC 5.4).
+    c.addSelectField({.name = "schedule_horizon", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0),
-                      .group = "Motion behavior",
-                      .desc = "How the machine finds home: feel for the hard stops itself, or "
-                              "hand the whole cycle to the drive.",
-                      .settingKey = 6, .flags = valence::setting_flags::advanced,
+                      .group = "Streaming",
+                      .desc = "How far ahead a segment player may schedule. Longer rides out poor "
+                              "WiFi. Disconnect the player to change it.",
+                      .settingKey = 7, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true,
                       .hasRank = true, .rank = valence::ui_ranks::advanced},
-                     {"sensorless sweep", "drive built-in"});
+                     {"250 ms", "500 ms", "1000 ms"});
     };
 
     // ---- "kinetic-*" — STATE, tuning -------------------------------------
@@ -1890,6 +1912,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addSchemaField({.key = 6, .name = "home_style", .type = CborFieldType::uint_t, .unit = "",
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     }
+    c.addSchemaField({.key = 7, .name = "schedule_horizon", .type = CborFieldType::uint_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = float(kHorizonMs.size() - 1)});
     };
 
     // ---- "kinetic-set" — INTENT, control, 5 Hz ---------------------------

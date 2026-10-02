@@ -508,3 +508,23 @@ TEST_CASE("ESTOP drops override and a running return; release lands in plain PAU
     CHECK_FALSE(r->census().override_mode);
     CHECK_FALSE(r->submit(MotionSource::Manual, 50.0f));
 }
+
+TEST_CASE("a 32-segment bundle spanning the 1000 ms schedule horizon parks whole (RFC-087)") {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    const uint64_t t_base = g_now_us + 20'000;
+    for (int i = 0; i < 32; ++i) {
+        MotionIntent in;
+        in.source = MotionSource::Stream;
+        in.target_mm = (i % 2 == 0) ? 260.0f : 140.0f;
+        in.duration_us = 30'000;
+        in.anchor_us = t_base + uint64_t(i) * 30'000;   // the last start 950 ms ahead
+        REQUIRE(r->arb.accept(in, g_now_us));
+    }
+    r->run(1'100'000);
+    const MotionCensus c = r->census();
+    CHECK(c.intents == 32);
+    CHECK(c.rejected == 0);
+    CHECK(c.failures == 0);
+}

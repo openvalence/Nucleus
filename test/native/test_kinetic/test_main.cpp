@@ -3051,7 +3051,7 @@ TEST_CASE("An anchor beyond the lead bound is refused; the plan in flight is unt
 
     Command c2 = c1;
     c2.target = 0.90f;
-    c2.anchor_us = 600 * kMs;   // past kAnchorMaxLeadUs (500 ms)
+    c2.anchor_us = 1100 * kMs;  // past kAnchorMaxLeadUs (1000 ms)
     c2.has_anchor = true;
     CHECK_FALSE(e.commit(c2, 10 * kMs));
 
@@ -3063,7 +3063,7 @@ TEST_CASE("An anchor beyond the lead bound is refused; the plan in flight is unt
     CHECK(saw);
     CHECK(e.positionAt(50 * kMs) == doctest::Approx(ref).epsilon(1e-12));
     CHECK(e.snapshot(50 * kMs).target == doctest::Approx(0.40).epsilon(1e-6));
-    CHECK_FALSE(e.isBusy(400 * kMs));   // no slot was parked
+    CHECK_FALSE(e.isBusy(900 * kMs));   // no slot was parked
 }
 
 TEST_CASE("No settle while a scheduled successor exists") {
@@ -3158,9 +3158,13 @@ TEST_CASE("A full schedule queue refuses with -96 and keeps what it holds") {
     c.duration_us = 40 * (uint32_t)kMs;
     c.has_duration = true; c.end_vel = 0.0f; c.has_end_vel = true;
     c.has_anchor = true;
-    for (int i = 0; i < 8; ++i) {                 // kScheduleDepth
+    // kScheduleDepth (32) segments of 30 ms, the whole 1000 ms horizon at
+    // 32/s: every one parks.
+    constexpr int kDepth = 32;
+    c.duration_us = 30 * (uint32_t)kMs;
+    for (int i = 0; i < kDepth; ++i) {
         c.target = (i % 2 == 0) ? 0.60f : 0.40f;
-        c.anchor_us = uint32_t((100 + 40 * i) * kMs);
+        c.anchor_us = uint32_t((40 + 30 * i) * kMs);
         REQUIRE(e.commit(c, 10 * kMs));
     }
     kinetic::Anomaly ev;
@@ -3168,7 +3172,7 @@ TEST_CASE("A full schedule queue refuses with -96 and keeps what it holds") {
 
     Command over = c;
     over.target = 0.95f;
-    over.anchor_us = uint32_t(420 * kMs);         // behind all eight
+    over.anchor_us = uint32_t((40 + 30 * kDepth) * kMs);    // behind all of them
     CHECK_FALSE(e.commit(over, 10 * kMs));
     bool saw = false;
     while (e.popAnomaly(ev))
@@ -3176,14 +3180,14 @@ TEST_CASE("A full schedule queue refuses with -96 and keeps what it holds") {
             ev.detail == doctest::Approx(-96.0f)) saw = true;
     CHECK(saw);
 
-    // The eight it holds still run, at their own anchors, and the refused one
+    // Every one it holds still runs, at its own anchor, and the refused one
     // never appears.
-    for (int i = 0; i < 8; ++i) {
-        const uint64_t at = (100 + 40 * i) * kMs;
+    for (int i = 0; i < kDepth; ++i) {
+        const uint64_t at = (40 + 30 * i) * kMs;
         e.positionAt(at);
         CHECK(e.lastPlanUs() == at);
     }
-    for (uint64_t t = 420 * kMs; t <= 500 * kMs; t += kMs)
+    for (uint64_t t = (40 + 30 * kDepth) * kMs; t <= (120 + 30 * kDepth) * kMs; t += kMs)
         CHECK(e.positionAt(t) < 0.80);
 }
 

@@ -107,7 +107,7 @@ public:
     bool adoptPresetsBlob(std::span<const std::byte> blob);
     // Bytes written, 0 when `out` is too small.
     size_t encodeConfigBlob(std::span<std::byte> out, uint16_t cfgGen) const {
-        return stored::encodeConfig(out, _cfg, _tune, cfgGen);
+        return stored::encodeConfig(out, _cfg, _tune, _modes, cfgGen);
     }
     size_t encodePresetsBlob(std::span<std::byte> out) const { return _presets.encode(out); }
 
@@ -142,6 +142,7 @@ public:
     bool canClearEstop() override;
     bool admitsUnderPause(uint16_t channel_id, const IntentValueMap& value,
                           bool overrideLatched) override;
+    uint16_t scheduleHorizonMs(uint16_t channel_id) override;
     void onEstop(uint8_t cause, uint8_t origin) override;
     void onStreamBundle(uint16_t channel_id, uint32_t session_id,
                         const BundleView& bundle) override;
@@ -161,6 +162,7 @@ private:
     Result<IntentValueMap, NackCode> applyPresets(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applySafety(const IntentValueMap& requested);
     bool railOwned() const;
+    bool segmentsGrantLive() const;
     void haltGenerator();
     void pushPattern();
     void publishPatternPlane(const MotionCensus& mo);
@@ -178,6 +180,10 @@ private:
     // factory set until a stored one is adopted. This copy IS the setting; the
     // engine holds whatever motionSetTuning() last carried from it.
     MotionTuning _tune = motionDefaultTuning();
+    // The stored 0x1030 modes beside the tuning (StoredState.h).
+    StoredModes _modes{};
+    // The schedule_horizon mask bit as last published.
+    bool _horizonOpenSent = true;
     // Which of those four cards an applied write changed, bit per card
     // (ValenceDevice.cpp, kCard*). tick() pushes and republishes, then clears.
     uint8_t _tuneDirty = 0;

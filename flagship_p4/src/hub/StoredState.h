@@ -6,12 +6,15 @@
 // Constraints:
 // - HARDWARE-FREE and header-only: the P4 composition (NVS), the host twin (a
 //   file) and the native suite all run this one codec.
-// - ONE BLOB PER CONCERN, opening [magic u32][version u8], decoded only at its
-//   exact length. Another version, a short or long read, a non-finite or
-//   out-of-range value: the blob is REJECTED WHOLE and the factory values
-//   stand. A layout change never misreads bytes, and nothing is clamped into
-//   shape at boot (a clamp is a config change, which §4.2 would make bump
-//   cfg_gen in the middle of restoring it).
+// - ONE BLOB PER CONCERN, opening [magic u32][version u8], decoded only at the
+//   exact length its version defines. An unknown version, a short or long
+//   read, a non-finite or out-of-range value: the blob is REJECTED WHOLE and
+//   the factory values stand. A layout change never misreads bytes, and
+//   nothing is clamped into shape at boot (a clamp is a config change, which
+//   §4.2 would make bump cfg_gen in the middle of restoring it).
+// - LAYOUT CHANGES APPEND AND MIGRATE: every older version still decodes, its
+//   missing tail taking the factory value, so a firmware update never orphans
+//   a stored setting. The next write is the current version.
 // - cfg_gen RIDES WITH EVERY VALUE IT COVERS. Both 0x3000 and the tuning
 //   writers bump it, so all of them share this one blob: one NVS write is
 //   atomic, and a generation can never land without its values or the reverse.
@@ -49,6 +52,13 @@ struct StoredConfig {
     bool operator==(const StoredConfig&) const = default;
 };
 
+// The stored 0x1030 modes that are not engine tuning.
+struct StoredModes {
+    uint8_t horizon = 0;   // schedule_horizon ordinal: kHorizonMs (ValenceCatalog.h)
+
+    bool operator==(const StoredModes&) const = default;
+};
+
 // ---- tuning bounds ------------------------------------------------------------
 // What 0x3120 clamps to and what a stored set must sit inside. Mirrors the
 // catalog's kinetic-* min/max, which mirror the engine's own clamps.
@@ -79,9 +89,16 @@ inline float overshootGuardFor(bool on, float factoryGuard) {
 namespace stored {
 
 inline constexpr uint32_t kConfigMagic   = 0x56434647u;  // "VCFG"
-inline constexpr uint8_t  kConfigVersion = 2;            // bump on ANY layout change
-// magic 4, version 1, cfg_gen 2, config 8 x f32, tuning 8 x f32 + 2 x u32 + 7 x u8
-inline constexpr size_t   kConfigBlobBytes = 4 + 1 + 2 + 32 + 32 + 8 + 7;
+inline constexpr uint8_t  kConfigVersion = 3;            // bump on ANY layout change
+// v2: magic 4, version 1, cfg_gen 2, config 8 x f32, tuning 8 x f32 + 2 x u32 + 7 x u8
+inline constexpr size_t   kConfigV2Bytes = 4 + 1 + 2 + 32 + 32 + 8 + 7;
+// v3 appends the schedule_horizon ordinal (u8).
+inline constexpr size_t   kConfigBlobBytes = kConfigV2Bytes + 1;
+
+// 0 for a version this firmware cannot read.
+inline constexpr size_t configBytesFor(uint8_t version) {
+    return version == 2 ? kConfigV2Bytes : version == 3 ? kConfigBlobBytes : 0;
+}
 
 namespace detail {
 template <typename T>
@@ -130,9 +147,11 @@ inline bool tuningValid(const MotionTuning& t) {
         && in(float(t.settle_grace_us) / 1000.0f, 0.0f, b::settle_ms_max);
 }
 
+inline bool modesValid(const StoredModes& m) { return m.horizon < kHorizonMs.size(); }
+
 // Returns bytes written: kConfigBlobBytes, or 0 when `out` is too small.
 inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
-                           const MotionTuning& t, uint16_t cfgGen) {
+                           const MotionTuning& t, const StoredModes& m, uint16_t cfgGen) {
     using detail::put;
     if (out.size() < kConfigBlobBytes) return 0;
     size_t n = 0;
@@ -151,18 +170,21 @@ inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
                       t.curve_policy, t.infeasible_policy, t.blend_steps,
                       uint8_t(t.overshoot_guard > 0.0f)})
         put(out, n, v);
+    put(out, n, m.horizon);
     return n;
 }
 
 // All-or-nothing: false leaves every output untouched, so the caller's factory
 // values stand. factoryGuard is the running engine's overshoot multiplier.
 inline bool decodeConfig(std::span<const std::byte> in, float factoryGuard,
-                         StoredConfig& cfgOut, MotionTuning& tuneOut, uint16_t& genOut) {
+                         StoredConfig& cfgOut, MotionTuning& tuneOut, StoredModes& modesOut,
+                         uint16_t& genOut) {
     using detail::get;
-    if (in.size() != kConfigBlobBytes) return false;
+    if (in.size() < 5) return false;
     size_t n = 0;
     if (get<uint32_t>(in, n) != kConfigMagic) return false;
-    if (get<uint8_t>(in, n) != kConfigVersion) return false;
+    const uint8_t version = get<uint8_t>(in, n);
+    if (configBytesFor(version) == 0 || in.size() != configBytesFor(version)) return false;
     const uint16_t gen = get<uint16_t>(in, n);
     if (gen == 0) return false;
 
@@ -189,9 +211,13 @@ inline bool decodeConfig(std::span<const std::byte> in, float factoryGuard,
     t.blend_steps       = b[5];
     t.overshoot_guard   = overshootGuardFor(b[6] != 0, factoryGuard);
 
-    if (!configValid(c) || !tuningValid(t)) return false;
+    StoredModes m;
+    if (version >= 3) m.horizon = get<uint8_t>(in, n);
+
+    if (!configValid(c) || !tuningValid(t) || !modesValid(m)) return false;
     cfgOut = c;
     tuneOut = t;
+    modesOut = m;
     genOut = gen;
     return true;
 }

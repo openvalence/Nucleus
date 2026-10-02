@@ -78,12 +78,6 @@ constexpr uint32_t kCfgPersistDebounceMs = 2000;
 // cannot mean absent; INT16_MIN is the value the catalog reserves.
 constexpr int16_t kSegNoEndVel = -32768;
 
-// How far ahead of now a stream sample's t_off may resolve before it is treated
-// as a client clock that lost sync. Past this the sample is pulled back rather
-// than parked: a quarter second of runway is already far more than any bundle
-// span, so a larger lead is a resync failure, not a schedule.
-constexpr int32_t kStreamFarFutureUs = 250000;
-
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 // ---- packed-layout writers ---------------------------------------------------
@@ -309,20 +303,24 @@ void publishOdometer(Hub& hub, const MotionCensus& m) {
     publishPacked(hub, ch::odometer, buf, n);
 }
 
-// Layout per ValenceCatalog.h's machine-modes entry: 5 B, plus home_style
+// Layout per ValenceCatalog.h's machine-modes entry: 6 B, plus home_style
 // only where has_drive put it in the catalog.
-void publishMachineModes(Hub& hub, const MotionTuning& t) {
-    std::array<std::byte, 6> buf{};
-    const size_t len = boardFeatures().has_drive ? 6 : 5;
+void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, bool horizonOpen) {
+    std::array<std::byte, 7> buf{};
+    const bool drive = boardFeatures().has_drive;
+    const size_t len = drive ? 7 : 6;
     size_t n = 0;
     packU8(buf, n, 0);   // blend_mode_reserved
     packU8(buf, n, 0);   // stream_speed_reserved
     packU8(buf, n, t.overshoot_guard > 0.0f ? 1 : 0);   // overshoot_clamp
-    // enabled_mask: bit 0 overshoot_clamp, accepted at all times. Bit 1
-    // (home_style, has_drive only) stays low: nothing here runs a homing cycle.
-    packU8(buf, n, 0x01);
+    // enabled_mask: bit 0 overshoot_clamp, accepted at all times. home_style
+    // (has_drive only) stays low: nothing here runs a homing cycle.
+    // schedule_horizon drops while a segments grant is live (applyModes()).
+    const uint8_t horizonBit = drive ? 0x04 : 0x02;
+    packU8(buf, n, uint8_t(0x01 | (horizonOpen ? horizonBit : 0)));
     packU8(buf, n, 2);   // motion_backend, read-only: quadrature, the LP-core emitter
-    if (len == 6) packU8(buf, n, 0);   // home_style
+    if (drive) packU8(buf, n, 0);   // home_style
+    packU8(buf, n, m.horizon);      // schedule_horizon
     publishPacked(hub, ch::machine_modes, std::span<const std::byte>(buf).first(len), n);
 }
 
@@ -494,21 +492,56 @@ void ValenceDevice::noteTuning(const MotionTuning& next, bool& cfgChanged) {
     _tune = next;
 }
 
+// Keys 4 (overshoot_clamp) and 7 (schedule_horizon); the whole request is
+// validated before anything is applied. A horizon change is refused INTERLOCK
+// while a segments grant is live: the grant advertised the old value for its
+// life (SPEC 5.4), and the library re-reads this one on every bundle.
 Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged) {
     const auto* f4 = findField(requested, 4);   // overshoot_clamp
-    if (!f4) return Ret::err(NackCode::INVALID_VALUE);
-    const std::optional<float> v = numberOf(f4);
-    if (!v) return Ret::err(NackCode::INVALID_VALUE);
-
-    MotionTuning next = _tune;
-    const bool on = wholeIn(*v, 0.0f, 1.0f) != 0;
-    next.overshoot_guard = overshootGuardFor(on, motionDefaultTuning().overshoot_guard);
-    noteTuning(next, cfgChanged);
+    const auto* f7 = findField(requested, 7);   // schedule_horizon
+    if (!f4 && !f7) return Ret::err(NackCode::INVALID_VALUE);
+    if ((f4 && !numberOf(f4)) || (f7 && !numberOf(f7))) return Ret::err(NackCode::INVALID_VALUE);
+    StoredModes nextModes = _modes;
+    if (f7) nextModes.horizon = uint8_t(wholeIn(*numberOf(f7), 0.0f, float(kHorizonMs.size() - 1)));
+    if (!(nextModes == _modes) && segmentsGrantLive()) return Ret::err(NackCode::INTERLOCK);
 
     IntentValueMap applied{};
-    applied.count = 1;
-    applied.fields[0] = {4, IntentValue::ofU64(on ? 1 : 0)};
+    uint32_t n = 0;
+    bool tuneChanged = false;
+    if (f4) {
+        MotionTuning next = _tune;
+        const bool on = wholeIn(*numberOf(f4), 0.0f, 1.0f) != 0;
+        next.overshoot_guard = overshootGuardFor(on, motionDefaultTuning().overshoot_guard);
+        noteTuning(next, tuneChanged);
+        applied.fields[n++] = {4, IntentValue::ofU64(on ? 1 : 0)};
+    }
+    if (f7) applied.fields[n++] = {7, IntentValue::ofU64(nextModes.horizon)};
+    const bool modesChanged = !(nextModes == _modes);
+    _modes = nextModes;
+    // Same card, same publish and persist path as the tuning (tick()).
+    if (modesChanged) _tuneDirty |= kCardModes;
+    cfgChanged = tuneChanged || modesChanged;
+    applied.count = n;
     return Ret::ok(applied);
+}
+
+// Any session holding a segments publish grant, live or parked: its grant
+// carries the horizon this hub advertised.
+bool ValenceDevice::segmentsGrantLive() const {
+    if (_hub == nullptr) return false;
+    for (size_t i = 0; i < kHubMaxSessions; ++i) {
+        const HubSession* s = _hub->sessionBySlot(i);
+        if (s == nullptr || !s->occupied()) continue;
+        for (const auto& pg : s->publishGrants)
+            if (pg.used && pg.channel_id == ch::motion_segment) return true;
+    }
+    return false;
+}
+
+// RFC-087: only the segments channel has a horizon. The library advertises
+// 500 and 1000 and omits the key for 250, its default.
+uint16_t ValenceDevice::scheduleHorizonMs(uint16_t channel_id) {
+    return channel_id == ch::motion_segment ? kHorizonMs[_modes.horizon] : 0;
 }
 
 Ret ValenceDevice::applyTuning(const IntentValueMap& requested, bool& cfgChanged) {
@@ -1021,10 +1054,16 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
         (isSegment && _hub != nullptr) ? _hub->publishCurveFamily(session_id, channel_id) : 0;
 
     // t_base/t_off are u32 HUB-us, the same wrapping domain the hub clock reads
-    // (§7.2). now64 stays the FULL 64-bit reading so the anchor never wraps
-    // itself; only the WIRE stamp being resolved against it does.
+    // (§7.2); BundleView already scaled a segments t_off from its 100 us unit.
+    // now64 stays the FULL 64-bit reading so the anchor never wraps itself;
+    // only the WIRE stamp being resolved against it does.
     const int64_t now64 = int64_t(deviceNowUs());
     const uint32_t now32 = uint32_t(uint64_t(now64) & 0xFFFFFFFFull);
+    // RFC-084 lead cap, one per kind: a sample stamped further ahead than its
+    // cap is CLAMPED to it, never dropped. Segments ride the grant's horizon
+    // (RFC-087); samples the registry's max_future_schedule_ms.
+    const int32_t leadCapUs = int32_t(isSegment ? scheduleHorizonMs(channel_id)
+                                                : limits::max_future_schedule_ms) * 1000;
 
     uint32_t dropped = 0;
     uint32_t farClamped = 0;
@@ -1033,7 +1072,7 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
         // because the wire stamp is near now by construction (the bundle
         // span is capped far under the 32-bit wrap).
         int32_t delta = int32_t(bundle.sampleTimeUs(i) - now32);
-        if (delta > kStreamFarFutureUs) { delta = kStreamFarFutureUs; ++farClamped; }
+        if (delta > leadCapUs) { delta = leadCapUs; ++farClamped; }
         if (delta < 0) delta = 0;
 
         const auto sample = bundle.sample(i);
@@ -1170,8 +1209,10 @@ void ValenceDevice::pushConfigToMotion() const {
 bool ValenceDevice::adoptConfigBlob(std::span<const std::byte> blob, uint16_t& cfgGen) {
     StoredConfig c;
     MotionTuning t;
-    if (!stored::decodeConfig(blob, motionDefaultTuning().overshoot_guard, c, t, cfgGen)) return false;
+    StoredModes m;
+    if (!stored::decodeConfig(blob, motionDefaultTuning().overshoot_guard, c, t, m, cfgGen)) return false;
     _cfg = c;
+    _modes = m;
     _cfgDirty = false;
     // The engine adopts through the live write's own door, never a side path.
     _tune = t;
@@ -1194,7 +1235,7 @@ void ValenceDevice::attach(Hub& hub) {
     publishHubStatus();
     // _tune is the factory set or the adopted one, and the engine already holds
     // it either way (adoptConfigBlob pushed it), so nothing is pushed here.
-    publishMachineModes(hub, _tune);
+    publishMachineModes(hub, _tune, _modes, !segmentsGrantLive());
     publishKineticCards(hub, _tune, kCardLimits | kCardChase | kCardWaveform);
     const MotionCensus mo = motionCensus();
     publishMotion(hub, mo, patternActive());
@@ -1228,6 +1269,14 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     // a strip that is only news while a plan runs.
     const MotionCensus mo = motionCensus();
 
+    // schedule_horizon's enabled_mask bit follows the segments grants, which
+    // no write announces.
+    const bool horizonOpen = !segmentsGrantLive();
+    if (horizonOpen != _horizonOpenSent) {
+        _horizonOpenSent = horizonOpen;
+        publishMachineModes(*_hub, _tune, _modes, horizonOpen);
+    }
+
     // RETURN arrived (SPEC 11.1): override drops, plain PAUSE stays. A counter,
     // not the census flag, because the census lags the request by up to a
     // publish interval and would read "no override" before it ever started.
@@ -1251,7 +1300,7 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
 
     if (_tuneDirty != 0) {
         motionSetTuning(_tune);
-        if (_tuneDirty & kCardModes) publishMachineModes(*_hub, _tune);
+        if (_tuneDirty & kCardModes) publishMachineModes(*_hub, _tune, _modes, !segmentsGrantLive());
         publishKineticCards(*_hub, _tune, _tuneDirty);
         _tuneDirty = 0;
         // Same blob as 0x1000: the tuning write bumped cfg_gen too.
