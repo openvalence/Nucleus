@@ -2044,6 +2044,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // these are rare, human-initiated, and share a shape. 2 Hz because a human
     // presses them; a client that needs to press one faster than twice a second
     // is doing something the machine should not help with.
+    //
+    // No op here is destructive (RFC-063, SPEC 8.8), so destructive_options
+    // stays absent: clear_fault drops a latch that re-asserts if the fault is
+    // still there, save_config commits values every one of which stays
+    // writable from a client, and servo_scan only queues register reads. An op
+    // that loses state a client cannot restore (a factory reset, a drive
+    // re-address) sets its bit in destructive_options when it is added.
     auto addMachineAdmin = [&]() {
     c.addEntry({.id = ch::machine_admin, .name = "machine-admin",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
