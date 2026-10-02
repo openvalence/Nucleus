@@ -100,10 +100,10 @@ inline constexpr uint16_t drive_tune       = 0x1130;  // STATE·motion, family 3
 // modifier (6 fields each, well under the 8-bit enabled_mask) — same
 // principle as the kinetic_limits/kinetic_chase/kinetic_waveform split.
 inline constexpr uint16_t pattern_advanced          = 0x1210;  // STATE·pattern, family 1 member 0 (master; was 0x1201) — ap_mode + 7 base controls
-// The six fray-d modifier lanes: ONE family (domain=pattern, family=1),
+// The six fray-d modulators (RFC-066): ONE family (domain=pattern, family=1),
 // members 1-6. Member order is speed-in/out, accel-in/out, depth-1/2 — NOT
 // advpat::BaseId order (depth,depth,speedin,speedout,accelin,accelout) — see
-// kModChannels in SlopSyncHubService.cpp, which maps between the two.
+// kModChannels in ValenceDevice.cpp, which maps between the two.
 inline constexpr uint16_t pattern_adv_mod_speedin   = 0x1211;  // STATE·pattern, family 1 member 1 (was 0x1204)
 inline constexpr uint16_t pattern_adv_mod_speedout  = 0x1212;  // STATE·pattern, family 1 member 2 (was 0x1205)
 inline constexpr uint16_t pattern_adv_mod_accelin   = 0x1213;  // STATE·pattern, family 1 member 3 (was 0x1206)
@@ -1605,99 +1605,108 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "pattern-adv-mod-*" — STATE, background ----------------------------
-    // The 6-field cyclic Modifier (advpat::Modifier) that rides EACH of the 6
-    // base controls (advpat::BASE_COUNT): amplitude ramps a control's swing
-    // in over `in_step` strokes, holds `in_wait`, ramps back over
-    // `out_step`, rests `out_wait`, and `offset` phase-shifts the whole
-    // cycle. ONE CHANNEL PER BASE CONTROL rather than binpacking 36 fields
-    // into the fewest possible 8-field channels: each is a real, separate
-    // concept (a different breathing pattern on depth vs. speed vs. accel),
-    // same judgment 0x008B/C/D made splitting by subsystem, not by
-    // bit-count.
+    // The six MODULATORS (RFC-066, SPEC 8.8 `mod.*`), one per base control
+    // (advpat::Modifier x advpat::BASE_COUNT). A modulator swings its control
+    // by `amount` through a cycle: `in_step` strokes rising, `in_wait` held,
+    // `out_step` falling, `out_wait` at rest, the whole cycle shifted by
+    // `offset` strokes. One modulator per entry, attached by the entry-level
+    // mod_target to the 0x1210 field it rides; its mod.* roles bind within the
+    // entry and repeat across the six by design (SPEC 8.8 cardinality).
     //
-    // ALL SIX SHARE ch::pattern_advanced_cmd as settingChannel (same writer
-    // as ch::pattern_advanced) and `user` as category, so all seven
-    // advanced-pattern cards merge into ONE tab. setting_keys are allocated
-    // 9..44 across the six, 6 keys apiece, matching the wire layout below
-    // exactly: keyBase+0 amplitude, +1 in_step, +2 in_wait, +3 out_step,
-    // +4 out_wait, +5 offset — the SAME formula as SlopSyncHubService's
-    // applyIntent(ch::pattern_advanced_cmd) grouping (base = 9 +
-    // 6*advpat::BaseId); the two must be kept in sync. `advanced`-flagged:
-    // this is the deep-customization layer under the 8 base controls, not
-    // the everyday knobs.
+    // `amount` 0 = no modulation, 100 = the full swing (RFC-066). Presets
+    // stored under the retired 100 = off meaning are migrated on load
+    // (PatternPresetStore blob version 1), never read under this one.
+    //
+    // `base` is the advpat::BaseId. 0x1210 lays the six base controls out at
+    // layout index 2 + base, and the shared writer ch::pattern_advanced_cmd
+    // keys this entry's six fields 9 + 6*base onward in field order, the
+    // arithmetic ValenceDevice::applyPatternAdvanced runs in reverse; the
+    // three must move together. Category control, so all seven
+    // advanced-pattern cards merge into one tab; `advanced`-flagged, the
+    // deep-customization layer under the base controls.
     //   [1*6 fields + 1 mask = 7 B, x6 channels]
     auto addApModifierChannel = [&](uint16_t id, const char* wireName, const char* group,
-                                    uint8_t keyBase) {
+                                    uint8_t base) {
+        const uint8_t keyBase = uint8_t(9 + 6 * base);
         c.addEntry({.id = id, .name = wireName,
                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
                     .access = AccessLevel::watch, .maxRateHz = 0.0f,
                     .defaultPriority = Priority::background,
                     .hasCategory = true, .category = valence::ui_categories::control,
                     .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd,
-                    // rank = advanced at BOTH entry and field level — this whole
-                    // channel IS the deep-customization layer under the 8 base
-                    // controls (see the comment above), and every field it declares
-                    // already carries setting_flags::advanced.
-                    .hasRank = true, .rank = valence::ui_ranks::advanced});
-        c.addLayoutField({.name = "amplitude", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
+                    .hasRank = true, .rank = valence::ui_ranks::advanced,
+                    .hasModTarget = true, .modTargetChannel = ch::pattern_advanced,
+                    .modTargetField = uint16_t(2 + base)});
+        c.addLayoutField({.name = "amount", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
-                          .dflt = SettingDefault::ofInt(100), .group = group,
-                          .desc = "Modulation strength; 100 = off.",
+                          .dflt = SettingDefault::ofInt(0), .group = group,
+                          .desc = "How far this modulator swings its control. 0 leaves the control "
+                                  "at its base value; 100 is the full swing.",
+                          .role = roles::mod_amount,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 0),
                           .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
                           .hasRank = true, .rank = valence::ui_ranks::advanced,
                           .hasUnitId = true, .unitId = valence::unit_ids::percent});
-        c.addLayoutField({.name = "in_step", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+        c.addLayoutField({.name = "in_step", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(1), .group = group,
-                          .desc = "Strokes ramping into the modulation.",
+                          .desc = "Strokes rising into the full swing.",
+                          .role = roles::mod_rise,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 1),
                           .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
-                          .hasRank = true, .rank = valence::ui_ranks::advanced});
-        c.addLayoutField({.name = "in_wait", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .hasRank = true, .rank = valence::ui_ranks::advanced,
+                          .hasUnitId = true, .unitId = valence::unit_ids::count});
+        c.addLayoutField({.name = "in_wait", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
-                          .desc = "Strokes held at full modulation.",
+                          .desc = "Strokes held at the full swing.",
+                          .role = roles::mod_hold,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 2),
                           .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
-                          .hasRank = true, .rank = valence::ui_ranks::advanced});
-        c.addLayoutField({.name = "out_step", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .hasRank = true, .rank = valence::ui_ranks::advanced,
+                          .hasUnitId = true, .unitId = valence::unit_ids::count});
+        c.addLayoutField({.name = "out_step", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(1), .group = group,
-                          .desc = "Strokes ramping back out.",
+                          .desc = "Strokes falling back to the base value.",
+                          .role = roles::mod_fall,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 3),
                           .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
-                          .hasRank = true, .rank = valence::ui_ranks::advanced});
-        c.addLayoutField({.name = "out_wait", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .hasRank = true, .rank = valence::ui_ranks::advanced,
+                          .hasUnitId = true, .unitId = valence::unit_ids::count});
+        c.addLayoutField({.name = "out_wait", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
-                          .desc = "Strokes resting before the cycle repeats.",
+                          .desc = "Strokes resting at the base value before the cycle repeats.",
+                          .role = roles::mod_rest,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 4),
                           .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
-                          .hasRank = true, .rank = valence::ui_ranks::advanced});
-        c.addLayoutField({.name = "offset", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .hasRank = true, .rank = valence::ui_ranks::advanced,
+                          .hasUnitId = true, .unitId = valence::unit_ids::count});
+        c.addLayoutField({.name = "offset", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
-                          .desc = "Phase shift of the cycle.",
+                          .desc = "Strokes this cycle starts shifted by, against the other modulators.",
+                          .role = roles::mod_phase,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 5),
                           .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true, .hasStep = true,
                           .hasRank = true, .rank = valence::ui_ranks::advanced,
-                          .hasUnitId = true, .unitId = valence::unit_ids::percent});
-        // Same honesty note as 0x008E: no setter here checks `homed` either
-        // (setApModifier has no gate beyond the delegate's e-stop check), so
+                          .hasUnitId = true, .unitId = valence::unit_ids::count});
+        // Same honesty note as 0x1210: no setter here checks `homed` either
+        // (Modifier::set has no gate beyond the delegate's e-stop check), so
         // the mask tracks e-stop alone.
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
                             .desc = "Which of these the machine will accept right now.",
                             .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = valence::ui_ranks::detail},
-                           {"amplitude", "in_step", "in_wait", "out_step", "out_wait", "offset"});
+                            .hasRank = true, .rank = valence::ui_ranks::detail},
+                           {"amount", "in_step", "in_wait", "out_step", "out_wait", "offset"});
     };
     // The six invocations move to the final ascending-id call sequence below
     // — see the end of this function.
@@ -2068,14 +2077,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     c.addSchemaField({.key = 8, .name = "out_accel", .type = CborFieldType::uint_t, .unit = "%",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
-    // 6 keys per base control (advpat::BaseId order): amplitude, in_step,
-    // in_wait, out_step, out_wait, offset — base = 9 + 6*id. Authoring order
+    // 6 keys per modulator (advpat::BaseId order): amount, in_step, in_wait,
+    // out_step, out_wait, offset: base = 9 + 6*id. Authoring order
     // doesn't need to be ascending here (the encoder sorts schema fields by
     // key before emitting), so a loop is safe where it would not be for the
     // addEntry() ordering above.
     for (uint8_t id = 0; id < kApBaseCount; ++id) {
         const uint8_t base = uint8_t(9 + 6 * id);
-        c.addSchemaField({.key = uint8_t(base + 0), .name = "amplitude", .type = CborFieldType::uint_t,
+        c.addSchemaField({.key = uint8_t(base + 0), .name = "amount",    .type = CborFieldType::uint_t,
                           .unit = "%", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
         c.addSchemaField({.key = uint8_t(base + 1), .name = "in_step",   .type = CborFieldType::uint_t,
                           .unit = "", .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f});
@@ -2145,12 +2154,12 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     if (feat.has_pattern) {
         addPatternState();       // 0x1200 STATE·pattern, family 0 member 0
         addPatternAdvanced();    // 0x1210 STATE·pattern, family 1 member 0
-        addApModifierChannel(ch::pattern_adv_mod_speedin,  "pattern-adv-mod-speedin",  "Speed in modifier",  21);  // 0x1211
-        addApModifierChannel(ch::pattern_adv_mod_speedout, "pattern-adv-mod-speedout", "Speed out modifier", 27);  // 0x1212
-        addApModifierChannel(ch::pattern_adv_mod_accelin,  "pattern-adv-mod-accelin",  "Accel in modifier",  33);  // 0x1213
-        addApModifierChannel(ch::pattern_adv_mod_accelout, "pattern-adv-mod-accelout", "Accel out modifier", 39);  // 0x1214
-        addApModifierChannel(ch::pattern_adv_mod_depth1,   "pattern-adv-mod-depth1",   "Depth 1 modifier",   9);   // 0x1215
-        addApModifierChannel(ch::pattern_adv_mod_depth2,   "pattern-adv-mod-depth2",   "Depth 2 modifier",   15);  // 0x1216
+        addApModifierChannel(ch::pattern_adv_mod_speedin,  "pattern-adv-mod-speedin",  "Speed in modifier",  2);  // 0x1211
+        addApModifierChannel(ch::pattern_adv_mod_speedout, "pattern-adv-mod-speedout", "Speed out modifier", 3);  // 0x1212
+        addApModifierChannel(ch::pattern_adv_mod_accelin,  "pattern-adv-mod-accelin",  "Accel in modifier",  4);  // 0x1213
+        addApModifierChannel(ch::pattern_adv_mod_accelout, "pattern-adv-mod-accelout", "Accel out modifier", 5);  // 0x1214
+        addApModifierChannel(ch::pattern_adv_mod_depth1,   "pattern-adv-mod-depth1",   "Depth 1 modifier",   0);   // 0x1215
+        addApModifierChannel(ch::pattern_adv_mod_depth2,   "pattern-adv-mod-depth2",   "Depth 2 modifier",   1);   // 0x1216
         addPatternPresetsRoster();  // 0x1220 STATE·pattern, family 2 member 0
     }
     if (feat.has_motion) {

@@ -12,7 +12,10 @@
 //   pattern-state / pattern-advanced / pattern-adv-mod-*), so the ECHO a
 //   delegate builds from the fields afterward is the post-clamp truth.
 // - The preset payload layout is wire-visible through BLOB_REQ exports and is
-//   the archive's: 4 base scalars then 6 lanes of 6 bytes, BaseId order.
+//   the archive's: 4 base scalars then 6 modulators of 6 bytes, BaseId
+//   order. Each modulator's first byte is its amount, 0 = no modulation
+//   (RFC-066); the retired 100 = off bytes migrate through
+//   migrateRetiredAmount() and are never read as they stand.
 // See: PatternEngine.h, ValencePattern.h, Valence SPEC.md §8.7, §11.3,
 // RENDERING.md §10.1
 
@@ -73,7 +76,7 @@ struct PatternSettings {
         return true;
     }
 
-    // The live advanced lane set a preset captures: speeds, accels, six lanes.
+    // The live advanced set a preset captures: speeds, accels, six modulators.
     // Never the depths or master speed -- a preset changes stroke character,
     // never the operator's window or throttle.
     PresetPayload capturePreset() const {
@@ -85,7 +88,7 @@ struct PatternSettings {
         for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
             const advpat::Modifier& m = ap.byId(id)->modifier;
             const size_t b = 4 + size_t(id) * 6;
-            p[b + 0] = m.amplitude;
+            p[b + 0] = m.amount;
             p[b + 1] = m.in_step;
             p[b + 2] = m.in_wait;
             p[b + 3] = m.out_step;
@@ -107,6 +110,17 @@ struct PatternSettings {
             ap.byId(id)->modifier.set(p[b + 0], p[b + 1], p[b + 2], p[b + 3], p[b + 4], p[b + 5]);
         }
         ap_mode = true;
+    }
+
+    // A payload written under the retired 100 = off amount, re-expressed in
+    // RFC-066's 0 = no modulation so the same preset strokes the same:
+    // amount = 100 - stored. A stored byte over 100 loaded as 100 (off) under
+    // the old clamp, so it migrates to 0.
+    static void migrateRetiredAmount(PresetPayload& p) {
+        for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
+            uint8_t& a = p[4 + size_t(id) * 6];
+            a = uint8_t(100 - (a > 100 ? 100 : a));
+        }
     }
 
     bool operator==(const PatternSettings&) const = default;

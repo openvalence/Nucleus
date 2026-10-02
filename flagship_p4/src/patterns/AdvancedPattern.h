@@ -1,7 +1,7 @@
 #pragma once
 
 // AdvancedPattern -- the fray-d Advanced Penetration stroke math: six base
-// controls, one cyclic modifier lane per control, one plan per half-stroke
+// controls, one cyclic modulator per control, one plan per half-stroke
 // Constraints:
 // - HARDWARE-FREE and pure: no clock, no task, no motion call. The pattern
 //   engine owns an instance, turns a StrokePlan into a MotionIntent, and hands
@@ -34,10 +34,11 @@ constexpr float ACCEL_CURVE_EXP = 0.6f;
 
 // ---- modifier ---------------------------------------------------------------
 
-// One lane: in_step strokes ramping toward full modification, in_wait held,
-// out_step ramping back, out_wait at rest. amplitude 100 is OFF.
+// One modulator (RFC-066): in_step strokes rising toward the full swing,
+// in_wait held, out_step falling back, out_wait at rest. amount 0 is no
+// modulation, 100 the full swing.
 struct Modifier {
-    uint8_t amplitude = 100;  // 0..100
+    uint8_t amount    = 0;    // 0..100
     uint8_t in_step   = 1;    // 1..25
     uint8_t in_wait   = 0;    // 0..25
     uint8_t out_step  = 1;    // 1..25
@@ -45,21 +46,21 @@ struct Modifier {
     uint8_t offset    = 0;    // 0..100
 
     uint8_t stepCount() const { return uint8_t(in_step + in_wait + out_step + out_wait); }
-    bool    active() const { return amplitude < 100 && stepCount() > 0; }
+    bool    active() const { return amount > 0 && stepCount() > 0; }
 
     // 0..1 multiplier on the control's swing for a cycle index.
     float modification(int cycle) const;
 
     // Every field clamped to its catalog bound.
-    void set(int amplitude, int in_step, int in_wait, int out_step, int out_wait, int offset);
+    void set(int amount, int in_step, int in_wait, int out_step, int out_wait, int offset);
 
     bool operator==(const Modifier&) const = default;
 };
 
 // ---- base control -----------------------------------------------------------
 
-// A 0..100 knob with a lane. invert_ref marks the control whose lane swings
-// toward its MAX bound (DEPTH_MIN pulls toward max depth).
+// A 0..100 knob with a modulator. invert_ref marks the control whose modulator
+// swings toward its MAX bound (DEPTH_MIN pulls toward max depth).
 struct BaseControl {
     uint8_t  value;
     uint8_t  min_value;   // dynamic for the depth pair (coupled)
@@ -96,7 +97,7 @@ struct StrokePlan {
 // annotations: shallow 10 % max depth and master speed 0, so a fresh boot
 // cannot lunge.
 struct Settings {
-    BaseControl master    {0,   0, 100, false};  // no lane
+    BaseControl master    {0,   0, 100, false};  // no modulator
     BaseControl max_depth {10,  0, 100, false};
     BaseControl min_depth {0,   0, 100, true};
     BaseControl in_speed  {100, 1, 100, false};

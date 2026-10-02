@@ -50,7 +50,7 @@ struct PatternInputs {
 class PatternEngine {
 public:
     // A running false -> true transition restarts the stroke count, so every
-    // start opens with an in-stroke and a fresh lane cycle.
+    // start opens with an in-stroke and a fresh modulator cycle.
     void apply(const PatternSettings& s);
 
     // At most one intent per call: the next half-stroke when it is due, or the

@@ -17,7 +17,7 @@ int clampInt(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 // ---- modifier ---------------------------------------------------------------
 
 float Modifier::modification(int cycle) const {
-    const float ratio = float(100 - amplitude) / 100.0f;
+    const float ratio = float(amount) / 100.0f;
     if (cycle < 0) return 1.0f - ratio;
     const int steps = stepCount();
     if (steps > 0) {
@@ -31,8 +31,8 @@ float Modifier::modification(int cycle) const {
     return 1.0f;
 }
 
-void Modifier::set(int amp, int is, int iw, int os, int ow, int off) {
-    amplitude = uint8_t(clampInt(amp, 0, 100));
+void Modifier::set(int amt, int is, int iw, int os, int ow, int off) {
+    amount    = uint8_t(clampInt(amt, 0, 100));
     in_step   = uint8_t(clampInt(is, 1, 25));
     in_wait   = uint8_t(clampInt(iw, 0, 25));
     out_step  = uint8_t(clampInt(os, 1, 25));
@@ -46,7 +46,7 @@ float BaseControl::modifiedValue(int stroke_count) const {
     if (!modifier.active()) return float(value);
     const float difference = float(value) - float(invert_ref ? max_value : min_value);
     const int steps = modifier.stepCount();
-    // Two half-strokes (one in, one out) advance the lane by one step.
+    // Two half-strokes (one in, one out) advance the modulator by one step.
     const int cycle = stroke_count < 0 ? -1 : (stroke_count / 2) % steps;
     return float(value) - difference * (1.0f - modifier.modification(cycle));
 }

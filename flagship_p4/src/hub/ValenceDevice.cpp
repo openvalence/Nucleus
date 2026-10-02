@@ -38,7 +38,7 @@ namespace valence {
 static_assert(kPresetCapacity == PatternPresetStore::kCapacity, "catalog preset capacity drifted");
 static_assert(kPresetNameMax == PatternPresetStore::kNameMax, "catalog preset name_max drifted");
 static_assert(kPresetPayloadBytes == PatternPresetStore::kPayloadBytes, "catalog preset per_item_max drifted");
-static_assert(kApBaseCount == advpat::BASE_COUNT, "catalog modifier-lane count drifted");
+static_assert(kApBaseCount == advpat::BASE_COUNT, "catalog modulator count drifted");
 
 // A build without the capacity flags would get the library's defaults: a
 // different Catalog32 from the board's, and no accessory budget at all.
@@ -373,9 +373,9 @@ void publishKineticCards(Hub& hub, const MotionTuning& t, uint8_t cards) {
 // these channels move on session-volatile writes that bump nothing, and an
 // enabled_mask moves with homed and e-stop, which no write announces.
 
-// The six lanes in BaseId order, which is NOT ascending channel order: the
+// The six modulators in BaseId order, which is NOT ascending channel order: the
 // catalog puts them speed-in/out, accel-in/out, depth-1/2 (ValenceCatalog.h).
-constexpr std::array<uint16_t, advpat::BASE_COUNT> kLaneChannels{
+constexpr std::array<uint16_t, advpat::BASE_COUNT> kModChannels{
     ch::pattern_adv_mod_depth1,   ch::pattern_adv_mod_depth2,  ch::pattern_adv_mod_speedin,
     ch::pattern_adv_mod_speedout, ch::pattern_adv_mod_accelin, ch::pattern_adv_mod_accelout};
 
@@ -681,7 +681,7 @@ Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
 }
 
 // Refused only while e-stop is latched, which is when every pattern-advanced
-// and lane enabled_mask bit drops. None of these knobs moves the machine by
+// and modulator enabled_mask bit drops. None of these knobs moves the machine by
 // itself (only 0x3200 running does), so none is gated on homed. Base controls
 // apply in key order (max depth before min depth), each re-coupling the depth
 // pair, and the echo reads back AFTER all of them.
@@ -704,7 +704,7 @@ Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
         if (const auto* f = findField(requested, uint8_t(3 + id))) ap.setBase(id, knobOf(*numberOf(f)));
     for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
         advpat::Modifier& m = ap.byId(id)->modifier;
-        std::array<int, 6> v{m.amplitude, m.in_step, m.in_wait, m.out_step, m.out_wait, m.offset};
+        std::array<int, 6> v{m.amount, m.in_step, m.in_wait, m.out_step, m.out_wait, m.offset};
         for (uint8_t sub = 0; sub < 6; ++sub)
             if (const auto* f = findField(requested, uint8_t(9 + 6 * id + sub))) v[sub] = knobOf(*numberOf(f));
         m.set(v[0], v[1], v[2], v[3], v[4], v[5]);
@@ -726,9 +726,9 @@ Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
             out = ap.byId(uint8_t(key - 3))->value;
         } else {
             const advpat::Modifier& m = ap.byId(uint8_t((key - 9) / 6))->modifier;
-            const std::array<uint8_t, 6> lane{m.amplitude, m.in_step, m.in_wait,
-                                               m.out_step, m.out_wait, m.offset};
-            out = lane[size_t((key - 9) % 6)];
+            const std::array<uint8_t, 6> mod{m.amount, m.in_step, m.in_wait,
+                                              m.out_step, m.out_wait, m.offset};
+            out = mod[size_t((key - 9) % 6)];
         }
         applied.fields[n++] = {key, IntentValue::ofU64(out)};
     }
@@ -839,14 +839,14 @@ void ValenceDevice::publishPatternPlane(const MotionCensus& mo) {
         const advpat::Modifier& m = p.ap.byId(id)->modifier;
         std::array<std::byte, 7> buf{};
         size_t n = 0;
-        packU8(buf, n, m.amplitude);
+        packU8(buf, n, m.amount);
         packU8(buf, n, m.in_step);
         packU8(buf, n, m.in_wait);
         packU8(buf, n, m.out_step);
         packU8(buf, n, m.out_wait);
         packU8(buf, n, m.offset);
         packU8(buf, n, mo.estop ? 0x00 : 0x3F);
-        publishIfChanged(hub, kLaneChannels[id], buf, n, _sentApMod[id], force);
+        publishIfChanged(hub, kModChannels[id], buf, n, _sentApMod[id], force);
     }
     {
         std::array<std::byte, 4> buf{};

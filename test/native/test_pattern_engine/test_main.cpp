@@ -9,7 +9,9 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -47,8 +49,8 @@ PatternSettings advancedSettings() {
     s.ap.master.set(60);
     s.ap.setBase(advpat::DEPTH_MAX, 90);
     s.ap.setBase(advpat::DEPTH_MIN, 10);
-    // A lane set: depth breathes in over 3 strokes, speed-in over 5.
-    s.ap.byId(advpat::DEPTH_MAX)->modifier.set(40, 3, 1, 3, 0, 0);
+    // A modulator set: depth breathes in over 3 strokes, speed-in over 5.
+    s.ap.byId(advpat::DEPTH_MAX)->modifier.set(60, 3, 1, 3, 0, 0);
     s.ap.byId(advpat::SPEED_IN)->modifier.set(50, 5, 0, 5, 2, 20);
     return s;
 }
@@ -131,7 +133,7 @@ TEST_CASE("classic stroke: waveform half-strokes inside the window, reversing at
         CHECK(r[i].at_us - r[i - 1].at_us <= uint64_t(r[i - 1].it.duration_us) + 1000u);
 }
 
-TEST_CASE("advanced generator: a lane set is deterministic and stays in the window") {
+TEST_CASE("advanced generator: a modulator set is deterministic and stays in the window") {
     auto a = std::make_unique<PatternEngine>();
     auto b = std::make_unique<PatternEngine>();
     a->apply(advancedSettings());
@@ -151,7 +153,7 @@ TEST_CASE("advanced generator: a lane set is deterministic and stays in the wind
             if (ra[i].it.target_mm < shallowest_in) shallowest_in = ra[i].it.target_mm;
         }
     }
-    // The depth lane really modulates: in-strokes do not all land at 90 %.
+    // The depth modulator really modulates: in-strokes do not all land at 90 %.
     CHECK(deepest - shallowest_in > 10.0f);
 }
 
@@ -245,7 +247,7 @@ TEST_CASE("advanced knobs clamp and the depth pair never crosses") {
     CHECK(ap.max_depth.value == 80);
     advpat::Modifier m;
     m.set(-4, 999, 30, 0, 26, 250);
-    CHECK(m.amplitude == 0);
+    CHECK(m.amount == 0);
     CHECK(m.in_step == 25);
     CHECK(m.in_wait == 25);
     CHECK(m.out_step == 1);
@@ -281,4 +283,96 @@ TEST_CASE("preset payload round-trips and the store bumps its generation") {
     CHECK(st.remove(3));
     CHECK(st.slot(3) == nullptr);
     CHECK(st.generation() == uint16_t(g0 + 3));
+}
+
+TEST_CASE("modulator: amount 0 leaves its control at the base value, 100 is the full swing") {
+    advpat::BaseControl c{70, 0, 100, false};
+    c.modifier.set(0, 3, 1, 3, 2, 0);
+    CHECK_FALSE(c.modifier.active());
+    for (int k = -1; k < 40; ++k) CHECK(c.modifiedValue(k) == 70.0f);
+
+    // Step 3 of 9 is the hold (in_step 3, then in_wait), reached at stroke 6.
+    c.modifier.set(100, 3, 1, 3, 2, 0);
+    CHECK(c.modifier.active());
+    CHECK(c.modifiedValue(6) == 0.0f);
+}
+
+namespace {
+
+// The modulation math as it stood under the retired 100 = off amplitude, so
+// the migration test compares against the old engine rather than the new one.
+float retiredModification(const advpat::Modifier& m, uint8_t amplitude, int cycle) {
+    const float ratio = float(100 - amplitude) / 100.0f;
+    if (cycle < 0) return 1.0f - ratio;
+    const int steps = m.stepCount();
+    cycle = (cycle + m.offset) % steps;
+    if (cycle < m.in_step) return 1.0f - ratio / float(m.in_step) * float(cycle + 1);
+    cycle -= m.in_step;
+    if (cycle < m.in_wait) return 1.0f - ratio;
+    cycle -= m.in_wait;
+    if (cycle < m.out_step) return 1.0f - ratio + ratio / float(m.out_step) * float(cycle + 1);
+    return 1.0f;
+}
+
+std::array<std::byte, PatternPresetStore::kBlobBytes> g_presetBlob{};
+
+}  // namespace
+
+TEST_CASE("presets: a version-1 blob migrates the retired amount and strokes the same") {
+    // Bytes as the old firmware stored them: depth-max swinging 60 %
+    // (amplitude 40), speed-in off (100), speed-out an out-of-range 250 that
+    // the old clamp loaded as off. Every other modulator off.
+    PatternSettings::PresetPayload old{};
+    old[0] = 80;
+    old[1] = 70;
+    old[2] = 40;
+    old[3] = 40;
+    for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
+        const size_t b = 4 + size_t(id) * 6;
+        old[b + 0] = 100;
+        old[b + 1] = 1;
+        old[b + 3] = 1;
+    }
+    const size_t dm = 4 + size_t(advpat::DEPTH_MAX) * 6;
+    old[dm + 0] = 40;
+    old[dm + 1] = 3;
+    old[dm + 2] = 1;
+    old[dm + 3] = 3;
+    old[dm + 4] = 2;
+    old[dm + 5] = 4;
+    old[4 + size_t(advpat::SPEED_OUT) * 6] = 250;
+
+    static PatternPresetStore st;
+    REQUIRE(st.save(5, "old meaning", old));
+    REQUIRE(st.encode(g_presetBlob) == g_presetBlob.size());
+    g_presetBlob[4] = std::byte{PatternPresetStore::kBlobVersionRetiredAmount};
+
+    static PatternPresetStore back;
+    REQUIRE(back.decode(g_presetBlob));
+    // Cached items re-enumerate: the generation moved with the meaning.
+    CHECK(back.generation() == uint16_t(st.generation() + 1));
+    REQUIRE(back.slot(5) != nullptr);
+    CHECK(back.slot(0) == nullptr);
+
+    PatternSettings s;
+    s.applyPreset(back.slot(5)->payload);
+    CHECK(s.ap.max_depth.modifier.amount == 60);
+    CHECK(s.ap.in_speed.modifier.amount == 0);
+    CHECK(s.ap.out_speed.modifier.amount == 0);
+    CHECK(s.ap.min_depth.modifier.amount == 0);
+
+    // Strokes the same: every cycle of the migrated modulator matches the old
+    // engine's math on the original byte.
+    const advpat::Modifier& m = s.ap.max_depth.modifier;
+    for (int cycle = -1; cycle < 2 * m.stepCount(); ++cycle) {
+        CAPTURE(cycle);
+        CHECK(m.modification(cycle) == doctest::Approx(retiredModification(m, 40, cycle)));
+    }
+
+    // A current-version blob is never migrated a second time.
+    REQUIRE(back.encode(g_presetBlob) == g_presetBlob.size());
+    static PatternPresetStore again;
+    REQUIRE(again.decode(g_presetBlob));
+    CHECK(again.generation() == back.generation());
+    CHECK(again.slot(5)->payload == back.slot(5)->payload);
 }

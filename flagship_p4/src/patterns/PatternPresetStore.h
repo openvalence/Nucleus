@@ -4,14 +4,18 @@
 // slots of {name, opaque payload} plus the roster generation
 // Constraints:
 // - HARDWARE-FREE, fixed capacity, no heap. It knows nothing about what a
-//   payload MEANS (SPEC §8.7: payloads are opaque); PatternSettings owns that.
+//   payload MEANS (SPEC §8.7: payloads are opaque); PatternSettings owns that,
+//   including the one payload migration decode() applies.
 // - OWNED BY THE HUB TASK (the delegate): the CRUD intents and readBlob() both
 //   run there, so there is no lock and none is wanted (T5).
 // - PERSISTED AS ONE BLOB (encode/decode below), all-or-nothing: magic,
 //   version byte, the generation, then every slot, decoded only at its exact
 //   length. The generation rides WITH the items: a client's cached enumeration
 //   is keyed on it, so a restart that reset it beside surviving items would
-//   leave that cache stale without a signal. Storage and debounce are the
+//   leave that cache stale without a signal. A version-1 blob holds the
+//   retired 100 = off modulator amount: decode() migrates every stored item
+//   (PatternSettings::migrateRetiredAmount) and bumps the generation, so no
+//   cached item survives under the other meaning. Storage and debounce are the
 //   composition's (ValenceHub.cpp NVS key "presets"; the twin's state file).
 // - Every mutation bumps generation(): the roster's "re-enumerate" signal and
 //   the generation readBlob() answers with.
@@ -85,7 +89,8 @@ public:
 
     // ---- persistence blob ----
     static constexpr uint32_t kBlobMagic   = 0x56505253u;  // "VPRS"
-    static constexpr uint8_t  kBlobVersion = 1;            // bump on ANY layout change
+    static constexpr uint8_t  kBlobVersion = 2;            // bump on ANY layout or meaning change
+    static constexpr uint8_t  kBlobVersionRetiredAmount = 1;   // migrated on decode, never written
     // magic 4, version 1, generation 2, then per slot the NUL-padded name and
     // the payload
     static constexpr size_t kBlobBytes = 4 + 1 + 2 + size_t(kCapacity) * (kNameMax + kPayloadBytes);
@@ -113,7 +118,8 @@ public:
         uint8_t version = 0;
         std::memcpy(&magic, in.data(), sizeof(magic));
         std::memcpy(&version, in.data() + 4, sizeof(version));
-        if (magic != kBlobMagic || version != kBlobVersion) return false;
+        if (magic != kBlobMagic) return false;
+        if (version != kBlobVersion && version != kBlobVersionRetiredAmount) return false;
         constexpr size_t kSlotsAt = 7;
         constexpr size_t kStride = size_t(kNameMax) + kPayloadBytes;
         for (size_t i = 0; i < kCapacity; ++i) {
@@ -126,7 +132,10 @@ public:
             const std::byte* at = in.data() + kSlotsAt + i * kStride;
             std::memcpy(_slots[i].name.data(), at, kNameMax);
             std::memcpy(_slots[i].payload.data(), at + kNameMax, kPayloadBytes);
+            if (version == kBlobVersionRetiredAmount && _slots[i].used())
+                PatternSettings::migrateRetiredAmount(_slots[i].payload);
         }
+        if (version == kBlobVersionRetiredAmount) ++_generation;
         return true;
     }
 
