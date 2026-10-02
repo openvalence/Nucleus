@@ -841,9 +841,12 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 // ui_categories::control's own note names "streams" explicitly.
                 .hasCategory = true, .category = valence::ui_categories::control,
                 .hasRank = true, .rank = valence::ui_ranks::control});
+    // input.* (RFC-071): how a client finds the motion input without a name.
     c.addLayoutField({.name = "target_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
+                      .role = roles::input_target,
                       .hasUnitId = true, .unitId = valence::unit_ids::normalized});
-    c.addLayoutField({.name = "vel_norm",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
+    c.addLayoutField({.name = "vel_norm",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f,
+                      .role = roles::input_velocity});
                       // unit_id left absent for vel_norm: unit_ids has no "normalized/s" variant
                       // (a documented gap, same class as the kinetic_limits override fields below).
     };
@@ -885,10 +888,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .streamKind = valence::stream_kinds::segments,
                 .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "target_norm",  .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
+                      .role = roles::input_target,
                       .hasUnitId = true, .unitId = valence::unit_ids::normalized});
     c.addLayoutField({.name = "duration_ms",  .type = PackedFieldType::u16, .unit = "ms",     .scale = 1.0f,
+                      .role = roles::input_duration,
                       .hasUnitId = true, .unitId = valence::unit_ids::ms});
-    c.addLayoutField({.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
+    c.addLayoutField({.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f,
+                      .role = roles::input_end_velocity});
     };
 
     // ---- "plan-strip" — STATE, elevated, 45 Hz ------------------------------
