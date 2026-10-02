@@ -528,3 +528,39 @@ TEST_CASE("a 32-segment bundle spanning the 1000 ms schedule horizon parks whole
     CHECK(c.rejected == 0);
     CHECK(c.failures == 0);
 }
+
+TEST_CASE("flip: targets mirror in, positions and the window mirror out, the engine stays physical") {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->arb.setWindow(50.0f, 300.0f, 400.0f);
+    r->run(1000);
+    r->arb.setFlipped(true);
+    // Client 100 mm is physical 300 mm.
+    REQUIRE(r->submit(MotionSource::Manual, 100.0f));
+    r->run(10'000'000);
+    const MotionCensus c = r->census();
+    CHECK(c.position_mm == doctest::Approx(100.0f).epsilon(0.01));
+    CHECK(float(c.steps) * valence::kMmPerStep == doctest::Approx(300.0f).epsilon(0.01));
+    CHECK(c.win_min == doctest::Approx(100.0f));
+    CHECK(c.win_max == doctest::Approx(350.0f));
+    // A client target past the mirrored window clamps to it: client 380 is
+    // physical 20, under the physical window's 50, so it lands at client 350.
+    REQUIRE(r->submit(MotionSource::Stream, 380.0f));
+    CHECK(r->census().demand_mm == doctest::Approx(350.0f));
+    // Away from the client's 0 reads positive, though the carriage runs toward physical 0.
+    REQUIRE(r->submit(MotionSource::Manual, 150.0f));
+    r->run(300'000);
+    CHECK(r->census().velocity_mm_s > 0.0f);
+    r->run(10'000'000);
+    r->arb.setFlipped(false);
+    CHECK(r->census().position_mm == doctest::Approx(250.0f).epsilon(0.01));
+
+    // Home swaps ends: force_home under the flip asserts the client's 0, the
+    // physical far end of the stroke.
+    r->arb.setFlipped(true);
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    CHECK(r->census().position_mm == doctest::Approx(0.0f).epsilon(0.001));
+    r->arb.setFlipped(false);
+    CHECK(r->census().position_mm == doctest::Approx(400.0f).epsilon(0.001));
+}

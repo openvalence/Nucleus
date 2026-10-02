@@ -259,6 +259,7 @@ void motionPatternAllow() { g_motion.arbiter().allowPattern(); }
 void motionSetEstopCutsPower(bool cuts) { g_motion.arbiter().setEstopCutsPower(cuts); }
 void motionOverride() { g_motion.override(); }
 void motionReturn() { g_motion.returnToPause(); }
+void motionSetFlipped(bool on) { g_motion.arbiter().setFlipped(on); }
 void motionSetJogLimits(float v, float a) { g_motion.arbiter().setJogLimits(v, a); }
 void motionSetInputLimits(float v, float a, float j) { g_motion.arbiter().setInputLimits(v, a, j); }
 void motionSetWindow(float lo, float hi, float rail) { g_motion.arbiter().setWindow(lo, hi, rail); }

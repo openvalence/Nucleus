@@ -147,6 +147,12 @@ public:
     // limp after an ESTOP and the position reference is gone.
     void setEstopCutsPower(bool cuts) { _cuts_power = cuts; }
     void setJogLimits(float v, float a) { _jog_v = v; _jog_a = a; }
+    // RFC-088 (SPEC 9.6): with the flip on, position 0 is the far end. Every
+    // intent target is mirrored against the rail on the way in, and every
+    // position, velocity and window in snapshot() on the way out; the engine,
+    // the emitter and the window this class holds stay physical. The hub
+    // delegate gates the change (at rest, homed, no source, no override).
+    void setFlipped(bool on) { _flipped.store(on); }
     void setInputLimits(float v, float a, float j) { _in_v = v; _in_a = a; _in_j = j; }
     void setWindow(float lo, float hi, float rail);
     float forceHome(float stroke_mm);
@@ -212,6 +218,7 @@ private:
     // volatile: the gate store must be visible before the brake request is.
     std::atomic<bool> _paused{false};
     std::atomic<bool> _override{false};
+    std::atomic<bool> _flipped{false};
     std::atomic<bool> _return_req{false};
     std::atomic<bool> _pattern_stopped{false};
     std::atomic<bool> _brake_req{false};

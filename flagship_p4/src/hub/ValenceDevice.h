@@ -169,6 +169,15 @@ private:
 
     void publishHubStatus();
     void publishMachineConfig();
+    // The travel window as clients see it (RFC-088): _cfg holds it physical,
+    // and with the flip on the same window reads mirrored against `rail`.
+    struct Window {
+        float lo;
+        float hi;
+        bool operator==(const Window&) const = default;
+    };
+    Window clientWindow(float rail) const;
+    bool flipOpen(const MotionCensus& c) const;
 
     Hub* _hub = nullptr;
     IUiTokenGate* _tokenGate = nullptr;
@@ -182,8 +191,12 @@ private:
     MotionTuning _tune = motionDefaultTuning();
     // The stored 0x1030 modes beside the tuning (StoredState.h).
     StoredModes _modes{};
-    // The schedule_horizon mask bit as last published.
+    // The schedule_horizon and flipped mask bits as last published.
     bool _horizonOpenSent = true;
+    bool _flipOpenSent = false;
+    // The client-frame window 0x1000 last carried: it moves with the flip and
+    // the rail, neither of which changes _cfg.
+    Window _sentWindow{0.0f, 0.0f};
     // Which of those four cards an applied write changed, bit per card
     // (ValenceDevice.cpp, kCard*). tick() pushes and republishes, then clears.
     uint8_t _tuneDirty = 0;

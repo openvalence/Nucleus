@@ -303,12 +303,13 @@ void publishOdometer(Hub& hub, const MotionCensus& m) {
     publishPacked(hub, ch::odometer, buf, n);
 }
 
-// Layout per ValenceCatalog.h's machine-modes entry: 6 B, plus home_style
+// Layout per ValenceCatalog.h's machine-modes entry: 7 B, plus home_style
 // only where has_drive put it in the catalog.
-void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, bool horizonOpen) {
-    std::array<std::byte, 7> buf{};
+void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, bool horizonOpen,
+                         bool flipOpen) {
+    std::array<std::byte, 8> buf{};
     const bool drive = boardFeatures().has_drive;
-    const size_t len = drive ? 7 : 6;
+    const size_t len = drive ? 8 : 7;
     size_t n = 0;
     packU8(buf, n, 0);   // blend_mode_reserved
     packU8(buf, n, 0);   // stream_speed_reserved
@@ -316,11 +317,14 @@ void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, 
     // enabled_mask: bit 0 overshoot_clamp, accepted at all times. home_style
     // (has_drive only) stays low: nothing here runs a homing cycle.
     // schedule_horizon drops while a segments grant is live (applyModes()).
+    // flipped drops whenever applyModes() would refuse it (flipOpen()).
     const uint8_t horizonBit = drive ? 0x04 : 0x02;
-    packU8(buf, n, uint8_t(0x01 | (horizonOpen ? horizonBit : 0)));
+    const uint8_t flipBit = uint8_t(horizonBit << 1);
+    packU8(buf, n, uint8_t(0x01 | (horizonOpen ? horizonBit : 0) | (flipOpen ? flipBit : 0)));
     packU8(buf, n, 2);   // motion_backend, read-only: quadrature, the LP-core emitter
     if (drive) packU8(buf, n, 0);   // home_style
     packU8(buf, n, m.horizon);      // schedule_horizon
+    packU8(buf, n, m.flipped ? 1 : 0);   // flipped
     publishPacked(hub, ch::machine_modes, std::span<const std::byte>(buf).first(len), n);
 }
 
@@ -438,9 +442,16 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     const auto* f7 = findField(requested, 7);  // input_jerk
     const auto* f8 = findField(requested, 8);  // max_rail
 
+    // The window arrives in the client frame (RFC-088) and is stored physical.
+    const float rail = motionCensus().rail_mm;
+    const Window was = clientWindow(rail);
+    const float cmin = f1 ? clampf(fieldF32(f1, was.lo), 0.0f, ceiling::rail_mm) : was.lo;
+    const float cmax = f2 ? clampf(fieldF32(f2, was.hi), 0.0f, ceiling::rail_mm) : was.hi;
     StoredConfig next = _cfg;
-    if (f1) next.window_min  = clampf(fieldF32(f1, next.window_min),  0.0f, ceiling::rail_mm);
-    if (f2) next.window_max  = clampf(fieldF32(f2, next.window_max),  0.0f, ceiling::rail_mm);
+    if (f1 || f2) {
+        next.window_min = _modes.flipped ? clampf(rail - cmax, 0.0f, ceiling::rail_mm) : cmin;
+        next.window_max = _modes.flipped ? clampf(rail - cmin, 0.0f, ceiling::rail_mm) : cmax;
+    }
     if (f3) next.jog_speed  = clampf(fieldF32(f3, next.jog_speed),  ceiling::speed_min, ceiling::speed_max);
     if (f4) next.jog_accel  = clampf(fieldF32(f4, next.jog_accel),  ceiling::accel_min, ceiling::accel_max);
     if (f5) next.input_speed = clampf(fieldF32(f5, next.input_speed), ceiling::speed_min, ceiling::speed_max);
@@ -463,8 +474,9 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     // value the hub actually holds (SPEC §9.3).
     IntentValueMap applied{};
     uint32_t n = 0;
-    if (f1) applied.fields[n++] = {1, IntentValue::ofF32(_cfg.window_min)};
-    if (f2) applied.fields[n++] = {2, IntentValue::ofF32(_cfg.window_max)};
+    const Window now = clientWindow(rail);
+    if (f1) applied.fields[n++] = {1, IntentValue::ofF32(now.lo)};
+    if (f2) applied.fields[n++] = {2, IntentValue::ofF32(now.hi)};
     if (f3) applied.fields[n++] = {3, IntentValue::ofF32(_cfg.jog_speed)};
     if (f4) applied.fields[n++] = {4, IntentValue::ofF32(_cfg.jog_accel)};
     if (f5) applied.fields[n++] = {5, IntentValue::ofF32(_cfg.input_speed)};
@@ -496,14 +508,26 @@ void ValenceDevice::noteTuning(const MotionTuning& next, bool& cfgChanged) {
 // validated before anything is applied. A horizon change is refused INTERLOCK
 // while a segments grant is live: the grant advertised the old value for its
 // life (SPEC 5.4), and the library re-reads this one on every bundle.
+// Key 8 (flipped, RFC-088) is gated in the spec's order: SOURCE_CONFLICT while
+// a source owns the rail, NOT_HOMED while unhomed, INTERLOCK under override or
+// in motion. An unchanged value is an ordinary no-op ECHO.
 Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged) {
     const auto* f4 = findField(requested, 4);   // overshoot_clamp
     const auto* f7 = findField(requested, 7);   // schedule_horizon
-    if (!f4 && !f7) return Ret::err(NackCode::INVALID_VALUE);
-    if ((f4 && !numberOf(f4)) || (f7 && !numberOf(f7))) return Ret::err(NackCode::INVALID_VALUE);
+    const auto* f8 = findField(requested, 8);   // flipped
+    if (!f4 && !f7 && !f8) return Ret::err(NackCode::INVALID_VALUE);
+    if ((f4 && !numberOf(f4)) || (f7 && !numberOf(f7)) || (f8 && !boolOf(f8)))
+        return Ret::err(NackCode::INVALID_VALUE);
     StoredModes nextModes = _modes;
     if (f7) nextModes.horizon = uint8_t(wholeIn(*numberOf(f7), 0.0f, float(kHorizonMs.size() - 1)));
-    if (!(nextModes == _modes) && segmentsGrantLive()) return Ret::err(NackCode::INTERLOCK);
+    if (nextModes.horizon != _modes.horizon && segmentsGrantLive()) return Ret::err(NackCode::INTERLOCK);
+    if (f8) nextModes.flipped = *boolOf(f8);
+    if (nextModes.flipped != _modes.flipped) {
+        const MotionCensus c = motionCensus();
+        if (railOwned()) return Ret::err(NackCode::SOURCE_CONFLICT);
+        if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
+        if (!flipOpen(c)) return Ret::err(NackCode::INTERLOCK);
+    }
 
     IntentValueMap applied{};
     uint32_t n = 0;
@@ -516,7 +540,14 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
         applied.fields[n++] = {4, IntentValue::ofU64(on ? 1 : 0)};
     }
     if (f7) applied.fields[n++] = {7, IntentValue::ofU64(nextModes.horizon)};
+    if (f8) applied.fields[n++] = {8, IntentValue::ofU64(nextModes.flipped ? 1 : 0)};
     const bool modesChanged = !(nextModes == _modes);
+    // At rest by the gate above, so the frame moves under a still carriage.
+    if (nextModes.flipped != _modes.flipped) {
+        motionSetFlipped(nextModes.flipped);
+        GLOGW(kTag, "FLIP %s: position 0 is the %s end", nextModes.flipped ? "on" : "off",
+              nextModes.flipped ? "far" : "home");
+    }
     _modes = nextModes;
     // Same card, same publish and persist path as the tuning (tick()).
     if (modesChanged) _tuneDirty |= kCardModes;
@@ -758,7 +789,10 @@ Ret ValenceDevice::applyPresets(const IntentValueMap& requested) {
 // disagree about the window.
 void ValenceDevice::pushPattern() {
     PatternSettings s = _pat;
-    s.frame = {_cfg.window_min, _cfg.window_max, _cfg.input_speed, _cfg.input_accel};
+    // The client frame: the generator reads the mirrored census, and the
+    // arbiter mirrors its strokes back (RFC-088).
+    const Window w = clientWindow(motionCensus().rail_mm);
+    s.frame = {w.lo, w.hi, _cfg.input_speed, _cfg.input_accel};
     patternSetSettings(s);
 }
 
@@ -848,8 +882,9 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     // Ground truth: echo the post-clamp position, against the SAME bounds the
     // arbiter clamps a Manual intent to: the whole rail under override, the
     // travel window inside the rail otherwise.
-    const float lo = overrideOn ? 0.0f : std::max(0.0f, _cfg.window_min);
-    const float hi = overrideOn ? c.rail_mm : std::min(_cfg.window_max, c.rail_mm);
+    const Window w = clientWindow(c.rail_mm);
+    const float lo = overrideOn ? 0.0f : std::max(0.0f, w.lo);
+    const float hi = overrideOn ? c.rail_mm : std::min(w.hi, c.rail_mm);
     IntentValueMap applied{};
     applied.count = 1;
     applied.fields[0] = {1, IntentValue::ofF32(clampf(in.target_mm, lo, hi))};
@@ -1065,6 +1100,10 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
     const int32_t leadCapUs = int32_t(isSegment ? scheduleHorizonMs(channel_id)
                                                 : limits::max_future_schedule_ms) * 1000;
 
+    // Normalized samples map onto the client-frame window (RFC-088); the
+    // arbiter mirrors the result to the physical rail.
+    const Window w = clientWindow(motionCensus().rail_mm);
+    const float span = w.hi - w.lo;
     uint32_t dropped = 0;
     uint32_t farClamped = 0;
     for (uint8_t i = 0; i < n; ++i) {
@@ -1080,7 +1119,7 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
 
         MotionIntent in;
         in.source    = MotionSource::Stream;
-        in.target_mm = _cfg.window_min + norm * (_cfg.window_max - _cfg.window_min);
+        in.target_mm = w.lo + norm * span;
         in.anchor_us = uint64_t(now64 + int64_t(delta));
 
         if (isSegment) {
@@ -1092,12 +1131,12 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
             // -32768 is the NO-END-VELOCITY sentinel: 0 is a legitimate
             // slope (a reversal ends AT rest), so 0 cannot mean absent.
             if (endV != kSegNoEndVel) {
-                in.end_vel_mm_s = float(endV) / 1000.0f * (_cfg.window_max - _cfg.window_min);
+                in.end_vel_mm_s = float(endV) / 1000.0f * span;
                 in.has_end_vel  = true;
             }
         } else {
             const int16_t vel = int16_t(getU16(sample.subspan(2, 2)));
-            in.end_vel_mm_s = float(vel) / 1000.0f * (_cfg.window_max - _cfg.window_min);
+            in.end_vel_mm_s = float(vel) / 1000.0f * span;
             in.has_end_vel  = (vel != 0);
         }
         if (!motionSubmit(in)) ++dropped;
@@ -1170,13 +1209,30 @@ void ValenceDevice::publishHubStatus() {
     _hub->publishState(channels::hub_status, s);
 }
 
+ValenceDevice::Window ValenceDevice::clientWindow(float rail) const {
+    if (!_modes.flipped) return {_cfg.window_min, _cfg.window_max};
+    return {std::max(0.0f, rail - _cfg.window_max), std::max(0.0f, rail - _cfg.window_min)};
+}
+
+// RFC-088's gate as the enabled_mask shows it: a homed rail at rest, owned by
+// no source, not under override. applyModes() refuses each case by its own
+// code.
+bool ValenceDevice::flipOpen(const MotionCensus& c) const {
+    const bool overrideOn = _hub != nullptr &&
+                            (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
+    return c.homed && !c.estop && !railOwned() && !overrideOn && !c.override_mode &&
+           !c.busy && c.step_q8 == 0;
+}
+
 void ValenceDevice::publishMachineConfig() {
-    // 37 B, matching the 0x1000 layout in ValenceCatalog.h.
+    // 37 B, matching the 0x1000 layout in ValenceCatalog.h. The window is the
+    // client frame's (RFC-088).
     const StoredConfig& c = _cfg;
+    const Window w = clientWindow(motionCensus().rail_mm);
     std::array<std::byte, 37> buf{};
     std::span<std::byte> s(buf);
-    putF32(s.subspan(0, 4), c.window_min);
-    putF32(s.subspan(4, 4), c.window_max);
+    putF32(s.subspan(0, 4), w.lo);
+    putF32(s.subspan(4, 4), w.hi);
     putF32(s.subspan(8, 4), c.jog_speed);
     putF32(s.subspan(12, 4), c.jog_accel);
     putF32(s.subspan(16, 4), c.input_speed);
@@ -1195,10 +1251,12 @@ void ValenceDevice::publishMachineConfig() {
     putF32(s.subspan(33, 4), 0.0f);
     _hub->publishState(ch::machine_config, s);
     _lastPublishedCfg = c;
+    _sentWindow = w;
     _cfgEverSent = true;
 }
 
 void ValenceDevice::pushConfigToMotion() const {
+    motionSetFlipped(_modes.flipped);
     motionSetWindow(_cfg.window_min, _cfg.window_max, _cfg.max_rail);
     motionSetJogLimits(_cfg.jog_speed, _cfg.jog_accel);
     motionSetInputLimits(_cfg.input_speed, _cfg.input_accel, _cfg.input_jerk);
@@ -1235,7 +1293,7 @@ void ValenceDevice::attach(Hub& hub) {
     publishHubStatus();
     // _tune is the factory set or the adopted one, and the engine already holds
     // it either way (adoptConfigBlob pushed it), so nothing is pushed here.
-    publishMachineModes(hub, _tune, _modes, !segmentsGrantLive());
+    publishMachineModes(hub, _tune, _modes, !segmentsGrantLive(), flipOpen(motionCensus()));
     publishKineticCards(hub, _tune, kCardLimits | kCardChase | kCardWaveform);
     const MotionCensus mo = motionCensus();
     publishMotion(hub, mo, patternActive());
@@ -1269,12 +1327,14 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     // a strip that is only news while a plan runs.
     const MotionCensus mo = motionCensus();
 
-    // schedule_horizon's enabled_mask bit follows the segments grants, which
-    // no write announces.
+    // The schedule_horizon and flipped enabled_mask bits follow the segments
+    // grants and the rail's state, which no write announces.
     const bool horizonOpen = !segmentsGrantLive();
-    if (horizonOpen != _horizonOpenSent) {
+    const bool flipNowOpen = flipOpen(mo);
+    if (horizonOpen != _horizonOpenSent || flipNowOpen != _flipOpenSent) {
         _horizonOpenSent = horizonOpen;
-        publishMachineModes(*_hub, _tune, _modes, horizonOpen);
+        _flipOpenSent = flipNowOpen;
+        publishMachineModes(*_hub, _tune, _modes, horizonOpen, flipNowOpen);
     }
 
     // RETURN arrived (SPEC 11.1): override drops, plain PAUSE stays. A counter,
@@ -1300,7 +1360,8 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
 
     if (_tuneDirty != 0) {
         motionSetTuning(_tune);
-        if (_tuneDirty & kCardModes) publishMachineModes(*_hub, _tune, _modes, !segmentsGrantLive());
+        if (_tuneDirty & kCardModes)
+            publishMachineModes(*_hub, _tune, _modes, _horizonOpenSent, _flipOpenSent);
         publishKineticCards(*_hub, _tune, _tuneDirty);
         _tuneDirty = 0;
         // Same blob as 0x1000: the tuning write bumped cfg_gen too.
@@ -1323,6 +1384,11 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
 
     const bool dirty = _cfgDirty;
     _cfgDirty = false;
+    if (_cfgEverSent && clientWindow(mo.rail_mm) != _sentWindow) {
+        // The frame moved (a flip, or the rail under one), not the setting.
+        publishMachineConfig();
+        _patDirty = true;
+    }
     if (dirty || (_cfgEverSent && !(_lastPublishedCfg == _cfg))) {
         pushConfigToMotion();
         publishMachineConfig();

@@ -281,7 +281,7 @@ TEST_CASE("config blob: a pre-rename v2 blob decodes into the jog fields") {
     CHECK(c.max_rail == 300.0f);
 }
 
-TEST_CASE("config blob: v3 carries the schedule horizon; a v2 blob migrates to the 250 ms default") {
+TEST_CASE("config blob: the schedule horizon round trips; a v2 blob migrates to the 250 ms default") {
     std::array<std::byte, stored::kConfigBlobBytes> b{};
     valence::StoredModes m;
     m.horizon = 2;
@@ -305,9 +305,35 @@ TEST_CASE("config blob: v3 carries the schedule horizon; a v2 blob migrates to t
     CHECK(valence::kHorizonMs[got.horizon] == 250);
 
     // An ordinal past the select's options is rejected whole.
-    b[b.size() - 1] = std::byte{3};
+    b[stored::kConfigV3Bytes - 1] = std::byte{3};
     CHECK_FALSE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
     // A v3 label on v2 bytes is a length mismatch, never a misread.
     v2[4] = std::byte{3};
     CHECK_FALSE(stored::decodeConfig(v2, kFactoryGuard, c, t, got, gen));
+}
+
+TEST_CASE("config blob: v4 carries the flip; a v3 blob migrates to unflipped") {
+    std::array<std::byte, stored::kConfigBlobBytes> b{};
+    valence::StoredModes m;
+    m.horizon = 1;
+    m.flipped = true;
+    REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), m, 12) == b.size());
+    StoredConfig c;
+    MotionTuning t;
+    valence::StoredModes got;
+    uint16_t gen = 0;
+    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    CHECK(got.flipped);
+    CHECK(got.horizon == 1);
+
+    std::array<std::byte, stored::kConfigV3Bytes> v3{};
+    std::memcpy(v3.data(), b.data(), v3.size());
+    v3[4] = std::byte{3};
+    REQUIRE(stored::decodeConfig(v3, kFactoryGuard, c, t, got, gen));
+    CHECK_FALSE(got.flipped);
+    CHECK(got.horizon == 1);
+
+    // The flip byte is a bool: anything but 0 or 1 is rejected whole.
+    b[b.size() - 1] = std::byte{2};
+    CHECK_FALSE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
 }

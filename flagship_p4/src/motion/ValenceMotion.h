@@ -195,6 +195,9 @@ void motionSetEstopCutsPower(bool cuts);
 // first; return is a no-op without override (MotionArbiter::returnToPause()).
 void motionOverride();
 void motionReturn();
+// RFC-088: the direction flip (MotionArbiter::setFlipped()). Any task; the
+// delegate gates it to a homed rail at rest with no source and no override.
+void motionSetFlipped(bool on);
 
 // Ceiling sets, in millimeters. Ceilings are clamps, never targets; the one
 // exception is a deadline-less Manual point move, which plans AT the jog

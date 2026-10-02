@@ -1161,7 +1161,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // category rather than more fields on 0x0081 (see ch::machine_modes for
     // the enabled_mask arithmetic that makes the split structural).
     //
-    // Layout [6 B, 7 B with has_drive], all u8 — small enough that the
+    // Layout [7 B, 8 B with has_drive], all u8 — small enough that the
     // on-change cadence costs nothing, and every value is an enum the catalog
     // names, so a generic client renders it without knowing this device
     // exists. ValenceDevice.cpp's publishMachineModes() packs the same bytes.
@@ -1206,14 +1206,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                             .desc = "Which of these the machine will accept right now.",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
-                           {"overshoot_clamp", "home_style", "schedule_horizon"});
+                           {"overshoot_clamp", "home_style", "schedule_horizon", "flipped"});
     } else {
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
                             .desc = "Which of these the machine will accept right now.",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
-                           {"overshoot_clamp", "schedule_horizon"});
+                           {"overshoot_clamp", "schedule_horizon", "flipped"});
     }
     // Which path actually drives the motor. READ-ONLY: the backend is what is
     // soldered, so there is no choice for a setting to make.
@@ -1252,6 +1252,18 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasSettingKey = true,
                       .hasRank = true, .rank = valence::ui_ranks::advanced},
                      {"250 ms", "500 ms", "1000 ms"});
+    // RFC-088 (SPEC 9.6): how the rail is mounted. On, position 0 is the far
+    // end and the hub mirrors positions, the window and every target. Stored;
+    // gated to a homed rail at rest with no source and no override.
+    c.addSelectField({.name = "flipped", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .dflt = SettingDefault::ofInt(0),
+                      .group = "Motion behavior",
+                      .desc = "Flip: the rail is mounted the other way round, so position 0 is the "
+                              "far end. Change it homed, at rest, with nothing streaming.",
+                      .role = roles::axis_flipped,
+                      .settingKey = 8, .hasSettingKey = true,
+                      .hasRank = true, .rank = valence::ui_ranks::control},
+                     {"off", "on"});
     };
 
     // ---- "kinetic-*" — STATE, tuning -------------------------------------
@@ -1914,6 +1926,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     }
     c.addSchemaField({.key = 7, .name = "schedule_horizon", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = float(kHorizonMs.size() - 1)});
+    c.addSchemaField({.key = 8, .name = "flipped", .type = CborFieldType::uint_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     };
 
     // ---- "kinetic-set" — INTENT, control, 5 Hz ---------------------------

@@ -55,6 +55,7 @@ struct StoredConfig {
 // The stored 0x1030 modes that are not engine tuning.
 struct StoredModes {
     uint8_t horizon = 0;   // schedule_horizon ordinal: kHorizonMs (ValenceCatalog.h)
+    bool    flipped = false;   // axis.flipped (RFC-088): how the rail is mounted
 
     bool operator==(const StoredModes&) const = default;
 };
@@ -89,15 +90,18 @@ inline float overshootGuardFor(bool on, float factoryGuard) {
 namespace stored {
 
 inline constexpr uint32_t kConfigMagic   = 0x56434647u;  // "VCFG"
-inline constexpr uint8_t  kConfigVersion = 3;            // bump on ANY layout change
+inline constexpr uint8_t  kConfigVersion = 4;            // bump on ANY layout change
 // v2: magic 4, version 1, cfg_gen 2, config 8 x f32, tuning 8 x f32 + 2 x u32 + 7 x u8
 inline constexpr size_t   kConfigV2Bytes = 4 + 1 + 2 + 32 + 32 + 8 + 7;
-// v3 appends the schedule_horizon ordinal (u8).
-inline constexpr size_t   kConfigBlobBytes = kConfigV2Bytes + 1;
+// v3 appends the schedule_horizon ordinal (u8), v4 the flip (u8, 0/1).
+inline constexpr size_t   kConfigV3Bytes = kConfigV2Bytes + 1;
+inline constexpr size_t   kConfigBlobBytes = kConfigV3Bytes + 1;
 
 // 0 for a version this firmware cannot read.
 inline constexpr size_t configBytesFor(uint8_t version) {
-    return version == 2 ? kConfigV2Bytes : version == 3 ? kConfigBlobBytes : 0;
+    return version == 2 ? kConfigV2Bytes
+         : version == 3 ? kConfigV3Bytes
+         : version == 4 ? kConfigBlobBytes : 0;
 }
 
 namespace detail {
@@ -171,6 +175,7 @@ inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
                       uint8_t(t.overshoot_guard > 0.0f)})
         put(out, n, v);
     put(out, n, m.horizon);
+    put(out, n, uint8_t(m.flipped));
     return n;
 }
 
@@ -213,6 +218,11 @@ inline bool decodeConfig(std::span<const std::byte> in, float factoryGuard,
 
     StoredModes m;
     if (version >= 3) m.horizon = get<uint8_t>(in, n);
+    if (version >= 4) {
+        const uint8_t f = get<uint8_t>(in, n);
+        if (f > 1) return false;
+        m.flipped = f != 0;
+    }
 
     if (!configValid(c) || !tuningValid(t) || !modesValid(m)) return false;
     cfgOut = c;

@@ -104,7 +104,10 @@ float MotionArbiter::forceHome(float stroke_mm) {
     float stroke = stroke_mm;
     if (!(stroke >= 1.0f)) stroke = 250.0f;
     if (stroke > _rail) stroke = _rail;
-    _origin    = _emitter.count();
+    // Home swaps ends under the flip (SPEC 9.6): the carriage is asserted at
+    // the client's 0, which is the physical far end of the stroke.
+    const int32_t far_steps = _flipped.load() ? int32_t(std::lround(stroke * kStepsPerMm)) : 0;
+    _origin    = _emitter.count() - far_steps;
     _frame_moved = true;   // 0.0 mm now means a different emitter count
     _rail      = stroke;
     _homed     = true;
@@ -135,7 +138,14 @@ void MotionArbiter::begin(uint64_t now_us) {
     _p_cmd_mm = 0.0f;
 }
 
-bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
+bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
+    // The flip's way in (setFlipped()): a target in the mirrored frame is the
+    // physical point rail minus it, and a velocity reverses.
+    MotionIntent in = asked;
+    if (_flipped.load()) {
+        in.target_mm    = _rail - in.target_mm;
+        in.end_vel_mm_s = -in.end_vel_mm_s;
+    }
     // E-stop is the one gate no source bypasses.
     if (_estop) {
         ++_rejected;
@@ -487,6 +497,22 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     // The source stops owning motion when motion stops, so the 0x1100 stream
     // flag falls on its own rather than latching until the next Manual move.
     c.stream         = _stream && c.busy;
+    // The flip's way out: every position and window in the mirrored frame,
+    // every velocity reversed. steps stays the emitter's own count.
+    if (_flipped.load()) {
+        c.position_mm    = _rail - c.position_mm;
+        c.plan_mm        = _rail - c.plan_mm;
+        c.target_mm      = _rail - c.target_mm;
+        c.demand_mm      = _rail - c.demand_mm;
+        c.velocity_mm_s  = -c.velocity_mm_s;
+        c.residual_steps = -c.residual_steps;
+        c.win_min        = _rail - _win_max;
+        c.win_max        = _rail - _win_min;
+        c.plan_start     = 1.0f - c.plan_start;
+        c.plan_end       = 1.0f - c.plan_end;
+        c.plan_cur       = 1.0f - c.plan_cur;
+        c.plan_vel       = -c.plan_vel;
+    }
     return c;
 }
 
