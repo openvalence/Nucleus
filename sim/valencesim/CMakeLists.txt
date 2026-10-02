@@ -56,6 +56,11 @@ target_include_directories(valencesim PRIVATE
 # Device GLOG sites are audible here; without it Geiger's host branch is mute.
 target_compile_definitions(valencesim PRIVATE GEIGER_HOST_PLATFORM)
 
+# The board's catalog capacities, from their one home, so the twin's catalog
+# and scratch are the P4's.
+include("${NUCLEUS_ROOT}/flagship_p4/valence_capacity.cmake")
+target_compile_definitions(valencesim PRIVATE ${VALENCE_CAPACITY_DEFINITIONS})
+
 target_compile_options(valencesim PRIVATE -O2 -Wall -Wextra)
 
 # Standalone exe: no libstdc++/libgcc/winpthread DLL hunting.

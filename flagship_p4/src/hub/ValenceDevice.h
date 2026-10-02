@@ -63,6 +63,21 @@ inline DeviceFeatures boardFeatures() {
     return feat;
 }
 
+// ---- catalog capacity (RFC-077 item 8) ----------------------------------------
+// The user-space room this build leaves beside the machine's own catalog: what
+// the accessories roster advertises (val-9u0.19) and nothing more. Capacities
+// and the per-accessory budget are build flags whose one home is
+// flagship_p4/valence_capacity.cmake; ValenceDevice.cpp refuses to compile
+// without them. bytes keeps the 80% headroom floor on the encode scratch.
+struct CatalogHeadroom {
+    uint16_t entries = 0;
+    uint16_t layout = 0;
+    uint16_t schema = 0;
+    uint32_t bytes = 0;
+    uint8_t  accessories = 0;   // whole per-accessory budgets that fit, at most the build's count
+};
+CatalogHeadroom catalogHeadroom(const Catalog32& c, size_t encodedBytes);
+
 // ---- supplied by the composition --------------------------------------------
 // deviceNowUs(): the 64-bit monotonic clock motion plans against. It MUST be
 // the clock the linked ValenceMotion implementation reads, or every stream

@@ -39,6 +39,28 @@ static_assert(kPresetNameMax == PatternPresetStore::kNameMax, "catalog preset na
 static_assert(kPresetPayloadBytes == PatternPresetStore::kPayloadBytes, "catalog preset per_item_max drifted");
 static_assert(kApBaseCount == advpat::BASE_COUNT, "catalog modifier-lane count drifted");
 
+// A build without the capacity flags would get the library's defaults: a
+// different Catalog32 from the board's, and no accessory budget at all.
+#ifndef NUCLEUS_ACCESSORIES
+#error "catalog capacity flags missing: apply flagship_p4/valence_capacity.cmake to this build"
+#endif
+
+CatalogHeadroom catalogHeadroom(const Catalog32& c, size_t encodedBytes) {
+    CatalogHeadroom h;
+    h.entries = uint16_t(Catalog32::kEntryCapacity - c.count);
+    h.layout  = uint16_t(Catalog32::kLayoutCapacity - c.layoutUsed);
+    h.schema  = uint16_t(Catalog32::kSchemaCapacity - c.schemaUsed);
+    const size_t floor = Hub::catalogScratchCapacity() * 4 / 5;
+    h.bytes = encodedBytes < floor ? uint32_t(floor - encodedBytes) : 0;
+    const size_t fit = std::min({size_t(h.entries) / NUCLEUS_ACCESSORY_ENTRIES,
+                                 size_t(h.layout) / NUCLEUS_ACCESSORY_LAYOUT_FIELDS,
+                                 size_t(h.schema) / NUCLEUS_ACCESSORY_SCHEMA_FIELDS,
+                                 size_t(h.bytes) / NUCLEUS_ACCESSORY_CATALOG_BYTES,
+                                 size_t(NUCLEUS_ACCESSORIES)});
+    h.accessories = uint8_t(fit);
+    return h;
+}
+
 namespace {
 
 using Ret = Result<IntentValueMap, NackCode>;

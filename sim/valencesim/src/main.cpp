@@ -284,6 +284,10 @@ int main(int argc, char** argv) {
     log.logf('I', "valencesim: %s %s, catalog %u entries, %u B, etag %s", VALENCE_PRODUCT,
              FIRMWARE_VERSION, unsigned(box->catalog.count), unsigned(hub.catalogEncodedBytes()),
              etagHex.data());
+    const valence::CatalogHeadroom room = valence::catalogHeadroom(box->catalog, hub.catalogEncodedBytes());
+    log.logf('I', "valencesim: accessory headroom: %u accessories; free %u entries, %u layout, "
+             "%u schema, %lu B", unsigned(room.accessories), unsigned(room.entries),
+             unsigned(room.layout), unsigned(room.schema), static_cast<unsigned long>(room.bytes));
 
     if (opt.homed) {
         const float stroke = valence::motionForceHome(box->device.config().max_rail);
