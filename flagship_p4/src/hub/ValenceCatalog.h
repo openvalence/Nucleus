@@ -1055,9 +1055,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .group = "Planner", .desc = "Which curve the active plan is."},
                      {"none", "quintic", "ruckig", "cubic"});
     // Per-kind breakdown — names are kinetic::AnomalyType's, index 0 is
-    // the engine's own "none" placeholder and is never counted.
+    // the engine's own "none" placeholder and is never counted, so it is
+    // rank hidden: a permanent zero is padding, not a gauge.
     c.addLayoutField({.name = "anom_none",        .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "Placeholder slot; never counts."});
+                      .group = "Anomalies", .desc = "Placeholder slot; never counts.",
+                      .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "anom_plan_failed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies", .desc = "A command could not be planned at all."});
     c.addLayoutField({.name = "anom_settle",      .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
@@ -1183,8 +1185,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // there is no live motion behavior behind this control. The BYTE STAYS
     // (renamed `blend_mode_reserved`, still occupies byte 0 so bytes 1..3
     // keep their offsets — packed layouts are append-only, deleting the byte
-    // would be a wire break) but carries NO setting_key, so no generic
-    // client renders a control for it. The paired INTENT key (0x0104 key 1)
+    // would be a wire break) but carries NO setting_key and rank hidden
+    // (RENDERING section 4: hidden never renders), so no client offers it as a
+    // setting or shows it at all. The paired INTENT key (0x0104 key 1)
     // is retired too — see the modes_set case in SlopSyncHubService.cpp —
     // a SECOND permanent gap alongside key 2's `transport`.
     //
@@ -1211,19 +1214,15 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasCategory = true, .category = valence::ui_categories::tuning,
                 .hasSettingChannel = true, .settingChannel = ch::modes_set,
                 .hasRank = true, .rank = valence::ui_ranks::advanced});
-    // RETIRED — see the entry comment above. Plain reserved byte, no
-    // options/group/default/setting_key: nothing should render this. The
-    // publisher still writes the driver's (inert) getBlendMode() value here
-    // rather than a hardcoded 0 — the byte's CONTENT is no longer meaningful
-    // either way.
+    // RETIRED padding, see the entry comment above. Rank hidden and no
+    // options/group/default/setting_key: never rendered, never a setting.
+    // publishMachineModes() writes 0 to both bytes.
     c.addLayoutField({.name = "blend_mode_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .desc = "Retired. Unused padding now, the motion policy it once set is gone. "
-                              "Motion always behaves as 'allow'."});
-    // RETIRED — see the entry comment above. Plain reserved byte, no
-    // options/group/default/setting_key: nothing should render this.
+                      .desc = "Retired padding; always 0.",
+                      .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "stream_speed_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .desc = "Retired. Unused padding now, the speed feed it selected between "
-                              "is gone. A streamed point takes the speed its plan derives."});
+                      .desc = "Retired padding; always 0.",
+                      .hasRank = true, .rank = valence::ui_ranks::hidden});
     // Live: applied to the engine before its next plan (ValenceDevice.cpp).
     c.addSelectField({.name = "overshoot_clamp", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(factory::overshoot_clamp),
