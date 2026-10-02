@@ -20,6 +20,7 @@
 //   Names ≤32 B, field names ≤24 B, units ≤8 B (schema/catalog.cddl).
 //   A fully-annotated entry must fit limits::catalog_max_entry_bytes (4096);
 //   `desc` strings are the only unbounded cost and must stay tight.
+//   `desc` reads like a Blender tooltip: one fragment, no period, no rationale.
 //   0x0003/0x0004/0x0005/0x0007 layouts are pinned by the hub's own encoders
 //   (buildSafetyPayload / buildControlOwnerPayload / handleIntent's
 //   release path / emitTakeoverEvent) — not free to reshape here without
@@ -384,17 +385,18 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // (Hub::logDropped) and the firmware's httpTask->hub hand-off ring.
     // Append-only — bytes 0..9 keep their offsets.
     c.addLayoutField({.name = "log_dropped", .type = PackedFieldType::u32, .unit = "count", .scale = 1.0f,
-                      .desc = "Log lines dropped since boot (replay ring + cross-task bridge)."});
+                      .desc = "Log lines dropped since boot"});
     // `motor_switch` and `motor_fault` (fields 6-7, appended 14 -> 16 B): the
     // motor switch's state and the reason it last latched faulted. Their
     // ordinals are motorswitch::State and motorswitch::Fault
     // (system/MotorSwitch.h): the labels move with those enums, append-only.
     // A machine with no switch publishes `on` and `none` (the sim twin).
+    // motor_fault keeps reporting the last fault after a recovery.
     c.addSelectField({.name = "motor_switch", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .desc = "Motor power switch: off, pre-charging, on, or latched off by a fault."},
+                      .desc = "Motor power switch state"},
                      {"off", "precharging", "on", "faulted"});
     c.addSelectField({.name = "motor_fault", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .desc = "Why the motor switch last latched off; it stays reported after a recovery."},
+                      .desc = "Reason the motor switch last latched off"},
                      {"none", "switch_fault", "en_node", "inrush", "precharge"});
 
     // ---- "session-events" — EVENT, watch ------------------------------------
@@ -472,25 +474,25 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // truth (docs/rp-motion-port.md). The drive encoder is its AUDITOR and
     // reaches clients through the encoder-deviation channel, not this field.
     c.addLayoutField({.name = "pos_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
-                      .desc = "Where the carriage is, as the motion processor rendered it.",
+                      .desc = "Carriage position as rendered",
                       .role = roles::telemetry_position,
                       .hasRank = true, .rank = valence::ui_ranks::hero,
                       .hasProvenance = true, .provenance = valence::value_provenance::planned,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
     c.addLayoutField({.name = "tgt_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
-                      .desc = "Where the motion planner is currently driving to.",
+                      .desc = "Position the planner is driving to",
                       .role = roles::telemetry_target,
                       .hasRank = true, .rank = valence::ui_ranks::hero,
                       .hasProvenance = true, .provenance = valence::value_provenance::planned,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
     c.addLayoutField({.name = "speed",    .type = PackedFieldType::i16, .unit = "mm/s", .scale = 10.0f,
-                      .desc = "Live carriage speed; sign is the direction of travel.",
+                      .desc = "Carriage speed, signed by direction",
                       .role = roles::telemetry_velocity,
                       .hasRank = true, .rank = valence::ui_ranks::hero,
                       .hasProvenance = true, .provenance = valence::value_provenance::actual,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
     c.addBitfieldField({.name = "flags", .type = PackedFieldType::bitfield8, .unit = "flag", .scale = 1.0f,
-                        .desc = "Live machine mode bits.",
+                        .desc = "Live machine mode bits",
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"homed", "homing", "gen_running", "paused", "override", "estop", "stream"});
     c.addLayoutField({.name = "raw_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
@@ -499,8 +501,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       // this desc's LEADING CLAUSE is the field's human label:
                       // clients read it instead of the wire name (webui
                       // model/format.js labelFor).
-                      .desc = "Asked position, as the controlling input sent it, mapped into "
-                              "the stroke window before the planner shaped it.",
+                      .desc = "Asked position, mapped into the window, before planning",
                       .hasRank = true, .rank = valence::ui_ranks::diagnostic,
                       .hasProvenance = true, .provenance = valence::value_provenance::demand,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
@@ -541,12 +542,12 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasCategory = true, .category = valence::ui_categories::setup,
                 .hasSettingChannel = true, .settingChannel = ch::config_set,
                 .hasRank = true, .rank = valence::ui_ranks::control});
+    // Commands map into [window_min, window_max]; window_max > window_min.
     c.addLayoutField({.name = "window_min",  .type = PackedFieldType::f32, .unit = "mm",    .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm,
                       .dflt = SettingDefault::ofFloat(factory::window_min),
                       .group = "Stroke window",
-                      .desc = "Rearmost point of travel. Everything the machine is told to do is "
-                              "mapped into the window between this and the front limit.",
+                      .desc = "Rear travel limit of the window",
                       .role = roles::window_min, .step = 1.0f,
                       .settingKey = 1, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -555,18 +556,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm,
                       .dflt = SettingDefault::ofFloat(factory::window_max),
                       .group = "Stroke window",
-                      .desc = "Frontmost point of travel. Must be greater than the rear limit; the "
-                              "machine never moves past it.",
+                      .desc = "Front travel limit of the window",
                       .role = roles::window_max, .step = 1.0f,
                       .settingKey = 2, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
+    // A ceiling, not a target; the factory value is deliberately gentle.
     c.addLayoutField({.name = "jog_speed",  .type = PackedFieldType::f32, .unit = "mm/s",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max,
                       .dflt = SettingDefault::ofFloat(factory::jog_speed),
                       .group = "Jog limits",
-                      .desc = "Speed ceiling for the jog, the moves YOU drive by hand. Kept gentle "
-                              "by default: it is a ceiling, not a target.",
+                      .desc = "Speed ceiling for manual jogs",
                       .role = roles::limit_jog_speed, .step = 1.0f,
                       .settingKey = 3, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -575,8 +575,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max,
                       .dflt = SettingDefault::ofFloat(factory::jog_accel),
                       .group = "Jog limits",
-                      .desc = "How hard a jog is allowed to pick up speed. Lower feels softer at "
-                              "the start and end of every move.",
+                      .desc = "Acceleration ceiling for manual jogs",
                       .role = roles::limit_jog_accel, .step = 10.0f,
                       .settingKey = 4, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -585,8 +584,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max,
                       .dflt = SettingDefault::ofFloat(factory::input_speed),
                       .group = "Machine-driven limits",
-                      .desc = "Speed ceiling for everything the machine drives itself: patterns, "
-                              "scripts and live streams. This is your top-speed safety limit.",
+                      .desc = "Top speed for patterns, scripts and streams",
                       .role = roles::limit_input_speed, .step = 10.0f,
                       .settingKey = 5, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -595,8 +593,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max,
                       .dflt = SettingDefault::ofFloat(factory::input_accel),
                       .group = "Machine-driven limits",
-                      .desc = "How hard patterns and scripts may change speed. Raise it for snappy "
-                              "content, lower it if the machine feels harsh.",
+                      .desc = "Acceleration ceiling for patterns, scripts and streams",
                       .role = roles::limit_input_accel, .step = 100.0f,
                       .settingKey = 6, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -605,18 +602,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = ceiling::rail_min, .max = ceiling::rail_mm,
                       .dflt = SettingDefault::ofFloat(factory::max_rail),
                       .group = "Rail geometry",
-                      .desc = "How far sensorless homing searches for the hard stops. Set it above "
-                              "your rail's real length (e.g. 2000mm+ for a 2m rail).",
+                      .desc = "Homing search distance, set above rail length",
                       .role = roles::geometry_max_travel, .step = 1.0f,
                       .settingKey = 8, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
+    // Protects the mechanics; not a smoothing knob.
     c.addLayoutField({.name = "input_jerk",  .type = PackedFieldType::f32, .unit = "mm/s3", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::jerk_min, .max = ceiling::jerk_max,
                       .dflt = SettingDefault::ofFloat(factory::input_jerk),
                       .group = "Machine-driven limits",
-                      .desc = "How abruptly machine-driven motion may change its acceleration. "
-                              "Protects the mechanics; it is not a smoothing knob.",
+                      .desc = "Jerk ceiling for patterns, scripts and streams",
                       .role = roles::limit_input_jerk, .step = 1000.0f,
                       .settingKey = 7, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true,
@@ -635,7 +631,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // field each bit gates so the mapping survives encode/decode.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
-                        .desc = "Which of these settings the machine will accept right now.",
+                        .desc = "Settings the machine accepts right now",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"window_min", "window_max", "jog_speed", "jog_accel",
@@ -651,8 +647,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // max_rail — the search sweep bounds hunting, not the result.
     // Append-only: added after enabled_mask, bytes 0..32 keep their offsets.
     c.addLayoutField({.name = "measured_stroke", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
-                      .desc = "Usable stroke length sensorless homing actually measured between the "
-                              "two hard stops. Zero until the first successful home.",
+                      .desc = "Stroke measured by homing, 0 until homed",
                       .role = roles::geometry_measured_travel,
                       .hasRank = true, .rank = valence::ui_ranks::detail,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
@@ -691,8 +686,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofBool(false),
                       .group = "Pattern",
-                      .desc = "Whether the built-in pattern generator is currently driving the "
-                              "machine.",
+                      .desc = "Run the pattern generator",
                       .role = roles::pattern_running,
                       .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control});
@@ -700,18 +694,18 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 6.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Pattern",
-                      .desc = "Which stroke pattern the generator plays.",
+                      .desc = "Stroke pattern to play",
                       .role = roles::pattern_select,
                       .step = 1.0f, .settingKey = 2, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control},
                      {"Simple Stroke", "Teasing Pounding", "Robo Stroke", "Half'n'Half",
                       "Deeper", "Stop'n'Go", "Insist"});
+    // Also bounded by input_speed on 0x1000.
     c.addLayoutField({.name = "speed",     .type = PackedFieldType::f32, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(0.0f),
                       .group = "Pattern",
-                      .desc = "How fast the pattern strokes, as a percentage of its own range. "
-                              "Bounded by the machine-driven speed limit.",
+                      .desc = "Pattern speed, percent of its range",
                       .role = roles::pattern_speed,
                       .step = 1.0f, .settingKey = 3, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -720,7 +714,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(0.0f),
                       .group = "Pattern",
-                      .desc = "How far into the stroke window the pattern reaches.",
+                      .desc = "How far into the window the pattern reaches",
                       .role = roles::pattern_depth,
                       .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -729,17 +723,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(0.0f),
                       .group = "Pattern",
-                      .desc = "Length of each stroke, as a percentage of the available depth.",
+                      .desc = "Stroke length, percent of depth",
                       .role = roles::pattern_stroke,
                       .step = 1.0f, .settingKey = 5, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::percent});
+    // What it changes depends on the selected pattern.
     c.addLayoutField({.name = "sensation", .type = PackedFieldType::f32, .unit = "",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(50.0f),
                       .group = "Pattern",
-                      .desc = "Pattern character knob. 50 is neutral; what it changes depends on "
-                              "the pattern you picked.",
+                      .desc = "Pattern character, 50 is neutral",
                       .role = roles::pattern_sensation,
                       .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control});
@@ -754,7 +748,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // at a time.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
-                        .desc = "Which pattern controls the machine will accept right now.",
+                        .desc = "Settings the machine accepts right now",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"running", "pattern", "speed", "depth", "stroke", "sensation", "background_run"});
@@ -769,8 +763,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofBool(false),
                       .group = "Pattern",
-                      .desc = "Keep the pattern running after its session disconnects. Off stops "
-                              "it; on leaves it running, stoppable via Stop/E-Stop.",
+                      .desc = "Keep running after the session disconnects",
                       .role = roles::source_background_run,
                       .step = 1.0f, .settingKey = 7, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control});
@@ -797,31 +790,29 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // aspect is total(4) for the cumulative counters and peak(1) for
     // peak_mm_s, its companion-instrument tag (§5.4).
     c.addLayoutField({.name = "strokes",    .type = PackedFieldType::u32, .unit = "",     .scale = 1.0f,
-                      .group = "Session", .desc = "Direction reversals counted this session.",
+                      .group = "Session", .desc = "Direction reversals this session",
                       .hasAspect = true, .aspect = valence::value_aspects::total,
                       .hasScope = true, .scope = valence::value_scopes::session,
                       .hasUnitId = true, .unitId = valence::unit_ids::count});
     c.addLayoutField({.name = "distance_m", .type = PackedFieldType::f32, .unit = "m",    .scale = 1.0f,
-                      .group = "Session", .desc = "Total distance the carriage has traveled this session.",
+                      .group = "Session", .desc = "Distance traveled this session",
                       .hasAspect = true, .aspect = valence::value_aspects::total,
                       .hasScope = true, .scope = valence::value_scopes::session});
                       // unit_id deliberately absent: unit_ids has no meters (only mm, id 0) and
                       // reporting mm here would misstate the physical unit — falls back to the
                       // "m" string label (the honest, documented unit_ids gap).
     c.addLayoutField({.name = "peak_mm_s",  .type = PackedFieldType::f32, .unit = "mm/s", .scale = 1.0f,
-                      .group = "Session", .desc = "Fastest the carriage moved this session.",
+                      .group = "Session", .desc = "Top carriage speed this session",
                       .hasAspect = true, .aspect = valence::value_aspects::peak,
                       .hasScope = true, .scope = valence::value_scopes::session,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
     c.addLayoutField({.name = "energy_wh",  .type = PackedFieldType::f32, .unit = "Wh",   .scale = 1.0f,
-                      .group = "Session", .desc = "Electrical energy drawn this session. Zero if this "
-                                                  "machine has no power monitor.",
+                      .group = "Session", .desc = "Energy drawn this session",
                       .hasAspect = true, .aspect = valence::value_aspects::total,
                       .hasScope = true, .scope = valence::value_scopes::session,
                       .hasUnitId = true, .unitId = valence::unit_ids::wh});
     c.addLayoutField({.name = "session_ms", .type = PackedFieldType::u32, .unit = "ms",   .scale = 1.0f,
-                      .group = "Session", .desc = "Time since boot, or since the session counters were "
-                                                  "last reset.",
+                      .group = "Session", .desc = "Session time, since boot or counter reset",
                       .hasAspect = true, .aspect = valence::value_aspects::total,
                       .hasScope = true, .scope = valence::value_scopes::session,
                       .hasUnitId = true, .unitId = valence::unit_ids::ms});
@@ -929,7 +920,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addBitfieldField({.name = "flags", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .group = "Active plan",
-                        .desc = "Whether a plan is running, and which planner produced it."},
+                        .desc = "Active plan and planner mode bits"},
                        {"active", "live_mode", "grad_mode"});
     // RFC-035: the plan.* role family — a generic plan-strip widget finds this
     // channel BY ROLE on any machine, replacing the reference client's
@@ -937,27 +928,27 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // names the concept differently).
     c.addSelectField({.name = "style", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .group = "Active plan",
-                      .desc = "Which planning mode the motion core is in.",
+                      .desc = "Planning mode of the motion core",
                       .role = roles::plan_style},
                      {"idle", "waveform", "chase", "settle"});
     c.addLayoutField({.name = "start_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = "Active plan", .desc = "Where the current plan started.",
+                      .group = "Active plan", .desc = "Start of the current plan",
                       .role = roles::plan_start});
     c.addLayoutField({.name = "end_norm",   .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = "Active plan", .desc = "Where the current plan ends.",
+                      .group = "Active plan", .desc = "End of the current plan",
                       .role = roles::plan_end});
     c.addLayoutField({.name = "cur_norm",   .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = "Active plan", .desc = "The setpoint the plan is producing right now.",
+                      .group = "Active plan", .desc = "Setpoint the plan is producing now",
                       .role = roles::plan_current});
     c.addLayoutField({.name = "cur_vel",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f,
-                      .group = "Active plan", .desc = "The plan's velocity right now, signed.",
+                      .group = "Active plan", .desc = "Plan velocity right now, signed",
                       .role = roles::plan_velocity});
     c.addLayoutField({.name = "duration_us", .type = PackedFieldType::u32, .unit = "us",    .scale = 1.0f,
-                      .group = "Active plan", .desc = "How long the current plan runs in total.",
+                      .group = "Active plan", .desc = "Total duration of the current plan",
                       .role = roles::plan_duration,
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "elapsed_us",  .type = PackedFieldType::u32, .unit = "us",    .scale = 1.0f,
-                      .group = "Active plan", .desc = "How far into the current plan we are.",
+                      .group = "Active plan", .desc = "Time elapsed in the current plan",
                       .role = roles::plan_elapsed,
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     };
@@ -992,17 +983,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                     .hasCategory = true, .category = valence::ui_categories::system,
                     .hasRank = true, .rank = valence::ui_ranks::diagnostic});
         c.addLayoutField({.name = "bus_mV",  .type = PackedFieldType::u16, .unit = "V", .scale = 1000.0f,
-                          .group = "Power", .desc = "DC bus voltage feeding the motor drive.",
+                          .group = "Power", .desc = "DC bus voltage at the motor drive",
                           .role = roles::telemetry_power_bus});
         c.addLayoutField({.name = "peak_mA", .type = PackedFieldType::u16, .unit = "A", .scale = 1000.0f,
                           .group = "Power",
-                          .desc = "Largest bus current seen since the counters were last reset."});
+                          .desc = "Peak bus current since last reset"});
         c.addLayoutField({.name = "i_bus_mA", .type = PackedFieldType::i16, .unit = "A", .scale = 1000.0f,
-                          .group = "Power", .desc = "Bus current right now; sign follows the drive.",
+                          .group = "Power", .desc = "Bus current, signed by the drive",
                           .role = roles::telemetry_current});
         if (feat.has_power_monitor) {
             c.addLayoutField({.name = "die_c10", .type = PackedFieldType::i16, .unit = "C", .scale = 10.0f,
-                              .group = "Power", .desc = "Power-monitor die temperature.",
+                              .group = "Power", .desc = "Power monitor die temperature",
                               .role = roles::telemetry_temp});
         }
     }
@@ -1039,82 +1030,78 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasRank = true, .rank = valence::ui_ranks::diagnostic,
                 .role = valence::channel_roles::anomaly_summary});
     c.addLayoutField({.name = "plans",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Planner", .desc = "Motion plans computed successfully."});
+                      .group = "Planner", .desc = "Motion plans computed successfully"});
+    // On a rejection the previous plan keeps running.
     c.addLayoutField({.name = "failures", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Planner", .desc = "Commands the planner rejected; the previous plan kept running."});
+                      .group = "Planner", .desc = "Commands the planner rejected"});
     c.addLayoutField({.name = "anomalies", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Planner", .desc = "Total planner anomalies of every kind."});
+                      .group = "Planner", .desc = "Planner anomalies of every kind"});
     c.addSelectField({.name = "mode",      .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .group = "Planner", .desc = "Which planning mode the motion core is in."},
+                      .group = "Planner", .desc = "Planning mode of the motion core"},
                      {"idle", "waveform", "chase", "settle"});
     // Options are indexed by kinetic::PlanKind and the enum is APPEND-ONLY.
     // "cubic" (=3) arrived with curve_policy/ForceC1: a C1 cubic and a C2 quintic
     // are different curves and the client must be able to tell them apart, so
     // this list grows rather than collapsing both into "hermite".
     c.addSelectField({.name = "plan_kind", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .group = "Planner", .desc = "Which curve the active plan is."},
+                      .group = "Planner", .desc = "Curve type of the active plan"},
                      {"none", "quintic", "ruckig", "cubic"});
     // Per-kind breakdown — names are kinetic::AnomalyType's, index 0 is
     // the engine's own "none" placeholder and is never counted, so it is
     // rank hidden: a permanent zero is padding, not a gauge.
     c.addLayoutField({.name = "anom_none",        .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "Placeholder slot; never counts.",
+                      .group = "Anomalies", .desc = "Placeholder slot, never counts",
                       .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "anom_plan_failed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "A command could not be planned at all."});
+                      .group = "Anomalies", .desc = "Commands that could not be planned"});
     c.addLayoutField({.name = "anom_settle",      .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "The stream stopped sending mid-move; the machine braked to rest."});
+                      .group = "Anomalies", .desc = "Moves braked to rest after the stream stopped"});
     c.addLayoutField({.name = "anom_endvel_clamped", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "A handoff speed was cut back to stay inside the window."});
+                      .group = "Anomalies", .desc = "Handoff speed cut to stay inside the window"});
     c.addLayoutField({.name = "anom_deadline_stretched", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "A move needed longer than the time it was given."});
+                      .group = "Anomalies", .desc = "Moves stretched past their given time"});
     c.addLayoutField({.name = "anom_waveform_fallback",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "The sender's curve broke a limit; the machine reshaped it."});
+                      .group = "Anomalies", .desc = "Sender curves reshaped for breaking a limit"});
     c.addLayoutField({.name = "anom_waveform_scaled",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "A stroke was shortened to finish on time."});
+                      .group = "Anomalies", .desc = "Strokes shortened to finish on time"});
     // Retired kind (centering left the engine 2026-09-03); the counter stays
     // in the layout so the per-kind table keeps its positions, and hidden so
     // no renderer draws a permanent zero (sd-djg).
     c.addLayoutField({.name = "anom_waveform_centered",   .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "A shortened stroke was re-centered on its midpoint.",
+                      .group = "Anomalies", .desc = "Shortened strokes re-centered on their midpoint",
                       .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "anom_handoff_bounded",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies",
-                      .desc = "A sender asked to arrive at a speed the next segment could not "
-                              "absorb; the machine bounded it."});
+                      .desc = "Arrival speeds bounded for the next segment"});
     c.addLayoutField({.name = "anom_waveform_smoothed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies",
-                      .desc = "A curve was flattened toward a straight line so the machine "
-                              "could keep the timing without losing the stroke."});
+                      .desc = "Curves flattened to keep timing and stroke"});
     c.addLayoutField({.name = "anom_dwell_zeroed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies",
-                      .desc = "A hold was re-sent carrying a stale arrival speed; the machine "
-                              "ignored it and stayed put."});
+                      .desc = "Stale arrival speeds ignored on held positions"});
     c.addLayoutField({.name = "plan_us_last", .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
-                      .group = "Plan time", .desc = "Time the most recent plan took to compute.",
+                      .group = "Plan time", .desc = "Compute time of the latest plan",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "plan_us_max",  .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
-                      .group = "Plan time", .desc = "Worst plan time since the counters were reset.",
+                      .group = "Plan time", .desc = "Worst plan compute time since reset",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "plan_us_avg",  .type = PackedFieldType::f32, .unit = "us", .scale = 1.0f,
-                      .group = "Plan time", .desc = "Smoothed average plan time.",
+                      .group = "Plan time", .desc = "Smoothed average plan compute time",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "sync_bundles",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Stream ingress", .desc = "Motion bundles accepted over Valence."});
+                      .group = "Stream ingress", .desc = "Motion bundles accepted over Valence"});
     c.addLayoutField({.name = "sync_samples",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Stream ingress", .desc = "Motion samples decoded from those bundles."});
+                      .group = "Stream ingress", .desc = "Motion samples decoded from bundles"});
     c.addLayoutField({.name = "sync_enqueued", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Stream ingress", .desc = "Samples that reached the motion core."});
+                      .group = "Stream ingress", .desc = "Samples that reached the motion core"});
     c.addLayoutField({.name = "sync_dropped",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Stream ingress",
-                      .desc = "Samples discarded before the motion core: too late, unusable, or "
-                              "refused because the machine was not ready."});
+                      .desc = "Samples dropped as late, unusable or refused"});
     c.addLayoutField({.name = "sync_seg_bundles", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Stream ingress", .desc = "How many of those bundles were timed segments."});
+                      .group = "Stream ingress", .desc = "Bundles that carried timed segments"});
     c.addLayoutField({.name = "reset_gen", .type = PackedFieldType::u16, .unit = "", .scale = 1.0f,
                       .group = "Planner",
-                      .desc = "Counts up every time these counters are reset, so every viewer "
-                              "sees the reset and not just whoever asked for it.",
+                      .desc = "Increments on every counter reset",
                       .role = roles::meta_reset_gen});
     };
 
@@ -1150,21 +1137,19 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                      "waveform_fallback", "waveform_scaled", "waveform_centered",
                      "handoff_bounded", "waveform_smoothed", "dwell_zeroed"});
     c.addSchemaField({.key = anom_body::kind, .name = "kind", .type = CborFieldType::uint_t, .unit = "",
-                      .desc = "What the motion core had to do differently, and why: the event's "
-                              "own kind, repeated."});
+                      .desc = "Anomaly kind, same as the event kind"});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",
-                      .desc = "Rolling event id from the motion core; wraps."});
+                      .desc = "Rolling event id, wraps"});
     c.addSchemaField({.key = anom_body::target, .name = "target", .type = CborFieldType::f32_t,
                       .unit = "norm",
-                      .desc = "The commanded position that provoked it, 0..1 across the stroke window."});
+                      .desc = "Commanded position, 0 to 1 across the window"});
     c.addSchemaField({.key = anom_body::detail, .name = "detail", .type = CborFieldType::f32_t, .unit = "",
-                      .desc = "Kind-specific number: the clamped speed, the stretched duration, or "
-                              "the fraction of the stroke actually achieved."});
+                      .desc = "Speed, duration or stroke fraction, per kind"});
     // unit_ids us, not hub_s: a schema field carries no scale and the registry
     // has no microsecond hub-time unit (RFC-086), so the wire states this
     // stamp's magnitude only, never which clock it was read from.
     c.addSchemaField({.key = anom_body::t_us, .name = "t_us", .type = CborFieldType::uint_t, .unit = "us",
-                      .desc = "Motion-core time when it happened.",
+                      .desc = "Motion core time of the event",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     };
 
@@ -1218,17 +1203,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // options/group/default/setting_key: never rendered, never a setting.
     // publishMachineModes() writes 0 to both bytes.
     c.addLayoutField({.name = "blend_mode_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .desc = "Retired padding; always 0.",
+                      .desc = "Retired padding, always 0",
                       .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "stream_speed_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .desc = "Retired padding; always 0.",
+                      .desc = "Retired padding, always 0",
                       .hasRank = true, .rank = valence::ui_ranks::hidden});
     // Live: applied to the engine before its next plan (ValenceDevice.cpp).
+    // Trades a little smoothness for no overshoot micromotion.
     c.addSelectField({.name = "overshoot_clamp", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(factory::overshoot_clamp),
                       .group = "Motion behavior",
-                      .desc = "Stops a smoothed curve from bulging past the points it was given. "
-                              "Costs a little smoothness to remove overshoot micromotion.",
+                      .desc = "Keep smoothed curves from overshooting their points",
                       .settingKey = 4, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true,
                       .hasRank = true, .rank = valence::ui_ranks::advanced},
@@ -1240,14 +1225,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     if (feat.has_drive) {
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
-                            .desc = "Which of these the machine will accept right now.",
+                            .desc = "Settings the machine accepts right now",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
                            {"overshoot_clamp", "home_style", "schedule_horizon", "flipped"});
     } else {
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
-                            .desc = "Which of these the machine will accept right now.",
+                            .desc = "Settings the machine accepts right now",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
                            {"overshoot_clamp", "schedule_horizon", "flipped"});
@@ -1259,8 +1244,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // value another machine in this ecosystem already publishes.
     c.addSelectField({.name = "motion_backend", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .group = "Motion behavior",
-                      .desc = "Which path drives the motor: step/dir pulses, RS485 setpoints, "
-                              "or a quadrature the drive follows.",
+                      .desc = "Signal path that drives the motor",
                       .flags = valence::setting_flags::advanced,
                       .hasRank = true, .rank = valence::ui_ranks::advanced},
                      {"step-dir", "modbus", "quadrature"});
@@ -1270,8 +1254,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addSelectField({.name = "home_style", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .dflt = SettingDefault::ofInt(0),
                           .group = "Motion behavior",
-                          .desc = "How the machine finds home: feel for the hard stops itself, or "
-                                  "hand the whole cycle to the drive.",
+                          .desc = "How the machine finds home",
                           .settingKey = 6, .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true,
                           .hasRank = true, .rank = valence::ui_ranks::advanced},
@@ -1279,12 +1262,12 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     }
     // RFC-087: the schedule horizon a segments grant advertises (kHorizonMs).
     // Refused INTERLOCK while any session holds a segments grant, because the
-    // grant's horizon is a commitment for its life (SPEC 5.4).
+    // grant's horizon is a commitment for its life (SPEC 5.4); enabled_mask grays
+    // it while a grant is live.
     c.addSelectField({.name = "schedule_horizon", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Streaming",
-                      .desc = "How far ahead a segment player may schedule. Longer rides out poor "
-                              "WiFi. Disconnect the player to change it.",
+                      .desc = "How far ahead segment players may schedule",
                       .settingKey = 7, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true,
                       .hasRank = true, .rank = valence::ui_ranks::advanced},
@@ -1295,8 +1278,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectField({.name = "flipped", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Motion behavior",
-                      .desc = "Flip: the rail is mounted the other way round, so position 0 is the "
-                              "far end. Change it homed, at rest, with nothing streaming.",
+                      .desc = "Rail mounted reversed, position 0 at the far end",
                       .role = roles::axis_flipped,
                       .settingKey = 8, .hasSettingKey = true,
                       .hasRank = true, .rank = valence::ui_ranks::control},
@@ -1332,27 +1314,28 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasCategory = true, .category = valence::ui_categories::setup,
                 .hasSettingChannel = true, .settingChannel = ch::kinetic_set,
                 .hasRank = true, .rank = valence::ui_ranks::advanced});
+    // The three overrides: 0 derives the ceiling from the mm limits on 0x1000.
     c.addLayoutField({.name = "jmax_ovr", .type = PackedFieldType::f32, .unit = "1/s3", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2000000.0f,
                       .dflt = SettingDefault::ofFloat(0.0f), .group = "Ceiling overrides",
-                      .desc = "Jerk ceiling for the planner. 0 derives it from the machine limits.",
+                      .desc = "Jerk ceiling override, 0 for automatic",
                       .role = "", .step = 1000.0f,
                       .settingKey = 1, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "vmax_ovr", .type = PackedFieldType::f32, .unit = "1/s", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 20.0f,
                       .dflt = SettingDefault::ofFloat(0.0f), .group = "Ceiling overrides",
-                      .desc = "Speed ceiling override, normalized. 0 derives it from the mm limits.",
+                      .desc = "Speed ceiling override, 0 for automatic",
                       .settingKey = 2, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true});
     c.addLayoutField({.name = "amax_ovr", .type = PackedFieldType::f32, .unit = "1/s2", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 500.0f,
                       .dflt = SettingDefault::ofFloat(0.0f), .group = "Ceiling overrides",
-                      .desc = "Acceleration ceiling override, normalized. 0 derives it from the mm limits.",
+                      .desc = "Acceleration ceiling override, 0 for automatic",
                       .settingKey = 3, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
-                        .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
+                        .scale = 1.0f, .desc = "Settings the machine accepts right now",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"jmax_ovr", "vmax_ovr", "amax_ovr"});
@@ -1379,48 +1362,49 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasRank = true, .rank = valence::ui_ranks::advanced});
     c.addSelectField({.name = "chase_ff", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(1), .group = "Sample streams",
-                      .desc = "Aim at where the sender is heading, not just where it last was.",
+                      .desc = "Aim where the sender is heading",
                       .settingKey = 6, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addSelectField({.name = "chase_accel_ff", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(1), .group = "Sample streams",
-                      .desc = "Also match how the sender's speed is changing, not just its speed.",
+                      .desc = "Also follow the sender's acceleration",
                       .settingKey = 7, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addLayoutField({.name = "chase_gain", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.5f,
                       .dflt = SettingDefault::ofFloat(0.9f), .group = "Sample streams",
-                      .desc = "Damping on the speed estimate. Lower is steadier, higher is more responsive.",
+                      .desc = "Speed estimate damping, lower is steadier",
                       .step = 0.05f, .settingKey = 8, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
+    // Too far overshoots at turns.
     c.addLayoutField({.name = "chase_lookahead", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f,
                       .dflt = SettingDefault::ofFloat(1.3f), .group = "Sample streams",
-                      .desc = "How far ahead to aim, in stream intervals. Too far overshoots at turns.",
+                      .desc = "Aim-ahead distance in stream intervals",
                       .step = 0.5f, .settingKey = 9, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "chase_dense_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 10.0f, .max = 500.0f,
                       .dflt = SettingDefault::ofFloat(60.0f), .group = "Sample streams",
-                      .desc = "Streams faster than this count as dense and get predictive aiming.",
+                      .desc = "Streams faster than this get predictive aiming",
                       .settingKey = 10, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true});
     c.addSelectField({.name = "chase_aim_extrap", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(1), .group = "Sample streams",
-                      .desc = "Second-order aiming. Sharper tracking, but can overshoot at turn points.",
+                      .desc = "Second-order aiming, sharper but can overshoot",
                       .settingKey = 11, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addLayoutField({.name = "handoff_k", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f,
                       .dflt = SettingDefault::ofFloat(1.5f), .group = "Sample streams",
-                      .desc = "Bound on handoff speed between moves, as a multiple of the chord.",
+                      .desc = "Handoff speed bound, as a multiple of the chord",
                       .step = 0.1f, .settingKey = 12, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
-                        .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
+                        .scale = 1.0f, .desc = "Settings the machine accepts right now",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"chase_ff", "chase_accel_ff", "chase_gain", "chase_lookahead",
@@ -1441,7 +1425,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasRank = true, .rank = valence::ui_ranks::control});
     c.addSelectField({.name = "curve_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0), .group = "Curve",
-                      .desc = "Rebuild the sender's curve as sent, or force one smoothness family.",
+                      .desc = "Keep the sender's curve or force a smoothness class",
                       .settingKey = 13, .hasSettingKey = true},
                      {"follow client", "force C1", "force C2"});
     // A SELECT'S WIRE VALUE IS ITS INDEX (SPEC, catalog.hpp addSelectField), so
@@ -1451,23 +1435,24 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // ordinals of policies deleted 2026-09-02 as blend.
     c.addSelectField({.name = "infeasible_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(1), .group = "Infeasible moves",
-                      .desc = "What to do when a move cannot be finished in the time it was given.",
+                      .desc = "Handling for moves that cannot finish in time",
                       .settingKey = 14, .hasSettingKey = true},
                      {"stretch", "blend"});
     c.addLayoutField({.name = "smooth_budget", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofFloat(0.5f), .group = "Infeasible moves",
-                      .desc = "How much smoothness may be spent before amplitude is touched.",
+                      .desc = "Smoothness spent before amplitude is touched",
                       .step = 0.05f, .settingKey = 16, .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "amplitude_budget", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofFloat(0.5f), .group = "Infeasible moves",
-                      .desc = "How much stroke length may be spent before smoothness is touched.",
+                      .desc = "Stroke length spent before smoothness is touched",
                       .step = 0.05f, .settingKey = 17, .hasSettingKey = true, .hasStep = true});
+    // More steps: smoother, slower to settle.
     c.addLayoutField({.name = "blend_steps", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 10.0f,
                       .dflt = SettingDefault::ofInt(6), .group = "Infeasible moves",
-                      .desc = "How gradually a budget is spent. More steps is smoother, slower to settle.",
+                      .desc = "How gradually a budget is spent",
                       .settingKey = 18, .hasSettingKey = true});
     // TODO(sd-6b2.4): `infeasible_blend` (SystemState::sm_tune_infeas_blend,
     // f32, 0..1, default 0.5, group "Infeasible moves") belongs here and in the
@@ -1478,10 +1463,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "settle_grace_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 200.0f,
                       .dflt = SettingDefault::ofFloat(30.0f), .group = "Settling",
-                      .desc = "Grace period after a stream stops before the machine brakes to rest.",
+                      .desc = "Wait after a stream stops before braking",
                       .settingKey = 20, .hasSettingKey = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
-                        .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
+                        .scale = 1.0f, .desc = "Settings the machine accepts right now",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"curve_policy", "infeasible_policy", "smooth_budget",
@@ -1506,9 +1491,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 60098.0f,
                       .dflt = SettingDefault::ofInt(0), .group = "Servo drive",
-                      // 128 bytes exactly, which is limits::desc_max_bytes.
-                      .desc = "Drive ramp register. 0 = auto. Under 60000 the drive ramps on "
-                              "its own and lags; 60000 removes it; 60001-60098 add feedforward %.",
+                      // Below 60000 the drive ramps on its own and lags the planner.
+                      .desc = "Drive ramp, 0 auto, 60000 none, 60001+ feedforward %",
                       .step = 1.0f, .settingKey = 1,
                       .hasSettingKey = true, .hasStep = true});
     // READBACK, no setting_key, so these render as readouts. What the DRIVE
@@ -1516,13 +1500,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // disagree, and only the drive's own answer settles it.
     c.addLayoutField({.name = "accel_reg_actual", .type = PackedFieldType::u32, .unit = "rpm/s",
                       .scale = 1.0f, .group = "Servo drive",
-                      .desc = "What the drive reports for 0x03 right now, read back off the bus."});
+                      .desc = "Ramp register as read back from the drive"});
+    // Below the planner's accel ceiling, the drive limits the stroke.
     c.addLayoutField({.name = "ramp_limit", .type = PackedFieldType::f32, .unit = "mm/s2",
                       .scale = 1.0f, .group = "Servo drive",
-                      .desc = "That same setting in machine units. Below your accel ceiling the "
-                              "drive, not the planner, is what limits the stroke."});
+                      .desc = "Drive ramp in machine units"});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
-                        .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
+                        .scale = 1.0f, .desc = "Settings the machine accepts right now",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"accel_reg"});
@@ -1559,7 +1543,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofBool(false),
                       .group = "Advanced pattern",
-                      .desc = "Drive the generator with Advanced mode instead of the classic patterns.",
+                      .desc = "Use Advanced mode instead of classic patterns",
                       .role = roles::advgen_mode,
                       .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control});
@@ -1567,7 +1551,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Advanced pattern",
-                      .desc = "Overall stroke speed. 0 holds position.",
+                      .desc = "Overall stroke speed, 0 holds position",
                       .role = roles::advgen_master,
                       .step = 1.0f, .settingKey = 2, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -1576,7 +1560,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(10),
                       .group = "Depth window",
-                      .desc = "Deepest point of the stroke (the in-stroke target).",
+                      .desc = "Deepest point of the stroke",
                       .role = roles::advgen_depth_max,
                       .step = 1.0f, .settingKey = 3, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -1585,7 +1569,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Depth window",
-                      .desc = "Shallowest point of the stroke (the out-stroke target).",
+                      .desc = "Shallowest point of the stroke",
                       .role = roles::advgen_depth_min,
                       .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -1594,7 +1578,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(100),
                       .group = "Speed",
-                      .desc = "In-stroke speed, as a percentage of master speed.",
+                      .desc = "In-stroke speed, percent of master",
                       .role = roles::advgen_speed_in,
                       .step = 1.0f, .settingKey = 5, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -1603,7 +1587,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(100),
                       .group = "Speed",
-                      .desc = "Out-stroke speed, as a percentage of master speed.",
+                      .desc = "Out-stroke speed, percent of master",
                       .role = roles::advgen_speed_out,
                       .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -1612,7 +1596,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(40),
                       .group = "Acceleration",
-                      .desc = "How hard the in-stroke accelerates.",
+                      .desc = "In-stroke acceleration",
                       .role = roles::advgen_accel_in,
                       .step = 1.0f, .settingKey = 7, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -1621,7 +1605,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(40),
                       .group = "Acceleration",
-                      .desc = "How hard the out-stroke accelerates.",
+                      .desc = "Out-stroke acceleration",
                       .role = roles::advgen_accel_out,
                       .step = 1.0f, .settingKey = 8, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -1636,7 +1620,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // homed and running, same as dialing in a pattern before pressing start.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
-                        .desc = "Which of these the machine will accept right now.",
+                        .desc = "Settings the machine accepts right now",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"ap_mode", "master", "max_depth", "min_depth", "in_speed", "out_speed",
@@ -1683,8 +1667,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addLayoutField({.name = "amount", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
-                          .desc = "How far this modulator swings its control. 0 leaves the control "
-                                  "at its base value; 100 is the full swing.",
+                          .desc = "Modulation amount, 0 none, 100 full swing",
                           .role = roles::mod_amount,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 0),
                           .flags = valence::setting_flags::advanced,
@@ -1694,7 +1677,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addLayoutField({.name = "in_step", .type = PackedFieldType::u8, .unit = "strokes", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(1), .group = group,
-                          .desc = "Strokes rising into the full swing.",
+                          .desc = "Strokes rising to full swing",
                           .role = roles::mod_rise,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 1),
                           .flags = valence::setting_flags::advanced,
@@ -1704,7 +1687,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addLayoutField({.name = "in_wait", .type = PackedFieldType::u8, .unit = "strokes", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
-                          .desc = "Strokes held at the full swing.",
+                          .desc = "Strokes held at full swing",
                           .role = roles::mod_hold,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 2),
                           .flags = valence::setting_flags::advanced,
@@ -1714,7 +1697,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addLayoutField({.name = "out_step", .type = PackedFieldType::u8, .unit = "strokes", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(1), .group = group,
-                          .desc = "Strokes falling back to the base value.",
+                          .desc = "Strokes falling back to base",
                           .role = roles::mod_fall,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 3),
                           .flags = valence::setting_flags::advanced,
@@ -1724,7 +1707,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addLayoutField({.name = "out_wait", .type = PackedFieldType::u8, .unit = "strokes", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
-                          .desc = "Strokes resting at the base value before the cycle repeats.",
+                          .desc = "Strokes resting at base before repeating",
                           .role = roles::mod_rest,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 4),
                           .flags = valence::setting_flags::advanced,
@@ -1734,7 +1717,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addLayoutField({.name = "offset", .type = PackedFieldType::u8, .unit = "strokes", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
-                          .desc = "Strokes this cycle starts shifted by, against the other modulators.",
+                          .desc = "Cycle offset against the other modulators",
                           .role = roles::mod_phase,
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 5),
                           .flags = valence::setting_flags::advanced,
@@ -1746,7 +1729,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         // the mask tracks e-stop alone.
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
-                            .desc = "Which of these the machine will accept right now.",
+                            .desc = "Settings the machine accepts right now",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
                            {"amount", "in_step", "in_wait", "out_step", "out_wait", "offset"});
