@@ -10,8 +10,8 @@
 
 namespace valence {
 
-// Applies any pending settings and ticks the generator at now_us, submitting
-// its stroke through motionSubmit(). Call every loop pass.
+// Applies any pending settings and ticks both generators at now_us, submitting
+// their strokes through motionSubmit(). Call every loop pass.
 void simPatternTick(uint64_t now_us);
 
 }  // namespace valence
