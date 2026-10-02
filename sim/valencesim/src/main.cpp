@@ -3,14 +3,15 @@
 // and the REAL kinetic::Engine behind a WebSocket speaking valence.v1
 //
 //   valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
-//              [--pairing-window] [--state PREFIX]
+//              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
 //              [--headless] [--no-mdns] [--enforce]
 //
 // Constraints:
 // - HOST-ONLY: never touches a device, never deploys, no pio.
-// - ONE hub thread. The Hub, ValenceDevice, SimMotion and SimPattern are
-//   called from the loop below and nowhere else (T5). IXWebSocket connection
-//   threads only feed the port's RX rings and the /uitoken slot table.
+// - ONE hub thread. The Hub, ValenceDevice, SimMotion, SimMotorSwitch and
+//   SimPattern are called from the loop below and nowhere else (T5).
+//   IXWebSocket connection threads only feed the port's RX rings and the
+//   /uitoken slot table.
 // - DEVICE GLOG LINES: Geiger's host platform layer (GEIGER_HOST_PLATFORM in
 //   CMakeLists.txt) is drained on the hub thread only, into the sim's own
 //   SessionLog, so a run reads as one stream.
@@ -47,6 +48,7 @@
 #endif
 
 #include "SimMotion.h"
+#include "SimMotorSwitch.h"
 #include "SimPattern.h"
 #include "SimUiToken.h"
 #include "common/HostPlatform.h"
@@ -96,6 +98,8 @@ struct Options {
     bool homed = false;
     int durationS = 0;
     bool pairingWindow = false;
+    bool motorSwitch = false;
+    int mswFaultS = -1;   // --msw-fault: seconds after boot, -1 = none
     std::string statePrefix;   // empty = valencesim-state beside the exe
 };
 
@@ -109,6 +113,8 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (!std::strcmp(a, "--duration") && hasNext) o.durationS = std::atoi(argv[++i]);
         else if (!std::strcmp(a, "--homed")) o.homed = true;
         else if (!std::strcmp(a, "--pairing-window")) o.pairingWindow = true;
+        else if (!std::strcmp(a, "--motor-switch")) o.motorSwitch = true;
+        else if (!std::strcmp(a, "--msw-fault") && hasNext) o.mswFaultS = std::atoi(argv[++i]);
         else if (!std::strcmp(a, "--state") && hasNext) o.statePrefix = argv[++i];
         // No TUI and no mDNS responder exist, and --enforce names what is now
         // the only posture; all three are accepted so older command lines run
@@ -210,7 +216,7 @@ int main(int argc, char** argv) {
     if (!parseArgs(argc, argv, opt)) {
         std::fprintf(stderr,
                      "usage: valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]\n"
-                     "                  [--pairing-window] [--state PREFIX]\n"
+                     "                  [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]\n"
                      "                  [--headless] [--no-mdns] [--enforce]\n");
         return 2;
     }
@@ -230,6 +236,7 @@ int main(int argc, char** argv) {
 
     auto box = std::make_unique<SimBox>();
     valence::motionBegin();
+    if (opt.motorSwitch) valence::simMotorSwitchModel();
     valence::motorSwitchBegin();
     valence::patternBegin();
 
@@ -271,8 +278,9 @@ int main(int argc, char** argv) {
     log.logf('I', "valencesim: state %s.{cfg,presets,iid}: config %s, cfg_gen %u",
              prefix.string().c_str(), haveStored ? "stored" : "factory", unsigned(hub.cfgGen()));
     hub.setIdentity(VALENCE_PRODUCT, FIRMWARE_VERSION, kHubName);
-    // No motor switch on a desktop: ESTOP is a halt that keeps home (SPEC 11.2).
-    hub.setEstopCutsPower(false);
+    // No motor switch on a desktop by default: ESTOP is a halt that keeps
+    // home (SPEC 11.2). --motor-switch models the board's, which cuts power.
+    hub.setEstopCutsPower(opt.motorSwitch);
     hub.setHubInstanceId(loadOrMintInstanceId(iidPath, box->rng, log));
     log.logf('I', "valencesim: hub_instance_id %016llx",
              static_cast<unsigned long long>(hub.hubInstanceId()));
@@ -290,6 +298,17 @@ int main(int argc, char** argv) {
     log.logf('I', "valencesim: accessory headroom: %u accessories; free %u entries, %u layout, "
              "%u schema, %lu B", unsigned(room.accessories), unsigned(room.entries),
              unsigned(room.layout), unsigned(room.schema), static_cast<unsigned long>(room.bytes));
+
+    // The board's boot hands the switch the self-check's verdict; the twin's
+    // board always passes it. Without the model this changes nothing.
+    valence::motorSwitchSetSelfCheck(true);
+    if (opt.motorSwitch)
+        log.logf('W', "valencesim: --motor-switch: switch modeled, estop_cuts_power true, enabling");
+    if (opt.motorSwitch && opt.mswFaultS >= 0) {
+        const uint64_t from = g_clock.nowUs64() + uint64_t(opt.mswFaultS) * 1000000u;
+        valence::simMotorSwitchInjectFault(from, from + 2000000u);
+        log.logf('W', "valencesim: --msw-fault: MSW_FLT_N low from +%d s for 2 s", opt.mswFaultS);
+    }
 
     if (opt.homed) {
         const float stroke = valence::motionForceHome(box->device.config().max_rail);
@@ -321,6 +340,7 @@ int main(int argc, char** argv) {
         // Generator first, so a stroke it emits is planned on this same pass,
         // as the P4's motion task plans at arrival.
         valence::simPatternTick(nowUs);
+        valence::simMotorSwitchTick(nowUs);
         valence::simMotionTick(nowUs);
         if (uint32_t(nowMs - lastHubMs) >= 5u) {
             lastHubMs = nowMs;
