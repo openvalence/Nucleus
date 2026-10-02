@@ -425,9 +425,9 @@ bool hubBegin() {
           unsigned(g_box->catalog.count), unsigned(g_box->hub->catalogEncodedBytes()),
           unsigned(valence::Hub::catalogScratchCapacity()));
     const CatalogHeadroom room = catalogHeadroom(g_box->catalog, g_box->hub->catalogEncodedBytes());
-    GLOGI(kTag, "accessory headroom: %u accessories; free %u entries, %u layout, %u schema, %lu B",
+    GLOGI(kTag, "accessory headroom: %u accessories; free %u entries, %u layout, %u schema, %u safe, %lu B",
           unsigned(room.accessories), unsigned(room.entries), unsigned(room.layout),
-          unsigned(room.schema), static_cast<unsigned long>(room.bytes));
+          unsigned(room.schema), unsigned(room.safe), static_cast<unsigned long>(room.bytes));
     GLOGI(kTag, "catalog etag: %02x%02x%02x%02x%02x%02x%02x%02x",
           unsigned(etag[0]), unsigned(etag[1]), unsigned(etag[2]), unsigned(etag[3]),
           unsigned(etag[4]), unsigned(etag[5]), unsigned(etag[6]), unsigned(etag[7]));

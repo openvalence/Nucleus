@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 
 #include "IngressDropTally.h"
 #include "StoredState.h"
@@ -75,6 +76,7 @@ struct CatalogHeadroom {
     uint16_t entries = 0;
     uint16_t layout = 0;
     uint16_t schema = 0;
+    uint16_t safe = 0;      // RFC-076 safe-value slots
     uint32_t bytes = 0;
     uint8_t  accessories = 0;   // whole per-accessory budgets that fit, at most the build's count
 };
@@ -146,6 +148,7 @@ public:
     Result<IntentValueMap, NackCode> applyIntent(uint16_t channel_id,
                                                  const IntentValueMap& requested,
                                                  AccessLevel role, bool& cfgChanged) override;
+    std::string_view intentNackDetail(uint16_t channel_id, NackCode code) override;
     std::optional<uint8_t> sourceForChannel(uint16_t channel_id) override;
     bool canClearEstop() override;
     bool admitsUnderPause(uint16_t channel_id, const IntentValueMap& value,
@@ -228,10 +231,13 @@ private:
     // arbiter's census.returns moves past _returnsAtRequest, or by ESTOP.
     bool _returnPending = false;
     uint32_t _returnsAtRequest = 0;
-    // ESTOP initiations this delegate has seen (onEstop runs once per latch),
-    // and the motor switch's fault count as tick() last acted on it.
-    uint16_t _estopInitiations = 0;
+    // The motor switch's fault count as tick() last acted on it.
     uint16_t _mswFaultsSeen = 0;
+    // SPEC 16.1 NACK detail for the refusal applyIntent() last returned, NUL
+    // terminated; empty when that call gave no reason. Cleared on every
+    // applyIntent() entry, so intentNackDetail() never answers a stale one.
+    // Hub task only. Text over nack_detail_max_bytes is cut by the hub.
+    std::array<char, limits::nack_detail_max_bytes + 1> _nackDetail{};
     // The switch status hub-status last carried, so a change publishes now.
     MotorSwitchStatus _mswSent{};
 

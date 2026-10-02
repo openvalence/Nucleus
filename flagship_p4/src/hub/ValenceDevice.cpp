@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <string_view>
 
 #include "geiger/geiger.h"
@@ -56,11 +57,13 @@ CatalogHeadroom catalogHeadroom(const Catalog32& c, size_t encodedBytes) {
     h.entries = uint16_t(Catalog32::kEntryCapacity - c.count);
     h.layout  = uint16_t(Catalog32::kLayoutCapacity - c.layoutUsed);
     h.schema  = uint16_t(Catalog32::kSchemaCapacity - c.schemaUsed);
+    h.safe    = uint16_t(Catalog32::kSafeCapacity - c.safeUsed);
     const size_t floor = Hub::catalogScratchCapacity() * 4 / 5;
     h.bytes = encodedBytes < floor ? uint32_t(floor - encodedBytes) : 0;
     const size_t fit = std::min({size_t(h.entries) / NUCLEUS_ACCESSORY_ENTRIES,
                                  size_t(h.layout) / NUCLEUS_ACCESSORY_LAYOUT_FIELDS,
                                  size_t(h.schema) / NUCLEUS_ACCESSORY_SCHEMA_FIELDS,
+                                 size_t(h.safe) / NUCLEUS_ACCESSORY_SAFE_FIELDS,
                                  size_t(h.bytes) / NUCLEUS_ACCESSORY_CATALOG_BYTES,
                                  size_t(NUCLEUS_ACCESSORIES)});
     h.accessories = uint8_t(fit);
@@ -413,6 +416,7 @@ AccessLevel ValenceDevice::validateToken(std::span<const std::byte> instance_id,
 Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& requested,
                                AccessLevel role, bool& cfgChanged) {
     (void)role;
+    _nackDetail[0] = '\0';
     if (channel_id == ch::move) return applyMove(requested);
     if (channel_id == ch::home) return applyHome(requested);
     if (channel_id == ch::modes_set) return applyModes(requested, cfgChanged);
@@ -492,6 +496,15 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     if (f8) applied.fields[n++] = {8, IntentValue::ofF32(_cfg.max_rail)};
     applied.count = n;
     return Ret::ok(applied);
+}
+
+// SPEC 16.1: asked by the hub right after applyIntent() refused, on the same
+// task, before the NACK is encoded. The view is into _nackDetail, which lives
+// until the next applyIntent() clears it.
+std::string_view ValenceDevice::intentNackDetail(uint16_t channel_id, NackCode code) {
+    (void)channel_id;
+    (void)code;
+    return std::string_view(_nackDetail.data());
 }
 
 // ---- 0x3030 modes / 0x3120 kinetic tuning -----------------------------------
@@ -942,12 +955,20 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
 }
 
 // The arbiter's power gate as a NACK: INTERLOCK (0x0402, registry.yaml
-// nack_codes, "hub-specific safety interlock"). The reason rides the log
-// channel, because a delegate's refusal carries a code and no NACK detail.
+// nack_codes, "hub-specific safety interlock"). The reason rides the NACK's
+// detail (SPEC 16.1) for the client; the throttled log line is the bench's.
+// Both detail shapes stay under nack_detail_max_bytes (48) at the longest
+// state and fault names, so the hub never has to cut one.
 Ret ValenceDevice::refuseUnpowered(const char* what) {
     const MotorSwitchStatus sw = motorSwitchStatus();
     GLOGW_EVERY_MS(1000, kTag, "%s refused INTERLOCK: motor power is off (switch %s, last fault: %s)",
                    what, motorswitch::stateName(sw.state), motorswitch::faultName(sw.last_fault));
+    if (sw.state == motorswitch::State::faulted)
+        std::snprintf(_nackDetail.data(), _nackDetail.size(), "motor power off: %s",
+                      motorswitch::faultName(sw.last_fault));
+    else
+        std::snprintf(_nackDetail.data(), _nackDetail.size(), "motor power off (switch %s)",
+                      motorswitch::stateName(sw.state));
     return Ret::err(NackCode::INTERLOCK);
 }
 
@@ -957,6 +978,8 @@ std::optional<NackCode> ValenceDevice::startRefusal(const MotionCensus& c, const
         GLOGW_EVERY_MS(1000, kTag, "%s refused INTERLOCK: not commissioned "
                        "(setup fields written 0x%02x of 0x%02x)",
                        what, unsigned(_modes.setup_written), unsigned(kSetupRequiredMask));
+        std::snprintf(_nackDetail.data(), _nackDetail.size(), "not commissioned: setup 0x%02x of 0x%02x",
+                      unsigned(_modes.setup_written), unsigned(kSetupRequiredMask));
         return NackCode::INTERLOCK;
     }
     if (!c.homed) return NackCode::NOT_HOMED;
@@ -1139,7 +1162,6 @@ bool ValenceDevice::canClearEstop() {
 // the latch as the spec requires.
 void ValenceDevice::onEstop(uint8_t cause, uint8_t origin) {
     motionEstop();
-    ++_estopInitiations;
     _returnPending = false;   // the arbiter dropped override and the return
     // The generators stop with the machine and stay stopped: clearing the
     // latch never restarts one (the arbiter's rail stays closed until a
@@ -1423,16 +1445,16 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     // A motor switch fault already cut power with no ESTOP behind it. Latch
     // one, cause fault (SPEC 11.2), so the release is the explicit re-enable
     // and a power-cutting hub lands unhomed. The hub is its own initiator, at
-    // its highest tier. The seq counts this delegate's initiations: the
-    // library exposes no estop_seq to continue from.
+    // its highest tier. The seq is the hub's one SPEC 5.5 counter, never one
+    // kept here: a count of this delegate's own initiations drifts from the
+    // seq a raw 0xE5 frame or the `estop` op set.
     const MotorSwitchStatus sw = motorSwitchStatus();
     if (sw.faults != _mswFaultsSeen) {
         _mswFaultsSeen = sw.faults;
         if (!_hub->estopLatched()) {
             GLOGE(kTag, "motor switch fault (%s): latching ESTOP, cause fault",
                   motorswitch::faultName(sw.last_fault));
-            _hub->latchEstop(safety_causes::fault, uint8_t(AccessLevel::configure),
-                             uint16_t(_estopInitiations + 1));
+            _hub->latchEstop(safety_causes::fault, uint8_t(AccessLevel::configure));
         }
     }
     // The motion plane, from ONE census so no two channels disagree about the

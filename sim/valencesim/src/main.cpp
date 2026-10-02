@@ -328,8 +328,9 @@ int main(int argc, char** argv) {
              etagHex.data());
     const valence::CatalogHeadroom room = valence::catalogHeadroom(box->catalog, hub.catalogEncodedBytes());
     log.logf('I', "valencesim: accessory headroom: %u accessories; free %u entries, %u layout, "
-             "%u schema, %lu B", unsigned(room.accessories), unsigned(room.entries),
-             unsigned(room.layout), unsigned(room.schema), static_cast<unsigned long>(room.bytes));
+             "%u schema, %u safe, %lu B", unsigned(room.accessories), unsigned(room.entries),
+             unsigned(room.layout), unsigned(room.schema), unsigned(room.safe),
+             static_cast<unsigned long>(room.bytes));
 
     // The board's boot hands the switch the self-check's verdict; the twin's
     // board always passes it. Without the model this changes nothing.
