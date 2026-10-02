@@ -1652,6 +1652,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // mod_target to the 0x1210 field it rides; its mod.* roles bind within the
     // entry and repeat across the six by design (SPEC 8.8 cardinality).
     //
+    // The five timing fields carry unit "strokes" on both the layout and the
+    // writer's schema (SPEC 8.8: a time-like mod field carries its clock in
+    // its unit) with unit_id count, because the registry has no stroke unit.
+    //
     // `amount` 0 = no modulation, 100 = the full swing (RFC-066). Presets
     // stored under the retired 100 = off meaning are migrated on load
     // (PatternPresetStore blob version 1), never read under this one.
@@ -1687,7 +1691,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                           .hasSettingKey = true, .hasStep = true,
                           .hasRank = true, .rank = valence::ui_ranks::advanced,
                           .hasUnitId = true, .unitId = valence::unit_ids::percent});
-        c.addLayoutField({.name = "in_step", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
+        c.addLayoutField({.name = "in_step", .type = PackedFieldType::u8, .unit = "strokes", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(1), .group = group,
                           .desc = "Strokes rising into the full swing.",
@@ -1697,7 +1701,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                           .hasSettingKey = true, .hasStep = true,
                           .hasRank = true, .rank = valence::ui_ranks::advanced,
                           .hasUnitId = true, .unitId = valence::unit_ids::count});
-        c.addLayoutField({.name = "in_wait", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
+        c.addLayoutField({.name = "in_wait", .type = PackedFieldType::u8, .unit = "strokes", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
                           .desc = "Strokes held at the full swing.",
@@ -1707,7 +1711,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                           .hasSettingKey = true, .hasStep = true,
                           .hasRank = true, .rank = valence::ui_ranks::advanced,
                           .hasUnitId = true, .unitId = valence::unit_ids::count});
-        c.addLayoutField({.name = "out_step", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
+        c.addLayoutField({.name = "out_step", .type = PackedFieldType::u8, .unit = "strokes", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(1), .group = group,
                           .desc = "Strokes falling back to the base value.",
@@ -1717,7 +1721,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                           .hasSettingKey = true, .hasStep = true,
                           .hasRank = true, .rank = valence::ui_ranks::advanced,
                           .hasUnitId = true, .unitId = valence::unit_ids::count});
-        c.addLayoutField({.name = "out_wait", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
+        c.addLayoutField({.name = "out_wait", .type = PackedFieldType::u8, .unit = "strokes", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
                           .desc = "Strokes resting at the base value before the cycle repeats.",
@@ -1727,7 +1731,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                           .hasSettingKey = true, .hasStep = true,
                           .hasRank = true, .rank = valence::ui_ranks::advanced,
                           .hasUnitId = true, .unitId = valence::unit_ids::count});
-        c.addLayoutField({.name = "offset", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
+        c.addLayoutField({.name = "offset", .type = PackedFieldType::u8, .unit = "strokes", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
                           .desc = "Strokes this cycle starts shifted by, against the other modulators.",
@@ -2135,15 +2139,15 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addSchemaField({.key = uint8_t(base + 0), .name = "amount",    .type = CborFieldType::uint_t,
                           .unit = "%", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
         c.addSchemaField({.key = uint8_t(base + 1), .name = "in_step",   .type = CborFieldType::uint_t,
-                          .unit = "", .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f});
+                          .unit = "strokes", .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f});
         c.addSchemaField({.key = uint8_t(base + 2), .name = "in_wait",   .type = CborFieldType::uint_t,
-                          .unit = "", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f});
+                          .unit = "strokes", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f});
         c.addSchemaField({.key = uint8_t(base + 3), .name = "out_step",  .type = CborFieldType::uint_t,
-                          .unit = "", .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f});
+                          .unit = "strokes", .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f});
         c.addSchemaField({.key = uint8_t(base + 4), .name = "out_wait",  .type = CborFieldType::uint_t,
-                          .unit = "", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f});
+                          .unit = "strokes", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f});
         c.addSchemaField({.key = uint8_t(base + 5), .name = "offset",    .type = CborFieldType::uint_t,
-                          .unit = "", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
+                          .unit = "strokes", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     }
     };
 
