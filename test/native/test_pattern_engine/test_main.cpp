@@ -16,6 +16,10 @@
 #include <memory>
 #include <vector>
 
+// Named directly so the library finder adds lib/valence, which
+// PatternPresetStore.h reaches for its store-item encoder.
+#include "valence/wire/messages/store_item.hpp"
+
 #include "../../../flagship_p4/src/patterns/AdvancedPattern.cpp"
 #include "../../../flagship_p4/src/patterns/PatternEngine.cpp"
 #include "../../../flagship_p4/src/patterns/PatternPresetStore.h"

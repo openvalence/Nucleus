@@ -19,6 +19,11 @@
 //   composition's (ValenceHub.cpp NVS key "presets"; the twin's state file).
 // - Every mutation bumps generation(): the roster's "re-enumerate" signal and
 //   the generation readBlob() answers with.
+// - encodeItem() is the BLOB_REQ answer (SPEC §8.7): it always carries the
+//   RFC-073 digest, SHA-256 over the payload alone, so a receiver can decide
+//   BLOB_DONE status 1 without being told what to expect. The library's
+//   software hash, identical on the P4 and the sim: one 64-byte block per
+//   item, about 300 B of transient stack on the caller's task.
 // See: ValenceCatalog.h (pattern-presets, pattern-presets-roster),
 // ValenceDevice.cpp (the pattern-presets-cmd verbs and readBlob)
 
@@ -30,6 +35,7 @@
 #include <string_view>
 
 #include "PatternSettings.h"
+#include "valence/wire/messages/store_item.hpp"
 
 namespace valence {
 
@@ -85,6 +91,29 @@ public:
         _slots[i].payload.fill(0);
         ++_generation;
         return true;
+    }
+
+    // ---- store item (BLOB_REQ ns 1) ----
+    // Worst-case encoded item for a `kind` of kindLen bytes: map header, then
+    // slot, name, kind, payload and digest, each a key byte plus a header of
+    // at most 2 bytes.
+    static constexpr size_t itemMaxBytes(size_t kindLen) {
+        return 1 + (1 + 2) + (1 + 2 + kNameMax - 1) + (1 + 2 + kindLen) +
+               (1 + 2 + kPayloadBytes) + (1 + 2 + Sha256::kDigestBytes);
+    }
+
+    // Returns bytes written, or 0 for an out-of-range or EMPTY slot or an
+    // `out` too small.
+    size_t encodeItem(uint8_t i, std::string_view kind, std::span<std::byte> out) const {
+        const Slot* s = slot(i);
+        if (s == nullptr) return 0;
+        StoreItem item;
+        item.slot = i;
+        item.name = s->nameView();
+        item.kind = kind;
+        item.payload = std::as_bytes(std::span(s->payload));
+        item.has_digest = true;
+        return encodeStoreItem(item, out);
     }
 
     // ---- persistence blob ----

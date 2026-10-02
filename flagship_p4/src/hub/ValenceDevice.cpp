@@ -28,7 +28,6 @@
 #include "system/ValenceMotorSwitch.h"
 
 #include "valence/util/byte_io.hpp"
-#include "valence/wire/cbor/cbor_writer.hpp"
 
 namespace valence {
 
@@ -381,20 +380,6 @@ void publishIfChanged(Hub& hub, uint16_t id, const std::array<std::byte, N>& buf
     if (!force && buf == sent) return;
     sent = buf;
     publishPacked(hub, id, buf, written);
-}
-
-// ---- store items (SPEC §8.7) ---------------------------------------------------
-// An item is {slot, name, kind, payload}, keyed by the registry's blob_keys in
-// ascending order. The payload rides as an opaque bstr; the name is what lets a
-// client label a slot, because the roster carries none.
-size_t encodePresetItem(std::span<std::byte> out, uint8_t slot, const PatternPresetStore::Slot& s) {
-    CborWriter w(out);
-    w.mapHeader(4);
-    w.key(uint64_t(blob::slot)).uintVal(slot);
-    w.key(uint64_t(blob::name)).tstrVal(s.nameView());
-    w.key(uint64_t(blob::kind)).tstrVal(kPresetKind);
-    w.key(uint64_t(blob::payload)).bstrVal(std::as_bytes(std::span(s.payload)));
-    return w.size();
 }
 
 }  // namespace
@@ -1203,15 +1188,17 @@ void ValenceDevice::onSourceOwnership(uint8_t source_id, uint32_t owner_session,
     (void)reason;
 }
 
-// §8.7 store items over BLOB_REQ ns=1. The hub has already enforced the
-// declaring entry's access floor; an empty slot answers nullopt, which the hub
-// NACKs CHUNK_UNAVAILABLE (honest and enumerable).
+// §8.7 store items over BLOB_REQ ns=1, each carrying its RFC-073 digest
+// (PatternPresetStore::encodeItem). The hub has already enforced the declaring
+// entry's access floor; an empty slot answers nullopt, which the hub NACKs
+// CHUNK_UNAVAILABLE (honest and enumerable).
 std::optional<HubDelegate::BlobView> ValenceDevice::readBlob(uint8_t ns, uint8_t store_id, uint8_t slot) {
     if (!boardFeatures().has_pattern || ns != blob_ns::store || store_id != kPresetStoreId)
         return std::nullopt;
-    const PatternPresetStore::Slot* s = _presets.slot(slot);
-    if (s == nullptr) return std::nullopt;
-    const size_t n = encodePresetItem(_blobScratch, slot, *s);
+    static_assert(PatternPresetStore::itemMaxBytes(std::string_view(kPresetKind).size()) <=
+                      sizeof(_blobScratch),
+                  "a preset item with its digest outgrew the blob scratch");
+    const size_t n = _presets.encodeItem(slot, kPresetKind, _blobScratch);
     if (n == 0) return std::nullopt;
     BlobView v;
     v.bytes = std::span<const std::byte>(_blobScratch.data(), n);

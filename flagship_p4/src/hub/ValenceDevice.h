@@ -231,8 +231,9 @@ private:
     bool _patDirty = false;
     PatternPresetStore _presets{};
     // readBlob()'s answer lives here until the hub's next call (hub.hpp's
-    // BlobView contract); re-encoded on every resume, never cached.
-    std::array<std::byte, 128> _blobScratch{};
+    // BlobView contract); re-encoded on every resume, never cached. Sized for
+    // the largest preset item with its digest (static_assert in readBlob).
+    std::array<std::byte, 160> _blobScratch{};
     // Last bytes SENT per pattern-plane channel: each republishes on a change
     // of its own bytes, including an enabled_mask that moved with homed/estop.
     std::array<std::byte, 20> _sentPatState{};

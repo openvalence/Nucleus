@@ -19,6 +19,7 @@
 // Named directly so the library finder adds lib/valence; StoredState.h
 // reaches it only through ValenceCatalog.h, which the finder does not follow.
 #include "valence/channel/catalog.hpp"
+#include "valence/wire/messages/store_item.hpp"
 
 #include "../../../flagship_p4/src/hub/StoredState.h"
 #include "../../../flagship_p4/src/patterns/PatternPresetStore.h"
@@ -336,4 +337,42 @@ TEST_CASE("config blob: v4 carries the flip; a v3 blob migrates to unflipped") {
     // The flip byte is a bool: anything but 0 or 1 is rejected whole.
     b[b.size() - 1] = std::byte{2};
     CHECK_FALSE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+}
+
+// RFC-073: every BLOB_REQ item carries SHA-256 over its payload, so a receiver
+// decides BLOB_DONE status 1 on its own.
+TEST_CASE("preset item: the digest rides every item and a flipped payload byte fails it") {
+    static PatternPresetStore st;
+    REQUIRE(st.save(4, "digest me", payload(11)));
+    std::array<std::byte, 160> out{};
+    REQUIRE(PatternPresetStore::itemMaxBytes(13) <= out.size());
+
+    const size_t n = st.encodeItem(4, "pattern.frayd", out);
+    REQUIRE(n > 0);
+    CHECK(n <= PatternPresetStore::itemMaxBytes(13));
+    auto item = valence::decodeStoreItem(std::span<const std::byte>(out.data(), n));
+    REQUIRE(item.isOk());
+    CHECK(item.value().slot == 4);
+    CHECK(item.value().name == "digest me");
+    CHECK(item.value().kind == "pattern.frayd");
+    REQUIRE(item.value().payload.size() == PatternPresetStore::kPayloadBytes);
+    CHECK(std::memcmp(item.value().payload.data(), st.slot(4)->payload.data(),
+                      PatternPresetStore::kPayloadBytes) == 0);
+    CHECK(item.value().has_digest);
+    CHECK(valence::storeItemDoneStatus(item.value()) == valence::BlobDoneStatus::VerifiedComplete);
+
+    // The payload bstr is the only run of the slot's bytes in the item: flip
+    // its first byte where it actually sits on the wire.
+    const auto* at = item.value().payload.data();
+    const size_t off = size_t(at - out.data());
+    out[off] = std::byte(uint8_t(out[off]) ^ 0x01u);
+    auto bent = valence::decodeStoreItem(std::span<const std::byte>(out.data(), n));
+    REQUIRE(bent.isOk());
+    CHECK(valence::storeItemDoneStatus(bent.value()) == valence::BlobDoneStatus::HashMismatch);
+
+    // Empty and out-of-range slots encode nothing; a short buffer neither.
+    CHECK(st.encodeItem(5, "pattern.frayd", out) == 0);
+    CHECK(st.encodeItem(PatternPresetStore::kCapacity, "pattern.frayd", out) == 0);
+    std::array<std::byte, 64> tiny{};
+    CHECK(st.encodeItem(4, "pattern.frayd", tiny) == 0);
 }
