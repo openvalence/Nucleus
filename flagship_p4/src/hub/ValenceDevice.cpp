@@ -1043,13 +1043,6 @@ Ret ValenceDevice::applyHome(const IntentValueMap& requested) {
             return Ret::ok(applied);
         }
 
-        case 3:  // clear_override
-            // On a machine that can really home, this returns it to real
-            // homing. Here op 1 does not exist, so "back to real homing"
-            // has no state to return to and accepting it would echo a
-            // transition that did not happen.
-            return Ret::err(NackCode::UNSUPPORTED_OP);
-
         default:
             return Ret::err(NackCode::INVALID_VALUE);
     }

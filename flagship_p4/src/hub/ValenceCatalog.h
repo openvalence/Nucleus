@@ -1904,9 +1904,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "home" — INTENT, control -------------------------------------------
-    // {1:"op", 2:"stroke"} — op 1 starts sensorless homing; ops 2/3 are the
-    // BENCH ops (RFC-025, safety-reviewed) that make motorless dev work
-    // possible at all.
+    // {1:"op", 2:"stroke"} — op 1 starts sensorless homing; op 2 is the
+    // BENCH op (RFC-025, safety-reviewed) that makes motorless dev work
+    // possible at all. No op here clears override: SPEC §11.1 leaves it only
+    // by the safety-intents `return` op (RFC-085).
     //
     // *** OP 2 (force_home) RELEASES AN E-STOP LATCH INTO PAUSE. *** That is exactly why
     // RFC-025 placed these under safety review rather than in a convenience
@@ -1916,7 +1917,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // on a machine with a motor attached that is a real collision hazard, and
     // the call site in SlopSyncHubService says so again.
     //
-    // Op values are DEVICE-defined: 0x0103 is in this device's own >=0x0100
+    // Op values are DEVICE-defined: 0x3101 is in this device's own >=0x0080
     // allocation, so unlike 0x0005's registry-governed `safety_ops` these
     // numbers live in this catalog and nowhere else — which is precisely why
     // they carry option labels, so a generic client can name them.
@@ -1930,11 +1931,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasRank = true, .rank = valence::ui_ranks::control});
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                             .role = "action.home"},
-                           {"reserved", "home", "force_home", "clear_override"},
+                           {"reserved", "home", "force_home"},
                            {AccessLevel::control,   // 0 (placeholder, never an op)
                             AccessLevel::control,   // 1 home
-                            AccessLevel::control,   // 2 force_home  — RELEASES THE E-STOP LATCH
-                            AccessLevel::control}); // 3 clear_override
+                            AccessLevel::control}); // 2 force_home  — RELEASES THE E-STOP LATCH
     c.addSchemaField({.key = 2, .name = "stroke", .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 2000.0f});
     };
