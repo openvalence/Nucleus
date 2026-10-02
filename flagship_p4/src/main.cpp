@@ -33,6 +33,7 @@
 #include "system/ValenceDiag.h"
 #include "system/ValenceOta.h"
 #include "system/BoardPins.h"
+#include "system/ValenceDbg.h"   // compiled here so the build checks it; called from nowhere by default
 #include "system/ValenceLogBridge.h"
 #include "system/ValenceMotorSwitch.h"
 #include "system/ValencePower.h"

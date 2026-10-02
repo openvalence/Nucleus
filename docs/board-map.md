@@ -25,7 +25,9 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
   (held low from the first line of `app_main`, raised only by the enable
   sequence), MSW_FLT_N, MSW_IMON and EN_NODE (the switch task's watch).
 - **Firm and unwired:** board monitor SWIO, status LED data, fan PWM and tach,
-  PAIR button, DBG marker, all thirteen accessory LP pads, PD_INT.
+  PAIR button, all thirteen accessory LP pads, PD_INT.
+- **Firm, surface only:** the DBG marker (`system/ValenceDbg.h`), driven from
+  nowhere by default.
 - **Provisional and unwired:** CLAMP_MON, SHUNT_TEMP, THERM, RS485
   TX/RX/DE, DRV_ALM, DRV_RDY, HOME button.
 - Every unwired row has a bead under val-091 (column "Owed").
@@ -85,7 +87,7 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 | HOME button SW1 (press homes, hold resets, on release), 10k pull-up, 1k series; J13 in parallel | `/UI.BTN_HOME` | GPIO49, pad 12 | nothing | Provisional | val-091.26 |
 | PAIR button SW2 (hold pairs, held at power-on = config mode), 10k pull-up, 1k series; J13 in parallel | `/UI.BTN_PAIR` | GPIO52, pad 55 | nothing | Firm: SPEC 2026-09-23 pin-map-after-LP row | val-9u0.10, val-9u0.14 |
 | Status LED data: 74AHCT125 gate 3 (U10) to the GRBW pixel D5 (XL-3528RGBW, 32 bits per pixel), chained on to J12 NEOPIXEL OUT; R601 10k pull-down | `/DRV.LED_DATA` | GPIO26 (USB1.1 D-), pad 19 | nothing | Firm: same row | val-091.27 |
-| DBG marker through R602 1k to TP603; the ROM boot log appears on it at every reset (U0TX) | `/DRV.DBG` | GPIO37, pad 30 | nothing | Firm: SPEC 2026-09-23 board-monitor row | val-091.32 |
+| DBG marker through R602 1k to TP603; the ROM boot log appears on it at every reset (U0TX) | `/DRV.DBG` | GPIO37, pad 30 | `system/ValenceDbg.h`: `dbgBegin()` claims the pad, `dbgLevel()` is one register store, `dbgPulse(n)`; called from nowhere by default | Firm: SPEC 2026-09-23 board-monitor row | bench val-091.66 |
 | BOOT strap to tweezer pad TP903 (held low at power-on = download mode) | `Net-(TP903-Pad1)` | GPIO35, pad 36 (pad 48 NC) | never used, by rule | Firm | none |
 | CHIP_EN to tweezer pad TP901 | `Net-(U8-CHIP_EN)` | CHIP_EN, pad 34 | n/a | Firm | none |
 
@@ -115,7 +117,7 @@ unless noted.
 
 | Function | Net | P4 pad | Firmware today | Firmness |
 |---|---|---|---|---|
-| SDIO 3.0 4-bit to the stacked Stamp-AddOn C6: CLK 43, CMD 44, D0-D3 45-48, slave reset 42 | stamp-internal header | not on stamp pads | `flagship_p4/sdkconfig.defaults:64-74` (Kconfig owns them), brought up in `main.cpp:72` (`wifi_up`), version read at `:93` and judged by the self-check's host-link entry | Firm: stamp hardware |
+| SDIO 3.0 4-bit to the stacked Stamp-AddOn C6: CLK 43, CMD 44, D0-D3 45-48, slave reset 42 | stamp-internal header | not on stamp pads | `flagship_p4/sdkconfig.defaults:64-74` (Kconfig owns them), brought up in `main.cpp:73` (`wifi_up`), version read at `:94` and judged by the self-check's host-link entry | Firm: stamp hardware |
 | USB-C on the stamp: USB-Serial/JTAG console and the serial rescue path | G24/G25 | pads 43/44 NC on the board | IDF console | Firm |
 | USB 2.0 host pair, MIPI DSI lanes, stamp 5V_USB_IN | NC | pads 40/41, 57-64, 15 | none | Firm |
 | Stamp VIN (from the 5 V buck), SYS_5V out (+5V_SYS), SOC_3.3V out (+3V3_SYS) | `+5V`, `+5V_SYS`, `+3V3_SYS` | pads 14, 39, 28 | none | Firm |
