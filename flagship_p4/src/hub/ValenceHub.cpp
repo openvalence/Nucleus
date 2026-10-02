@@ -7,12 +7,16 @@
 // - The delegate and every retained STATE publisher are ValenceDevice, which
 //   is hardware-free so the host twin (sim/valencesim) runs it verbatim. What
 //   stays here is what only the P4 has: NVS, PSRAM, esp_netif, the task.
-// - PERSISTED STATE IS TWO NVS BLOBS in namespace "valence", one per concern:
-//   "cfg" (StoredState.h: 0x1000, 0x1030 and 0x1120-0x1122 with cfg_gen, 86 B)
-//   and "presets" (PatternPresetStore: the 24 slots with their generation,
-//   1,735 B). The device owns what the bytes mean; this file owns only the
-//   byte IO. Both load BEFORE the first retained push, so a subscriber's first
-//   snapshot is the stored truth and never a default a later load overwrites.
+// - PERSISTED STATE IS FOUR NVS BLOBS in namespace "valence", one per concern:
+//   "cfg" (StoredState.h: 0x1000, 0x1030 and 0x1120-0x1122 with cfg_gen, 86 B),
+//   "presets" (PatternPresetStore: the 24 slots with their generation,
+//   1,735 B), "trust" (the §12.3 trust ledger, tokens included, at most
+//   trust_ledger_max_bytes) and "pgest" (the power-cycle gesture counter,
+//   1 B); TrustStore.h owns the last two. The device owns what the bytes
+//   mean; this file owns only the byte IO. "cfg" and "presets" load BEFORE
+//   the first retained push, so a subscriber's first snapshot is the stored
+//   truth and never a default a later load overwrites; "trust" loads before
+//   the WS port starts, so no HELLO is ever judged against an empty ledger.
 //   Adoption never becomes an intent, an ECHO or a cfg_gen bump.
 // - NVS WRITES RUN ON THE HUB TASK (T5: never in a transport callback), each
 //   DEBOUNCED by ValenceDevice's kCfgPersistDebounceMs of quiet, and are HELD
@@ -23,7 +27,12 @@
 //   is ~58 days of tuning without pause on ONE page, before NVS wear-levels
 //   across its five. "presets" costs ~57 entries, ~2 writes a page, but a save
 //   is a deliberate operator act, not a stream. A slider drag is one write.
-// See: Valence SPEC.md §4.2, §6.3, §9.1, §9.3; ValenceDevice.h
+//   "trust" is written only when its bytes change (grants, approvals,
+//   revocations, a roster label), at most once per 2 s; "pgest" once at boot
+//   (app_main, before the hub task exists) and once when uptime passes
+//   pairing_gesture_max_uptime_ms (hub task).
+// See: Valence SPEC.md §4.2, §6.3, §9.1, §9.3, §12.3; ValenceDevice.h,
+// TrustStore.h
 
 #include "ValenceHub.h"
 
@@ -34,6 +43,7 @@
 #include <esp_heap_caps.h>
 #include <esp_netif.h>
 #include <esp_random.h>
+#include <esp_system.h>
 #include <esp_task_wdt.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
@@ -45,6 +55,7 @@
 #include "ValenceCatalog.h"
 #include "ValenceDevice.h"
 #include "geiger/geiger.h"
+#include "TrustStore.h"
 #include "ValencePlatform.h"
 #include "ValenceUiToken.h"
 #include "ValenceWsPort.h"
@@ -88,32 +99,42 @@ constexpr const char* kNvsPresetsKey = "presets";
 constexpr size_t kBlobScratchBytes = PatternPresetStore::kBlobBytes;
 static_assert(stored::kConfigBlobBytes <= kBlobScratchBytes, "cfg blob outgrew the scratch");
 
-// The stored bytes, or an empty span for absent, unreadable or larger than the
-// scratch. A wrong-size blob comes back as-is: rejecting it is the decoder's
-// job, and it does.
-std::span<const std::byte> loadBlob(const char* key, std::span<std::byte> scratch) {
+// Absent covers a namespace or key never written; Failed is every other
+// error, including a blob larger than the scratch. A wrong-size blob that
+// fits comes back as-is: rejecting it is the decoder's job, and it does.
+KeyLoad loadKey(const char* key, std::span<std::byte> scratch) {
     nvs_handle_t h;
-    if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return {};
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READONLY, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return {};
+    if (err != ESP_OK) return {KeyLoadStatus::Failed, {}};
     size_t len = scratch.size();
-    const esp_err_t err = nvs_get_blob(h, key, scratch.data(), &len);
+    err = nvs_get_blob(h, key, scratch.data(), &len);
     nvs_close(h);
-    if (err != ESP_OK) return {};
-    return scratch.first(len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return {};
+    if (err != ESP_OK) return {KeyLoadStatus::Failed, {}};
+    return {KeyLoadStatus::Loaded, scratch.first(len)};
 }
 
-// Hub task only (T5). nvs_commit() blocks on the flash write; the debounce is
-// what keeps that off the tick more than once per interval. `blob` may sit in
-// PSRAM: esp_flash_write bounces a non-DRAM source through a 32 B stack buffer
-// (esp_flash_api.c, direct_write), so the cache-off window never reads it.
-void saveBlob(const char* key, std::span<const std::byte> blob) {
+// The stored bytes, or an empty span for absent, unreadable or too large.
+std::span<const std::byte> loadBlob(const char* key, std::span<std::byte> scratch) {
+    return loadKey(key, scratch).bytes;
+}
+
+// Hub task only (T5), except TrustStore::boot()'s counter write on app_main
+// before the hub task exists. nvs_commit() blocks on the flash write; the
+// debounce is what keeps that off the tick more than once per interval.
+// `blob` may sit in PSRAM: esp_flash_write bounces a non-DRAM source through
+// a 32 B stack buffer (esp_flash_api.c, direct_write), so the cache-off
+// window never reads it.
+bool saveBlob(const char* key, std::span<const std::byte> blob) {
     if (blob.empty()) {
         GLOGW(kTag, "persist %s: encode failed, nothing written", key);
-        return;
+        return false;
     }
     nvs_handle_t h;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) {
         GLOGW(kTag, "persist %s: nvs_open failed", key);
-        return;
+        return false;
     }
     // The write is TIMED because it is a flash write on the hub task: this
     // number is what says whether the debounce is enough, and an unmeasured
@@ -125,9 +146,19 @@ void saveBlob(const char* key, std::span<const std::byte> blob) {
     nvs_close(h);
     const uint32_t us = uint32_t(esp_timer_get_time() - t0);
     if (err != ESP_OK) GLOGW(kTag, "persist %s failed: %s", key, esp_err_to_name(err));
-    else GLOGI(kTag, "persisted %s, %u B, %lu us on the hub task", key, unsigned(blob.size()),
+    else GLOGI(kTag, "persisted %s, %u B, %lu us", key, unsigned(blob.size()),
                static_cast<unsigned long>(us));
+    return err == ESP_OK;
 }
+
+// TrustStore's storage seam over the same namespace. Stateless.
+class NvsKeyStore final : public IKeyStore {
+public:
+    KeyLoad load(const char* key, std::span<std::byte> scratch) override { return loadKey(key, scratch); }
+    bool save(const char* key, std::span<const std::byte> bytes) override { return saveBlob(key, bytes); }
+};
+
+NvsKeyStore g_nvs;
 
 // ---- the PSRAM-resident box --------------------------------------------------
 // MEMBER ORDER IS CONSTRUCTION ORDER AND IT IS LOAD-BEARING: the catalog, the
@@ -149,6 +180,9 @@ struct HubBox {
     std::optional<valence::Hub> hub{};
     ValenceWsPort port{};
     ValenceUiTokenMinter minter{};
+    // Two ledger-sized buffers (encode scratch and the last stored bytes);
+    // hub task only after boot.
+    TrustStore trust{};
 };
 
 HubBox* g_box = nullptr;
@@ -246,7 +280,15 @@ void hubTask(void*) {
         // successful update reboots before the hold drains, so a change made
         // DURING an update does not survive it; one made before it does.
         g_persistDue |= g_box->device.tick(nowMs);
-        if (g_persistDue != 0 && !otaInFlight()) persistDue();
+        const bool ota = otaInFlight();
+        if (g_persistDue != 0 && !ota) persistDue();
+        // nowMs is uptime, which is also the §12.3 gesture's clock.
+        const uint8_t trust = g_box->trust.tick(g_box->hub->pairing(), g_nvs, nowMs, ota);
+        if (trust & kTrustLedgerFailed)
+            GLOGW_EVERY_MS(30000, kTag, "trust ledger not persisted: retrying every %lu ms",
+                           static_cast<unsigned long>(kLedgerWriteMinIntervalMs));
+        if (trust & kTrustGestureFailed)
+            GLOGW(kTag, "pairing gesture counter not cleared: this boot may count as short");
         if (uint32_t(nowMs - g_lastEndpointMs) >= 1000u) {
             g_lastEndpointMs = nowMs;
             refreshEndpoint();
@@ -358,6 +400,25 @@ bool hubBegin() {
     // EVERY advertised STATE gets its truthful at-rest value before the first
     // client can subscribe (ValenceDevice.cpp's file header says why).
     g_box->device.attach(*g_box->hub);
+
+    // SPEC §12.3: the ledger before the WS port starts, so no HELLO is judged
+    // against an empty one, and the boot's half of the power-cycle gesture.
+    const TrustBoot tb = g_box->trust.boot(g_box->hub->pairing(), g_nvs,
+                                           esp_reset_reason() == ESP_RST_POWERON);
+    if (tb.ledgerRejected)
+        GLOGE(kTag, "stored trust ledger unreadable or rejected: no pairings; "
+                    "the power-cycle gesture opens pairing");
+    else GLOGI(kTag, "trust ledger: %u paired%s", unsigned(tb.paired), tb.ledgerLoaded ? "" : " (none stored)");
+    if (!tb.counterSaved) GLOGW(kTag, "pairing gesture counter not saved: this boot does not count");
+    if (tb.openWindow()) {
+        g_box->hub->openPresenceWindow();
+        if (tb.claimable)
+            GLOGW(kTag, "pairing open for %lu s: unclaimed, the first knock gets configure",
+                  static_cast<unsigned long>(limits::pairing_window_default_s));
+        else
+            GLOGW(kTag, "pairing open for %lu s: power-cycle gesture (%u short boots)",
+                  static_cast<unsigned long>(limits::pairing_window_default_s), unsigned(tb.shortBoots));
+    }
 
     auto etag = g_box->hub->catalogEtag();
     GLOGI(kTag, "catalog: %u entries, %u B encoded (scratch %u B)",
