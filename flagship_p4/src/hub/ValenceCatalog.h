@@ -157,7 +157,7 @@ inline constexpr uint8_t kApBaseCount = 6;
 // DEVICE-authored EVENT channel in the ecosystem and therefore the proof that
 // the grammar fix works: nothing below required a registry change.
 namespace anom_body {
-inline constexpr uint8_t kind   = 1;  // kinetic::AnomalyType, MIRRORS event_kind (see the entry)
+inline constexpr uint8_t kind   = 1;  // kinetic::AnomalyType, mirrors event_kind; labels live in event_kinds
 inline constexpr uint8_t seq    = 2;  // engine's rolling event id (wraps)
 inline constexpr uint8_t target = 3;  // the command target that provoked it, 0..1 normalized
 inline constexpr uint8_t detail = 4;  // KIND-SPECIFIC scalar — see the option labels
@@ -1014,6 +1014,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // a resync, not a break — before the v1.0 tag. After it, a new kind
     // wants its own channel rather than a reshuffled 0x0088.
     //
+    // Channel role anomaly.summary (RFC-065): the latched counters twin of
+    // motion-anomaly's events.anomaly, so a client binds log and counters
+    // together.
+    //
     // reset_gen is the observable-reset half: every applied counter reset
     // increments it, so EVERY subscriber sees the reset happened, not only
     // the session that asked for it. Without it a client watching the
@@ -1025,7 +1029,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
                 .defaultPriority = Priority::background,
                 .hasCategory = true, .category = valence::ui_categories::tuning,
-                .hasRank = true, .rank = valence::ui_ranks::diagnostic});
+                .hasRank = true, .rank = valence::ui_ranks::diagnostic,
+                .role = valence::channel_roles::anomaly_summary});
     c.addLayoutField({.name = "plans",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Planner", .desc = "Motion plans computed successfully."});
     c.addLayoutField({.name = "failures", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
@@ -1110,30 +1115,31 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // channel could not exist without one, which the self-describing
     // catalog's body-map grammar exists to prevent.
     //
-    // `kind` appears BOTH as the frame's event_kind (33) — the protocol's own
-    // discriminator a client switches on — and as body key 1 carrying the
-    // identical value. Not redundancy for its own sake: the catalog has no
-    // vocabulary for LABELING event kinds, and `options` on a schema field is
-    // the one registered mechanism for turning a number into a name.
-    // Mirroring it into the body lets a generic client print
-    // "waveform_scaled" instead of "6".
+    // The kind rides the frame's event_kind (33) and is labeled by this entry's
+    // event_kinds table (RFC-065), index-aligned with kinetic::AnomalyType and
+    // APPEND-ONLY: a released kind is never relabeled, a retired one keeps its
+    // label. Body key 1 mirrors the value (SPEC 9.4 MAY) and carries no labels,
+    // because the table is their one home. The entry's events.anomaly role is
+    // how a client finds the anomaly feed without a name.
     //
     // NO replay depth: an anomaly is an edge, and §9.4's default (edges are
-    // never replayed) is right for it. The counters on 0x0088 are the
-    // durable record — the event/state duality doing its job.
+    // never replayed) is right for it. The counters on kinetic-diag (0x1111,
+    // channel role anomaly.summary) are the durable record: the event/state
+    // duality doing its job.
     auto addMotionAnomaly = [&]() {
     c.addEntry({.id = ch::motion_anomaly, .name = "motion-anomaly",
                 .cls = ChannelClass::EVENT, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
                 .hasCategory = true, .category = valence::ui_categories::tuning,
-                .hasRank = true, .rank = valence::ui_ranks::diagnostic});
-    c.addSelectSchemaField({.key = anom_body::kind, .name = "kind", .type = CborFieldType::uint_t,
-                            .unit = "",
-                            .desc = "What the motion core had to do differently, and why."},
-                           {"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
-                            "waveform_fallback", "waveform_scaled", "waveform_centered",
-                            "handoff_bounded", "waveform_smoothed", "dwell_zeroed"});
+                .hasRank = true, .rank = valence::ui_ranks::diagnostic,
+                .role = valence::channel_roles::events_anomaly});
+    c.setEventKinds({"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
+                     "waveform_fallback", "waveform_scaled", "waveform_centered",
+                     "handoff_bounded", "waveform_smoothed", "dwell_zeroed"});
+    c.addSchemaField({.key = anom_body::kind, .name = "kind", .type = CborFieldType::uint_t, .unit = "",
+                      .desc = "What the motion core had to do differently, and why: the event's "
+                              "own kind, repeated."});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",
                       .desc = "Rolling event id from the motion core; wraps."});
     c.addSchemaField({.key = anom_body::target, .name = "target", .type = CborFieldType::f32_t,
