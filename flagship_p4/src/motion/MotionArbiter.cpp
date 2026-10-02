@@ -258,8 +258,10 @@ bool MotionArbiter::plan(float target, const MotionIntent& in, bool manual, uint
     cmd.has_end_vel  = in.has_end_vel;
     cmd.end_vel      = in.end_vel_mm_s / s;
     cmd.client_curve_family = in.curve_family;
-    // An anchor already in the past is not a schedule, it is arrival: passing
-    // it through would spend a schedule slot to say "now".
+    // An anchor already in the past is not a schedule, it is due now: passing
+    // it through would spend a schedule slot to say "now". A future anchor
+    // means a segment's START or a chase point's ARRIVAL (RFC-084); kinetic
+    // tells them apart by the duration.
     cmd.has_anchor   = in.anchor_us > now_us;
     cmd.anchor_us    = in.anchor_us;
     const uint64_t t0 = _now_us();

@@ -517,10 +517,12 @@ struct Command {
     float    next_chord     = 0.0f;
     bool     has_next_chord = false;
 
-    // ---- Scheduled start (anchored commit) ----------------------------------
-    // The command's due time in the engine's own clock domain. When set,
-    // commit() anchors the plan here rather than at arrival, so release
-    // jitter between the pacing schedule and the commit never becomes
+    // ---- Anchor (anchored commit) --------------------------------------------
+    // The command's time in the engine's own clock domain. Its meaning follows
+    // the command kind (SPEC 5.4, RFC-084): a DURATION-carrying segment STARTS
+    // at its anchor; a bare chase point is REACHED at its anchor (its arrival
+    // time), so a future-anchored point is planned to arrive there from where
+    // the previous point arrives. Either way release jitter never becomes
     // rendered geometry. false = plan at arrival (pre-0.9 behavior).
     uint64_t anchor_us  = 0;
     bool     has_anchor = false;
@@ -810,6 +812,7 @@ public:
         // re-seed has no previous segment, and inheriting one turns the first
         // post-seed stroke into a dwell (its handoff velocity forced to 0).
         _prev_wave_tgt_ok = false;
+        _chase_arrive_ok = false;
         _plan_jerk_frac = 1.0f;
         _plans      = 0;
         _failures   = 0;
@@ -860,8 +863,14 @@ public:
         // ahead of time). That state is the END of the last plan queued before
         // it, so a whole client lookahead is planned in arrival order without
         // any of it waiting on the machine.
+        //
+        // A FUTURE-anchored CHASE point is an ARRIVAL (RFC-084): its plan
+        // starts where the previous future point arrives (or now, if that has
+        // passed) and is stretched to reach the point AT its anchor, so a
+        // client's lead buys on-time arrival and never delays the chase.
         uint64_t t0 = now_us;
         bool sched  = false;
+        bool arrive = false;
         if (cmd.has_anchor && cmd.anchor_us < now_us) {
             t0 = cmd.anchor_us;
             if (now_us - t0 > kAnchorMaxLateUs) t0 = now_us - kAnchorMaxLateUs;
@@ -872,9 +881,18 @@ public:
                               kDetailAnchorLead, now_us);
                 return false;
             }
-            t0    = cmd.anchor_us;
-            sched = true;
+            t0     = cmd.anchor_us;
+            arrive = !cmd.has_duration;
+            if (arrive) {
+                t0 = (_chase_arrive_ok && _chase_arrive_us > now_us &&
+                      _chase_arrive_us < cmd.anchor_us)
+                         ? _chase_arrive_us : now_us;
+            }
+            sched = t0 > now_us;
         }
+        // The point's own time: the estimator's cadence reads it, never the
+        // plan start an arrival chose.
+        const uint64_t t_pt = arrive ? cmd.anchor_us : t0;
 
         // A command OWNS its anchor onward: every queued plan starting at or
         // after t0 was planned from a state that no longer holds. Dropped
@@ -902,7 +920,7 @@ public:
         // every consumer whenever two anchors sit close together.
         const double seg_T = cmd.has_duration
                                  ? (double)cmd.duration_us * 1e-6 : 0.0;
-        updateEstimator(target, t0,
+        updateEstimator(target, t_pt,
                         seg_T > 0.0 ? (target - p) / seg_T : 0.0, seg_T);
 
         // Cold-start governor (Config::recovery_vmax): the opening plan out
@@ -939,13 +957,17 @@ public:
         // and trades back, so no planner or adopter knows a plan can be
         // scheduled.
         if (sched) swapPlan(schedAt(_sched_n));
+        const double arrive_s = arrive ? (double)(cmd.anchor_us - t0) * 1e-6 : 0.0;
         const bool ok = cmd.has_duration
                             ? commitWaveform(cmd, p, v, a, target, t0)
-                            : commitChase(cmd, p, v, a, target, t0);
+                            : commitChase(cmd, p, v, a, target, t0, arrive_s);
         if (sched) {
             swapPlan(schedAt(_sched_n));
             if (ok) ++_sched_n;   // a rejected plan leaves the slot as scratch
         }
+        // The arrival chain: only a planned arrival extends it.
+        _chase_arrive_ok = ok && arrive;
+        _chase_arrive_us = cmd.anchor_us;
         if (ok) _plans++;
         return ok;
     }
@@ -958,6 +980,7 @@ public:
     bool brake(uint64_t now_us) {
         promoteDue(now_us);
         dropScheduledFrom(now_us);
+        _chase_arrive_ok = false;
         if (!isBusy(now_us)) return false;
         double p, v, a;
         sampleRaw(now_us, p, v, a);
@@ -2175,8 +2198,13 @@ private:
     }
 
     // ---- CHASE (bare / short-interval points) -------------------------------
+    // arrive_s > 0: an ARRIVAL plan (RFC-084) that reaches `target` exactly
+    // arrive_s after now_us when the ceilings allow, at the stream's own
+    // velocity and curvature. No predictive aim: the plan already knows when
+    // it must be there, so aiming past the point would only add overshoot.
+    // 0 = the time-optimal chase of a point that is already due.
     bool commitChase(const Command& cmd, double p, double v, double a,
-                     double target, uint64_t now_us) {
+                     double target, uint64_t now_us, double arrive_s = 0.0) {
         // A bare point declares no band, so there is nothing for the guard to
         // measure excursion against. Disarmed explicitly: the softened-plan
         // legality recheck in planRuckig reads this member (chase plans at a
@@ -2189,7 +2217,19 @@ private:
         double aim = target;
         double vf  = 0.0;
         double af  = 0.0;
-        if (_cfg.chase_feedforward && _est_ema_ok && streamIsDense()) {
+        if (arrive_s > 0.0 && _cfg.chase_feedforward && _est_ema_ok &&
+            streamIsDense()) {
+            const double acap  = 0.5 * (double)_plan_lim.amax;
+            const double a_est = _est_a_ema < -acap ? -acap
+                               : _est_a_ema >  acap ?  acap : _est_a_ema;
+            // The de-lagged estimate IS the stream at this point's instant.
+            const double v_pt = _cfg.chase_aim_accel_extrap
+                                    ? _est_v_ema + kVEmaLagIntervals * _est_dt_ema * a_est
+                                    : _est_v_ema;
+            vf = applyEndVelGuard(v_pt * (double)_cfg.chase_ff_gain, aim, now_us);
+            if (_cfg.chase_accel_ff) af = a_est * (double)_cfg.chase_ff_gain;
+        } else if (arrive_s <= 0.0 && _cfg.chase_feedforward && _est_ema_ok &&
+                   streamIsDense()) {
             // Predictive aim: the newest point is already ~1 interval stale
             // and the plan needs time to get there — aim ahead along the
             // stream's motion, arrive AT its velocity and curvature. (The
@@ -2263,11 +2303,11 @@ private:
             if (r > 1.0) r = 1.0;
             j_ovr = (double)_plan_lim.jmax * r;
         }
-        bool ok = planRuckig(p, v, a, aim, vf, af, 0.0, now_us, j_ovr);
+        bool ok = planRuckig(p, v, a, aim, vf, af, arrive_s, now_us, j_ovr);
         // A softened plan may be DECLINED (legality recheck); the mechanical
         // ceiling is always available as the hard fallback.
         if (!ok && j_ovr > 0.0)
-            ok = planRuckig(p, v, a, aim, vf, af, 0.0, now_us);
+            ok = planRuckig(p, v, a, aim, vf, af, arrive_s, now_us);
         if (ok) _mode = Mode::Chase;
         return ok;
     }
@@ -2738,6 +2778,10 @@ private:
     // near its NEXT target legitimately.
     bool     _prev_wave_tgt_ok = false;
     double   _prev_wave_tgt = 0.0;
+    // The arrival chain (RFC-084): the anchor the last planned chase arrival
+    // reaches, where the next future point's plan starts.
+    bool     _chase_arrive_ok = false;
+    uint64_t _chase_arrive_us = 0;
 
     // Counters + anomaly ring
     uint32_t _plans = 0;

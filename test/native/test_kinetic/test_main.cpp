@@ -3381,3 +3381,94 @@ TEST_CASE("brake(): a STOP brakes a moving plan to rest without reversing, drops
     kinetic::Anomaly ev;
     while (e.popAnomaly(ev)) CHECK(ev.kind != (uint8_t)AnomalyType::SettleEngaged);
 }
+
+// ---- RFC-084: a future-anchored chase point is an ARRIVAL --------------------
+namespace {
+
+// Phosphor ph-vdk.26's shape: a 1 Hz sine streamed as bare points every 20 ms,
+// each stamped `lead_us` ahead of its send instant, the sends jittered by up to
+// `jitter_us` (deterministic LCG, in-order like TCP). Commits exactly as the
+// arbiter does: an anchor already due is not one. Reports the time shift that
+// best fits the rendered position to the STAMPED curve, and the excursion.
+struct LeadFit {
+    double lag_s = 0.0;
+    double hi = 0.0;
+    double lo = 1.0;
+};
+LeadFit runLeadSine(const Config& cfg, uint64_t lead_us, uint64_t jitter_us) {
+    Engine e(cfg, 0.5f);
+    const double amp = 0.3;
+    auto curve = [&](double t) { return 0.5 + amp * std::sin(2.0 * M_PI * t); };
+    const uint64_t dt = 20 * kMs, t_end = 5 * kS;
+    std::vector<uint64_t> stamp, sent;
+    uint32_t lcg = 12345u;
+    for (uint64_t k = 0; k * dt + lead_us < t_end; ++k) {
+        lcg = lcg * 1664525u + 1013904223u;
+        uint64_t a = k * dt + (jitter_us ? uint64_t(lcg >> 8) % jitter_us : 0);
+        if (!sent.empty() && a < sent.back()) a = sent.back();
+        sent.push_back(a);
+        stamp.push_back(k * dt + lead_us);
+    }
+    std::vector<double> pos;
+    size_t next = 0;
+    for (uint64_t t = 0; t < t_end; t += kMs) {
+        for (; next < sent.size() && sent[next] <= t; ++next) {
+            Command c;
+            c.target = (float)curve((double)stamp[next] * 1e-6);
+            c.has_anchor = stamp[next] > t;
+            c.anchor_us = stamp[next];
+            REQUIRE(e.commit(c, t));
+        }
+        pos.push_back(e.positionAt(t));
+    }
+    LeadFit r;
+    double best = 1e9;
+    const size_t settled = 2000;   // two full periods of warm-up
+    for (int lag_ms = -100; lag_ms <= 200; ++lag_ms) {
+        double sse = 0.0;
+        for (size_t i = settled; i < pos.size(); ++i) {
+            const double d = pos[i] - curve((double)i * 1e-3 - lag_ms * 1e-3);
+            sse += d * d;
+        }
+        if (sse < best) { best = sse; r.lag_s = lag_ms * 1e-3; }
+    }
+    for (size_t i = settled; i < pos.size(); ++i) {
+        r.hi = std::max(r.hi, pos[i]);
+        r.lo = std::min(r.lo, pos[i]);
+    }
+    return r;
+}
+
+}  // namespace
+
+TEST_CASE("RFC-084: a led sine lags its stamps by the chase budget, never the lead, and does not overshoot") {
+    // Factory chase tuning (what motionDefaultTuning ships) and the operator's
+    // session tuning, both on the machine's ceilings.
+    Config factory;
+    factory.limits = liveTuning().limits;
+    for (const Config& cfg : {factory, liveTuning()}) {
+        // The budget schedule_latency_us states for a samples grant, less the
+        // hub's hop: one dense interval (val-091.44).
+        const double budget_s = (double)cfg.chase_dense_us * 1e-6;
+        const LeadFit r = runLeadSine(cfg, 100 * kMs, 30 * kMs);
+        CHECK(r.lag_s <= budget_s);
+        CHECK(r.lag_s < 0.020);                 // a lead buys arrival, not delay
+        CHECK(r.hi <= 0.8 + 0.01 * 0.3);        // within 1 % of the amplitude
+        CHECK(r.lo >= 0.2 - 0.01 * 0.3);
+        CHECK(r.hi - r.lo >= 0.6 * 0.98);       // and keeps the stroke
+    }
+}
+
+TEST_CASE("RFC-084: points stamped at arrival (no lead) plan exactly as before") {
+    // The arrival branch only engages on a future anchor; a client with no
+    // lead must see the predictive-aim chase unchanged. Both figures were
+    // measured on this harness before the arrival branch existed. The same
+    // harness then read lag -5 ms / peak 0.8068 at a 100 ms lead with 30 ms
+    // jitter (factory), and lag 28 ms (session tuning): what the case above
+    // now refuses.
+    Config cfg;
+    cfg.limits = liveTuning().limits;
+    const LeadFit r = runLeadSine(cfg, 0, 0);
+    CHECK(r.lag_s == doctest::Approx(-0.005));
+    CHECK(r.hi == doctest::Approx(0.806762).epsilon(1e-5));
+}

@@ -30,7 +30,11 @@ Every command becomes ONE trajectory planned from the engine's actual
   overrun the deadline) is the one alternative contract. Amplitude is the one
   quantity a ceiling may shape; this is the operator-ratified exception
   (2026-09-02) to "ceilings are clamps, never targets". CHASE (bare points,
-  no duration) is Ruckig replan-per-point. Sample synthesis is gone
+  no duration) is Ruckig replan-per-point. A chase point's future anchor is
+  its ARRIVAL time (SPEC 5.4, RFC-084), never a start: its plan begins where
+  the previous future point arrives and is stretched to reach the point at
+  its anchor, while a segment's anchor stays its start; a point already due
+  is the time-optimal chase, unchanged. Sample synthesis is gone
   (2026-09-02): no client sends bare points at a rate that needs a holdback.
   SETTLE is brake-to-rest when a plan ends still-moving with no fresh command.
 - **One activity clock (operator ruling 2026-09-02).** Every "is the stream
