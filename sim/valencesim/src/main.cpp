@@ -14,7 +14,8 @@
 //   /uitoken slot table.
 // - DEVICE GLOG LINES: Geiger's host platform layer (GEIGER_HOST_PLATFORM in
 //   CMakeLists.txt) is drained on the hub thread only, into the sim's own
-//   SessionLog, so a run reads as one stream.
+//   SessionLog, so a run reads as one stream, and Warn and above onto the log
+//   channel 0x0008 as the board's ValenceLogBridge does.
 // - The loop's 5 ms hub tick matches the P4's hub task; motion is evaluated
 //   every pass (~1 ms), matching the P4's 1 kHz motion tick as closely as a
 //   desktop scheduler allows.
@@ -38,6 +39,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include <ixwebsocket/IXNetSystem.h>
@@ -90,6 +92,23 @@ public:
 
 private:
     bench::SessionLog& _log;
+};
+
+// The board's ValenceLogBridge: Warn and above onto the log channel 0x0008.
+// Every drain in this binary runs on the hub thread, so no task-name gate is
+// needed here. Never logs: a GLOG from here would drain straight back in.
+class GeigerToLogChannel final : public geiger::ISink {
+public:
+    void bind(valence::Hub* hub) { _hub = hub; }
+
+    void write(const geiger::Record& r) override {
+        if (_hub == nullptr) return;
+        // geiger::Level and the registry's log_levels share one numbering.
+        _hub->publishLog(uint8_t(r.level), std::string_view(r.tag), std::string_view(r.msg));
+    }
+
+private:
+    valence::Hub* _hub = nullptr;
 };
 
 struct Options {
@@ -235,6 +254,10 @@ int main(int argc, char** argv) {
     // Declared before the first GLOG can fire and outlives every drain below.
     GeigerToSessionLog geigerSink(log);
     geiger::logger().addSink(&geigerSink);
+    // Bound to the hub once it exists; outlives every drain below.
+    GeigerToLogChannel logChannel;
+    if (!geiger::logger().addSink(&logChannel, geiger::Level::Warn))
+        log.logf('W', "valencesim: log channel bridge not registered: Geiger sink table full");
 
     auto box = std::make_unique<SimBox>();
     valence::motionBegin();
@@ -294,6 +317,7 @@ int main(int argc, char** argv) {
              static_cast<unsigned long long>(hub.hubInstanceId()));
     hub.setEndpoint(opt.wsPort, 0x7F000001u);
     box->device.attach(hub);
+    logChannel.bind(&hub);
 
     const auto etag = hub.catalogEtag();
     std::array<char, 2 * 32 + 1> etagHex{};
