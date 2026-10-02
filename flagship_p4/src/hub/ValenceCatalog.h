@@ -139,8 +139,9 @@ inline constexpr uint16_t pattern_presets        = 0x5220;  // STORE·pattern, f
 inline constexpr uint8_t kPresetCapacity = 24;
 inline constexpr uint8_t kPresetNameMax = 32;
 inline constexpr uint8_t kPresetPayloadBytes = 40;
-// The preset store's identity, published in its STORE descriptor and answered
-// by ValenceDevice::readBlob(). store_id 1 is the trust ledger.
+// The preset store's identity, published in its STORE descriptor, carried as
+// store_id (RFC-070) by its roster and writer, and answered by
+// ValenceDevice::readBlob(). store_id 1 is the trust ledger.
 inline constexpr uint8_t kPresetStoreId = 2;
 inline constexpr const char* kPresetKind = "pattern.frayd";
 
@@ -1761,7 +1762,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // the same way it already does for the trust ledger: BLOB_REQ each slot
     // (kPayloadBytes is tiny — 40 B — so kPresetCapacity fetches is cheap) or
     // read the name back from a save/rename ECHO it sent itself. A generation
-    // bump means "re-enumerate", exactly like 0x000D.
+    // bump means "re-enumerate", exactly like 0x000D. store_id (RFC-070)
+    // joins this roster, the 0x5220 store and the 0x3220 writer by one key.
     auto addPatternPresetsRoster = [&]() {
     c.addEntry({.id = ch::pattern_presets_roster, .name = "pattern-presets-roster",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1769,7 +1771,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .defaultPriority = Priority::background,
                 .hasCategory = true, .category = valence::ui_categories::library,
                 .hasSettingChannel = true, .settingChannel = ch::pattern_presets_cmd,
-                .hasRank = true, .rank = valence::ui_ranks::detail});
+                .hasRank = true, .rank = valence::ui_ranks::detail,
+                .hasStoreId = true, .storeId = kPresetStoreId});
     c.addLayoutField({.name = "generation", .type = PackedFieldType::u16, .unit = "count", .scale = 1.0f});
     c.addLayoutField({.name = "count",      .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
     c.addLayoutField({.name = "capacity",   .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
@@ -2126,7 +2129,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addEntry({.id = ch::pattern_presets_cmd, .name = "pattern-presets-cmd",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
-                .defaultPriority = Priority::normal});
+                .defaultPriority = Priority::normal,
+                .hasStoreId = true, .storeId = kPresetStoreId});
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                             .role = "action.store"},
                            {"reserved", "save", "load", "delete", "rename"});
