@@ -168,6 +168,17 @@ struct MotionTuning {
 // that set it is on the create site in ValenceMotion.cpp.
 inline constexpr uint32_t kMotionTaskStackBytes = 24576;
 
+// The sampler period, microseconds, and the ONE home for it (C-1). The S3
+// product evaluated its plan at 1 kHz and that number is kept deliberately: it
+// is the cadence the whole engine was benched at, the LP core renders every
+// edge between ticks regardless, and a faster tick buys nothing because the
+// emitter re-reads its steering word mid-wait anyway.
+// It is also the hub's whole internal hop for a scheduled plan: the tick at
+// or after a plan's anchor steers the emitter with the motion of the interval
+// that just elapsed, so execution trails a stamp by one tick.
+// schedule_latency_us (RFC-059) is built on it.
+inline constexpr uint32_t kMotionTickUs = 1000;
+
 // Brings up the engine, the arbiter and the motion task. The emitter is PARKED
 // until an intent is accepted. Must run BEFORE hubBegin(): the hub's boot
 // publish of every motion STATE channel reads motionCensus().

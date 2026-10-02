@@ -144,6 +144,7 @@ public:
     bool admitsUnderPause(uint16_t channel_id, const IntentValueMap& value,
                           bool overrideLatched) override;
     uint16_t scheduleHorizonMs(uint16_t channel_id) override;
+    uint32_t scheduleLatencyUs(uint16_t channel_id) override;
     void onEstop(uint8_t cause, uint8_t origin) override;
     void onStreamBundle(uint16_t channel_id, uint32_t session_id,
                         const BundleView& bundle) override;
@@ -164,7 +165,7 @@ private:
     Result<IntentValueMap, NackCode> applySafety(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> refuseUnpowered(const char* what);
     bool railOwned() const;
-    bool segmentsGrantLive() const;
+    bool publishGrantLive(uint16_t channel_id) const;
     void haltGenerator();
     void pushPattern();
     void publishPatternPlane(const MotionCensus& mo);

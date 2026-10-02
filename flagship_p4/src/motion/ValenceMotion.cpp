@@ -37,15 +37,9 @@ constexpr const char* kTag = "motion";
 
 // ---- task constants ---------------------------------------------------------
 
-// Sampler period. The S3 product evaluated its plan at 1 kHz and that number
-// is kept deliberately: it is the cadence the whole engine was benched at, the
-// LP core renders every edge between ticks regardless, and a faster tick buys
-// nothing because the emitter re-reads its steering word mid-wait anyway.
-constexpr uint32_t kTickUs = 1000;
-
 // How often the cross-task snapshot is refreshed. 50 Hz feeds a 60 Hz 0x1100
 // and a 45 Hz 0x1110 with one engine sample per refresh instead of one per
-// tick, which is the whole reason it is not simply done at kTickUs: the
+// tick, which is the whole reason it is not simply done at kMotionTickUs: the
 // snapshot calls Engine::snapshot(), and an instrument billed at the tick rate
 // is the class that manufactures the fault it observes (memory-budget.md T27).
 constexpr uint32_t kPublishUs = 20000;
@@ -150,7 +144,7 @@ bool MotionTask::begin() {
     if (ok != pdPASS) return false;
     GLOGI(kTag, "motion path up: window %.1f..%.1f mm, rail %.1f mm, %.3f steps/mm, %lu us tick",
           double(_arb.winMin()), double(_arb.winMax()), double(_arb.rail()), double(kStepsPerMm),
-          static_cast<unsigned long>(kTickUs));
+          static_cast<unsigned long>(kMotionTickUs));
     return true;
 }
 
@@ -219,7 +213,7 @@ void MotionTask::run() {
         // Wakes on an intent OR on the tick, whichever comes first. dt is
         // MEASURED, so an early wake costs nothing and an intent never waits
         // out the tick to be planned.
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kTickUs / 1000));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kMotionTickUs / 1000));
         const uint64_t now_us = espNowUs();
         drain(now_us);
         const float dt_s = float(now_us - prev_us) * 1e-6f;

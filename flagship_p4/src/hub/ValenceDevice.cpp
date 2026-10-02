@@ -478,6 +478,9 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
 // INVALID_VALUE, as does a non-numeric or non-finite value anywhere in it.
 // Clamp bounds are StoredState.h's tuning_bounds, the same ones a stored set
 // is validated against at boot; tick() persists a changed set with 0x1000.
+// Key 10 (chase_dense) is refused INTERLOCK while a samples grant is live: it
+// sets that grant's schedule_latency_us, a commitment for the grant's life
+// (SPEC 5.4, RFC-059), and the library has no publish re-GRANT to move it.
 
 void ValenceDevice::noteTuning(const MotionTuning& next, bool& cfgChanged) {
     const uint8_t cards = cardsChanged(_tune, next);
@@ -502,7 +505,8 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
         return Ret::err(NackCode::INVALID_VALUE);
     StoredModes nextModes = _modes;
     if (f7) nextModes.horizon = uint8_t(wholeIn(*numberOf(f7), 0.0f, float(kHorizonMs.size() - 1)));
-    if (nextModes.horizon != _modes.horizon && segmentsGrantLive()) return Ret::err(NackCode::INTERLOCK);
+    if (nextModes.horizon != _modes.horizon && publishGrantLive(ch::motion_segment))
+        return Ret::err(NackCode::INTERLOCK);
     if (f8) nextModes.flipped = *boolOf(f8);
     if (nextModes.flipped != _modes.flipped) {
         const MotionCensus c = motionCensus();
@@ -538,15 +542,15 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
     return Ret::ok(applied);
 }
 
-// Any session holding a segments publish grant, live or parked: its grant
-// carries the horizon this hub advertised.
-bool ValenceDevice::segmentsGrantLive() const {
+// Any session holding a publish grant of `channel_id`, live or parked: its
+// grant carries the horizon and the latency this hub advertised.
+bool ValenceDevice::publishGrantLive(uint16_t channel_id) const {
     if (_hub == nullptr) return false;
     for (size_t i = 0; i < kHubMaxSessions; ++i) {
         const HubSession* s = _hub->sessionBySlot(i);
         if (s == nullptr || !s->occupied()) continue;
         for (const auto& pg : s->publishGrants)
-            if (pg.used && pg.channel_id == ch::motion_segment) return true;
+            if (pg.used && pg.channel_id == channel_id) return true;
     }
     return false;
 }
@@ -555,6 +559,18 @@ bool ValenceDevice::segmentsGrantLive() const {
 // 500 and 1000 and omits the key for 250, its default.
 uint16_t ValenceDevice::scheduleHorizonMs(uint16_t channel_id) {
     return channel_id == ch::motion_segment ? kHorizonMs[_modes.horizon] : 0;
+}
+
+// RFC-059, computed from the pipeline, never a second constant. Segments
+// start AT their stamp, planned and parked ahead of it, so the delay is the
+// motion tick's one-tick hop. A samples point is reached at its stamp once it
+// arrives a planning interval ahead (RFC-084); the chase-planning budget is
+// that interval at its longest, the densest cadence the engine still plans
+// as a stream (chase_dense), plus the same hop.
+uint32_t ValenceDevice::scheduleLatencyUs(uint16_t channel_id) {
+    if (channel_id == ch::motion_segment) return kMotionTickUs;
+    if (channel_id == ch::motion_input) return _tune.chase_dense_us + kMotionTickUs;
+    return 0;
 }
 
 Ret ValenceDevice::applyTuning(const IntentValueMap& requested, bool& cfgChanged) {
@@ -583,6 +599,8 @@ Ret ValenceDevice::applyTuning(const IntentValueMap& requested, bool& cfgChanged
             case 9:  t.chase_lookahead = clampf(*v, 0.0f, b::lookahead_max); out = IntentValue::ofF32(t.chase_lookahead); break;
             case 10:  // ms on the wire, us in the engine
                 t.chase_dense_us = uint32_t(clampf(*v, b::dense_ms_min, b::dense_ms_max) * 1000.0f + 0.5f);
+                if (t.chase_dense_us != _tune.chase_dense_us && publishGrantLive(ch::motion_input))
+                    return Ret::err(NackCode::INTERLOCK);
                 out = IntentValue::ofF32(float(t.chase_dense_us) / 1000.0f);
                 break;
             case 11: t.chase_aim_extrap = wholeIn(*v, 0.0f, 1.0f) != 0; out = IntentValue::ofU64(t.chase_aim_extrap); break;
@@ -1308,7 +1326,7 @@ void ValenceDevice::attach(Hub& hub) {
     publishHubStatus();
     // _tune is the factory set or the adopted one, and the engine already holds
     // it either way (adoptConfigBlob pushed it), so nothing is pushed here.
-    publishMachineModes(hub, _tune, _modes, !segmentsGrantLive(), flipOpen(motionCensus()));
+    publishMachineModes(hub, _tune, _modes, !publishGrantLive(ch::motion_segment), flipOpen(motionCensus()));
     publishKineticCards(hub, _tune, kCardLimits | kCardChase | kCardWaveform);
     const MotionCensus mo = motionCensus();
     publishMotion(hub, mo, patternActive());
@@ -1359,7 +1377,7 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
 
     // The schedule_horizon and flipped enabled_mask bits follow the segments
     // grants and the rail's state, which no write announces.
-    const bool horizonOpen = !segmentsGrantLive();
+    const bool horizonOpen = !publishGrantLive(ch::motion_segment);
     const bool flipNowOpen = flipOpen(mo);
     if (horizonOpen != _horizonOpenSent || flipNowOpen != _flipOpenSent) {
         _horizonOpenSent = horizonOpen;
