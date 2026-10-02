@@ -46,12 +46,12 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 
 | Function | Net | P4 pad | Firmware today | Firmness | Owed |
 |---|---|---|---|---|---|
-| SDA: motor current monitor (U11, INA237 or INA228, 0x40, A0/A1 to GND) and board monitor (U12, CH32V003, 0x2C, not ruled); 4.7k pull-up R24 | `/I2C.INA_SDA` | GPIO34, pad 33 | `system/ValencePower.cpp:24` (its own constant), bus opened at `:89`; the self-check borrows it, `ValenceSelfCheck.cpp:45` | Firm: SPEC 2026-09-23 pin-map-after-LP row | move to BoardPins.h val-091.33; test pads hw-kcu |
+| SDA: motor current monitor (U11, INA237 or INA228, 0x40, A0/A1 to GND) and board monitor (U12, CH32V003, 0x2C, not ruled); 4.7k pull-up R24 | `/I2C.INA_SDA` | GPIO34, pad 33 | `system/ValencePower.cpp:24` (its own constant), bus opened at `:89`; the self-check borrows it, `ValenceSelfCheck.cpp:46` | Firm: SPEC 2026-09-23 pin-map-after-LP row | move to BoardPins.h val-091.33; test pads hw-kcu |
 | SCL, 4.7k pull-up R25 | `/I2C.INA_SCL` | GPIO36, pad 47 | `ValencePower.cpp:25` | Firm | same |
 | U11 ALERT, latched: joins the EN node above, cuts motor power with no firmware | `/MSW.EN_NODE` | (GPIO23) | DIAG_ALRT read (`powerTakeAlerts()`) by the switch task on every enable request, before the window, its over-current and over-voltage flags logged: that read plus the MOTOR_EN toggle is the re-arm (`ValenceMotorSwitch.cpp` `serviceEnable`) | Firm | bench val-091.56 |
 | SWIO to the board monitor's PD1 through R1102 100 R (10k pull-up R1101; rescue pad TP1101) | `/MON.MON_SWIO` | GPIO50, pad 10 | nothing | Firm: SPEC 2026-09-23 board-monitor row | val-091.20 |
 | Board monitor FAULT_N (U12 PC7 through R1121 1k): can cut motor power, never enable it | onto `/MSW.EN_NODE` | (GPIO23) | seen only as an EN-node drop (row above), cause not read | Firm | val-091.19, val-091.57 |
-| Board monitor's own ADC taps (VIN_RAW, +BUS, +12V, +5V, +5V_SYS, +3V3_ACC, SHUNT_TEMP, CLAMP_MON), CLAMP_TRIM PWM, PUMP_FLT (PC0), status LED bank (PC6) | U12 local | not on the P4 | IDENT and STATUS blocks (`system/Supervisor.h`) read once at boot by the self-check, `ValenceSelfCheck.cpp:61`; no runtime poll, no heartbeat | Firm (address not ruled) | val-091.19, val-091.57 |
+| Board monitor's own ADC taps (VIN_RAW, +BUS, +12V, +5V, +5V_SYS, +3V3_ACC, SHUNT_TEMP, CLAMP_MON), CLAMP_TRIM PWM, PUMP_FLT (PC0), status LED bank (PC6) | U12 local | not on the P4 | IDENT and STATUS blocks (`system/Supervisor.h`) read once at boot by the self-check, `ValenceSelfCheck.cpp:62`; no runtime poll, no heartbeat | Firm (address not ruled) | val-091.19, val-091.57 |
 
 ## Regen clamp, thermal, fan
 
@@ -78,9 +78,9 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 
 | Function | Net | P4 pad | Firmware today | Firmness | Owed |
 |---|---|---|---|---|---|
-| E-stop NC contact (J9, and the daughterboard M8 in parallel), 2.2k pull-up, 1k R903; HIGH = open | `/ESTOP.ESTOP_NC` | GPIO39, pad 31 | Decoded once at boot: `ValenceSelfCheck.cpp:149` | Firm: SPEC 2026-09-23 E-stop row (+2026-09-28, 2026-10-01) | runtime latch val-091.23 |
+| E-stop NC contact (J9, and the daughterboard M8 in parallel), 2.2k pull-up, 1k R903; HIGH = open | `/ESTOP.ESTOP_NC` | GPIO39, pad 31 | Decoded once at boot: `ValenceSelfCheck.cpp:157` | Firm: SPEC 2026-09-23 E-stop row (+2026-09-28, 2026-10-01) | runtime latch val-091.23 |
 | E-stop NO contact, 2.2k pull-up, 1k R904 | `/ESTOP.ESTOP_NO` | GPIO30, pad 53 | same | Firm | val-091.23 |
-| E-stop bypass drive (Q903, masks an unplugged cable only), 100k pull-down R906 | `/ESTOP.ESTOP_BYP` | GPIO29, pad 54 | Driven LOW: `ValenceSelfCheck.cpp:225` | Firm | bypass policy val-091.23 |
+| E-stop bypass drive (Q903, masks an unplugged cable only), 100k pull-down R906 | `/ESTOP.ESTOP_BYP` | GPIO29, pad 54 | Driven LOW: `ValenceSelfCheck.cpp:233` | Firm | bypass policy val-091.23 |
 | HOME button SW1 (press homes, hold resets, on release), 10k pull-up, 1k series; J13 in parallel | `/UI.BTN_HOME` | GPIO49, pad 12 | nothing | Provisional | val-091.26 |
 | PAIR button SW2 (hold pairs, held at power-on = config mode), 10k pull-up, 1k series; J13 in parallel | `/UI.BTN_PAIR` | GPIO52, pad 55 | nothing | Firm: SPEC 2026-09-23 pin-map-after-LP row | val-9u0.10, val-9u0.14 |
 | Status LED data: 74AHCT125 gate 3 (U10) to the GRBW pixel D5 (XL-3528RGBW, 32 bits per pixel), chained on to J12 NEOPIXEL OUT; R601 10k pull-down | `/DRV.LED_DATA` | GPIO26 (USB1.1 D-), pad 19 | nothing | Firm: same row | val-091.27 |

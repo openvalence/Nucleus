@@ -31,6 +31,7 @@
 #include "motion/ValenceMotion.h"
 #include "patterns/PatternPresetStore.h"
 #include "patterns/PatternSettings.h"
+#include "system/ValenceMotorSwitch.h"
 #include "valence/hub/hub.hpp"
 
 namespace valence {
@@ -220,6 +221,8 @@ private:
     // and the motor switch's fault count as tick() last acted on it.
     uint16_t _estopInitiations = 0;
     uint16_t _mswFaultsSeen = 0;
+    // The switch status hub-status last carried, so a change publishes now.
+    MotorSwitchStatus _mswSent{};
 
     // The live pattern generator settings. This copy IS the setting (the
     // delegate is its one writer); the generator's task runs on whatever

@@ -18,6 +18,7 @@
 #include "system/BoardPins.h"
 #include "system/SelfCheck.h"
 #include "system/Supervisor.h"
+#include "system/ValenceMotorSwitch.h"
 #include "system/ValencePower.h"
 
 namespace valence {
@@ -121,6 +122,13 @@ void checkPowerMonitor(std::optional<PowerReading>& reading) {
 }
 
 void checkMotorRailOff(const std::optional<PowerReading>& reading) {
+    // "With the switch off" is the module's word, not an assumption.
+    const MotorSwitchStatus sw = motorSwitchStatus();
+    if (sw.state != motorswitch::State::off) {
+        g_table.record(Check::motor_rail_off, Verdict::fail, "motor switch is %s, not off",
+                       motorswitch::stateName(sw.state));
+        return;
+    }
     if (!reading) {
         g_table.record(Check::motor_rail_off, Verdict::skipped,
                        "needs the power monitor, which did not pass");
@@ -138,7 +146,7 @@ void checkMotorRailOff(const std::optional<PowerReading>& reading) {
 }
 
 void checkSwitchFault() {
-    if (gpio_get_level(pin(BOARD_GPIO_MSW_FLT_N)) == 0) {
+    if (motorSwitchFaultLine()) {
         g_table.record(Check::switch_fault, Verdict::fail,
                        "MSW_FLT_N low: over-current or over-temperature latched");
         return;

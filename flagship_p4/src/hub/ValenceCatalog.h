@@ -366,7 +366,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                             AccessLevel::control});// 10 retired (bypass_off)
 
     // ---- "hub-status" — STATE, background, 1 Hz -----------------------------
-    // Slow health telemetry.  [4+4+1+1 = 10 B]
+    // Slow health telemetry.  [4+4+1+1+4+1+1 = 16 B]
     c.addEntry({.id = valence::channels::hub_status, .name = "hub-status",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
@@ -384,6 +384,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // Append-only — bytes 0..9 keep their offsets.
     c.addLayoutField({.name = "log_dropped", .type = PackedFieldType::u32, .unit = "count", .scale = 1.0f,
                       .desc = "Log lines dropped since boot (replay ring + cross-task bridge)."});
+    // `motor_switch` and `motor_fault` (fields 6-7, appended 14 -> 16 B): the
+    // motor switch's state and the reason it last latched faulted. Their
+    // ordinals are motorswitch::State and motorswitch::Fault
+    // (system/MotorSwitch.h): the labels move with those enums, append-only.
+    // A machine with no switch publishes `on` and `none` (the sim twin).
+    c.addSelectField({.name = "motor_switch", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .desc = "Motor power switch: off, pre-charging, on, or latched off by a fault."},
+                     {"off", "precharging", "on", "faulted"});
+    c.addSelectField({.name = "motor_fault", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .desc = "Why the motor switch last latched off; it stays reported after a recovery."},
+                     {"none", "switch_fault", "en_node", "inrush", "precharge"});
 
     // ---- "session-events" — EVENT, watch ------------------------------------
     // Payload keys match Hub::emitTakeoverEvent(): {1:"source", 2:"session"}.

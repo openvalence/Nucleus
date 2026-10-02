@@ -1224,15 +1224,18 @@ std::optional<HubDelegate::BlobView> ValenceDevice::readBlob(uint8_t ns, uint8_t
 // ---- retained STATE --------------------------------------------------------------
 
 void ValenceDevice::publishHubStatus() {
-    // 4+4+1+1+4 = 14 B, matching the 0x0006 layout in ValenceCatalog.h.
+    // 4+4+1+1+4+1+1 = 16 B, matching the 0x0006 layout in ValenceCatalog.h.
     const int8_t rssi = _linkRssi.load(std::memory_order_relaxed);
-    std::array<std::byte, 14> buf{};
+    _mswSent = motorSwitchStatus();
+    std::array<std::byte, 16> buf{};
     std::span<std::byte> s(buf);
     putU32(s.subspan(0, 4), deviceFreeHeapBytes());
     putU32(s.subspan(4, 4), uint32_t(deviceNowUs() / 1000000));
     putU8(s.subspan(8, 1), uint8_t(rssi));
     putU8(s.subspan(9, 1), uint8_t(_hub->sessionCount()));
     putU32(s.subspan(10, 4), _hub->logDropped());
+    putU8(s.subspan(14, 1), uint8_t(_mswSent.state));
+    putU8(s.subspan(15, 1), uint8_t(_mswSent.last_fault));
     _hub->publishState(channels::hub_status, s);
 }
 
@@ -1442,7 +1445,11 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _persistDueMs = nowMs + kCfgPersistDebounceMs;
     }
 
-    if (uint32_t(nowMs - _lastStatusMs) >= 1000u) {
+    // 1 Hz, and at once when the motor switch moved: a client watching a
+    // release sees pre-charging, then on, without waiting out the second.
+    const MotorSwitchStatus msw = motorSwitchStatus();
+    if (uint32_t(nowMs - _lastStatusMs) >= 1000u || msw.state != _mswSent.state ||
+        msw.last_fault != _mswSent.last_fault) {
         _lastStatusMs = nowMs;
         publishHubStatus();
     }
