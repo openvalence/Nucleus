@@ -4,7 +4,7 @@
 //
 //   valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
 //              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
-//              [--headless] [--no-mdns] [--enforce]
+//              [--uncommissioned] [--headless] [--no-mdns] [--enforce]
 //
 // Constraints:
 // - HOST-ONLY: never touches a device, never deploys, no pio.
@@ -96,6 +96,7 @@ struct Options {
     uint16_t wsPort = 82;
     uint16_t httpPort = 80;
     bool homed = false;
+    bool uncommissioned = false;   // first-run hub (RFC-079); default commissioned
     int durationS = 0;
     bool pairingWindow = false;
     bool motorSwitch = false;
@@ -112,6 +113,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (!std::strcmp(a, "--http") && hasNext) o.httpPort = uint16_t(std::atoi(argv[++i]));
         else if (!std::strcmp(a, "--duration") && hasNext) o.durationS = std::atoi(argv[++i]);
         else if (!std::strcmp(a, "--homed")) o.homed = true;
+        else if (!std::strcmp(a, "--uncommissioned")) o.uncommissioned = true;
         else if (!std::strcmp(a, "--pairing-window")) o.pairingWindow = true;
         else if (!std::strcmp(a, "--motor-switch")) o.motorSwitch = true;
         else if (!std::strcmp(a, "--msw-fault") && hasNext) o.mswFaultS = std::atoi(argv[++i]);
@@ -217,7 +219,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "usage: valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]\n"
                      "                  [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]\n"
-                     "                  [--headless] [--no-mdns] [--enforce]\n");
+                     "                  [--uncommissioned] [--headless] [--no-mdns] [--enforce]\n");
         return 2;
     }
 
@@ -263,6 +265,12 @@ int main(int argc, char** argv) {
     blob = loadBlob(presetsPath, scratch);
     if (!blob.empty() && !box->device.adoptPresetsBlob(blob))
         log.logf('W', "valencesim: %s rejected -- preset store starts empty", presetsPath.string().c_str());
+    // The twin is a COMMISSIONED machine whatever its state file says, so every
+    // client test can stream at once; --uncommissioned is the first-run hub
+    // (RFC-079), which refuses stream and pattern motion until config-set
+    // writes have carried all eight keys.
+    box->device.setSetupWritten(opt.uncommissioned ? 0 : valence::kSetupRequiredMask);
+    if (opt.uncommissioned) log.logf('W', "valencesim: --uncommissioned: first-run hub, setup record cleared");
     box->device.pushConfigToMotion();
 
     box->hub.emplace(box->catalog, g_clock, box->rng, box->device);

@@ -54,6 +54,7 @@ checkout must exist beside this repo (override with `-DVALENCE_ROOT=`).
 ```
 valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
            [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
+           [--uncommissioned]
            [--headless] [--no-mdns] [--enforce]
 ```
 
@@ -62,6 +63,7 @@ valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
 | `--port N` | WebSocket port, default 82 |
 | `--http N` | `/uitoken` port on 127.0.0.1, default 80 |
 | `--homed` | force_home at boot with the stored max rail, so motion is accepted at once |
+| `--uncommissioned` | boot as a first-run hub (RFC-079): the setup record is cleared, so stream and pattern motion are refused (pattern start NACKs `INTERLOCK`) until `config-set` writes have carried all eight keys; Manual moves still run. Without it the twin is COMMISSIONED whatever its state file says, so client tests stream at once |
 | `--duration S` | exit after S seconds (0 = until Ctrl-C) |
 | `--pairing-window` | open the presence window at boot: first knock on a fresh ledger gets configure |
 | `--motor-switch` | model the board's motor switch: ESTOP cuts power and leaves the hub unhomed, `release` lands in PAUSE with `home_required` and starts the 150 ms pre-charge, `force_home` then `resume` runs again; motion is refused INTERLOCK until the switch reads `on` |
