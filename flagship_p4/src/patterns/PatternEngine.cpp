@@ -44,7 +44,7 @@ uint32_t strokeUs(float seconds) { return uint32_t(clampf(seconds, kMinStrokeS, 
 // ---- settings ---------------------------------------------------------------
 
 void PatternEngine::apply(const PatternSettings& s) {
-    const bool start = s.running && !_s.running;
+    const bool start = (s.running && !_s.running) || (s.adv_running && !_s.adv_running);
     _s = s;
     if (start) {
         _stroke_index = 0;
@@ -58,9 +58,10 @@ bool PatternEngine::wantsMotion(const PatternInputs& in) const {
     // The arbiter refuses a Pattern intent on each of these too; gating here
     // keeps the generator from spending strokes into a refusal, and yielding to
     // a live stream keeps two machine-driven sources from interleaving plans.
-    if (!_s.running || !in.homed || in.estop || in.paused || in.stream_active) return false;
+    if (!(_s.running || _s.adv_running) || !in.homed || in.estop || in.paused || in.stream_active)
+        return false;
     if (!(_s.frame.win_max > _s.frame.win_min) || !(_s.frame.input_speed > 0.0f)) return false;
-    if (_s.ap_mode) return _s.ap.master.value > 0;
+    if (_s.adv_running) return _s.ap.master.value > 0;
     return _s.speed > 0.0f && _s.stroke > 0.0f;
 }
 
@@ -86,7 +87,7 @@ std::optional<MotionIntent> PatternEngine::tick(uint64_t now_us, const PatternIn
     }
     if (now_us < _due_us) return std::nullopt;
 
-    const std::optional<Stroke> st = _s.ap_mode ? nextAdvanced(in) : nextClassic(now_us, in);
+    const std::optional<Stroke> st = _s.adv_running ? nextAdvanced(in) : nextClassic(now_us, in);
     if (!st) {
         _due_us = now_us + kPollUs;
         return std::nullopt;
@@ -99,7 +100,7 @@ std::optional<MotionIntent> PatternEngine::tick(uint64_t now_us, const PatternIn
     if (!st->moves) return std::nullopt;
 
     MotionIntent it;
-    it.source       = MotionSource::Pattern;
+    it.source       = _s.adv_running ? MotionSource::Advanced : MotionSource::Pattern;
     it.target_mm    = st->target_mm;
     it.duration_us  = st->duration_us;
     it.has_end_vel  = true;
@@ -190,7 +191,7 @@ MotionIntent PatternEngine::brake(const PatternInputs& in) const {
     const float a = f.input_accel > 0.0f ? f.input_accel : 1.0f;
     const float v = in.velocity_mm_s;
     MotionIntent it;
-    it.source    = MotionSource::Pattern;
+    it.source    = _s.adv_running ? MotionSource::Advanced : MotionSource::Pattern;
     it.target_mm = clampf(in.position_mm + v * std::fabs(v) / (2.0f * a), f.win_min, f.win_max);
     return it;
 }

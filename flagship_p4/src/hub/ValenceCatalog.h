@@ -100,7 +100,7 @@ inline constexpr uint16_t drive_tune       = 0x1130;  // STATE·motion, family 3
 // constraints, so this splits by subsystem — one channel per base control's
 // modifier (6 fields each, well under the 8-bit enabled_mask) — same
 // principle as the kinetic_limits/kinetic_chase/kinetic_waveform split.
-inline constexpr uint16_t pattern_advanced          = 0x1210;  // STATE·pattern, family 1 member 0 (master; was 0x1201) — ap_mode + 7 base controls
+inline constexpr uint16_t pattern_advanced          = 0x1210;  // STATE·pattern, family 1 member 0 (master; was 0x1201) — 7 base controls + running
 // The six fray-d modulators (RFC-066): ONE family (domain=pattern, family=1),
 // members 1-6. Member order is speed-in/out, accel-in/out, depth-1/2 — NOT
 // advpat::BaseId order (depth,depth,speedin,speedout,accelin,accelout) — see
@@ -149,6 +149,11 @@ inline constexpr const char* kPresetKind = "pattern.frayd";
 // MIRROR of advpat::BASE_COUNT (flagship_p4/src/patterns/AdvancedPattern.h),
 // same rule and the same static_assert home as the preset mirror above.
 inline constexpr uint8_t kApBaseCount = 6;
+
+// MIRROR of kMotionSourceNames (flagship_p4/src/motion/ValenceMotion.h),
+// indexed by source id: control-owner's option labels. Same rule and the
+// same static_assert home as the preset mirror above.
+inline constexpr std::array<const char*, 4> kSourceLabels{"Jog", "Stream", "Classic", "Advanced"};
 
 // ---- motion-anomaly EVENT: the `body` (40) sub-map keys ---------------------
 // These are the CHANNEL'S OWN schema keys, exactly as valence::safety_body is
@@ -300,19 +305,24 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // ---- "control-owner" — STATE, critical, on-change -----------------------
     // Matches Hub::buildControlOwnerPayload(): 4 × {source u8, owner u32}, in
     // ascending source order, 20 bytes total. Each pair is one arbiter source
-    // (0 manual, 1 tcode, 2 pattern, 3 ossm) and the session id that owns it
-    // (0 = unowned).  [20 B]
+    // and the session id that owns it (0 = unowned). The src options name
+    // each source id, so a client reads the owner's name from here; index 0
+    // is the jog, a real source, not a none label.  [20 B]
     c.addEntry({.id = valence::channels::control_owner, .name = "control-owner",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::critical});
-    c.addLayoutField({.name = "src0",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f});
+    c.addSelectField({.name = "src0",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f},
+                     {kSourceLabels[0], kSourceLabels[1], kSourceLabels[2], kSourceLabels[3]});
     c.addLayoutField({.name = "owner0", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f});
-    c.addLayoutField({.name = "src1",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f});
+    c.addSelectField({.name = "src1",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f},
+                     {kSourceLabels[0], kSourceLabels[1], kSourceLabels[2], kSourceLabels[3]});
     c.addLayoutField({.name = "owner1", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f});
-    c.addLayoutField({.name = "src2",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f});
+    c.addSelectField({.name = "src2",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f},
+                     {kSourceLabels[0], kSourceLabels[1], kSourceLabels[2], kSourceLabels[3]});
     c.addLayoutField({.name = "owner2", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f});
-    c.addLayoutField({.name = "src3",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f});
+    c.addSelectField({.name = "src3",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f},
+                     {kSourceLabels[0], kSourceLabels[1], kSourceLabels[2], kSourceLabels[3]});
     c.addLayoutField({.name = "owner3", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f});
 
     // ---- "safety-intents" — INTENT, critical, modest rate -------------------
@@ -686,7 +696,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofBool(false),
                       .group = "Pattern",
-                      .desc = "Run the pattern generator",
+                      .desc = "Run the classic generator",
                       .role = roles::pattern_running,
                       .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control});
@@ -758,7 +768,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // ("should the generator keep going if I disconnect"), not a live motion
     // command, so unlike bits 0-5 it is never gated by homed/estop — it
     // still needs a bit (every setting-annotated field does), just one that
-    // never drops.
+    // never drops. One policy for both generators: a released session stops
+    // the classic and the advanced alike unless this is on (RFC-093).
     c.addLayoutField({.name = "background_run", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofBool(false),
@@ -1513,24 +1524,21 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "pattern-advanced" — STATE, normal, on-change ----------------------
-    // Advanced mode's 8 BASE controls (advpat::Settings, everything except
-    // the per-control modulators, 0x1211..0x1216). Their advgen.* roles
-    // (RFC-081) are the advanced generator's binding: one each per catalog
-    // (SPEC 8.8), so the 0x3210 writer's mirror fields carry none. ap_mode is
-    // advgen.mode because 0x1200 also plays the pattern.select set.
-    // Replaces the ad-hoc JSON keys POST /api/pattern used to carry
-    // (ap_mode/ap_speed/ap_max_depth/ap_min_depth/ap_in_speed/ap_out_speed/
-    // ap_in_accel/ap_out_accel, undiscoverable by a generic client) with 8
-    // settings a generic client renders without knowing this firmware
-    // exists. That endpoint answers 410 today; this channel is what makes
-    // Advanced mode reachable at all.
+    // The advanced generator's 7 BASE controls and its own run/stop
+    // (advpat::Settings, everything except the per-control modulators,
+    // 0x1211..0x1216). Their advgen.* roles (RFC-081, RFC-093) are the
+    // advanced generator's binding: one each per catalog (SPEC 8.8), so the
+    // 0x3210 writer's mirror fields carry none.
     //
-    // SAME CATEGORY AS 0x0082 (`user`), DIFFERENT settingChannel (0x0107, not
-    // 0x0102): Advanced is a separate sub-mode of the SAME pattern generator,
-    // not a seventh classic-pattern field, so it earns its own writer while
-    // sharing the category so both render as ONE tab (SPEC §8.8 — "a category
-    // spans channels").
-    //   [1*8 fields + 1 mask = 9 B]
+    // RFC-093: the advanced generator is its own SPEC 11.4 source (id 3),
+    // never a mode of the classic one: `running` here and 0x1200's `running`
+    // are independent, and starting one while the other owns the rail is
+    // refused SOURCE_CONFLICT. Same category as 0x1200, its own writer.
+    //
+    // Byte 0 is the retired mode switch, kept as hidden padding so bytes 1..8
+    // keep their offsets; its writer key 1 on 0x3210 is a permanent gap.
+    // `running` is appended after enabled_mask, writer key 45.
+    //   [1 pad + 7 fields + 1 mask + 1 running = 10 B]
     auto addPatternAdvanced = [&]() {
     c.addEntry({.id = ch::pattern_advanced, .name = "pattern-advanced",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1539,14 +1547,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasCategory = true, .category = valence::ui_categories::control,
                 .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd,
                 .hasRank = true, .rank = valence::ui_ranks::control});
-    c.addLayoutField({.name = "ap_mode", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
-                      .dflt = SettingDefault::ofBool(false),
-                      .group = "Advanced pattern",
-                      .desc = "Use Advanced mode instead of classic patterns",
-                      .role = roles::advgen_mode,
-                      .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = valence::ui_ranks::control});
+    // RETIRED padding (RFC-093). Rank hidden and no setting_key: never
+    // rendered, never a setting. publishPatternPlane() writes 0.
+    c.addLayoutField({.name = "ap_mode_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .desc = "Retired padding, always 0",
+                      .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "master", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(0),
@@ -1610,21 +1615,27 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .step = 1.0f, .settingKey = 8, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::percent});
-    // Bit i gates the i-th setting-annotated field above, same rule as 0x0082.
-    // GENUINELY dynamic, and genuinely NARROWER than 0x0082's: unlike `running`
-    // on 0x0102, none of these 8 setters is gated on `homed` (PatternEngine::
-    // setAdvancedMode/setApMaster/setApBase have no homed check — only start()
-    // does), so mirroring 0x0082's mask formula here would be a DISHONEST
-    // refusal the delegate never actually makes. The mask therefore tracks
-    // e-stop alone; the fields simply have no effect on the machine until it is
-    // homed and running, same as dialing in a pattern before pressing start.
+    // Bit i gates the i-th setting-annotated field of this layout, same rule
+    // as 0x1200: bits 0-6 the knobs, bit 7 `running`. The knobs are refused
+    // only under e-stop (they move nothing until a start), so bits 0-6 track
+    // e-stop alone; bit 7 also drops unhomed, as 0x1200's running bit does.
+    // Neither drops while the classic generator owns the rail: the start is
+    // refused SOURCE_CONFLICT and a client shows that refusal (RFC-093).
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Settings the machine accepts right now",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
-                       {"ap_mode", "master", "max_depth", "min_depth", "in_speed", "out_speed",
-                        "in_accel", "out_accel"});
+                       {"master", "max_depth", "min_depth", "in_speed", "out_speed",
+                        "in_accel", "out_accel", "running"});
+    c.addLayoutField({.name = "running", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                      .dflt = SettingDefault::ofBool(false),
+                      .group = "Advanced pattern",
+                      .desc = "Run the advanced generator",
+                      .role = roles::advgen_running,
+                      .step = 1.0f, .settingKey = 45, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = valence::ui_ranks::control});
     };
 
     // ---- "pattern-adv-mod-*" — STATE, background ----------------------------
@@ -2085,11 +2096,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // side, so this channel carries only what a client needs to validate
     // before sending — name, type, unit, bounds.
     //
-    // Keys 1..8 mirror 0x008E's layout exactly. Keys 9..44 are 6-per-control
+    // Keys 2..8 mirror 0x1210's base controls. Keys 9..44 are 6-per-control
     // blocks, base = 9 + 6*id with id in advpat::BaseId order (DEPTH_MAX=0
-    // .. ACCEL_OUT=5), matching 0x008F..0x0094 exactly — see
-    // SlopSyncHubService's applyIntent(0x0107) for the same arithmetic run
-    // in reverse to decode a wire frame back into a control + sub-field.
+    // .. ACCEL_OUT=5), matching 0x1211..0x1216; ValenceDevice.cpp's
+    // applyPatternAdvanced() runs the same arithmetic in reverse. Key 1 (the
+    // retired mode switch, RFC-093) is a permanent gap; key 45 is `running`.
     //
     // Session-volatile, same as 0x0102 pattern-cmd: cfg_gen does not bump.
     auto addPatternAdvancedCmd = [&]() {
@@ -2097,7 +2108,6 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 20.0f,
                 .defaultPriority = Priority::normal});
-    c.addSchemaField({.key = 1, .name = "ap_mode",   .type = CborFieldType::bool_t, .unit = ""});
     c.addSchemaField({.key = 2, .name = "master",    .type = CborFieldType::uint_t, .unit = "%",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     c.addSchemaField({.key = 3, .name = "max_depth", .type = CborFieldType::uint_t, .unit = "%",
@@ -2132,6 +2142,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addSchemaField({.key = uint8_t(base + 5), .name = "offset",    .type = CborFieldType::uint_t,
                           .unit = "strokes", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     }
+    c.addSchemaField({.key = 45, .name = "running", .type = CborFieldType::bool_t, .unit = ""});
     };
 
     // ---- "pattern-presets-cmd" — INTENT, control ----------------------------

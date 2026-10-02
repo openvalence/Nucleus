@@ -49,7 +49,8 @@ PatternSettings baseSettings() {
 
 PatternSettings advancedSettings() {
     PatternSettings s = baseSettings();
-    s.ap_mode = true;
+    s.running = false;
+    s.adv_running = true;
     s.ap.master.set(60);
     s.ap.setBase(advpat::DEPTH_MAX, 90);
     s.ap.setBase(advpat::DEPTH_MIN, 10);
@@ -224,19 +225,24 @@ TEST_CASE("a stream taking over does not get a brake from the generator") {
     CHECK_FALSE(e.active());
 }
 
-TEST_CASE("background_run decides what a source release does") {
+TEST_CASE("background_run decides what a source release does, for each generator") {
     PatternSettings s = baseSettings();
     s.background_run = false;
-    CHECK(s.ownerReleased());
+    CHECK(s.ownerReleased(s.running));
     CHECK_FALSE(s.running);
 
     s = baseSettings();
     s.background_run = true;
-    CHECK_FALSE(s.ownerReleased());
+    CHECK_FALSE(s.ownerReleased(s.running));
     CHECK(s.running);
 
     s.running = false;
-    CHECK_FALSE(s.ownerReleased());
+    CHECK_FALSE(s.ownerReleased(s.running));
+
+    s = advancedSettings();
+    s.background_run = false;
+    CHECK(s.ownerReleased(s.adv_running));
+    CHECK_FALSE(s.adv_running);
 }
 
 TEST_CASE("advanced knobs clamp and the depth pair never crosses") {
@@ -267,7 +273,7 @@ TEST_CASE("preset payload round-trips and the store bumps its generation") {
 
     PatternSettings b;
     b.applyPreset(payload);
-    CHECK(b.ap_mode);
+    CHECK_FALSE(b.adv_running);   // a load starts nothing
     CHECK(b.ap.out_speed.value == 33);
     CHECK(b.ap.byId(advpat::SPEED_IN)->modifier == a.ap.byId(advpat::SPEED_IN)->modifier);
     // Depths and master speed are never carried by a preset.

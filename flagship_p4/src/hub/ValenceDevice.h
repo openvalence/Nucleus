@@ -170,6 +170,9 @@ private:
     Result<IntentValueMap, NackCode> applyPresets(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applySafety(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> refuseUnpowered(const char* what);
+    // A generator start's machine gates, in 0x3200's order: unpowered,
+    // uncommissioned, unhomed. nullopt admits; the rail is acquired after.
+    std::optional<NackCode> startRefusal(const MotionCensus& c, const char* what);
     bool railOwned() const;
     bool publishGrantLive(uint16_t channel_id) const;
     void haltGenerator();
@@ -244,7 +247,7 @@ private:
     // Last bytes SENT per pattern-plane channel: each republishes on a change
     // of its own bytes, including an enabled_mask that moved with homed/estop.
     std::array<std::byte, 20> _sentPatState{};
-    std::array<std::byte, 9> _sentApBase{};
+    std::array<std::byte, 10> _sentApBase{};
     std::array<std::array<std::byte, 7>, advpat::BASE_COUNT> _sentApMod{};
     std::array<std::byte, 4> _sentRoster{};
     bool _patPlaneSent = false;

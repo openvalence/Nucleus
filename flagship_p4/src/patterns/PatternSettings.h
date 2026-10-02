@@ -1,8 +1,8 @@
 #pragma once
 
-// PatternSettings -- every knob the pattern generator runs on, as one value:
-// the classic pattern set, the advanced set, the run and background_run
-// policy, and the stroke frame they map into
+// PatternSettings -- every knob both generators run on, as one value: the
+// classic pattern set, the advanced set, each generator's own run flag, the
+// background_run policy, and the stroke frame they map into
 // Constraints:
 // - HARDWARE-FREE value type. The hub delegate OWNS the live copy (it is the
 //   one writer: intents, presets, e-stop, source release) and hands WHOLE
@@ -48,14 +48,17 @@ struct PatternSettings {
 
     // Defaults are the catalog's `default` annotations: nothing moves until an
     // operator dials in a speed, a depth and a stroke.
-    bool    running        = false;
+    bool    running        = false;   // the classic generator's run/stop
     uint8_t pattern        = 0;
     float   speed          = 0.0f;    // 0..100 % of the input speed ceiling
     float   depth          = 0.0f;    // 0..100 % into the window
     float   stroke         = 0.0f;    // 0..100 % of the depth
     float   sensation      = 50.0f;   // 0..100, 50 neutral
-    bool    background_run = false;   // registry source.background_run
-    bool    ap_mode        = false;   // the advanced generator instead of the classic set
+    bool    background_run = false;   // registry source.background_run, both generators
+    // The advanced generator's run/stop, independent of `running`: the two
+    // are separate sources and the arbiter never lets both hold the rail
+    // (RFC-093).
+    bool    adv_running    = false;
     advpat::Settings ap{};
     PatternFrame frame{};
 
@@ -66,13 +69,13 @@ struct PatternSettings {
     }
     static float percent(float v) { return v < 0.0f ? 0.0f : (v > 100.0f ? 100.0f : v); }
 
-    // SPEC §11.3 / RENDERING §10.1: the session that owned this source is gone.
-    // background_run false (the default) stops the generator; true keeps it
-    // running unattended, stoppable by e-stop. Returns true when it stopped a
-    // running generator.
-    bool ownerReleased() {
-        if (!running || background_run) return false;
-        running = false;
+    // SPEC §11.3 / RENDERING §10.1: the session that owned a generator is
+    // gone. `run` is that generator's flag, `running` or `adv_running`.
+    // background_run false (the default) stops it; true keeps it running
+    // unattended, stoppable by e-stop. Returns true when it stopped one.
+    bool ownerReleased(bool& run) const {
+        if (!run || background_run) return false;
+        run = false;
         return true;
     }
 
@@ -98,8 +101,8 @@ struct PatternSettings {
         return p;
     }
 
-    // The inverse, through the same clamps an intent takes, and it engages the
-    // advanced generator: a loaded preset is a pattern being asked for.
+    // The inverse, through the same clamps an intent takes. It starts nothing:
+    // the advanced generator's run flag is its writer's alone.
     void applyPreset(const PresetPayload& p) {
         ap.setBase(advpat::SPEED_IN, p[0]);
         ap.setBase(advpat::SPEED_OUT, p[1]);
@@ -109,7 +112,6 @@ struct PatternSettings {
             const size_t b = 4 + size_t(id) * 6;
             ap.byId(id)->modifier.set(p[b + 0], p[b + 1], p[b + 2], p[b + 3], p[b + 4], p[b + 5]);
         }
-        ap_mode = true;
     }
 
     // A payload written under the retired 100 = off amount, re-expressed in

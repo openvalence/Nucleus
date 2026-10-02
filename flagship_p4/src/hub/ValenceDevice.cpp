@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 
 #include "geiger/geiger.h"
 #include "motion/ValenceMotion.h"
@@ -38,6 +39,11 @@ static_assert(kPresetCapacity == PatternPresetStore::kCapacity, "catalog preset 
 static_assert(kPresetNameMax == PatternPresetStore::kNameMax, "catalog preset name_max drifted");
 static_assert(kPresetPayloadBytes == PatternPresetStore::kPayloadBytes, "catalog preset per_item_max drifted");
 static_assert(kApBaseCount == advpat::BASE_COUNT, "catalog modulator count drifted");
+static_assert([] {
+    for (size_t i = 0; i < kSourceLabels.size(); ++i)
+        if (std::string_view(kSourceLabels[i]) != kMotionSourceNames[i]) return false;
+    return kSourceLabels.size() == kMotionSourceNames.size();
+}(), "catalog source labels drifted");
 
 // A build without the capacity flags would get the library's defaults: a
 // different Catalog32 from the board's, and no accessory budget at all.
@@ -662,13 +668,8 @@ Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
         const MotionCensus c = motionCensus();
         if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
         // Only a start is motion; a knob turned with the switch off is not.
-        if (f1 && boolOf(f1).value_or(false) && !c.motor_on) return refuseUnpowered("pattern start");
-        if (f1 && boolOf(f1).value_or(false) && !commissioned(_modes)) {
-            GLOGW_EVERY_MS(1000, kTag, "pattern start refused INTERLOCK: not commissioned "
-                           "(setup fields written 0x%02x of 0x%02x)",
-                           unsigned(_modes.setup_written), unsigned(kSetupRequiredMask));
-            return Ret::err(NackCode::INTERLOCK);
-        }
+        if (f1 && boolOf(f1).value_or(false))
+            if (const auto why = startRefusal(c, "classic start")) return Ret::err(*why);
         if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
     }
     if ((f1 && !boolOf(f1)) || (f7 && !boolOf(f7))) return Ret::err(NackCode::INVALID_VALUE);
@@ -703,25 +704,36 @@ Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
     return Ret::ok(applied);
 }
 
-// Refused only while e-stop is latched, which is when every pattern-advanced
-// and modulator enabled_mask bit drops. None of these knobs moves the machine by
-// itself (only 0x3200 running does), so none is gated on homed. Base controls
-// apply in key order (max depth before min depth), each re-coupling the depth
-// pair, and the echo reads back AFTER all of them.
+// Keys 2-44 are knobs, refused only while e-stop is latched (when every
+// pattern-advanced and modulator enabled_mask bit drops); none moves the
+// machine by itself, so none is gated on homed. Key 45 `running` is the
+// advanced generator's start and stop, gated as 0x3200's running is, plus
+// SOURCE_CONFLICT while the classic generator holds the rail (RFC-093). Key 1
+// is the retired mode switch: a permanent gap, never read, never echoed. Base
+// controls apply in key order (max depth before min depth), each re-coupling
+// the depth pair, and the echo reads back AFTER all of them.
 Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
-    if (motionCensus().estop) return Ret::err(NackCode::ESTOP_ACTIVE);
-    constexpr uint8_t kLastKey = uint8_t(9 + 6 * advpat::BASE_COUNT - 1);   // 44
+    const MotionCensus c = motionCensus();
+    if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+    constexpr uint8_t kLastKnob = uint8_t(9 + 6 * advpat::BASE_COUNT - 1);   // 44
+    constexpr uint8_t kRunKey = 45;
     bool any = false;
-    for (uint8_t key = 1; key <= kLastKey; ++key) {
+    for (uint8_t key = 2; key <= kLastKnob; ++key) {
         const auto* f = findField(requested, key);
         if (!f) continue;
-        if (key == 1 ? !boolOf(f) : !numberOf(f)) return Ret::err(NackCode::INVALID_VALUE);
+        if (!numberOf(f)) return Ret::err(NackCode::INVALID_VALUE);
         any = true;
     }
-    if (!any) return Ret::err(NackCode::INVALID_VALUE);
+    const auto* run = findField(requested, kRunKey);
+    if (run && !boolOf(run)) return Ret::err(NackCode::INVALID_VALUE);
+    if (!any && !run) return Ret::err(NackCode::INVALID_VALUE);
+    const bool start = run && *boolOf(run);
+    if (start) {
+        if (const auto why = startRefusal(c, "advanced start")) return Ret::err(*why);
+        if (!motionAcquireRail(MotionSource::Advanced)) return Ret::err(NackCode::SOURCE_CONFLICT);
+    }
 
     advpat::Settings& ap = _pat.ap;
-    if (const auto* f = findField(requested, 1)) _pat.ap_mode = *boolOf(f);
     if (const auto* f = findField(requested, 2)) ap.master.set(knobOf(*numberOf(f)));
     for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id)
         if (const auto* f = findField(requested, uint8_t(3 + id))) ap.setBase(id, knobOf(*numberOf(f)));
@@ -732,16 +744,16 @@ Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
             if (const auto* f = findField(requested, uint8_t(9 + 6 * id + sub))) v[sub] = knobOf(*numberOf(f));
         m.set(v[0], v[1], v[2], v[3], v[4], v[5]);
     }
+    if (run) {
+        _pat.adv_running = start;
+        if (!start) motionReleaseRail(MotionSource::Advanced);
+    }
     _patDirty = true;
 
     IntentValueMap applied{};
     uint32_t n = 0;
-    for (uint8_t key = 1; key <= kLastKey; ++key) {
+    for (uint8_t key = 2; key <= kLastKnob; ++key) {
         if (!findField(requested, key)) continue;
-        if (key == 1) {
-            applied.fields[n++] = {1, IntentValue::ofBool(_pat.ap_mode)};
-            continue;
-        }
         uint64_t out = 0;
         if (key == 2) {
             out = ap.master.value;
@@ -755,6 +767,7 @@ Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
         }
         applied.fields[n++] = {key, IntentValue::ofU64(out)};
     }
+    if (run) applied.fields[n++] = {kRunKey, IntentValue::ofBool(_pat.adv_running)};
     applied.count = n;
     return Ret::ok(applied);
 }
@@ -762,9 +775,9 @@ Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
 // The four SPEC §8.7 verbs; the op-select ordinals are the registry's store_ops
 // (RFC-067), which the catalog's labels {reserved, save, load, delete, rename}
 // index-align with. save captures LIVE state (a client payload, an import, is
-// not offered); load applies through the same clamps an intent takes and
-// engages the advanced generator, and its truth arrives on the ordinary
-// pattern-plane STATE. The echoed name is the STORE's copy.
+// not offered); load applies through the same clamps an intent takes into the
+// advanced generator's knobs, starting nothing, and its truth arrives on the
+// ordinary pattern-plane STATE. The echoed name is the STORE's copy.
 Ret ValenceDevice::applyPresets(const IntentValueMap& requested) {
     const auto op = numberOf(findField(requested, 1));
     const auto slotV = numberOf(findField(requested, 2));
@@ -845,10 +858,13 @@ void ValenceDevice::publishPatternPlane(const MotionCensus& mo) {
         publishIfChanged(hub, ch::pattern_state, buf, n, _sentPatState, force);
     }
     {
+        // enabled_mask: bits 0-6 (knobs) drop under e-stop, bit 7 (running)
+        // also unhomed, applyPatternAdvanced()'s own refusals.
         const advpat::Settings& ap = p.ap;
-        std::array<std::byte, 9> buf{};
+        const uint8_t mask = mo.estop ? 0x00u : uint8_t(0x7Fu | (mo.homed ? 0x80u : 0x00u));
+        std::array<std::byte, 10> buf{};
         size_t n = 0;
-        packU8(buf, n, p.ap_mode ? 1 : 0);
+        packU8(buf, n, 0);   // ap_mode_reserved
         packU8(buf, n, ap.master.value);
         packU8(buf, n, ap.max_depth.value);
         packU8(buf, n, ap.min_depth.value);
@@ -856,7 +872,8 @@ void ValenceDevice::publishPatternPlane(const MotionCensus& mo) {
         packU8(buf, n, ap.out_speed.value);
         packU8(buf, n, ap.in_accel.value);
         packU8(buf, n, ap.out_accel.value);
-        packU8(buf, n, mo.estop ? 0x00 : 0xFF);   // applyPatternAdvanced()'s one refusal
+        packU8(buf, n, mask);
+        packU8(buf, n, p.adv_running ? 1 : 0);
         publishIfChanged(hub, ch::pattern_advanced, buf, n, _sentApBase, force);
     }
     for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
@@ -929,17 +946,30 @@ Ret ValenceDevice::refuseUnpowered(const char* what) {
     return Ret::err(NackCode::INTERLOCK);
 }
 
-// The rail is a source's while the stream or the generator owns it, or the
-// generator drives it unowned (background_run).
+std::optional<NackCode> ValenceDevice::startRefusal(const MotionCensus& c, const char* what) {
+    if (!c.motor_on) return refuseUnpowered(what).error();
+    if (!commissioned(_modes)) {
+        GLOGW_EVERY_MS(1000, kTag, "%s refused INTERLOCK: not commissioned "
+                       "(setup fields written 0x%02x of 0x%02x)",
+                       what, unsigned(_modes.setup_written), unsigned(kSetupRequiredMask));
+        return NackCode::INTERLOCK;
+    }
+    if (!c.homed) return NackCode::NOT_HOMED;
+    return std::nullopt;
+}
+
+// The rail is a source's while the stream owns it, while either generator is
+// started (RFC-093: a generator owns the rail from start to stop), or while
+// one still drives it (the stop's brake, or background_run unattended).
 bool ValenceDevice::railOwned() const {
-    return _owner[uint8_t(MotionSource::Stream)] != 0 || _owner[uint8_t(MotionSource::Pattern)] != 0 ||
+    return _owner[uint8_t(MotionSource::Stream)] != 0 || _pat.running || _pat.adv_running ||
            patternActive();
 }
 
 // SPEC 11.1: what the hub may let through while PAUSE is latched. The home
 // verb always (it is not source-mapped here, so this is belt and braces); the
-// jog only under override and never while the return runs; a pattern_cmd
-// that starts nothing (a knob or a stop is not a motion intent). Every
+// jog only under override and never while the return runs; a generator
+// writer that starts nothing (a knob or a stop is not a motion intent). Every
 // stream bundle is the hub's to drop and never reaches this.
 bool ValenceDevice::admitsUnderPause(uint16_t channel_id, const IntentValueMap& value,
                                      bool overrideLatched) {
@@ -947,6 +977,10 @@ bool ValenceDevice::admitsUnderPause(uint16_t channel_id, const IntentValueMap& 
     if (channel_id == ch::move) return overrideLatched && !_returnPending;
     if (channel_id == ch::pattern_cmd) {
         const std::optional<bool> running = boolOf(findField(value, 1));
+        return !(running && *running);
+    }
+    if (channel_id == ch::pattern_advanced_cmd) {
+        const std::optional<bool> running = boolOf(findField(value, 45));
         return !(running && *running);
     }
     return false;
@@ -1012,6 +1046,7 @@ Ret ValenceDevice::applySafety(const IntentValueMap& requested) {
 // 0x1200 running and 0x1100 gen_running fall at the next publish.
 void ValenceDevice::haltGenerator() {
     _pat.running = false;
+    _pat.adv_running = false;
     _patDirty = false;
     if (boardFeatures().has_pattern) pushPattern();
 }
@@ -1059,10 +1094,11 @@ std::optional<uint8_t> ValenceDevice::sourceForChannel(uint16_t channel_id) {
     if (channel_id == ch::move) return uint8_t(MotionSource::Manual);
     if (channel_id == ch::motion_input || channel_id == ch::motion_segment)
         return uint8_t(MotionSource::Stream);
-    // The generator's run/stop writer. Ownership is what lets a source release
-    // stop it (onSourceOwnership); the advanced and preset writers only set
-    // knobs and own nothing.
+    // Each generator's run/stop writer is its own source (RFC-093). Ownership
+    // is what lets a session release stop it (onSourceOwnership); the preset
+    // writer only sets knobs and owns nothing.
     if (channel_id == ch::pattern_cmd) return uint8_t(MotionSource::Pattern);
+    if (channel_id == ch::pattern_advanced_cmd) return uint8_t(MotionSource::Advanced);
     return std::nullopt;
 }
 
@@ -1207,21 +1243,26 @@ void ValenceDevice::onSessionLeft(uint32_t session_id) {
 
 // §11.4: every transition lands in _owner, the jog's SOURCE_CONFLICT answer.
 // A release (owner 0) comes on a session's way out, whether it went STALE or
-// was torn down; the reason is deliberately not consulted. The generator is
-// the one hub-autonomous source, and background_run is the operator's
-// standing answer to "keep going with nobody attached?".
+// was torn down; the reason is deliberately not consulted. The generators
+// are the hub-autonomous sources, and background_run is the operator's one
+// standing answer, for both, to "keep going with nobody attached?".
 void ValenceDevice::onSourceOwnership(uint8_t source_id, uint32_t owner_session, uint8_t reason) {
     if (source_id < _owner.size()) _owner[source_id] = owner_session;
-    if (owner_session != 0 || source_id != uint8_t(MotionSource::Pattern)) return;
-    if (_pat.ownerReleased()) {
+    if (owner_session != 0) return;
+    const auto gen = MotionSource(source_id);
+    if (gen != MotionSource::Pattern && gen != MotionSource::Advanced) return;
+    bool& run = gen == MotionSource::Advanced ? _pat.adv_running : _pat.running;
+    const char* name = kMotionSourceNames[source_id];
+    if (_pat.ownerReleased(run)) {
         _patDirty = true;
-        motionReleaseRail(MotionSource::Pattern);
-        GLOGI(kTag, "pattern stopped: its session released it (reason %u), background_run off",
+        motionReleaseRail(gen);
+        GLOGI(kTag, "%s stopped: its session released it (reason %u), background_run off", name,
               unsigned(reason));
-    } else if (_pat.running) {
-        GLOGW(kTag, "pattern running UNATTENDED: its session released it, background_run on");
+    } else if (run) {
+        GLOGW(kTag, "%s running UNATTENDED: its session released it, background_run on", name);
     }
     (void)reason;
+    (void)name;
 }
 
 // §8.7 store items over BLOB_REQ ns=1, each carrying its RFC-073 digest
