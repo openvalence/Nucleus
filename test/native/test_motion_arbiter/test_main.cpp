@@ -633,9 +633,10 @@ TEST_CASE("the dwell rule runs at the registry's span: a re-commanded hold repor
     in.has_end_vel = true;
     in.end_vel_mm_s = 0.0f;
     REQUIRE(r->arb.accept(in, g_now_us));
-    // Re-sent while the hold is still in flight. TODO(val-091.59): a re-send
-    // after the machine came to rest is re-seeded and escapes the rule.
-    r->run(60'000);
+    // Re-sent AFTER the machine came to rest: the RFC-058 field case. The
+    // arbiter re-seeds the engine at rest, and the rule must survive it.
+    r->run(400'000);
+    REQUIRE_FALSE(r->census().busy);
     in.end_vel_mm_s = -900.0f;   // a stale tangent on the re-sent hold
     REQUIRE(r->arb.accept(in, g_now_us));
     r->run(200'000);

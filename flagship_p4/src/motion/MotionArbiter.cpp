@@ -250,9 +250,11 @@ bool MotionArbiter::plan(float target, const MotionIntent& in, bool manual, uint
     // count and nothing else: an engine that re-seeds from its own idea of
     // where it stopped carries every move's sub-step residue into the next one.
     // Mid-plan the engine's own (p, v, a) IS the continuous state, and reseeding
-    // there would be a discontinuity, so the door is rest only.
+    // there would be a discontinuity, so the door is rest only. The frame is
+    // unchanged here (every frame move resets on its own path), so the dwell
+    // rule's previous target survives (reseedAt).
     if (!_engine.isBusy(now_us)) {
-        _engine.resetAt(toNorm(positionMm()), now_us);
+        _engine.reseedAt(toNorm(positionMm()), now_us);
         _p_cmd_mm = positionMm();
     }
 

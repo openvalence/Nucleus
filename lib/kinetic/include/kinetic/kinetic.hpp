@@ -808,9 +808,9 @@ public:
         _sched_n    = 0;
         _plan_start = now_us;
         _prev_vf_ok = false;
-        // The dwell rule compares against the PREVIOUS segment's target; a
-        // re-seed has no previous segment, and inheriting one turns the first
-        // post-seed stroke into a dwell (its handoff velocity forced to 0).
+        // The dwell rule compares against the PREVIOUS segment's target. A
+        // reset may move the frame that target is normalized in, so it is
+        // dropped here; reseedAt() is the at-rest door that keeps it.
         _prev_wave_tgt_ok = false;
         _chase_arrive_ok = false;
         _plan_jerk_frac = 1.0f;
@@ -819,6 +819,20 @@ public:
         _last_activity_us = now_us;   // the seed itself is activity
         _reset_cold = true;
         _plan_lim   = _cfg.limits;
+    }
+
+    // resetAt() for a carriage that merely came to REST in an unchanged frame:
+    // the position is refreshed, and the dwell rule's previous target is KEPT
+    // (SPEC 9.6 keys it on the previous accepted target on the same source,
+    // with no reset clause). A hold re-sent after the machine stopped is
+    // still a hold; forgetting the target here let its stale tangent whip
+    // through it (val-091.59). Never for a frame move, estop or power loss.
+    void reseedAt(float pos, uint64_t now_us) {
+        const bool   tgt_ok = _prev_wave_tgt_ok;
+        const double tgt    = _prev_wave_tgt;
+        resetAt(pos, now_us);
+        _prev_wave_tgt_ok = tgt_ok;
+        _prev_wave_tgt    = tgt;
     }
 
     // Ceiling updates take effect at the NEXT plan (an in-flight trajectory
