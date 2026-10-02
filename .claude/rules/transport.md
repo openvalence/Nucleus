@@ -46,9 +46,10 @@ wire-visible is ever respelled FROM this repo (`governance.md` §6).
   sessions without a reboot is mandatory verification for any
   session-lifecycle change.**
 - **Auth.** Token validation resolves the UI token, then the trust ledger,
-  then `watch`. Tokenless clients can watch and e-stop (stop and estop are
-  role-EXEMPT) but cannot command motion. While a UI token is enabled, LAN
-  HTTP equals control; a lockdown posture buys a chokepoint, not LAN secrecy.
+  then `watch`. Tokenless clients can watch, pause and e-stop (pause and
+  estop are role-EXEMPT, SPEC 11.1) but cannot command motion. While a UI
+  token is enabled, LAN HTTP equals control; a lockdown posture buys a
+  chokepoint, not LAN secrecy.
 - **Valence is the ONLY input/output plane (operator ruling 2026-07-26).**
   Motion input, telemetry, anomaly events and settings ride Valence channels.
   HTTP remains for fallback polling and bootstrap only.

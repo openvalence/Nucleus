@@ -68,9 +68,10 @@ Nucleus is the firmware; Valence is the protocol it speaks.
 - **MotionArbiter sole-caller rule.** The MotionArbiter is the ONLY component
   that commands the motion processor. Input sources (manual UI, TCode
   transports, PatternEngine, Valence sessions) never touch the emitter: they
-  submit intents. The arbiter owns arbitration, limit-set selection (user set
-  for manual, input set for machine-driven), and every safety gate -- homed,
-  paused, e-stop, window clamping, soft-start.
+  submit intents. The arbiter owns arbitration, limit-set selection (jog set
+  for the operator's hand, input set for machine-driven), and every safety
+  gate -- homed, PAUSE with its override/return mode, e-stop, window
+  clamping, soft-start.
 - **Core separation on the P4.** The LP core RENDERS EDGES and nothing else:
   a phase accumulator in exact cycles, one store per edge, no allocation, no
   branchy work. The HP core EVALUATES THE PLAN and hands the LP core a
