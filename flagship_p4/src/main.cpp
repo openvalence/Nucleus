@@ -33,7 +33,10 @@
 #include "system/ValenceDiag.h"
 #include "system/ValenceOta.h"
 #include "system/BoardPins.h"
+#include "system/ValenceBoardIo.h"
 #include "system/ValenceDbg.h"   // compiled here so the build checks it; called from nowhere by default
+#include "system/ValenceFan.h"
+#include "system/ValenceGlow.h"
 #include "system/ValenceLogBridge.h"
 #include "system/ValenceMotorSwitch.h"
 #include "system/ValencePower.h"
@@ -197,6 +200,7 @@ StackWatch g_stacks[] = {
     {"Pattern",  valence::kPatternTaskStackBytes},
     {"app_main", uint32_t(CONFIG_ESP_MAIN_TASK_STACK_SIZE)},
     {"MotorSw",  valence::kMotorSwitchTaskStackBytes},
+    {"BoardIo",  valence::kBoardIoTaskStackBytes},
 };
 void note_stack(size_t i, uint32_t free_bytes) {
     if (free_bytes == 0 || free_bytes >= g_stacks[i].worst_free) return;
@@ -236,6 +240,11 @@ extern "C" void app_main() {
     // monitor above for its ALERT re-arm and MOTOR_V+. It enables nothing
     // until the self-check's verdict below says so.
     if (!valence::motorSwitchBegin()) printf("--- motor switch host FAILED: motor power stays off ---\n");
+
+    // The status pixel, the fan and the HOME button, early so the boot
+    // rainbow covers the rest of the boot. AFTER the motor switch: THERM is
+    // sampled on its ADC poll.
+    if (!valence::boardIoBegin()) printf("--- BoardIo task FAILED: no status pixel, fan off ---\n");
 
     const bool lp_ok = start_lp_core();
     if (lp_ok) report_lp();
@@ -281,7 +290,9 @@ extern "C" void app_main() {
     valence::SelfCheckFacts facts;
     facts.lpEdges = ulp_g_edges;
     facts.hostLink = g_hosted_ok;
-    valence::motorSwitchSetSelfCheck(valence::selfCheckRun(facts));
+    const bool selfCheckPassed = valence::selfCheckRun(facts);
+    valence::motorSwitchSetSelfCheck(selfCheckPassed);
+    valence::glowSetSelfCheck(selfCheckPassed);
     printf("\n");
 
     // Liveness line every 5 s.
@@ -330,12 +341,14 @@ extern "C" void app_main() {
         note_stack(2, valence::patternStackFree());
         note_stack(3, uint32_t(uxTaskGetStackHighWaterMark(nullptr)));
         note_stack(4, valence::motorSwitchStackFree());
+        note_stack(5, valence::boardIoStackFree());
         const valence::MotorSwitchStatus msw = valence::motorSwitchStatus();
+        const valence::FanStatus fan = valence::fanStatus();
         printf("[flagship_p4] %lus  int_free=%u int_max=%u  psram_free=%u psram_max=%u  "
                "lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
                "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu  "
                "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu "
-               "faults=%lu  selfcheck=%s:%u/%u %s  msw=%s\n",
+               "faults=%lu  selfcheck=%s:%u/%u %s  msw=%s  therm=%.1fC fan=%.0f%%/%.0frpm\n",
                static_cast<unsigned long>(n * 5),
                unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
@@ -363,6 +376,7 @@ extern "C" void app_main() {
                static_cast<unsigned long>(mo.stack_free),
                static_cast<unsigned long>(mo.emitter_faults),
                sc.allowed ? "pass" : "held", unsigned(sc.failed), unsigned(sc.skipped), sc.first,
-               valence::motorswitch::stateName(msw.state));
+               valence::motorswitch::stateName(msw.state),
+               double(fan.celsius), double(fan.duty * 100.0f), double(fan.rpm));
     }
 }

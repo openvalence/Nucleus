@@ -21,6 +21,8 @@ idf_component_register(SRCS "main.cpp"
                             "system/ValenceDiag.cpp" "system/ValencePower.cpp"
                             "system/ValenceSelfCheck.cpp" "system/ValenceLogBridge.cpp"
                             "system/ValenceMotorSwitch.cpp"
+                            "system/ValenceBoardIo.cpp" "system/ValenceGlow.cpp"
+                            "system/ValenceFan.cpp" "system/ValenceButtons.cpp"
                             "../../lib/ruckig/src/ruckig/brake.cpp"
                             "../../lib/ruckig/src/ruckig/position_first_step1.cpp"
                             "../../lib/ruckig/src/ruckig/position_first_step2.cpp"
@@ -35,6 +37,7 @@ idf_component_register(SRCS "main.cpp"
                        INCLUDE_DIRS "." "hub" "motion" "system"
                                     "../../lib/valence/include"
                                     "../../lib/geiger/include"
+                                    "../../lib/flux/include"
                                     "../../lib/kinetic/include"
                                     "../../lib/ruckig/include"
                                     "../../lib/strokeengine_patterns/include"
@@ -49,7 +52,8 @@ idf_component_register(SRCS "main.cpp"
                        # with an all-components include set and so hides a
                        # missing entry from every pio build; ninja's own
                        # __idf_src target is the check.
-                       PRIV_REQUIRES app_update esp_adc esp_driver_gpio esp_driver_i2c esp_event esp_netif
+                       PRIV_REQUIRES app_update esp_adc esp_driver_gpio esp_driver_i2c
+                                     esp_driver_ledc esp_driver_pcnt esp_driver_rmt esp_event esp_netif
                                      esp_wifi lwip nvs_flash spi_flash
                                      espressif__esp_hosted
                                      espressif__esp_wifi_remote)

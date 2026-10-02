@@ -20,16 +20,23 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 
 - **Firm and wired:** quadrature A/B (LP core), the private I2C bus (motor
   current monitor, and the board monitor's IDENT/STATUS at boot), the C6 SDIO
-  link, the USB console, the E-stop pair and its bypass (boot self-check).
+  link, the USB console, the E-stop pair and its bypass (boot self-check),
+  status LED data, fan PWM and tach (the BoardIo task,
+  `system/ValenceBoardIo.cpp`). The DBG marker has its surface
+  (`system/ValenceDbg.h`) and is driven from nowhere by default.
 - **Provisional and wired:** the motor switch: MOTOR_EN and PRECHARGE_EN
   (held low from the first line of `app_main`, raised only by the enable
-  sequence), MSW_FLT_N, MSW_IMON and EN_NODE (the switch task's watch).
-- **Firm and unwired:** board monitor SWIO, status LED data, fan PWM and tach,
-  PAIR button, all thirteen accessory LP pads, PD_INT.
-- **Firm, surface only:** the DBG marker (`system/ValenceDbg.h`), driven from
-  nowhere by default.
-- **Provisional and unwired:** CLAMP_MON, SHUNT_TEMP, THERM, RS485
-  TX/RX/DE, DRV_ALM, DRV_RDY, HOME button.
+  sequence), MSW_FLT_N, MSW_IMON and EN_NODE (the switch task's watch); THERM
+  (sampled on that same task); the HOME button (gestures logged and parked,
+  the hub binding owed, val-091.26).
+- **Firm and unwired:** board monitor SWIO, PAIR button, all thirteen
+  accessory LP pads, PD_INT.
+- **Provisional and unwired:** CLAMP_MON, SHUNT_TEMP, RS485 TX/RX/DE,
+  DRV_ALM, DRV_RDY.
+- **ADC1 has ONE reader**, the motor switch task: every ADC1 pad (MSW_IMON,
+  EN_NODE, THERM, and CLAMP_MON / SHUNT_TEMP when they land) joins its poll.
+  A second reader's collision reads the EN node as NaN, which cuts motor
+  power (`ValenceMotorSwitch.cpp` header).
 - Every unwired row has a bead under val-091 (column "Owed").
 
 ## Motion and motor power
@@ -62,9 +69,9 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 |---|---|---|---|---|---|
 | Regen clamp gate monitor: 10k + 3.3k divider off the clamp FET gate (Q501), C504 1 nF; on-time capture for dissipation | `/REGEN.CLAMP_MON` | GPIO17, pad 26 | nothing | Provisional (ADC1-bound) | val-091.25 |
 | Regen load temperature: TH501 10k NTC, 10k pull-up R512, C503 100 nF, ADC1 | `/REGEN.SHUNT_TEMP` | GPIO18, pad 25 | nothing | Provisional (ADC1-bound) | val-091.25 |
-| Fan drive: Q701 to the high-side P-FET Q702, HIGH = on, R701 100k pull-down; output LC-filtered to DC | `/FAN.FAN_PWM` | GPIO27 (USB1.1 D+), pad 17 | nothing | Firm: SPEC 2026-09-23 pin-map-after-LP row | val-091.28 |
-| Fan tach, open collector, 10k pull-up, 1k series | `/FAN.FAN_TACH` | GPIO38, pad 32 | nothing | Firm: same row | val-091.28 |
-| Thermistor header J7: 1k series R27 + C14 100 nF, ADC1 | `/FAN.THERM` | GPIO16, pad 27 | nothing | Provisional (ADC1-bound) | val-091.28 |
+| Fan drive: Q701 to the high-side P-FET Q702, HIGH = on, R701 100k pull-down; output LC-filtered to DC | `/FAN.FAN_PWM` | GPIO27 (USB1.1 D+), pad 17 | LEDC low-speed timer 0 / channel 0, 50 kHz, 10-bit (`system/ValenceFan.cpp:72`, `kPwmHz`); duty from `Thermal.h`'s `FanPolicy`: curve with hysteresis, full-duty kick on every start, integral loop on tach RPM, stall retry, open-loop duty without a tach | Firm: SPEC 2026-09-23 pin-map-after-LP row | bench val-091.66; wire channel val-091.65 |
+| Fan tach, open collector, 10k pull-up, 1k series | `/FAN.FAN_TACH` | GPIO38, pad 32 | PCNT unit, falling edges, 1 us glitch filter, read and cleared once a second, 2 pulses per revolution (`ValenceFan.cpp:93`) | Firm: same row | bench val-091.66 |
+| Thermistor header J7: 1k series R27 + C14 100 nF, ADC1 | `/FAN.THERM` | GPIO16, pad 27 | ADC1 oneshot, 4-sample mean once a second on the motor switch task (`ValenceMotorSwitch.cpp:281`), handed over by `motorSwitchThermVolts()`; 10k B3950 table with a calibration offset in `system/Thermal.h`; open or shorted reads NaN and the fan runs at `kNoSensorFraction` | Provisional (ADC1-bound) | bench val-091.66; wire channel val-091.65 |
 
 ## Drive comms and status
 
@@ -84,9 +91,9 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 | E-stop NC contact (J9, and the daughterboard M8 in parallel), 2.2k pull-up, 1k R903; HIGH = open | `/ESTOP.ESTOP_NC` | GPIO39, pad 31 | Decoded once at boot: `ValenceSelfCheck.cpp:153` | Firm: SPEC 2026-09-23 E-stop row (+2026-09-28, 2026-10-01) | runtime latch val-091.23 |
 | E-stop NO contact, 2.2k pull-up, 1k R904 | `/ESTOP.ESTOP_NO` | GPIO30, pad 53 | same | Firm | val-091.23 |
 | E-stop bypass drive (Q903, masks an unplugged cable only), 100k pull-down R906 | `/ESTOP.ESTOP_BYP` | GPIO29, pad 54 | Driven LOW: `ValenceSelfCheck.cpp:229` | Firm | bypass policy val-091.23 |
-| HOME button SW1 (press homes, hold resets, on release), 10k pull-up, 1k series; J13 in parallel | `/UI.BTN_HOME` | GPIO49, pad 12 | nothing | Provisional | val-091.26 |
+| HOME button SW1 (press homes, hold resets, on release), 10k pull-up, 1k series; J13 in parallel | `/UI.BTN_HOME` | GPIO49, pad 12 | Polled every 10 ms on the BoardIo task (`system/ValenceButtons.cpp:38`) into `ButtonGesture.h` (30 ms debounce, hold at 3 s, stuck at 30 s, acted on release); each gesture is a Warn log line and is parked for the hub (`homeButtonTake()`); nothing acts on it yet | Provisional | hub binding val-091.26; bench val-091.66 |
 | PAIR button SW2 (hold pairs, held at power-on = config mode), 10k pull-up, 1k series; J13 in parallel | `/UI.BTN_PAIR` | GPIO52, pad 55 | nothing | Firm: SPEC 2026-09-23 pin-map-after-LP row | val-9u0.10, val-9u0.14 |
-| Status LED data: 74AHCT125 gate 3 (U10) to the GRBW pixel D5 (XL-3528RGBW, 32 bits per pixel), chained on to J12 NEOPIXEL OUT; R601 10k pull-down | `/DRV.LED_DATA` | GPIO26 (USB1.1 D-), pad 19 | nothing | Firm: same row | val-091.27 |
+| Status LED data: 74AHCT125 gate 3 (U10) to the GRBW pixel D5 (XL-3528RGBW, 32 bits per pixel), chained on to J12 NEOPIXEL OUT; R601 10k pull-down | `/DRV.LED_DATA` | GPIO26 (USB1.1 D-), pad 19 | RMT TX at 10 MHz, one GRBW frame per 20 ms (`system/ValenceGlow.cpp:67`), the board's one Flux glue; `StatusLook.h` maps the machine state to a Flux pair; pixel 0 only, the J12 chain is never written | Firm: same row | bench val-091.66 |
 | DBG marker through R602 1k to TP603; the ROM boot log appears on it at every reset (U0TX) | `/DRV.DBG` | GPIO37, pad 30 | `system/ValenceDbg.h`: `dbgBegin()` claims the pad, `dbgLevel()` is one register store, `dbgPulse(n)`; called from nowhere by default | Firm: SPEC 2026-09-23 board-monitor row | bench val-091.66 |
 | BOOT strap to tweezer pad TP903 (held low at power-on = download mode) | `Net-(TP903-Pad1)` | GPIO35, pad 36 (pad 48 NC) | never used, by rule | Firm | none |
 | CHIP_EN to tweezer pad TP901 | `Net-(U8-CHIP_EN)` | CHIP_EN, pad 34 | n/a | Firm | none |
@@ -117,7 +124,7 @@ unless noted.
 
 | Function | Net | P4 pad | Firmware today | Firmness |
 |---|---|---|---|---|
-| SDIO 3.0 4-bit to the stacked Stamp-AddOn C6: CLK 43, CMD 44, D0-D3 45-48, slave reset 42 | stamp-internal header | not on stamp pads | `flagship_p4/sdkconfig.defaults:64-74` (Kconfig owns them), brought up in `main.cpp:73` (`wifi_up`), version read at `:94` and judged by the self-check's host-link entry | Firm: stamp hardware |
+| SDIO 3.0 4-bit to the stacked Stamp-AddOn C6: CLK 43, CMD 44, D0-D3 45-48, slave reset 42 | stamp-internal header | not on stamp pads | `flagship_p4/sdkconfig.defaults:64-74` (Kconfig owns them), brought up in `main.cpp:76` (`wifi_up`), version read at `:97` and judged by the self-check's host-link entry | Firm: stamp hardware |
 | USB-C on the stamp: USB-Serial/JTAG console and the serial rescue path | G24/G25 | pads 43/44 NC on the board | IDF console | Firm |
 | USB 2.0 host pair, MIPI DSI lanes, stamp 5V_USB_IN | NC | pads 40/41, 57-64, 15 | none | Firm |
 | Stamp VIN (from the 5 V buck), SYS_5V out (+5V_SYS), SOC_3.3V out (+3V3_SYS) | `+5V`, `+5V_SYS`, `+3V3_SYS` | pads 14, 39, 28 | none | Firm |

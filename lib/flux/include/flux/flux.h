@@ -4,10 +4,10 @@
 // - Drivers here are the generic, reusable ones (LEDC PWM color/mono). Board
 //   wiring -- which pins, which states map to which fields, the heartbeat
 //   sources -- lives in the firmware, NOT here.
-// - There is NO ESP-IDF driver, and its absence is the rule, not a gap: no
-//   board in this repo carries a pixel yet. A stamp with no LED injects
-//   flux::NullGlowOutput from the core; the IDF driver lands with the
-//   hardware it drives, never before it.
+// - There is NO ESP-IDF driver here. An IDF pixel driver is board glue and
+//   lives with the board that wires it: the Flagship's is
+//   flagship_p4/src/system/ValenceGlow.cpp. A board with no LED injects
+//   flux::NullGlowOutput from the core.
 // - Native tests include flux_core.hpp directly and never reach this file.
 #pragma once
 

@@ -7,9 +7,12 @@
 //   raises them: only a lock makes "no cut since the step, then raise" one
 //   step. Inside it: the machine's methods and two gpio_set_level calls. No
 //   log, no ADC, no I2C, no allocation, no function-local static (T4).
-// - The switch task alone reads G19 and G23 (adc_oneshot_read only try-locks
-//   its unit, so a second reader fails rather than waits) and alone calls
-//   powerRead() and powerTakeAlerts() here.
+// - The switch task is ADC1's ONE READER: G19, G23 and THERM (G16).
+//   adc_oneshot_read only try-locks its unit, so a read from a second task
+//   fails instead of waiting, and a failed EN-node read is NaN, which trips
+//   en_node and cuts motor power. Another ADC1 pin joins this task's poll,
+//   never a task of its own. It alone calls powerRead() and
+//   powerTakeAlerts() here.
 // - MOTOR_EN and PRECHARGE_EN are outputs driven low from
 //   selfCheckHoldMotorOff(); this file is the only one that drives them high.
 // - Task "MotorSw": core 0, priority 5, kMotorSwitchTaskStackBytes of
@@ -62,6 +65,10 @@ constexpr int kImonSamples = 4;
 // The INA's ALERT releases the EN node when DIAG_ALRT is read; C404 10 nF
 // into the ~28k EN divider settles in ~1.5 ms (5 tau).
 constexpr uint32_t kRearmSettleMs = 2;
+// THERM: one averaged read per second. R27 1k + C14 100 nF filter the pin;
+// the fan policy steps once a second.
+constexpr uint32_t kThermEveryPolls = 1000 / kPollMs;
+constexpr int kThermSamples = 4;
 
 constexpr gpio_num_t pin(int n) { return static_cast<gpio_num_t>(n); }
 
@@ -86,10 +93,18 @@ bool g_pushedOn = false;
 
 // The switch task's alone after motorSwitchBegin().
 adc_oneshot_unit_handle_t g_adc = nullptr;
+adc_unit_t g_adcUnit{};
 adc_cali_handle_t g_caliImon = nullptr;
 adc_cali_handle_t g_caliEn = nullptr;
 adc_channel_t g_chImon{};
 adc_channel_t g_chEn{};
+adc_cali_handle_t g_caliTherm = nullptr;
+adc_channel_t g_chTherm{};
+uint32_t g_thermPolls = 0;
+
+// Written by the switch task, read anywhere. NaN = unreadable.
+std::atomic<float> g_thermV{kNaN};
+std::atomic<bool> g_thermSampled{false};
 
 // Under g_mux only. MOTOR_EN is written first both ways: closing, the main
 // FETs take the bus before the pre-charge path lets go; opening, the main
@@ -123,6 +138,7 @@ bool adcBegin() {
               BOARD_GPIO_MSW_IMON, BOARD_GPIO_EN_NODE);
         return false;
     }
+    g_adcUnit = unitImon;
     adc_oneshot_unit_init_cfg_t unit{};
     unit.unit_id = unitImon;
     if (adc_oneshot_new_unit(&unit, &g_adc) != ESP_OK) {
@@ -139,6 +155,22 @@ bool adcBegin() {
         return false;
     }
     return true;
+}
+
+// THERM is optional: J7 may be empty. Failure leaves its calibration null and
+// every sample NaN; the switch's own pins are unaffected.
+void thermBegin() {
+    adc_unit_t unit{};
+    adc_oneshot_chan_cfg_t chan{};
+    chan.atten = ADC_ATTEN_DB_12;
+    chan.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (g_adc == nullptr || adc_oneshot_io_to_channel(BOARD_GPIO_THERM, &unit, &g_chTherm) != ESP_OK ||
+        unit != g_adcUnit || adc_oneshot_config_channel(g_adc, g_chTherm, &chan) != ESP_OK ||
+        !caliFor(unit, g_chTherm, &g_caliTherm)) {
+        g_caliTherm = nullptr;
+        GLOGW(kTag, "THERM G%d not readable on the switch's ADC unit: the fan runs without a temperature",
+              BOARD_GPIO_THERM);
+    }
 }
 
 float readVolts(adc_channel_t ch, adc_cali_handle_t cali, int samples) {
@@ -246,6 +278,11 @@ void taskMain(void*) {
         portEXIT_CRITICAL(&g_mux);
 
         if (changed) logTransition(is, f, r);
+        if (++g_thermPolls >= kThermEveryPolls) {
+            g_thermPolls = 0;
+            g_thermV.store(readVolts(g_chTherm, g_caliTherm, kThermSamples), std::memory_order_relaxed);
+            g_thermSampled.store(true, std::memory_order_release);
+        }
         // Every entry into and exit from `on`, a cut from another task
         // included, reaches the arbiter from here and only from here.
         const bool on = is == State::on;
@@ -262,6 +299,7 @@ void taskMain(void*) {
 
 bool motorSwitchBegin() {
     const bool adcOk = adcBegin();
+    if (adcOk) thermBegin();
     const Readings r = readPins();
     portENTER_CRITICAL(&g_mux);
     g_last = r;
@@ -317,6 +355,11 @@ MotorSwitchStatus motorSwitchStatus() {
 }
 
 bool motorSwitchFaultLine() { return gpio_get_level(pin(BOARD_GPIO_MSW_FLT_N)) == 0; }
+
+std::optional<float> motorSwitchThermVolts() {
+    if (!g_thermSampled.load(std::memory_order_acquire)) return std::nullopt;
+    return g_thermV.load(std::memory_order_relaxed);
+}
 
 uint32_t motorSwitchStackFree() {
     // IDF reports BYTES, not the vanilla FreeRTOS words.

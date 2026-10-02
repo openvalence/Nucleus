@@ -9,7 +9,8 @@ Carried from the archived machine repo (SlopDrive-32
 `.claude/rules/logging-leds.md`). Self-contained ecosystem modules:
 hardware-free core plus thin platform glue. `lib/geiger` and `lib/flux` hold
 the cores, both header-only via an explicit include path. Geiger's IDF glue
-is live; Flux has none yet because no LED is fitted.
+is live; Flux's is `flagship_p4/src/system/ValenceGlow.cpp`, the Flagship's
+status pixel.
 
 ## Logging goes through Geiger. Only.
 
@@ -36,8 +37,9 @@ is live; Flux has none yet because no LED is fitted.
 - Callers speak semantics: `fluxEngine().set(System::X, Status::Y)`.
   Board wiring lives in exactly one glue file per board.
 - **Never drive an LED pin directly anywhere else.**
-- The PCB has no LED fitted on the bench stamp yet. The grammar below is
-  binding the day one exists; it is not re-litigated then.
+- The bare bench stamp carries no LED; the Flagship's status pixel (D5) is
+  driven by the glue file above. The grammar below is binding and is not
+  re-litigated.
 
 ## The two-axis LED grammar (operator rulings 2026-08-06)
 

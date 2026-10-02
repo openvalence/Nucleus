@@ -19,6 +19,7 @@
 // See: MotorSwitch.h, ValenceMotion.h, bd val-091.24
 
 #include <cstdint>
+#include <optional>
 
 #include "system/MotorSwitch.h"
 
@@ -56,5 +57,10 @@ bool motorSwitchFaultLine();
 // Board only: the switch task's stack high-water headroom, bytes; 0 before
 // motorSwitchBegin().
 uint32_t motorSwitchStackFree();
+
+// Board only: THERM (G16) in volts, sampled once a second by the switch task
+// because that task is ADC1's one reader (ValenceMotorSwitch.cpp). Any task.
+// nullopt before the first sample; NaN when the channel is unreadable.
+std::optional<float> motorSwitchThermVolts();
 
 }  // namespace valence
