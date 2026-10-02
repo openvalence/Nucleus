@@ -196,6 +196,9 @@ void motionEstopClear();
 // The motor switch's host pushes `on` here (MotionArbiter::setMotorPowered()).
 // Any task, never blocks; a loss parks the emitter before it returns.
 void motionSetMotorPowered(bool on);
+// The hub pushes its first-run record here (MotionArbiter::setCommissioned()).
+// Any task, never blocks.
+void motionSetCommissioned(bool on);
 // SPEC 11.1 PAUSE. Any task, never blocks: on refuses every intent from this
 // call on, then brakes the plan in flight to rest at the input decel on the
 // motion task. off is `resume`, the only clear. e-stop closes the Pattern gate

@@ -65,8 +65,9 @@ public:
 };
 
 // Built on the heap (rig()): the arbiter holds a KB-scale engine. A rig is a
-// powered machine unless a case says otherwise: the switch host's push is
-// part of the board's boot, not of the arbiter's.
+// powered, commissioned machine unless a case says otherwise: the switch
+// host's push and the hub's first-run record are part of the board's boot,
+// not of the arbiter's.
 struct Rig {
     TestEmitter emitter;
     MotionArbiter arb{emitter, &testNowUs};
@@ -74,6 +75,7 @@ struct Rig {
     explicit Rig(bool powered = true) {
         arb.begin(g_now_us);
         arb.setMotorPowered(powered);
+        arb.setCommissioned(true);
     }
 
     bool submit(MotionSource src, float target_mm) {
@@ -118,6 +120,19 @@ TEST_CASE("unhomed: Manual moves, a Stream source is refused") {
     CHECK(r->submit(MotionSource::Manual, 100.0f));
     CHECK(r->census().rejected == 1);
     CHECK(r->census().intents == 1);
+}
+
+TEST_CASE("uncommissioned (RFC-079 first run): Stream and Pattern are refused, Manual moves") {
+    auto r = rig();
+    r->arb.setCommissioned(false);
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    CHECK_FALSE(r->submit(MotionSource::Stream, 100.0f));
+    CHECK_FALSE(r->submit(MotionSource::Pattern, 100.0f));
+    CHECK(r->submit(MotionSource::Manual, 100.0f));
+    CHECK(r->census().rejected == 2);
+    r->arb.setCommissioned(true);
+    CHECK(r->submit(MotionSource::Stream, 120.0f));
 }
 
 TEST_CASE("PAUSE refuses every source, Manual included; resume is the only re-arm") {

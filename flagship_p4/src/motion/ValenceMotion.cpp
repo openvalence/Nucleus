@@ -249,6 +249,7 @@ void motionEstop() {
 }
 void motionEstopClear() { g_motion.arbiter().estop(false); }
 void motionSetMotorPowered(bool on) { g_motion.arbiter().setMotorPowered(on); }
+void motionSetCommissioned(bool on) { g_motion.arbiter().setCommissioned(on); }
 void motionPause(bool on) { g_motion.pause(on); }
 void motionPatternAllow() { g_motion.arbiter().allowPattern(); }
 void motionSetEstopCutsPower(bool cuts) { g_motion.arbiter().setEstopCutsPower(cuts); }

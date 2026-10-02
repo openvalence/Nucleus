@@ -200,6 +200,11 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
     // Manual bypasses the rest (the push-to-home case): an operator must be
     // able to move an unhomed machine, and only to move it.
     if (in.source != MotionSource::Manual) {
+        if (!_commissioned.load()) {
+            ++_rejected;
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: not commissioned (setup fields never written)");
+            return false;
+        }
         if (!_homed) {
             ++_rejected;
             GLOGW_EVERY_MS(1000, kTag, "REJECT: not homed");

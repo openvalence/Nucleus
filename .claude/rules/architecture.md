@@ -70,8 +70,9 @@ Nucleus is the firmware; Valence is the protocol it speaks.
   transports, PatternEngine, Valence sessions) never touch the emitter: they
   submit intents. The arbiter owns arbitration, limit-set selection (jog set
   for the operator's hand, input set for machine-driven), and every safety
-  gate -- homed, PAUSE with its override/return mode, e-stop, window
-  clamping, soft-start.
+  gate -- homed, commissioned (the first-run setup record, RFC-079: content
+  sources wait until the owner has written the geometry and ceilings once),
+  PAUSE with its override/return mode, e-stop, window clamping, soft-start.
 - **Core separation on the P4.** The LP core RENDERS EDGES and nothing else:
   a phase accumulator in exact cycles, one store per edge, no allocation, no
   branchy work. The HP core EVALUATES THE PLAN and hands the LP core a

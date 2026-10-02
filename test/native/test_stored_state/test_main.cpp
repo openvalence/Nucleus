@@ -335,8 +335,43 @@ TEST_CASE("config blob: v4 carries the flip; a v3 blob migrates to unflipped") {
     CHECK(got.horizon == 1);
 
     // The flip byte is a bool: anything but 0 or 1 is rejected whole.
-    b[b.size() - 1] = std::byte{2};
+    b[stored::kConfigV4Bytes - 1] = std::byte{2};
     CHECK_FALSE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+}
+
+TEST_CASE("config blob: v5 carries the first-run record; an older blob migrates uncommissioned") {
+    std::array<std::byte, stored::kConfigBlobBytes> b{};
+    valence::StoredModes m;
+    m.flipped = true;
+    m.setup_written = valence::kSetupRequiredMask;
+    REQUIRE(valence::commissioned(m));
+    REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), m, 14) == b.size());
+    StoredConfig c;
+    MotionTuning t;
+    valence::StoredModes got;
+    uint16_t gen = 0;
+    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    CHECK(got.setup_written == valence::kSetupRequiredMask);
+    CHECK(valence::commissioned(got));
+    CHECK(got.flipped);
+
+    // A blob from before the record: nothing proves the owner confirmed the
+    // geometry, so the hub starts uncommissioned and the rest is kept.
+    std::array<std::byte, stored::kConfigV4Bytes> v4{};
+    std::memcpy(v4.data(), b.data(), v4.size());
+    v4[4] = std::byte{4};
+    REQUIRE(stored::decodeConfig(v4, kFactoryGuard, c, t, got, gen));
+    CHECK(got.setup_written == 0);
+    CHECK_FALSE(valence::commissioned(got));
+    CHECK(got.flipped);
+
+    // A partial pass persists as written and is still uncommissioned.
+    m.setup_written = 0x7F;   // max_rail never written
+    REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), m, 15) == b.size());
+    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    CHECK(got.setup_written == 0x7F);
+    CHECK_FALSE(valence::commissioned(got));
+    CHECK_FALSE(valence::commissioned(valence::StoredModes{}));   // factory-fresh
 }
 
 // RFC-073: every BLOB_REQ item carries SHA-256 over its payload, so a receiver

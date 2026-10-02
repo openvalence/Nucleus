@@ -452,6 +452,20 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     _cfg = next;
     if (cfgChanged) _cfgDirty = true;
 
+    // The first-run record (RFC-079 setup): every key this accepted write
+    // carried, changed or not, counts as written. A confirmed default is a
+    // confirmation. Not a cfg_gen change; the dirty flag persists it.
+    const std::array<const IntentValueField*, 8> keys{f1, f2, f3, f4, f5, f6, f7, f8};
+    uint8_t wrote = 0;
+    for (size_t k = 0; k < keys.size(); ++k)
+        if (keys[k] != nullptr) wrote |= uint8_t(1u << k);
+    if ((_modes.setup_written | wrote) != _modes.setup_written) {
+        const bool was = commissioned(_modes);
+        _modes.setup_written |= wrote;
+        _cfgDirty = true;
+        if (!was && commissioned(_modes)) GLOGI(kTag, "commissioned: every setup field written");
+    }
+
     // Key-complete ECHO: every key the client sent comes back with the
     // value the hub actually holds (SPEC §9.3).
     IntentValueMap applied{};
@@ -649,6 +663,12 @@ Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
         if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
         // Only a start is motion; a knob turned with the switch off is not.
         if (f1 && boolOf(f1).value_or(false) && !c.motor_on) return refuseUnpowered("pattern start");
+        if (f1 && boolOf(f1).value_or(false) && !commissioned(_modes)) {
+            GLOGW_EVERY_MS(1000, kTag, "pattern start refused INTERLOCK: not commissioned "
+                           "(setup fields written 0x%02x of 0x%02x)",
+                           unsigned(_modes.setup_written), unsigned(kSetupRequiredMask));
+            return Ret::err(NackCode::INTERLOCK);
+        }
         if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
     }
     if ((f1 && !boolOf(f1)) || (f7 && !boolOf(f7))) return Ret::err(NackCode::INVALID_VALUE);
@@ -1289,6 +1309,7 @@ void ValenceDevice::publishMachineConfig() {
 }
 
 void ValenceDevice::pushConfigToMotion() const {
+    motionSetCommissioned(commissioned(_modes));
     motionSetFlipped(_modes.flipped);
     motionSetWindow(_cfg.window_min, _cfg.window_max, _cfg.max_rail);
     motionSetJogLimits(_cfg.jog_speed, _cfg.jog_accel);

@@ -162,6 +162,7 @@ void motionEstop() {
 }
 void motionEstopClear() { g_sim.arbiter().estop(false); }
 void motionSetMotorPowered(bool on) { g_sim.arbiter().setMotorPowered(on); }
+void motionSetCommissioned(bool on) { g_sim.arbiter().setCommissioned(on); }
 void motionPause(bool on) { g_sim.arbiter().pause(on); }
 void motionPatternAllow() { g_sim.arbiter().allowPattern(); }
 void motionSetEstopCutsPower(bool cuts) { g_sim.arbiter().setEstopCutsPower(cuts); }

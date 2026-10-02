@@ -16,7 +16,7 @@
 //   accept() calls commit(), which nests KB-scale Ruckig temporaries on that
 //   task's stack (T1, memory-budget.md T21).
 // - CROSS-TASK methods (estop, pause, override, returnToPause, allowPattern,
-//   setEstopCutsPower, setMotorPowered, the limit and window setters,
+//   setEstopCutsPower, setMotorPowered, setCommissioned, the limit and window setters,
 //   forceHome, noteStream) never touch the engine.
 //   They write flags and scalars the owning task reads on its next pass;
 //   estop() and a power loss also park the emitter on the CALLING task,
@@ -152,6 +152,11 @@ public:
     // emitter on the CALLING task and drops homed: a limp carriage keeps no
     // position reference. Boots off: nothing moves before the switch says on.
     void setMotorPowered(bool on);
+    // The hub's first-run record (RFC-079 setup, StoredState.h): false until
+    // the owner has written every required setup field once. False refuses
+    // Stream and Pattern; Manual still moves, exactly as unhomed, because an
+    // owner commissioning a machine must be able to move it. Boots false.
+    void setCommissioned(bool on) { _commissioned.store(on); }
     void setJogLimits(float v, float a) { _jog_v = v; _jog_a = a; }
     // RFC-088 (SPEC 9.6): with the flip on, position 0 is the far end. Every
     // intent target is mirrored against the rail on the way in, and every
@@ -225,6 +230,7 @@ private:
     // Written by setMotorPowered() on the switch host's task. _power_settled
     // re-arms on a loss and is spent once by evaluate() on the owning task.
     std::atomic<bool> _powered{false};
+    std::atomic<bool> _commissioned{false};
     std::atomic<bool> _power_settled{false};
     volatile bool _cuts_power = true;
     bool _estop_settled = false;  // the engine has been reset since the latch

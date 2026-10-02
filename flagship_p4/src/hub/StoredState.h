@@ -52,13 +52,28 @@ struct StoredConfig {
     bool operator==(const StoredConfig&) const = default;
 };
 
-// The stored 0x1030 modes that are not engine tuning.
+// The first-run pass (RFC-079 setup): the 0x3000 keys an owner must write
+// once, bit k-1 for key k. Every one of the eight is the machine's geometry
+// or a ceiling, so all eight are required; the 0x3120 ceiling overrides are
+// not (0 derives them from these).
+inline constexpr uint8_t kSetupRequiredMask = 0xFF;
+
+// The stored 0x1030 modes that are not engine tuning, and the first-run record.
 struct StoredModes {
     uint8_t horizon = 0;   // schedule_horizon ordinal: kHorizonMs (ValenceCatalog.h)
     bool    flipped = false;   // axis.flipped (RFC-088): how the rail is mounted
+    // 0x3000 keys accepted at least once, same bits as kSetupRequiredMask.
+    // Only ever gains bits; a factory-fresh or migrated hub starts at 0.
+    uint8_t setup_written = 0;
 
     bool operator==(const StoredModes&) const = default;
 };
+
+// True once the owner has written every required setup field. Until then the
+// arbiter refuses every content source (MotionArbiter::setCommissioned()).
+inline bool commissioned(const StoredModes& m) {
+    return (m.setup_written & kSetupRequiredMask) == kSetupRequiredMask;
+}
 
 // ---- tuning bounds ------------------------------------------------------------
 // What 0x3120 clamps to and what a stored set must sit inside. Mirrors the
@@ -90,18 +105,21 @@ inline float overshootGuardFor(bool on, float factoryGuard) {
 namespace stored {
 
 inline constexpr uint32_t kConfigMagic   = 0x56434647u;  // "VCFG"
-inline constexpr uint8_t  kConfigVersion = 4;            // bump on ANY layout change
+inline constexpr uint8_t  kConfigVersion = 5;            // bump on ANY layout change
 // v2: magic 4, version 1, cfg_gen 2, config 8 x f32, tuning 8 x f32 + 2 x u32 + 7 x u8
 inline constexpr size_t   kConfigV2Bytes = 4 + 1 + 2 + 32 + 32 + 8 + 7;
-// v3 appends the schedule_horizon ordinal (u8), v4 the flip (u8, 0/1).
+// v3 appends the schedule_horizon ordinal (u8), v4 the flip (u8, 0/1), v5
+// the setup_written mask (u8).
 inline constexpr size_t   kConfigV3Bytes = kConfigV2Bytes + 1;
-inline constexpr size_t   kConfigBlobBytes = kConfigV3Bytes + 1;
+inline constexpr size_t   kConfigV4Bytes = kConfigV3Bytes + 1;
+inline constexpr size_t   kConfigBlobBytes = kConfigV4Bytes + 1;
 
 // 0 for a version this firmware cannot read.
 inline constexpr size_t configBytesFor(uint8_t version) {
     return version == 2 ? kConfigV2Bytes
          : version == 3 ? kConfigV3Bytes
-         : version == 4 ? kConfigBlobBytes : 0;
+         : version == 4 ? kConfigV4Bytes
+         : version == 5 ? kConfigBlobBytes : 0;
 }
 
 namespace detail {
@@ -176,6 +194,7 @@ inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
         put(out, n, v);
     put(out, n, m.horizon);
     put(out, n, uint8_t(m.flipped));
+    put(out, n, m.setup_written);
     return n;
 }
 
@@ -223,6 +242,7 @@ inline bool decodeConfig(std::span<const std::byte> in, float factoryGuard,
         if (f > 1) return false;
         m.flipped = f != 0;
     }
+    if (version >= 5) m.setup_written = get<uint8_t>(in, n);
 
     if (!configValid(c) || !tuningValid(t) || !modesValid(m)) return false;
     cfgOut = c;
