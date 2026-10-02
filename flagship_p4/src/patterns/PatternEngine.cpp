@@ -35,6 +35,10 @@ constexpr uint32_t kRestUs = 50000;
 constexpr float kMinStrokeS = 0.005f;
 constexpr float kMaxStrokeS = 60.0f;
 
+// One hold segment's ceiling, the half-stroke's for the same reason; a longer
+// dwell is sent as consecutive segments.
+constexpr uint64_t kMaxHoldUs = uint64_t(kMaxStrokeS * 1e6f);
+
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 uint32_t strokeUs(float seconds) { return uint32_t(clampf(seconds, kMinStrokeS, kMaxStrokeS) * 1e6f); }
@@ -49,6 +53,8 @@ void PatternEngine::apply(const PatternSettings& s) {
     if (start) {
         _stroke_index = 0;
         _have_prev = false;
+        _holding = false;
+        _hold_owed_us = 0;
     }
 }
 
@@ -74,7 +80,18 @@ std::optional<MotionIntent> PatternEngine::tick(uint64_t now_us, const PatternIn
         std::optional<MotionIntent> out;
         const bool mid_stroke = _active && now_us < _stroke_end_us;
         if (mid_stroke && in.homed && !in.estop && !in.paused && !in.stream_active) out = brake(in);
+        // Only PAUSE keeps a dwell, and only one already being held: a half
+        // cut short never reached its bound, and every other gate ends the run
+        // as the operator would read it.
+        const bool pause_only =
+            in.paused && running(_s) && in.homed && !in.estop && !in.stream_active;
+        if (!pause_only) {
+            _hold_owed_us = 0;
+        } else if (_active) {
+            _hold_owed_us = (_holding && now_us < _due_us) ? _hold_owed_us + (_due_us - now_us) : 0;
+        }
         _active = false;
+        _holding = false;
         _stroke_end_us = 0;
         return out;
     }
@@ -84,6 +101,26 @@ std::optional<MotionIntent> PatternEngine::tick(uint64_t now_us, const PatternIn
         _due_us = now_us;
     }
     if (now_us < _due_us) return std::nullopt;
+
+    if (_hold_owed_us > 0) {
+        // At the bound just reached, or where the carriage IS after a pause.
+        const uint64_t h = _hold_owed_us < kMaxHoldUs ? _hold_owed_us : kMaxHoldUs;
+        _hold_owed_us -= h;
+        const float at = fromMm(in);
+        _holding = true;
+        _due_us = now_us + h;
+        _stroke_end_us = _due_us;
+        _have_prev = true;
+        _prev_target_mm = at;
+        MotionIntent it;
+        it.source       = _source;
+        it.target_mm    = at;
+        it.duration_us  = uint32_t(h);
+        it.has_end_vel  = true;
+        it.end_vel_mm_s = 0.0f;
+        return it;
+    }
+    _holding = false;
 
     const std::optional<Stroke> st = next(now_us, in);
     if (!st) {
@@ -95,6 +132,7 @@ std::optional<MotionIntent> PatternEngine::tick(uint64_t now_us, const PatternIn
     _stroke_end_us = _due_us;
     _have_prev = true;
     _prev_target_mm = st->target_mm;
+    _hold_owed_us = st->moves ? st->hold_us : 0;
     if (!st->moves) return std::nullopt;
 
     MotionIntent it;
@@ -165,11 +203,15 @@ std::optional<PatternEngine::Stroke> ClassicGenerator::next(uint64_t now_us, con
 
 // Counts strokes, never time: the clock argument is unused.
 std::optional<PatternEngine::Stroke> AdvancedGenerator::next(uint64_t, const PatternInputs& in) {
+    if (_stroke_index == 0) _prev_half_us = 0;
     const PatternFrame& f = _s.frame;
     const advpat::StrokePlan sp = _s.ap.planStroke(_stroke_index);
     const float target = f.win_min + sp.target_frac * (f.win_max - f.win_min);
     const float d = std::fabs(target - fromMm(in));
-    if (!sp.moving || d < kMinTravelMm) return Stroke{false, target, kRestUs};
+    if (!sp.moving || d < kMinTravelMm) {
+        _prev_half_us = 0;
+        return Stroke{false, target, kRestUs};
+    }
 
     // fray-d: cruise at speed_frac of the input ceiling; accel spans 1x..10x
     // the least that reaches that speed over this distance (1x a triangle,
@@ -177,7 +219,14 @@ std::optional<PatternEngine::Stroke> AdvancedGenerator::next(uint64_t, const Pat
     float v = sp.speed_frac * f.input_speed;
     if (v < 1.0f) v = 1.0f;
     const float a = (v * v / d) * (1.0f + 9.0f * sp.accel_knob);
-    return Stroke{true, target, strokeUs(d / v + v / a)};
+    const uint32_t half_us = strokeUs(d / v + v / a);
+
+    // RFC-095: the dwell's clock is one stroke, this half plus the one before
+    // it; the first half of a run has no partner and counts twice.
+    const uint64_t stroke_us = uint64_t(half_us) + (_prev_half_us != 0 ? _prev_half_us : half_us);
+    _prev_half_us = half_us;
+    const uint64_t hold_us = uint64_t(sp.dwell_strokes * float(stroke_us) + 0.5f);
+    return Stroke{true, target, half_us, hold_us};
 }
 
 // ---- the brake --------------------------------------------------------------

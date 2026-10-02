@@ -29,6 +29,7 @@ using valence::MotionCensus;
 using valence::MotionEmitter;
 using valence::MotionIntent;
 using valence::MotionSource;
+using valence::AdvancedGenerator;
 using valence::ClassicGenerator;
 using valence::PatternEngine;
 using valence::PatternInputs;
@@ -718,4 +719,49 @@ TEST_CASE("flip: targets mirror in, positions and the window mirror out, the eng
     CHECK(r->census().position_mm == doctest::Approx(0.0f).epsilon(0.001));
     r->arb.setFlipped(false);
     CHECK(r->census().position_mm == doctest::Approx(400.0f).epsilon(0.001));
+}
+
+TEST_CASE("RFC-095: a dwell lands as a hold segment, a live plan at rest on the bound") {
+    auto r = rig();
+    r->arb.forceHome(DEFAULT_MAX_RAIL_MM);
+    r->run(1000);
+    REQUIRE(r->arb.acquireRail(MotionSource::Advanced));
+    PatternSettings s;
+    s.frame = {0.0f, DEFAULT_MAX_RAIL_MM, DEFAULT_MAX_SPEED_MM_S, DEFAULT_ACCEL_MM_S2};
+    s.adv_running = true;
+    s.ap.master.set(40);
+    s.ap.setBase(advpat::DEPTH_MAX, 80);
+    s.ap.setBase(advpat::DEPTH_MIN, 20);
+    s.ap.setBase(advpat::DWELL_CREST, 100);   // one stroke
+    auto gen = std::make_unique<AdvancedGenerator>();
+    gen->apply(s);
+
+    MotionIntent prev{}, cur{};
+    int landed = 0;
+    bool held = false;
+    for (int i = 0; i < 20000 && !held; ++i) {
+        if (!generatorPass(*r, *gen, &cur)) continue;
+        ++landed;
+        held = landed > 1 && cur.target_mm == prev.target_mm;
+        if (!held) {
+            const MotionCensus moving = r->census();
+            CHECK(moving.busy);
+            CHECK_FALSE(moving.plan_hold);
+        }
+        prev = cur;
+    }
+    REQUIRE(held);
+    REQUIRE(cur.duration_us > 100'000u);
+
+    // Well inside the hold: a timed plan whose start is its end, the carriage
+    // still on the bound, nothing moving.
+    r->run(cur.duration_us / 2);
+    const MotionCensus c = r->census();
+    CHECK(c.busy);
+    CHECK(c.plan_hold);
+    CHECK(double(c.plan_duration_us) == doctest::Approx(double(cur.duration_us)).epsilon(0.001));
+    CHECK(c.position_mm == doctest::Approx(cur.target_mm).epsilon(0.001));
+    CHECK(std::fabs(c.velocity_mm_s) < 1.0f);
+    r->arb.drainAnomalies();
+    CHECK(r->census().anom[size_t(kinetic::AnomalyType::DwellZeroed)] == 0);
 }

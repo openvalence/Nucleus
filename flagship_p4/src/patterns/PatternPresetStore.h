@@ -12,10 +12,12 @@
 //   version byte, the generation, then every slot, decoded only at its exact
 //   length. The generation rides WITH the items: a client's cached enumeration
 //   is keyed on it, so a restart that reset it beside surviving items would
-//   leave that cache stale without a signal. A version-1 blob holds the
-//   retired 100 = off modulator amount: decode() migrates every stored item
-//   (PatternSettings::migrateRetiredAmount) and bumps the generation, so no
-//   cached item survives under the other meaning. Storage and debounce are the
+//   leave that cache stale without a signal. Versions 1 and 2 hold the
+//   pre-dwell payload (PatternSettings::kLegacyPresetPayloadBytes), which
+//   decode() zero-extends; version 1 also holds the retired 100 = off
+//   modulator amount, which it migrates (migrateRetiredAmount). Either
+//   migration bumps the generation, so no cached item survives under the
+//   other layout or meaning. Storage and debounce are the
 //   composition's (ValenceHub.cpp NVS key "presets"; the twin's state file).
 // - Every mutation bumps generation(): the roster's "re-enumerate" signal and
 //   the generation readBlob() answers with.
@@ -118,11 +120,15 @@ public:
 
     // ---- persistence blob ----
     static constexpr uint32_t kBlobMagic   = 0x56505253u;  // "VPRS"
-    static constexpr uint8_t  kBlobVersion = 2;            // bump on ANY layout or meaning change
+    static constexpr uint8_t  kBlobVersion = 3;            // bump on ANY layout or meaning change
     static constexpr uint8_t  kBlobVersionRetiredAmount = 1;   // migrated on decode, never written
+    static constexpr uint8_t  kBlobVersionNoDwell = 2;         // migrated on decode, never written
+    static constexpr size_t   kLegacyPayloadBytes = PatternSettings::kLegacyPresetPayloadBytes;
     // magic 4, version 1, generation 2, then per slot the NUL-padded name and
     // the payload
     static constexpr size_t kBlobBytes = 4 + 1 + 2 + size_t(kCapacity) * (kNameMax + kPayloadBytes);
+    static constexpr size_t kLegacyBlobBytes =
+        4 + 1 + 2 + size_t(kCapacity) * (kNameMax + kLegacyPayloadBytes);
 
     // Returns bytes written: kBlobBytes, or 0 when `out` is too small.
     size_t encode(std::span<std::byte> out) const {
@@ -142,29 +148,33 @@ public:
     // so a false return leaves the store exactly as it was. Payload bytes are
     // opaque here; a load clamps them (PatternSettings::applyPreset).
     bool decode(std::span<const std::byte> in) {
-        if (in.size() != kBlobBytes) return false;
+        if (in.size() < 5) return false;
         uint32_t magic = 0;
         uint8_t version = 0;
         std::memcpy(&magic, in.data(), sizeof(magic));
         std::memcpy(&version, in.data() + 4, sizeof(version));
         if (magic != kBlobMagic) return false;
-        if (version != kBlobVersion && version != kBlobVersionRetiredAmount) return false;
+        const bool legacy = version == kBlobVersionRetiredAmount || version == kBlobVersionNoDwell;
+        if (version != kBlobVersion && !legacy) return false;
+        const size_t payloadBytes = legacy ? kLegacyPayloadBytes : kPayloadBytes;
+        if (in.size() != (legacy ? kLegacyBlobBytes : kBlobBytes)) return false;
         constexpr size_t kSlotsAt = 7;
-        constexpr size_t kStride = size_t(kNameMax) + kPayloadBytes;
+        const size_t stride = size_t(kNameMax) + payloadBytes;
         for (size_t i = 0; i < kCapacity; ++i) {
             std::array<char, kNameMax> name{};
-            std::memcpy(name.data(), in.data() + kSlotsAt + i * kStride, kNameMax);
+            std::memcpy(name.data(), in.data() + kSlotsAt + i * stride, kNameMax);
             if (!storedNameValid(name)) return false;
         }
         std::memcpy(&_generation, in.data() + 5, sizeof(_generation));
         for (size_t i = 0; i < kCapacity; ++i) {
-            const std::byte* at = in.data() + kSlotsAt + i * kStride;
+            const std::byte* at = in.data() + kSlotsAt + i * stride;
             std::memcpy(_slots[i].name.data(), at, kNameMax);
-            std::memcpy(_slots[i].payload.data(), at + kNameMax, kPayloadBytes);
+            _slots[i].payload.fill(0);
+            std::memcpy(_slots[i].payload.data(), at + kNameMax, payloadBytes);
             if (version == kBlobVersionRetiredAmount && _slots[i].used())
                 PatternSettings::migrateRetiredAmount(_slots[i].payload);
         }
-        if (version == kBlobVersionRetiredAmount) ++_generation;
+        if (legacy) ++_generation;
         return true;
     }
 

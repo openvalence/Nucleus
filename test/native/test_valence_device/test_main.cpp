@@ -7,7 +7,8 @@
 //   binary has no other translation unit that sees Catalog32. They only need
 //   to hold the machine's own catalog; the board's values live in
 //   flagship_p4/valence_capacity.cmake and are not restated here.
-// See: Valence SPEC.md §5.5, §11.2, §16.1; bd val-091.56, rfc-1ek, rfc-2w2
+// See: Valence SPEC.md §5.5, §11.2, §16.1; bd val-091.56, rfc-1ek, rfc-2w2,
+// Valence RFC-095
 
 #define VALENCE_CATALOG_ENTRIES 64
 #define VALENCE_CATALOG_LAYOUT_FIELDS 256
@@ -112,12 +113,16 @@ public:
     std::map<uint16_t, std::vector<std::byte>> lastState;
     std::vector<RecordedNack> nacks;
     int echoes = 0;
+    IntentValueMap lastEcho{};
 
     void onStateChange(ClientSessionState) override {}
     void onState(uint16_t channel_id, uint16_t, std::span<const std::byte> payload) override {
         lastState[channel_id] = std::vector<std::byte>(payload.begin(), payload.end());
     }
-    void onEcho(uint16_t, const IntentValueMap&, uint16_t) override { ++echoes; }
+    void onEcho(uint16_t, const IntentValueMap& applied, uint16_t) override {
+        ++echoes;
+        lastEcho = applied;
+    }
     void onNack(const NackMsg& n) override {
         nacks.push_back({n.code, n.has_detail ? std::string(n.detail) : std::string()});
     }
@@ -160,6 +165,8 @@ struct Rig {
         const auto etag = hub->catalogEtag();
         client->setCachedEtag(std::span<const std::byte, limits::etag_bytes>(etag.data(), limits::etag_bytes));
         client->addSubscriptionWish(0x0003, 0.0f, Priority::critical);
+        client->addSubscriptionWish(ch::pattern_advanced, 0.0f, Priority::normal);
+        client->addSubscriptionWish(ch::pattern_adv_mod_crest, 0.0f, Priority::normal);
         REQUIRE(client->connect());
         step(200);
         REQUIRE(client->state() == ClientSessionState::LIVE);
@@ -261,4 +268,54 @@ TEST_CASE("VD-02: a move refused for motor power carries the reason on the NACK"
     REQUIRE(rig->del.nacks.size() == 3);
     CHECK(rig->del.nacks[2].code == NackCode::NOT_HOMED);
     CHECK(rig->del.nacks[2].detail.empty());
+}
+
+// ---- RFC-095: the dwells on the wire --------------------------------------------
+
+namespace {
+
+const IntentValue* echoed(const IntentValueMap& m, uint8_t key) {
+    for (uint32_t i = 0; i < m.count; ++i)
+        if (m.fields[i].key == key) return &m.fields[i].value;
+    return nullptr;
+}
+
+}  // namespace
+
+TEST_CASE("VD-03: the dwells write on keys 46 and 47 and publish at the tail of 0x1210") {
+    auto rig = std::make_unique<Rig>();
+
+    IntentValueMap m{};
+    m.count = 3;
+    m.fields[0] = IntentValueField{46, IntentValue::ofF32(0.5f)};
+    m.fields[1] = IntentValueField{47, IntentValue::ofF32(1.25f)};
+    m.fields[2] = IntentValueField{48, IntentValue::ofU64(70)};   // the crest modulator's amount
+    REQUIRE(rig->client->sendIntent(ch::pattern_advanced_cmd, m).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(rig->del.echoes == 1);
+    const IntentValue* crest = echoed(rig->del.lastEcho, 46);
+    const IntentValue* trough = echoed(rig->del.lastEcho, 47);
+    const IntentValue* amount = echoed(rig->del.lastEcho, 48);
+    REQUIRE(crest != nullptr);
+    REQUIRE(trough != nullptr);
+    REQUIRE(amount != nullptr);
+    CHECK(crest->f32_val == doctest::Approx(0.5f));
+    CHECK(trough->f32_val == doctest::Approx(1.25f));
+    CHECK(amount->u64_val == 70);
+
+    // 0x1210: 10 bytes as before, then the dwells in hundredths and the
+    // second mask, both dwell bits up.
+    const auto adv = rig->del.lastState.find(ch::pattern_advanced);
+    REQUIRE(adv != rig->del.lastState.end());
+    const std::span<const std::byte> b(adv->second);
+    REQUIRE(b.size() == 15);
+    CHECK(getU16(b.subspan(10, 2)) == 50);
+    CHECK(getU16(b.subspan(12, 2)) == 125);
+    CHECK(b[14] == std::byte{0x03});
+
+    const auto mod = rig->del.lastState.find(ch::pattern_adv_mod_crest);
+    REQUIRE(mod != rig->del.lastState.end());
+    REQUIRE(mod->second.size() == 7);
+    CHECK(mod->second[0] == std::byte{70});
 }

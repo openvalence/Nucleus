@@ -120,6 +120,8 @@ struct MotionCensus {
     float    plan_vel         = 0.0f;  // normalized units/s
     uint32_t plan_duration_us = 0;
     uint32_t plan_elapsed_us  = 0;
+    bool     plan_hold        = false;  // the active plan is a hold: timed, its
+                                        // start its end (SPEC 9.6)
 
     // ---- planner diagnostics, as 0x1111 publishes them ----
     uint32_t plans          = 0;

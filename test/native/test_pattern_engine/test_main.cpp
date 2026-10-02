@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <iterator>
 #include <memory>
 #include <vector>
 
@@ -356,6 +358,22 @@ float retiredModification(const advpat::Modifier& m, uint8_t amplitude, int cycl
 }
 
 std::array<std::byte, PatternPresetStore::kBlobBytes> g_presetBlob{};
+std::array<std::byte, PatternPresetStore::kLegacyBlobBytes> g_legacyBlob{};
+
+using LegacyPayload = std::array<uint8_t, PatternSettings::kLegacyPresetPayloadBytes>;
+
+// A blob as the firmware stored it before RFC-095: 40-byte payloads, one item.
+void writeLegacyBlob(uint8_t version, uint16_t generation, uint8_t slot, const char* name,
+                     const LegacyPayload& payload) {
+    g_legacyBlob.fill(std::byte{0});
+    const uint32_t magic = PatternPresetStore::kBlobMagic;
+    std::memcpy(g_legacyBlob.data(), &magic, 4);
+    g_legacyBlob[4] = std::byte{version};
+    std::memcpy(g_legacyBlob.data() + 5, &generation, 2);
+    const size_t at = 7 + size_t(slot) * (PatternPresetStore::kNameMax + payload.size());
+    std::memcpy(g_legacyBlob.data() + at, name, std::strlen(name));
+    std::memcpy(g_legacyBlob.data() + at + PatternPresetStore::kNameMax, payload.data(), payload.size());
+}
 
 }  // namespace
 
@@ -363,12 +381,12 @@ TEST_CASE("presets: a version-1 blob migrates the retired amount and strokes the
     // Bytes as the old firmware stored them: depth-max swinging 60 %
     // (amplitude 40), speed-in off (100), speed-out an out-of-range 250 that
     // the old clamp loaded as off. Every other modulator off.
-    PatternSettings::PresetPayload old{};
+    LegacyPayload old{};
     old[0] = 80;
     old[1] = 70;
     old[2] = 40;
     old[3] = 40;
-    for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
+    for (uint8_t id = 0; id < advpat::PERCENT_BASE_COUNT; ++id) {
         const size_t b = 4 + size_t(id) * 6;
         old[b + 0] = 100;
         old[b + 1] = 1;
@@ -383,15 +401,12 @@ TEST_CASE("presets: a version-1 blob migrates the retired amount and strokes the
     old[dm + 5] = 4;
     old[4 + size_t(advpat::SPEED_OUT) * 6] = 250;
 
-    static PatternPresetStore st;
-    REQUIRE(st.save(5, "old meaning", old));
-    REQUIRE(st.encode(g_presetBlob) == g_presetBlob.size());
-    g_presetBlob[4] = std::byte{PatternPresetStore::kBlobVersionRetiredAmount};
+    writeLegacyBlob(PatternPresetStore::kBlobVersionRetiredAmount, 40, 5, "old meaning", old);
 
     static PatternPresetStore back;
-    REQUIRE(back.decode(g_presetBlob));
+    REQUIRE(back.decode(g_legacyBlob));
     // Cached items re-enumerate: the generation moved with the meaning.
-    CHECK(back.generation() == uint16_t(st.generation() + 1));
+    CHECK(back.generation() == 41);
     REQUIRE(back.slot(5) != nullptr);
     CHECK(back.slot(0) == nullptr);
 
@@ -401,6 +416,9 @@ TEST_CASE("presets: a version-1 blob migrates the retired amount and strokes the
     CHECK(s.ap.in_speed.modifier.amount == 0);
     CHECK(s.ap.out_speed.modifier.amount == 0);
     CHECK(s.ap.min_depth.modifier.amount == 0);
+    // The zero-extended dwell modulators are never migrated into a swing.
+    CHECK(s.ap.dwell_crest.modifier.amount == 0);
+    CHECK(s.ap.dwell_trough.modifier.amount == 0);
 
     // Strokes the same: every cycle of the migrated modulator matches the old
     // engine's math on the original byte.
@@ -416,4 +434,268 @@ TEST_CASE("presets: a version-1 blob migrates the retired amount and strokes the
     REQUIRE(again.decode(g_presetBlob));
     CHECK(again.generation() == back.generation());
     CHECK(again.slot(5)->payload == back.slot(5)->payload);
+}
+
+// ---- RFC-095: dwell ------------------------------------------------------------
+
+namespace {
+
+// The engine's intents before RFC-095 (Nucleus 8c37cbb) for advancedSettings()
+// from a homed carriage at the window floor: {at_us, target_mm, duration_us}.
+struct Recorded {
+    uint64_t at_us;
+    float    target_mm;
+    uint32_t duration_us;
+};
+constexpr Recorded kBeforeDwell[] = {
+    {3000000, 0x1.5p+7f, 590204},
+    {3591000, 0x1.4p+5f, 459912},
+    {4051000, 0x1.1p+7f, 344934},
+    {4396000, 0x1.4p+5f, 344934},
+    {4741000, 0x1.ap+6f, 229956},
+    {4971000, 0x1.4p+5f, 229956},
+    {5201000, 0x1.ap+6f, 229956},
+    {5431000, 0x1.4p+5f, 229956},
+    {5661000, 0x1.1p+7f, 382835},
+    {6044000, 0x1.4p+5f, 344934},
+    {6389000, 0x1.5p+7f, 573457},
+    {6963000, 0x1.4p+5f, 459912},
+    {7423000, 0x1.9p+7f, 817767},
+    {8241000, 0x1.4p+5f, 574890},
+    {8816000, 0x1.5p+7f, 761444},
+    {9578000, 0x1.4p+5f, 459912},
+    {10038000, 0x1.1p+7f, 683038},
+    {10722000, 0x1.4p+5f, 344934},
+    {11067000, 0x1.ap+6f, 380722},
+    {11448000, 0x1.4p+5f, 229956},
+    {11678000, 0x1.ap+6f, 327107},
+    {12006000, 0x1.4p+5f, 229956},
+    {12236000, 0x1.1p+7f, 430092},
+    {12667000, 0x1.4p+5f, 344934},
+};
+
+// A symmetric stroke: equal speeds and accels, 10 % to 90 %, so from the
+// shallow bound every half travels 160 mm in the same time.
+PatternSettings dwellSettings(int crest, int trough) {
+    PatternSettings s = baseSettings();
+    s.running = false;
+    s.adv_running = true;
+    s.ap.master.set(60);
+    s.ap.setBase(advpat::DEPTH_MAX, 90);
+    s.ap.setBase(advpat::DEPTH_MIN, 10);
+    s.ap.setBase(advpat::DWELL_CREST, crest);
+    s.ap.setBase(advpat::DWELL_TROUGH, trough);
+    return s;
+}
+
+PatternInputs atShallowBound() {
+    PatternInputs in = homedIdle();
+    in.position_mm = kWinMin + 0.1f * (kWinMax - kWinMin);
+    return in;
+}
+
+// A hold segment: the target of the intent before it, re-commanded on a clock.
+bool isHold(const std::vector<Emitted>& r, size_t i) {
+    return i > 0 && r[i].it.target_mm == r[i - 1].it.target_mm && r[i].it.duration_us > 0;
+}
+
+}  // namespace
+
+TEST_CASE("RFC-095: dwell 0 strokes sample for sample as before the dwell existed") {
+    PatternSettings s = advancedSettings();
+    REQUIRE(s.ap.dwell_crest.value == 0);
+    REQUIRE(s.ap.dwell_trough.value == 0);
+    auto g = std::make_unique<AdvancedGenerator>();
+    g->apply(s);
+    uint64_t now = 3'000'000;
+    const auto r = run(*g, now, 30000, homedIdle());
+    REQUIRE(r.size() >= std::size(kBeforeDwell));
+    for (size_t i = 0; i < std::size(kBeforeDwell); ++i) {
+        CAPTURE(i);
+        CHECK(r[i].at_us == kBeforeDwell[i].at_us);
+        CHECK(r[i].it.target_mm == kBeforeDwell[i].target_mm);
+        CHECK(r[i].it.duration_us == kBeforeDwell[i].duration_us);
+        CHECK(r[i].it.has_end_vel);
+        CHECK(r[i].it.end_vel_mm_s == 0.0f);
+    }
+}
+
+TEST_CASE("RFC-095: a 0.5 crest dwell holds half a stroke at the deep bound, additively") {
+    auto g = std::make_unique<AdvancedGenerator>();
+    g->apply(dwellSettings(50, 0));
+    uint64_t now = 1'000'000;
+    const auto r = run(*g, now, 12000, atShallowBound());
+    REQUIRE(r.size() >= 8);
+    const float deep = kWinMin + 0.9f * (kWinMax - kWinMin);
+
+    // in, hold, out, in, hold, out: the trough has no dwell.
+    CHECK(r[0].it.target_mm == doctest::Approx(deep));
+    REQUIRE(isHold(r, 1));
+    CHECK_FALSE(isHold(r, 2));
+    CHECK_FALSE(isHold(r, 3));
+    REQUIRE(isHold(r, 4));
+    CHECK_FALSE(isHold(r, 5));
+
+    const uint32_t half = r[0].it.duration_us;
+    REQUIRE(r[2].it.duration_us == half);   // symmetric halves
+    REQUIRE(r[3].it.duration_us == half);
+    // One stroke is one in-half plus one out-half; half of it is one half.
+    CHECK(r[1].it.duration_us == half);
+    CHECK(r[4].it.duration_us == half);
+    CHECK(r[1].it.source == MotionSource::Advanced);
+    CHECK(r[1].it.has_end_vel);
+    CHECK(r[1].it.end_vel_mm_s == 0.0f);
+
+    // Additive: the hold starts when the half lands and the reversal waits for
+    // it; the moving halves keep their own durations.
+    CHECK(r[1].at_us - r[0].at_us < uint64_t(half) + 1000u);
+    CHECK(r[1].at_us - r[0].at_us >= uint64_t(half));
+    CHECK(r[2].at_us - r[1].at_us >= uint64_t(r[1].it.duration_us));
+    CHECK(r[2].at_us - r[1].at_us < uint64_t(r[1].it.duration_us) + 1000u);
+    CHECK(r[3].at_us - r[2].at_us < uint64_t(half) + 1000u);
+}
+
+TEST_CASE("RFC-095: a trough dwell holds at the shallow bound") {
+    auto g = std::make_unique<AdvancedGenerator>();
+    g->apply(dwellSettings(0, 25));
+    uint64_t now = 1'000'000;
+    const auto r = run(*g, now, 8000, atShallowBound());
+    REQUIRE(r.size() >= 4);
+    const float shallow = kWinMin + 0.1f * (kWinMax - kWinMin);
+    CHECK_FALSE(isHold(r, 1));
+    REQUIRE(isHold(r, 2));
+    CHECK(r[2].it.target_mm == doctest::Approx(shallow));
+    // A quarter of a stroke is half of one half.
+    CHECK(r[2].it.duration_us == (r[0].it.duration_us + r[1].it.duration_us + 2u) / 4u);
+}
+
+TEST_CASE("RFC-095: a modulator riding a dwell varies it per stroke") {
+    // 1.00 stroke at the crest, swung fully: rise over 2 strokes, fall over 2.
+    PatternSettings s = dwellSettings(100, 0);
+    s.ap.byId(advpat::DWELL_CREST)->modifier.set(100, 2, 0, 2, 0, 0);
+    auto g = std::make_unique<AdvancedGenerator>();
+    g->apply(s);
+    uint64_t now = 1'000'000;
+    const auto r = run(*g, now, 20000, atShallowBound());
+
+    // Per stroke, the crest hold as a multiple of one moving half: the cycle
+    // is 0.5, 0, 0.5, 1.0 strokes, a stroke being two halves.
+    std::vector<float> holds;
+    for (size_t i = 0; i + 1 < r.size() && holds.size() < 8; ++i) {
+        if (isHold(r, i) || r[i].it.target_mm < kWinMin + 100.0f) continue;   // in-halves only
+        const bool held = isHold(r, i + 1);
+        holds.push_back(held ? float(r[i + 1].it.duration_us) / float(r[i].it.duration_us) : 0.0f);
+    }
+    REQUIRE(holds.size() >= 8);
+    const float want[] = {1.0f, 0.0f, 1.0f, 2.0f, 1.0f, 0.0f, 1.0f, 2.0f};
+    for (size_t k = 0; k < 8; ++k) {
+        CAPTURE(k);
+        CHECK(holds[k] == doctest::Approx(want[k]).epsilon(0.001));
+    }
+}
+
+TEST_CASE("RFC-095: PAUSE freezes a dwell; resume holds only what was left") {
+    auto g = std::make_unique<AdvancedGenerator>();
+    g->apply(dwellSettings(50, 0));
+    PatternInputs in = atShallowBound();
+    uint64_t now = 1'000'000;
+    std::vector<Emitted> r;
+    auto tickFor = [&](uint32_t ms) {
+        for (uint32_t k = 0; k < ms; ++k) {
+            if (const auto it = g->tick(now, in)) r.push_back({now, *it});
+            now += 1000;
+        }
+    };
+    while (r.size() < 2) tickFor(1);
+    REQUIRE(isHold(r, 1));
+    const uint32_t hold = r[1].it.duration_us;
+    REQUIRE(hold > 100'000u);
+    const uint64_t hold_end = r[1].at_us + hold;
+
+    // Paused 100 ms into the hold, for 5 s: nothing moves, nothing counts.
+    tickFor(99);
+    const uint64_t paused_at = now;
+    in.paused = true;
+    tickFor(5000);
+    CHECK(r.size() == 2);
+
+    // The carriage sits where the pause left it; resume owes the rest.
+    in.paused = false;
+    in.position_mm = r[1].it.target_mm - 0.05f;
+    tickFor(1);
+    REQUIRE(r.size() == 3);
+    CHECK(r[2].it.target_mm == in.position_mm);
+    CHECK(r[2].it.duration_us == uint32_t(hold_end - paused_at));
+    CHECK(r[2].it.end_vel_mm_s == 0.0f);
+    tickFor(uint32_t(r[2].it.duration_us / 1000u) + 2u);
+    REQUIRE(r.size() == 4);
+    CHECK_FALSE(isHold(r, 3));   // then the out-half, never a second dwell
+
+    // A stop forfeits a dwell: the next start opens with an in-half.
+    while (!isHold(r, r.size() - 1)) tickFor(1);
+    PatternSettings off = dwellSettings(50, 0);
+    off.adv_running = false;
+    g->apply(off);
+    tickFor(10);
+    in.position_mm = atShallowBound().position_mm;
+    g->apply(dwellSettings(50, 0));
+    const size_t before = r.size();
+    tickFor(1);
+    REQUIRE(r.size() == before + 1);
+    CHECK(r.back().it.target_mm == doctest::Approx(kWinMin + 0.9f * (kWinMax - kWinMin)));
+}
+
+TEST_CASE("RFC-095: a dwell past one segment's ceiling is sent as consecutive holds") {
+    auto g = std::make_unique<AdvancedGenerator>();
+    g->apply(dwellSettings(65535, 0));   // 655.35 strokes, the field's max
+    uint64_t now = 1'000'000;
+    const auto r = run(*g, now, 125000, atShallowBound());
+    REQUIRE(r.size() >= 3);
+    REQUIRE(isHold(r, 1));
+    REQUIRE(isHold(r, 2));
+    CHECK(r[1].it.duration_us == 60'000'000u);
+    CHECK(r[2].it.duration_us == 60'000'000u);
+    CHECK(r[2].it.target_mm == r[0].it.target_mm);
+}
+
+TEST_CASE("RFC-095: presets carry the dwells and their modulators; older payloads read 0") {
+    PatternSettings a = advancedSettings();
+    a.ap.setBase(advpat::DWELL_CREST, 1234);
+    a.ap.setBase(advpat::DWELL_TROUGH, 65535);
+    a.ap.byId(advpat::DWELL_TROUGH)->modifier.set(70, 4, 2, 3, 1, 9);
+    const auto payload = a.capturePreset();
+    REQUIRE(payload.size() == PatternPresetStore::kPayloadBytes);
+
+    PatternSettings b;
+    b.applyPreset(payload);
+    CHECK(b.ap.dwell_crest.value == 1234);
+    CHECK(b.ap.dwell_trough.value == 65535);
+    CHECK(b.ap.dwell_trough.modifier == a.ap.dwell_trough.modifier);
+    CHECK(b.ap.byId(advpat::DEPTH_MAX)->modifier == a.ap.byId(advpat::DEPTH_MAX)->modifier);
+
+    // Without them: a version-2 blob holds the 40-byte payload, which is the
+    // head of today's, so the same bytes load the same knobs and no dwell.
+    LegacyPayload head{};
+    std::memcpy(head.data(), payload.data(), head.size());
+    writeLegacyBlob(PatternPresetStore::kBlobVersionNoDwell, 7, 2, "pre-dwell", head);
+    static PatternPresetStore st;
+    REQUIRE(st.decode(g_legacyBlob));
+    CHECK(st.generation() == 8);
+    REQUIRE(st.slot(2) != nullptr);
+    PatternSettings c;
+    c.ap.setBase(advpat::DWELL_CREST, 500);   // a load overwrites, never keeps
+    c.applyPreset(st.slot(2)->payload);
+    CHECK(c.ap.dwell_crest.value == 0);
+    CHECK(c.ap.dwell_trough.value == 0);
+    CHECK_FALSE(c.ap.dwell_crest.modifier.active());
+    CHECK_FALSE(c.ap.dwell_trough.modifier.active());
+    CHECK(c.ap.in_speed.value == a.ap.in_speed.value);
+    CHECK(c.ap.byId(advpat::SPEED_IN)->modifier == a.ap.byId(advpat::SPEED_IN)->modifier);
+
+    // Re-encoded it is a current blob, and stays one.
+    REQUIRE(st.encode(g_presetBlob) == g_presetBlob.size());
+    static PatternPresetStore again;
+    REQUIRE(again.decode(g_presetBlob));
+    CHECK(again.generation() == st.generation());
+    CHECK(again.slot(2)->payload == st.slot(2)->payload);
 }

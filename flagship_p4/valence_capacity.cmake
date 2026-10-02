@@ -6,9 +6,11 @@
 # values would be two Catalog32 types (ODR), and nothing would say so.
 #
 # Sizing (val-9u0.5, recomputed 2026-10-02 for the 32-id slice of RFC-076):
-# the machine keeps the 48 / 200 / 160 / 192 budget it had (42 entries, 192
-# layout, 107 schema, 164 labels, 24,322 B encoded with the power channel), and
-# each accessory gets the per-accessory budget below. The accessory count is
+# the machine budget is 48 / 216 / 160 / 192. Layout rose from 200 with the
+# RFC-095 dwells (val-091.67: 17 layout fields), which would otherwise have
+# cost an accessory. Machine use is 44 entries, 210 layout, 123 schema and
+# 25,659 B encoded [verified 2026-10-02 -- valencesim headroom line]. Each
+# accessory gets the per-accessory budget below. The accessory count is
 # the most that keeps the total entries at or under catalog_max_entries (256),
 # the floor every client is built to handle: (256 - 48) / 31 = 6.
 # The encode scratch keeps the 80% headroom floor over the machine's 26,214 B
@@ -31,7 +33,7 @@ math(EXPR NUCLEUS_ACCESSORY_SAFE_FIELDS
 set(NUCLEUS_ACCESSORY_CATALOG_BYTES 5120)
 
 math(EXPR _entries "48 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_ENTRIES}")
-math(EXPR _layout  "200 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LAYOUT_FIELDS}")
+math(EXPR _layout  "216 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LAYOUT_FIELDS}")
 math(EXPR _schema  "160 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_SCHEMA_FIELDS}")
 math(EXPR _labels  "192 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LABELS}")
 math(EXPR _safe    "${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_SAFE_FIELDS}")

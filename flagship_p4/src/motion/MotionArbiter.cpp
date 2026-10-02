@@ -554,6 +554,10 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.plan_vel       = s.vel;
     c.plan_duration_us = uint32_t(s.duration_s * 1e6f);
     c.plan_elapsed_us  = uint32_t(s.elapsed_s * 1e6f);
+    // An RFC-095 dwell is one of these: the generator sends it as a hold
+    // segment so a client reads a live plan, never a stalled source.
+    c.plan_hold = c.busy && s.mode == uint8_t(kinetic::Mode::Waveform) &&
+                  std::fabs(s.target - s.start) < limits::segment_dwell_span;
     c.plans          = s.plans;
     c.failures       = s.failures;
     c.anomalies      = _anomalies;

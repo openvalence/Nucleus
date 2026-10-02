@@ -10,7 +10,7 @@
 // - PERSISTED STATE IS FOUR NVS BLOBS in namespace "valence", one per concern:
 //   "cfg" (StoredState.h: 0x1000, 0x1030 and 0x1120-0x1122 with cfg_gen, 86 B),
 //   "presets" (PatternPresetStore: the 24 slots with their generation,
-//   1,735 B), "trust" (the §12.3 trust ledger, tokens included, at most
+//   2,119 B), "trust" (the §12.3 trust ledger, tokens included, at most
 //   trust_ledger_max_bytes) and "pgest" (the power-cycle gesture counter,
 //   1 B); TrustStore.h owns the last two. The device owns what the bytes
 //   mean; this file owns only the byte IO. "cfg" and "presets" load BEFORE
@@ -25,7 +25,7 @@
 //   data header, 3 data), so ~25 writes fill a page and cost one sector erase;
 //   at the 2 s floor that is one erase per ~50 s, and the 100,000-cycle floor
 //   is ~58 days of tuning without pause on ONE page, before NVS wear-levels
-//   across its five. "presets" costs ~57 entries, ~2 writes a page, but a save
+//   across its five. "presets" costs ~69 entries, ~1.8 writes a page, but a save
 //   is a deliberate operator act, not a stream. A slider drag is one write.
 //   "trust" is written only when its bytes change (grants, approvals,
 //   revocations, a roster label), at most once per 2 s; "pgest" once at boot

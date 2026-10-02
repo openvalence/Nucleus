@@ -11,11 +11,15 @@
 // - Every setter clamps to the catalog's own bounds (ValenceCatalog.h,
 //   pattern-state / pattern-advanced / pattern-adv-mod-*), so the ECHO a
 //   delegate builds from the fields afterward is the post-clamp truth.
-// - The preset payload layout is wire-visible through BLOB_REQ exports and is
-//   the archive's: 4 base scalars then 6 modulators of 6 bytes, BaseId
-//   order. Each modulator's first byte is its amount, 0 = no modulation
-//   (RFC-066); the retired 100 = off bytes migrate through
-//   migrateRetiredAmount() and are never read as they stand.
+// - The preset payload layout is wire-visible through BLOB_REQ exports: 4
+//   base scalars, the six percent knobs' modulators (6 bytes each, BaseId
+//   order), the two dwells (u16 little-endian, 0.01 strokes, RFC-095), then
+//   the dwells' two modulators. A payload stored before RFC-095 is the first
+//   kLegacyPresetPayloadBytes of this one and the store zero-extends it,
+//   which reads as no dwell and no dwell modulation. Each modulator's first
+//   byte is its amount, 0 = no modulation (RFC-066); the retired 100 = off
+//   bytes migrate through migrateRetiredAmount() and are never read as they
+//   stand.
 // See: PatternEngine.h, ValencePattern.h, Valence SPEC.md §8.7, §11.3,
 // RENDERING.md §10.1
 
@@ -43,8 +47,17 @@ struct PatternSettings {
     // The seven core StrokeEngine patterns, index-aligned with the catalog's
     // pattern-state option labels.
     static constexpr uint8_t kPatternCount = 7;
-    static constexpr size_t  kPresetPayloadBytes = 4 + 6 * advpat::BASE_COUNT;
+    static constexpr size_t  kLegacyPresetPayloadBytes = 4 + 6 * advpat::PERCENT_BASE_COUNT;
+    static constexpr size_t  kPresetDwellAt = kLegacyPresetPayloadBytes;
+    static constexpr size_t  kPresetPayloadBytes = 4 + 6 * advpat::BASE_COUNT + 2 * 2;
     using PresetPayload = std::array<uint8_t, kPresetPayloadBytes>;
+
+    // Where BaseId `id`'s modulator sits in a payload.
+    static constexpr size_t presetModAt(uint8_t id) {
+        return id < advpat::PERCENT_BASE_COUNT
+                   ? 4 + size_t(id) * 6
+                   : kPresetDwellAt + 4 + size_t(id - advpat::PERCENT_BASE_COUNT) * 6;
+    }
 
     // Defaults are the catalog's `default` annotations: nothing moves until an
     // operator dials in a speed, a depth and a stroke.
@@ -79,18 +92,22 @@ struct PatternSettings {
         return true;
     }
 
-    // The live advanced set a preset captures: speeds, accels, six modulators.
-    // Never the depths or master speed -- a preset changes stroke character,
-    // never the operator's window or throttle.
+    // The live advanced set a preset captures: speeds, accels, dwells, every
+    // modulator. Never the depths or master speed -- a preset changes stroke
+    // character, never the operator's window or throttle.
     PresetPayload capturePreset() const {
         PresetPayload p{};
-        p[0] = ap.in_speed.value;
-        p[1] = ap.out_speed.value;
-        p[2] = ap.in_accel.value;
-        p[3] = ap.out_accel.value;
+        p[0] = uint8_t(ap.in_speed.value);
+        p[1] = uint8_t(ap.out_speed.value);
+        p[2] = uint8_t(ap.in_accel.value);
+        p[3] = uint8_t(ap.out_accel.value);
+        p[kPresetDwellAt + 0] = uint8_t(ap.dwell_crest.value & 0xFFu);
+        p[kPresetDwellAt + 1] = uint8_t(ap.dwell_crest.value >> 8);
+        p[kPresetDwellAt + 2] = uint8_t(ap.dwell_trough.value & 0xFFu);
+        p[kPresetDwellAt + 3] = uint8_t(ap.dwell_trough.value >> 8);
         for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
             const advpat::Modifier& m = ap.byId(id)->modifier;
-            const size_t b = 4 + size_t(id) * 6;
+            const size_t b = presetModAt(id);
             p[b + 0] = m.amount;
             p[b + 1] = m.in_step;
             p[b + 2] = m.in_wait;
@@ -108,8 +125,10 @@ struct PatternSettings {
         ap.setBase(advpat::SPEED_OUT, p[1]);
         ap.setBase(advpat::ACCEL_IN, p[2]);
         ap.setBase(advpat::ACCEL_OUT, p[3]);
+        ap.setBase(advpat::DWELL_CREST, p[kPresetDwellAt + 0] | (p[kPresetDwellAt + 1] << 8));
+        ap.setBase(advpat::DWELL_TROUGH, p[kPresetDwellAt + 2] | (p[kPresetDwellAt + 3] << 8));
         for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
-            const size_t b = 4 + size_t(id) * 6;
+            const size_t b = presetModAt(id);
             ap.byId(id)->modifier.set(p[b + 0], p[b + 1], p[b + 2], p[b + 3], p[b + 4], p[b + 5]);
         }
     }
@@ -117,10 +136,11 @@ struct PatternSettings {
     // A payload written under the retired 100 = off amount, re-expressed in
     // RFC-066's 0 = no modulation so the same preset strokes the same:
     // amount = 100 - stored. A stored byte over 100 loaded as 100 (off) under
-    // the old clamp, so it migrates to 0.
+    // the old clamp, so it migrates to 0. Only the six modulators such a
+    // payload had: the zero-extended dwell modulators already mean none.
     static void migrateRetiredAmount(PresetPayload& p) {
-        for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
-            uint8_t& a = p[4 + size_t(id) * 6];
+        for (uint8_t id = 0; id < advpat::PERCENT_BASE_COUNT; ++id) {
+            uint8_t& a = p[presetModAt(id)];
             a = uint8_t(100 - (a > 100 ? 100 : a));
         }
     }

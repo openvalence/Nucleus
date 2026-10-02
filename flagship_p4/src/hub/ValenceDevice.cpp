@@ -40,6 +40,9 @@ static_assert(kPresetCapacity == PatternPresetStore::kCapacity, "catalog preset 
 static_assert(kPresetNameMax == PatternPresetStore::kNameMax, "catalog preset name_max drifted");
 static_assert(kPresetPayloadBytes == PatternPresetStore::kPayloadBytes, "catalog preset per_item_max drifted");
 static_assert(kApBaseCount == advpat::BASE_COUNT, "catalog modulator count drifted");
+static_assert(kApPercentBaseCount == advpat::PERCENT_BASE_COUNT, "catalog percent knob count drifted");
+static_assert(apBaseKey(advpat::DWELL_CREST) == 46 && apBaseKey(advpat::DWELL_TROUGH) == 47,
+              "RFC-095 dwell writer keys drifted");
 static_assert([] {
     for (size_t i = 0; i < kSourceLabels.size(); ++i)
         if (std::string_view(kSourceLabels[i]) != kMotionSourceNames[i]) return false;
@@ -261,7 +264,9 @@ void publishPlanStrip(Hub& hub, const MotionCensus& m) {
     // flags: active, live_mode, grad_mode. live_mode and grad_mode named a
     // legacy interpolator split that has no counterpart in this engine.
     packU8(buf, n, m.busy ? 0x01u : 0u);
-    packU8(buf, n, m.mode);                            // style: idle/waveform/chase/settle
+    // style: kinetic::Mode, or `hold` for a hold segment, so a long dwell
+    // reads as a live plan and never as a stall.
+    packU8(buf, n, m.plan_hold ? kPlanStyleHold : m.mode);
     packU16(buf, n, wireU16(m.plan_start, 10000.0f));
     packU16(buf, n, wireU16(m.plan_end, 10000.0f));
     packU16(buf, n, wireU16(m.plan_cur, 10000.0f));
@@ -382,11 +387,39 @@ void publishKineticCards(Hub& hub, const MotionTuning& t, uint8_t cards) {
 // these channels move on session-volatile writes that bump nothing, and an
 // enabled_mask moves with homed and e-stop, which no write announces.
 
-// The six modulators in BaseId order, which is NOT ascending channel order: the
-// catalog puts them speed-in/out, accel-in/out, depth-1/2 (ValenceCatalog.h).
+// The eight modulators in BaseId order, which is NOT ascending channel order:
+// the catalog puts them speed-in/out, accel-in/out, depth-1/2, crest/trough
+// (ValenceCatalog.h).
 constexpr std::array<uint16_t, advpat::BASE_COUNT> kModChannels{
     ch::pattern_adv_mod_depth1,   ch::pattern_adv_mod_depth2,  ch::pattern_adv_mod_speedin,
-    ch::pattern_adv_mod_speedout, ch::pattern_adv_mod_accelin, ch::pattern_adv_mod_accelout};
+    ch::pattern_adv_mod_speedout, ch::pattern_adv_mod_accelin, ch::pattern_adv_mod_accelout,
+    ch::pattern_adv_mod_crest,    ch::pattern_adv_mod_trough};
+
+// A base control's wire value as the generator stores it: a percent knob, or
+// a dwell in hundredths of a stroke (RFC-095). setBase() clamps again.
+int apBaseOf(uint8_t id, float v) {
+    return id < advpat::PERCENT_BASE_COUNT ? knobOf(v) : int(wholeIn(v * 100.0f, 0.0f, 65535.0f));
+}
+
+// The applied value of one 0x3210 knob key (never kApRunKey), for its ECHO.
+IntentValue apEchoOf(const advpat::Settings& ap, uint8_t key) {
+    if (key == 2) return IntentValue::ofU64(ap.master.value);
+    for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
+        const advpat::BaseControl& b = *ap.byId(id);
+        if (key == apBaseKey(id)) {
+            return id < advpat::PERCENT_BASE_COUNT ? IntentValue::ofU64(b.value)
+                                                   : IntentValue::ofF32(float(b.value) / 100.0f);
+        }
+        const uint8_t at = apModKeyBase(id);
+        if (key >= at && key < at + 6) {
+            const advpat::Modifier& m = b.modifier;
+            const std::array<uint8_t, 6> mod{m.amount, m.in_step, m.in_wait,
+                                              m.out_step, m.out_wait, m.offset};
+            return IntentValue::ofU64(mod[size_t(key - at)]);
+        }
+    }
+    return IntentValue::ofU64(0);
+}
 
 template <size_t N>
 void publishIfChanged(Hub& hub, uint16_t id, const std::array<std::byte, N>& buf, size_t written,
@@ -722,27 +755,27 @@ Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
     return Ret::ok(applied);
 }
 
-// Keys 2-44 are knobs, refused only while e-stop is latched (when every
-// pattern-advanced and modulator enabled_mask bit drops); none moves the
+// Keys 2-44 and 46-59 are knobs, refused only while e-stop is latched (when
+// every pattern-advanced and modulator enabled_mask bit drops); none moves the
 // machine by itself, so none is gated on homed. Key 45 `running` is the
 // advanced generator's start and stop, gated as 0x3200's running is, plus
-// SOURCE_CONFLICT while the classic generator holds the rail (RFC-093). Key 1
+// SOURCE_CONFLICT while the classic generator holds the rail (RFC-093). Keys
+// 46 and 47 are the dwells (RFC-095) in strokes, stored in hundredths. Key 1
 // is the retired mode switch: a permanent gap, never read, never echoed. Base
 // controls apply in key order (max depth before min depth), each re-coupling
 // the depth pair, and the echo reads back AFTER all of them.
 Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
     const MotionCensus c = motionCensus();
     if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
-    constexpr uint8_t kLastKnob = uint8_t(9 + 6 * advpat::BASE_COUNT - 1);   // 44
-    constexpr uint8_t kRunKey = 45;
     bool any = false;
-    for (uint8_t key = 2; key <= kLastKnob; ++key) {
+    for (uint8_t key = 2; key <= kApLastKey; ++key) {
+        if (key == kApRunKey) continue;
         const auto* f = findField(requested, key);
         if (!f) continue;
         if (!numberOf(f)) return Ret::err(NackCode::INVALID_VALUE);
         any = true;
     }
-    const auto* run = findField(requested, kRunKey);
+    const auto* run = findField(requested, kApRunKey);
     if (run && !boolOf(run)) return Ret::err(NackCode::INVALID_VALUE);
     if (!any && !run) return Ret::err(NackCode::INVALID_VALUE);
     const bool start = run && *boolOf(run);
@@ -754,12 +787,12 @@ Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
     advpat::Settings& ap = _pat.ap;
     if (const auto* f = findField(requested, 2)) ap.master.set(knobOf(*numberOf(f)));
     for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id)
-        if (const auto* f = findField(requested, uint8_t(3 + id))) ap.setBase(id, knobOf(*numberOf(f)));
+        if (const auto* f = findField(requested, apBaseKey(id))) ap.setBase(id, apBaseOf(id, *numberOf(f)));
     for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
         advpat::Modifier& m = ap.byId(id)->modifier;
         std::array<int, 6> v{m.amount, m.in_step, m.in_wait, m.out_step, m.out_wait, m.offset};
         for (uint8_t sub = 0; sub < 6; ++sub)
-            if (const auto* f = findField(requested, uint8_t(9 + 6 * id + sub))) v[sub] = knobOf(*numberOf(f));
+            if (const auto* f = findField(requested, uint8_t(apModKeyBase(id) + sub))) v[sub] = knobOf(*numberOf(f));
         m.set(v[0], v[1], v[2], v[3], v[4], v[5]);
     }
     if (run) {
@@ -770,22 +803,11 @@ Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
 
     IntentValueMap applied{};
     uint32_t n = 0;
-    for (uint8_t key = 2; key <= kLastKnob; ++key) {
+    for (uint8_t key = 2; key <= kApLastKey; ++key) {
         if (!findField(requested, key)) continue;
-        uint64_t out = 0;
-        if (key == 2) {
-            out = ap.master.value;
-        } else if (key < 9) {
-            out = ap.byId(uint8_t(key - 3))->value;
-        } else {
-            const advpat::Modifier& m = ap.byId(uint8_t((key - 9) / 6))->modifier;
-            const std::array<uint8_t, 6> mod{m.amount, m.in_step, m.in_wait,
-                                              m.out_step, m.out_wait, m.offset};
-            out = mod[size_t((key - 9) % 6)];
-        }
-        applied.fields[n++] = {key, IntentValue::ofU64(out)};
+        applied.fields[n++] = {key, key == kApRunKey ? IntentValue::ofBool(_pat.adv_running)
+                                                     : apEchoOf(ap, key)};
     }
-    if (run) applied.fields[n++] = {kRunKey, IntentValue::ofBool(_pat.adv_running)};
     applied.count = n;
     return Ret::ok(applied);
 }
@@ -877,21 +899,26 @@ void ValenceDevice::publishPatternPlane(const MotionCensus& mo) {
     }
     {
         // enabled_mask: bits 0-6 (knobs) drop under e-stop, bit 7 (running)
-        // also unhomed, applyPatternAdvanced()'s own refusals.
+        // also unhomed, applyPatternAdvanced()'s own refusals. enabled_mask2:
+        // the two dwells, knobs, e-stop alone.
         const advpat::Settings& ap = p.ap;
         const uint8_t mask = mo.estop ? 0x00u : uint8_t(0x7Fu | (mo.homed ? 0x80u : 0x00u));
-        std::array<std::byte, 10> buf{};
+        const uint8_t mask2 = mo.estop ? 0x00u : 0x03u;
+        std::array<std::byte, 15> buf{};
         size_t n = 0;
         packU8(buf, n, 0);   // ap_mode_reserved
-        packU8(buf, n, ap.master.value);
-        packU8(buf, n, ap.max_depth.value);
-        packU8(buf, n, ap.min_depth.value);
-        packU8(buf, n, ap.in_speed.value);
-        packU8(buf, n, ap.out_speed.value);
-        packU8(buf, n, ap.in_accel.value);
-        packU8(buf, n, ap.out_accel.value);
+        packU8(buf, n, uint8_t(ap.master.value));
+        packU8(buf, n, uint8_t(ap.max_depth.value));
+        packU8(buf, n, uint8_t(ap.min_depth.value));
+        packU8(buf, n, uint8_t(ap.in_speed.value));
+        packU8(buf, n, uint8_t(ap.out_speed.value));
+        packU8(buf, n, uint8_t(ap.in_accel.value));
+        packU8(buf, n, uint8_t(ap.out_accel.value));
         packU8(buf, n, mask);
         packU8(buf, n, p.adv_running ? 1 : 0);
+        packU16(buf, n, ap.dwell_crest.value);
+        packU16(buf, n, ap.dwell_trough.value);
+        packU8(buf, n, mask2);
         publishIfChanged(hub, ch::pattern_advanced, buf, n, _sentApBase, force);
     }
     for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {

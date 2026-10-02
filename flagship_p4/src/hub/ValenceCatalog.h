@@ -93,24 +93,27 @@ inline constexpr uint16_t kinetic_waveform = 0x1122;  // STATE·motion, family 2
 inline constexpr uint16_t drive_tune       = 0x1130;  // STATE·motion, family 3 member 0 (master)
 // ---- Advanced pattern — off the dead /api/pattern HTTP surface, onto Valence
 // Same flattened-entry budget split as 0x008B/C/D. AdvancedPattern.h's real
-// parameter set is 8 base controls (advpat::Settings) plus a 6-field cyclic
-// Modifier per base control (advpat::BASE_COUNT = 6), 44 settings total. A
+// parameter set is the master knob, 8 base controls (advpat::BASE_COUNT) and
+// a 6-field cyclic Modifier per base control, 58 settings with `running`. A
 // fully-annotated 50-field entry encodes to ~8-10 KB (catalog_max_entry_bytes);
 // fitting in kMaxFields (64) and being affordable in one entry are different
 // constraints, so this splits by subsystem — one channel per base control's
 // modifier (6 fields each, well under the 8-bit enabled_mask) — same
 // principle as the kinetic_limits/kinetic_chase/kinetic_waveform split.
-inline constexpr uint16_t pattern_advanced          = 0x1210;  // STATE·pattern, family 1 member 0 (master; was 0x1201) — 7 base controls + running
-// The six fray-d modulators (RFC-066): ONE family (domain=pattern, family=1),
-// members 1-6. Member order is speed-in/out, accel-in/out, depth-1/2 — NOT
-// advpat::BaseId order (depth,depth,speedin,speedout,accelin,accelout) — see
-// kModChannels in ValenceDevice.cpp, which maps between the two.
+inline constexpr uint16_t pattern_advanced          = 0x1210;  // STATE·pattern, family 1 member 0 (master; was 0x1201) — 9 base controls + running
+// The eight fray-d modulators (RFC-066): ONE family (domain=pattern, family=1),
+// members 1-8. Member order is speed-in/out, accel-in/out, depth-1/2, then the
+// two dwells (RFC-095) — NOT advpat::BaseId order (depth,depth,speedin,
+// speedout,accelin,accelout,crest,trough) — see kModChannels in
+// ValenceDevice.cpp, which maps between the two.
 inline constexpr uint16_t pattern_adv_mod_speedin   = 0x1211;  // STATE·pattern, family 1 member 1 (was 0x1204)
 inline constexpr uint16_t pattern_adv_mod_speedout  = 0x1212;  // STATE·pattern, family 1 member 2 (was 0x1205)
 inline constexpr uint16_t pattern_adv_mod_accelin   = 0x1213;  // STATE·pattern, family 1 member 3 (was 0x1206)
 inline constexpr uint16_t pattern_adv_mod_accelout  = 0x1214;  // STATE·pattern, family 1 member 4 (was 0x1207)
 inline constexpr uint16_t pattern_adv_mod_depth1    = 0x1215;  // STATE·pattern, family 1 member 5 (was 0x1202) — advpat::DEPTH_MAX modifier
 inline constexpr uint16_t pattern_adv_mod_depth2    = 0x1216;  // STATE·pattern, family 1 member 6 (was 0x1203) — advpat::DEPTH_MIN modifier
+inline constexpr uint16_t pattern_adv_mod_crest     = 0x1217;  // STATE·pattern, family 1 member 7 — advpat::DWELL_CREST modifier (RFC-095)
+inline constexpr uint16_t pattern_adv_mod_trough    = 0x1218;  // STATE·pattern, family 1 member 8 — advpat::DWELL_TROUGH modifier (RFC-095)
 inline constexpr uint16_t move             = 0x3100;  // INTENT·motion, family 0 member 0 (master)
 inline constexpr uint16_t config_set       = 0x3000;  // INTENT·machine, family 0 member 0 (master), MIRROR of machine_config
 inline constexpr uint16_t pattern_cmd      = 0x3200;  // INTENT·pattern, family 0 member 0 (master), MIRROR of pattern_state
@@ -119,7 +122,7 @@ inline constexpr uint16_t modes_set        = 0x3030;  // INTENT·machine, family
 inline constexpr uint16_t kinetic_set      = 0x3120;  // INTENT·motion, family 2 member 0, MIRROR of the kinetic_* family (was 0x3102)
 inline constexpr uint16_t machine_admin    = 0x30F0;  // INTENT·machine, family F member 0 = admin (was 0x3002)
 inline constexpr uint16_t drive_set        = 0x3130;  // INTENT·motion, family 3 member 0, MIRROR of drive_tune
-// Shared writer behind ALL SEVEN pattern-advanced STATE channels — same
+// Shared writer behind ALL NINE pattern-advanced STATE channels — same
 // "one settingChannel, many cards" pattern as kinetic_set. MIRROR of
 // pattern_advanced (family 1 member 0 on both sides).
 inline constexpr uint16_t pattern_advanced_cmd = 0x3210;  // INTENT·pattern, family 1 member 0 (was 0x3201)
@@ -139,16 +142,44 @@ inline constexpr uint16_t pattern_presets        = 0x5220;  // STORE·pattern, f
 // fails the build, not the wire.
 inline constexpr uint8_t kPresetCapacity = 24;
 inline constexpr uint8_t kPresetNameMax = 32;
-inline constexpr uint8_t kPresetPayloadBytes = 40;
+inline constexpr uint8_t kPresetPayloadBytes = 56;
 // The preset store's identity, published in its STORE descriptor, carried as
 // store_id (RFC-070) by its roster and writer, and answered by
 // ValenceDevice::readBlob(). store_id 1 is the trust ledger.
 inline constexpr uint8_t kPresetStoreId = 2;
 inline constexpr const char* kPresetKind = "pattern.frayd";
 
-// MIRROR of advpat::BASE_COUNT (flagship_p4/src/patterns/AdvancedPattern.h),
-// same rule and the same static_assert home as the preset mirror above.
-inline constexpr uint8_t kApBaseCount = 6;
+// MIRROR of advpat::BASE_COUNT and advpat::PERCENT_BASE_COUNT
+// (flagship_p4/src/patterns/AdvancedPattern.h), same rule and the same
+// static_assert home as the preset mirror above.
+inline constexpr uint8_t kApBaseCount = 8;
+inline constexpr uint8_t kApPercentBaseCount = 6;
+
+// Where base control `base` (advpat::BaseId) lives on the wire. The six
+// percent knobs sit before 0x1210's first enabled_mask and `running`; the two
+// dwells (RFC-095) are appended after them at the tail (SPEC 5.4), so every
+// older offset and key holds. The catalog builders below and
+// ValenceDevice::applyPatternAdvanced both read these; nothing restates them.
+// 0x1210 layout index of the base control.
+constexpr uint16_t apBaseLayoutIndex(uint8_t base) {
+    return base < kApPercentBaseCount ? uint16_t(2 + base) : uint16_t(10 + (base - kApPercentBaseCount));
+}
+// 0x3210 key writing the base control.
+constexpr uint8_t apBaseKey(uint8_t base) {
+    return base < kApPercentBaseCount ? uint8_t(3 + base) : uint8_t(46 + (base - kApPercentBaseCount));
+}
+// 0x3210 key of the base control's modulator's first field; six in a row.
+constexpr uint8_t apModKeyBase(uint8_t base) {
+    return base < kApPercentBaseCount ? uint8_t(9 + 6 * base)
+                                      : uint8_t(48 + 6 * (base - kApPercentBaseCount));
+}
+inline constexpr uint8_t kApRunKey = 45;
+inline constexpr uint8_t kApLastKey = uint8_t(apModKeyBase(kApBaseCount - 1) + 5);
+
+// plan-strip `style` option for a hold: a timed plan whose start is its end
+// (SPEC 9.6 hold segment, an RFC-095 dwell among them). Indices below it are
+// kinetic::Mode's.
+inline constexpr uint8_t kPlanStyleHold = 4;
 
 // MIRROR of kMotionSourceNames (flagship_p4/src/motion/ValenceMotion.h),
 // indexed by source id: control-owner's option labels. Same rule and the
@@ -941,7 +972,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .group = "Active plan",
                       .desc = "Planning mode of the motion core",
                       .role = roles::plan_style},
-                     {"idle", "waveform", "chase", "settle"});
+                     {"idle", "waveform", "chase", "settle", "hold"});
     c.addLayoutField({.name = "start_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
                       .group = "Active plan", .desc = "Start of the current plan",
                       .role = roles::plan_start});
@@ -1537,8 +1568,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     //
     // Byte 0 is the retired mode switch, kept as hidden padding so bytes 1..8
     // keep their offsets; its writer key 1 on 0x3210 is a permanent gap.
-    // `running` is appended after enabled_mask, writer key 45.
-    //   [1 pad + 7 fields + 1 mask + 1 running = 10 B]
+    // `running` is appended after enabled_mask, writer key 45. The two dwells
+    // (RFC-095, u16 at 0.01 strokes, writer keys 46 and 47) follow, gated by a
+    // second enabled_mask whose bits continue the first's numbering (SPEC
+    // 8.8: bit 0 is the ninth setting field).
+    //   [1 pad + 7 fields + 1 mask + 1 running + 2 x 2 dwells + 1 mask = 15 B]
     auto addPatternAdvanced = [&]() {
     c.addEntry({.id = ch::pattern_advanced, .name = "pattern-advanced",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1634,18 +1668,46 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .group = "Advanced pattern",
                       .desc = "Run the advanced generator",
                       .role = roles::advgen_running,
-                      .step = 1.0f, .settingKey = 45, .hasSettingKey = true, .hasStep = true,
+                      .step = 1.0f, .settingKey = kApRunKey, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control});
+    // Unit "strokes" with unit_id count, as the modulators' timing fields: the
+    // registry has no stroke unit.
+    c.addLayoutField({.name = "dwell_crest", .type = PackedFieldType::u16, .unit = "strokes", .scale = 100.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 655.35f,
+                      .dflt = SettingDefault::ofFloat(0.0f),
+                      .group = "Dwell",
+                      .desc = "Hold at the deepest point, in strokes",
+                      .role = roles::advgen_dwell_crest,
+                      .step = 0.01f, .settingKey = apBaseKey(6), .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::count});
+    c.addLayoutField({.name = "dwell_trough", .type = PackedFieldType::u16, .unit = "strokes", .scale = 100.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 655.35f,
+                      .dflt = SettingDefault::ofFloat(0.0f),
+                      .group = "Dwell",
+                      .desc = "Hold at the shallowest point, in strokes",
+                      .role = roles::advgen_dwell_trough,
+                      .step = 0.01f, .settingKey = apBaseKey(7), .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::count});
+    // Bits 0-1 are setting fields 8 and 9, the dwells: knobs, so e-stop alone
+    // drops them, as bits 0-6 of the first mask.
+    c.addBitfieldField({.name = "enabled_mask2", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f,
+                        .desc = "Settings the machine accepts right now",
+                        .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
+                       {"dwell_crest", "dwell_trough"});
     };
 
     // ---- "pattern-adv-mod-*" — STATE, background ----------------------------
-    // The six MODULATORS (RFC-066, SPEC 8.8 `mod.*`), one per base control
+    // The eight MODULATORS (RFC-066, SPEC 8.8 `mod.*`), one per base control
     // (advpat::Modifier x advpat::BASE_COUNT). A modulator swings its control
     // by `amount` through a cycle: `in_step` strokes rising, `in_wait` held,
     // `out_step` falling, `out_wait` at rest, the whole cycle shifted by
     // `offset` strokes. One modulator per entry, attached by the entry-level
     // mod_target to the 0x1210 field it rides; its mod.* roles bind within the
-    // entry and repeat across the six by design (SPEC 8.8 cardinality).
+    // entry and repeat across the eight by design (SPEC 8.8 cardinality).
     //
     // The five timing fields carry unit "strokes" on both the layout and the
     // writer's schema (SPEC 8.8: a time-like mod field carries its clock in
@@ -1655,17 +1717,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // stored under the retired 100 = off meaning are migrated on load
     // (PatternPresetStore blob version 1), never read under this one.
     //
-    // `base` is the advpat::BaseId. 0x1210 lays the six base controls out at
-    // layout index 2 + base, and the shared writer ch::pattern_advanced_cmd
-    // keys this entry's six fields 9 + 6*base onward in field order, the
-    // arithmetic ValenceDevice::applyPatternAdvanced runs in reverse; the
-    // three must move together. Category control, so all seven
-    // advanced-pattern cards merge into one tab; `advanced`-flagged, the
-    // deep-customization layer under the base controls.
-    //   [1*6 fields + 1 mask = 7 B, x6 channels]
+    // `base` is the advpat::BaseId. 0x1210 lays the base control out at
+    // apBaseLayoutIndex(base), and the shared writer ch::pattern_advanced_cmd
+    // keys this entry's six fields apModKeyBase(base) onward in field order,
+    // the arithmetic ValenceDevice::applyPatternAdvanced runs in reverse.
+    // Category control, so all nine advanced-pattern cards merge into one
+    // tab; `advanced`-flagged, the deep-customization layer under the base
+    // controls.
+    //   [1*6 fields + 1 mask = 7 B, x8 channels]
     auto addApModifierChannel = [&](uint16_t id, const char* wireName, const char* group,
                                     uint8_t base) {
-        const uint8_t keyBase = uint8_t(9 + 6 * base);
+        const uint8_t keyBase = apModKeyBase(base);
         c.addEntry({.id = id, .name = wireName,
                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
                     .access = AccessLevel::watch, .maxRateHz = 0.0f,
@@ -1674,7 +1736,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                     .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd,
                     .hasRank = true, .rank = valence::ui_ranks::advanced,
                     .hasModTarget = true, .modTargetChannel = ch::pattern_advanced,
-                    .modTargetField = uint16_t(2 + base)});
+                    .modTargetField = apBaseLayoutIndex(base)});
         c.addLayoutField({.name = "amount", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
@@ -1758,11 +1820,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // by being published here rather than legislated.
     //
     // perItemMax/nameMax are declared, not measured against the wire: the
-    // payload is opaque device-defined bytes (in/out speed, in/out accel, six
-    // modifier blocks — the SAME fields the retired handler's `def` carried,
-    // "never depths or master speed"). See PatternPresetStore.h for the
-    // 40-byte layout and SlopDriveHubDelegate::applyIntent's 0x0108 case for
-    // the encode/decode.
+    // payload is opaque device-defined bytes (in/out speed, in/out accel, the
+    // two dwells, eight modifier blocks — "never depths or master speed").
+    // See PatternSettings.h for the 56-byte layout and
+    // ValenceDevice::applyPresets for the encode/decode.
     auto addPatternPresets = [&]() {
     c.addEntry({.id = ch::pattern_presets, .name = "pattern-presets",
                 .cls = ChannelClass::STORE, .dir = Direction::h2c,
@@ -1785,7 +1846,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // slots left on this device before this channel existed (189/200 used),
     // and 3 header fields + 14 name fields needs 17. A client enumerates names
     // the same way it already does for the trust ledger: BLOB_REQ each slot
-    // (kPayloadBytes is tiny — 40 B — so kPresetCapacity fetches is cheap) or
+    // (kPayloadBytes is tiny — 56 B — so kPresetCapacity fetches is cheap) or
     // read the name back from a save/rename ECHO it sent itself. A generation
     // bump means "re-enumerate", exactly like 0x000D. store_id (RFC-070)
     // joins this roster, the 0x5220 store and the 0x3220 writer by one key.
@@ -2089,18 +2150,19 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "pattern-advanced-cmd" — INTENT, control, 20 Hz --------------------
-    // The single writer behind ALL SEVEN 0x008E..0x0094 advanced-pattern
+    // The single writer behind ALL NINE 0x1210..0x1218 advanced-pattern
     // cards. Same lean-schema convention as every other settings writer in
     // this catalog (config_set, pattern_cmd, modes_set, kinetic_set): the
     // user-facing text (desc/group/default/role) lives ONCE, on the STATE
     // side, so this channel carries only what a client needs to validate
     // before sending — name, type, unit, bounds.
     //
-    // Keys 2..8 mirror 0x1210's base controls. Keys 9..44 are 6-per-control
-    // blocks, base = 9 + 6*id with id in advpat::BaseId order (DEPTH_MAX=0
-    // .. ACCEL_OUT=5), matching 0x1211..0x1216; ValenceDevice.cpp's
-    // applyPatternAdvanced() runs the same arithmetic in reverse. Key 1 (the
-    // retired mode switch, RFC-093) is a permanent gap; key 45 is `running`.
+    // Keys 2..8 mirror 0x1210's master and percent knobs, 46..47 its dwells
+    // (RFC-095). Keys 9..44 and 48..59 are 6-per-control modulator blocks at
+    // apModKeyBase(id), id in advpat::BaseId order, matching 0x1211..0x1218;
+    // ValenceDevice.cpp's applyPatternAdvanced() runs the same arithmetic in
+    // reverse. Key 1 (the retired mode switch, RFC-093) is a permanent gap;
+    // key 45 is `running`.
     //
     // Session-volatile, same as 0x0102 pattern-cmd: cfg_gen does not bump.
     auto addPatternAdvancedCmd = [&]() {
@@ -2122,13 +2184,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     c.addSchemaField({.key = 8, .name = "out_accel", .type = CborFieldType::uint_t, .unit = "%",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
+    c.addSchemaField({.key = apBaseKey(6), .name = "dwell_crest", .type = CborFieldType::f32_t,
+                      .unit = "strokes", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 655.35f});
+    c.addSchemaField({.key = apBaseKey(7), .name = "dwell_trough", .type = CborFieldType::f32_t,
+                      .unit = "strokes", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 655.35f});
     // 6 keys per modulator (advpat::BaseId order): amount, in_step, in_wait,
-    // out_step, out_wait, offset: base = 9 + 6*id. Authoring order
+    // out_step, out_wait, offset, from apModKeyBase(id). Authoring order
     // doesn't need to be ascending here (the encoder sorts schema fields by
     // key before emitting), so a loop is safe where it would not be for the
     // addEntry() ordering above.
     for (uint8_t id = 0; id < kApBaseCount; ++id) {
-        const uint8_t base = uint8_t(9 + 6 * id);
+        const uint8_t base = apModKeyBase(id);
         c.addSchemaField({.key = uint8_t(base + 0), .name = "amount",    .type = CborFieldType::uint_t,
                           .unit = "%", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
         c.addSchemaField({.key = uint8_t(base + 1), .name = "in_step",   .type = CborFieldType::uint_t,
@@ -2142,7 +2208,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addSchemaField({.key = uint8_t(base + 5), .name = "offset",    .type = CborFieldType::uint_t,
                           .unit = "strokes", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     }
-    c.addSchemaField({.key = 45, .name = "running", .type = CborFieldType::bool_t, .unit = ""});
+    c.addSchemaField({.key = kApRunKey, .name = "running", .type = CborFieldType::bool_t, .unit = ""});
     };
 
     // ---- "pattern-presets-cmd" — INTENT, control ----------------------------
@@ -2176,8 +2242,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // build logic is wrapped in a lambda (`add*`) and the calls below are the
     // one place that has to stay ascending (encodeCatalog/etag require it,
     // §8.3). Core channels (0x0003-0x000E) are unaffected: they were already
-    // emitted above, in order, before any device channel. The six AP-modifier
-    // calls are in MEMBER order (speedin/out, accelin/out, depth1/2), NOT
+    // emitted above, in order, before any device channel. The eight AP-modifier
+    // calls are in MEMBER order (speedin/out, accelin/out, depth1/2,
+    // crest/trough), NOT
     // advpat::BaseId order — see the ch:: namespace comment on those
     // constants.
     //
@@ -2208,6 +2275,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         addApModifierChannel(ch::pattern_adv_mod_accelout, "pattern-adv-mod-accelout", "Accel out modifier", 5);  // 0x1214
         addApModifierChannel(ch::pattern_adv_mod_depth1,   "pattern-adv-mod-depth1",   "Depth 1 modifier",   0);   // 0x1215
         addApModifierChannel(ch::pattern_adv_mod_depth2,   "pattern-adv-mod-depth2",   "Depth 2 modifier",   1);   // 0x1216
+        addApModifierChannel(ch::pattern_adv_mod_crest,    "pattern-adv-mod-crest",    "Crest dwell modifier",  6);  // 0x1217
+        addApModifierChannel(ch::pattern_adv_mod_trough,   "pattern-adv-mod-trough",   "Trough dwell modifier", 7);  // 0x1218
         addPatternPresetsRoster();  // 0x1220 STATE·pattern, family 2 member 0
     }
     if (feat.has_motion) {

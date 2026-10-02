@@ -184,7 +184,7 @@ PatternPresetStore::Payload payload(uint8_t seed) {
     return p;
 }
 
-// The store is ~1.7 KB; the encoded blob the same. Statics keep both off the
+// The store is ~2.1 KB; the encoded blob the same. Statics keep both off the
 // test's stack, the habit the firmware needs.
 std::array<std::byte, PatternPresetStore::kBlobBytes> g_blob{};
 

@@ -17,6 +17,11 @@
 // - EVENT-DRIVEN, NEVER CLOCKED: one intent per half-stroke, planned by the
 //   arbiter at arrival. tick() only asks "is the next half-stroke due"; it
 //   computes no positions on a clock.
+// - A DWELL IS A HOLD SEGMENT (RFC-095, SPEC 9.6): the bound re-commanded as
+//   a timed intent, never a silent gap. The plan strip then shows a live plan
+//   whose start is its end, and kinetic's activity clock keeps running, so a
+//   long dwell is neither a stall to a client nor a cold start to the next
+//   half. PAUSE freezes the dwell: what was not yet held is owed on resume.
 // - OWNED BY ONE TASK. apply() and tick() run on the host's pattern task (the
 //   sim's one thread). Settings arrive as whole copies (PatternSettings.h).
 // - The vendored patterns read millis(); ClassicGenerator sets the Arduino
@@ -84,6 +89,7 @@ protected:
         bool     moves = false;       // false: a zero-travel half-stroke, nothing to send
         float    target_mm = 0.0f;
         uint32_t duration_us = 0;
+        uint64_t hold_us = 0;         // dwell at target once it lands; read only when moves
     };
 
     // This generator's own run/stop flag in the shared settings.
@@ -107,6 +113,10 @@ private:
     bool     _active = false;
     uint64_t _due_us = 0;          // when the next half-stroke is due
     uint64_t _stroke_end_us = 0;   // when the half-stroke in flight lands
+    bool     _holding = false;     // the intent in flight is a dwell's hold segment
+    uint64_t _hold_owed_us = 0;    // dwell not yet sent: after a landing, the
+                                   // remainder past one segment's cap, or
+                                   // what a PAUSE froze
     bool     _have_prev = false;   // _prev_target_mm is the last stroke's target
     float    _prev_target_mm = 0.0f;
 };
@@ -143,6 +153,10 @@ private:
     bool running(const PatternSettings& s) const override { return s.adv_running; }
     bool moves(const PatternSettings& s) const override { return s.ap.master.value > 0; }
     std::optional<Stroke> next(uint64_t now_us, const PatternInputs& in) override;
+
+    // The previous moving half's duration, 0 when there is none: a dwell's
+    // stroke clock is this half plus that one (RFC-095).
+    uint32_t _prev_half_us = 0;
 };
 
 }  // namespace valence

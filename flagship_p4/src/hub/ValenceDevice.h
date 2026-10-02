@@ -254,7 +254,7 @@ private:
     // Last bytes SENT per pattern-plane channel: each republishes on a change
     // of its own bytes, including an enabled_mask that moved with homed/estop.
     std::array<std::byte, 20> _sentPatState{};
-    std::array<std::byte, 10> _sentApBase{};
+    std::array<std::byte, 15> _sentApBase{};
     std::array<std::array<std::byte, 7>, advpat::BASE_COUNT> _sentApMod{};
     std::array<std::byte, 4> _sentRoster{};
     bool _patPlaneSent = false;

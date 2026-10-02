@@ -70,6 +70,8 @@ BaseControl* Settings::byId(uint8_t id) {
         case SPEED_OUT: return &out_speed;
         case ACCEL_IN:  return &in_accel;
         case ACCEL_OUT: return &out_accel;
+        case DWELL_CREST:  return &dwell_crest;
+        case DWELL_TROUGH: return &dwell_trough;
         default:        return nullptr;
     }
 }
@@ -99,10 +101,12 @@ StrokePlan Settings::planStroke(uint32_t stroke_count) const {
         p.target_frac = max_depth.normalizedModified(sc);
         p.speed_frac  = master_ramp * in_speed.normalizedModified(sc);
         p.accel_knob  = in_accel.rampedModified(ACCEL_CURVE_EXP, sc);
+        p.dwell_strokes = dwell_crest.modifiedValue(sc) / 100.0f;
     } else {
         p.target_frac = min_depth.normalizedModified(sc);
         p.speed_frac  = master_ramp * out_speed.normalizedModified(sc);
         p.accel_knob  = out_accel.rampedModified(ACCEL_CURVE_EXP, sc);
+        p.dwell_strokes = dwell_trough.modifiedValue(sc) / 100.0f;
     }
     if (p.target_frac < 0.0f) p.target_frac = 0.0f;
     if (p.target_frac > 1.0f) p.target_frac = 1.0f;

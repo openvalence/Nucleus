@@ -1,6 +1,6 @@
 #pragma once
 
-// AdvancedPattern -- the fray-d Advanced Penetration stroke math: six base
+// AdvancedPattern -- the fray-d Advanced Penetration stroke math: eight base
 // controls, one cyclic modulator per control, one plan per half-stroke
 // Constraints:
 // - HARDWARE-FREE and pure: no clock, no task, no motion call. The pattern
@@ -8,8 +8,9 @@
 //   it to the arbiter's door like every other input source.
 // - Plain values, no volatile: a Settings is OWNED by one task and crosses
 //   tasks only as a copy (ValencePattern.h).
-// - BaseId order is the wire order of the pattern-advanced-cmd modifier keys
-//   (9 + 6 * id) and of the preset payload; never reorder it.
+// - BaseId order is the order of the pattern-advanced-cmd keys
+//   (ValenceCatalog.h apBaseKey / apModKeyBase) and of the preset payload;
+//   append, never reorder.
 // See: https://github.com/fray-d/OSSM-Lite (CERN-OHL-S v2, the algorithm's
 // origin), ValenceCatalog.h (pattern-advanced, pattern-adv-mod-*)
 
@@ -24,8 +25,14 @@ enum BaseId : uint8_t {
     SPEED_OUT  = 3,
     ACCEL_IN   = 4,
     ACCEL_OUT  = 5,
-    BASE_COUNT = 6
+    // RFC-095: the hold at each bound, value in 0.01 strokes.
+    DWELL_CREST  = 6,   // at max_depth, after the in-stroke
+    DWELL_TROUGH = 7,   // at min_depth, after the out-stroke
+    BASE_COUNT = 8
 };
+
+// BaseId 0..5 are 0..100 percent knobs; the dwells follow them.
+constexpr uint8_t PERCENT_BASE_COUNT = 6;
 
 // Knob-feel curve exponents: fray-d's speed curve default and his hardcoded
 // accel curve.
@@ -59,19 +66,20 @@ struct Modifier {
 
 // ---- base control -----------------------------------------------------------
 
-// A 0..100 knob with a modulator. invert_ref marks the control whose modulator
-// swings toward its MAX bound (DEPTH_MIN pulls toward max depth).
+// A knob with a modulator: 0..100 percent, or 0..65535 hundredths of a stroke
+// for a dwell. invert_ref marks the control whose modulator swings toward its
+// MAX bound (DEPTH_MIN pulls toward max depth).
 struct BaseControl {
-    uint8_t  value;
-    uint8_t  min_value;   // dynamic for the depth pair (coupled)
-    uint8_t  max_value;
+    uint16_t value;
+    uint16_t min_value;   // dynamic for the depth pair (coupled)
+    uint16_t max_value;
     bool     invert_ref;
     Modifier modifier{};
 
     void set(int v) {
         if (v < int(min_value)) v = min_value;
         if (v > int(max_value)) v = max_value;
-        value = uint8_t(v);
+        value = uint16_t(v);
     }
 
     float modifiedValue(int stroke_count) const;
@@ -89,6 +97,10 @@ struct StrokePlan {
     float target_frac = 0.0f;   // 0..1 within the stroke window
     float speed_frac  = 0.0f;   // 0..1 of the input speed ceiling
     float accel_knob  = 0.0f;   // 0..1: accel = minAccel * (1 + 9 * knob)
+    // RFC-095: the hold at this half's bound once it lands, in strokes (one
+    // stroke is one in-half plus one out-half). Additive: the halves keep
+    // their own speed and acceleration.
+    float dwell_strokes = 0.0f;
 };
 
 // ---- settings ---------------------------------------------------------------
@@ -104,6 +116,8 @@ struct Settings {
     BaseControl out_speed {100, 1, 100, false};
     BaseControl in_accel  {40,  0, 100, false};
     BaseControl out_accel {40,  0, 100, false};
+    BaseControl dwell_crest  {0, 0, 65535, false};
+    BaseControl dwell_trough {0, 0, 65535, false};
 
     BaseControl*       byId(uint8_t id);
     const BaseControl* byId(uint8_t id) const;
