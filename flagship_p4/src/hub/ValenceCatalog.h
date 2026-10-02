@@ -949,10 +949,12 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .role = roles::plan_velocity});
     c.addLayoutField({.name = "duration_us", .type = PackedFieldType::u32, .unit = "us",    .scale = 1.0f,
                       .group = "Active plan", .desc = "How long the current plan runs in total.",
-                      .role = roles::plan_duration});
+                      .role = roles::plan_duration,
+                      .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "elapsed_us",  .type = PackedFieldType::u32, .unit = "us",    .scale = 1.0f,
                       .group = "Active plan", .desc = "How far into the current plan we are.",
-                      .role = roles::plan_elapsed});
+                      .role = roles::plan_elapsed,
+                      .hasUnitId = true, .unitId = valence::unit_ids::us});
     };
 
     // ---- "power" — STATE, background, 10 Hz ---------------------------------
@@ -1082,11 +1084,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .desc = "A hold was re-sent carrying a stale arrival speed; the machine "
                               "ignored it and stayed put."});
     c.addLayoutField({.name = "plan_us_last", .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
-                      .group = "Plan time", .desc = "Time the most recent plan took to compute."});
+                      .group = "Plan time", .desc = "Time the most recent plan took to compute.",
+                      .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "plan_us_max",  .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
-                      .group = "Plan time", .desc = "Worst plan time since the counters were reset."});
+                      .group = "Plan time", .desc = "Worst plan time since the counters were reset.",
+                      .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "plan_us_avg",  .type = PackedFieldType::f32, .unit = "us", .scale = 1.0f,
-                      .group = "Plan time", .desc = "Smoothed average plan time."});
+                      .group = "Plan time", .desc = "Smoothed average plan time.",
+                      .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "sync_bundles",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Stream ingress", .desc = "Motion bundles accepted over Valence."});
     c.addLayoutField({.name = "sync_samples",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
@@ -1148,8 +1153,12 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSchemaField({.key = anom_body::detail, .name = "detail", .type = CborFieldType::f32_t, .unit = "",
                       .desc = "Kind-specific number: the clamped speed, the stretched duration, or "
                               "the fraction of the stroke actually achieved."});
+    // unit_ids us, not hub_s: a schema field carries no scale and the registry
+    // has no microsecond hub-time unit (RFC-086), so the wire states this
+    // stamp's magnitude only, never which clock it was read from.
     c.addSchemaField({.key = anom_body::t_us, .name = "t_us", .type = CborFieldType::uint_t, .unit = "us",
-                      .desc = "Motion-core time when it happened."});
+                      .desc = "Motion-core time when it happened.",
+                      .hasUnitId = true, .unitId = valence::unit_ids::us});
     };
 
     // ---- "machine-modes" — STATE, elevated, on-change -----------------------
