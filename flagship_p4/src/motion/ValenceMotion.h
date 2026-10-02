@@ -32,7 +32,8 @@ inline constexpr uint8_t kAnomalyKinds = 11;
 
 // Origin of an intent. It picks the ceiling SET and the gating, nothing else.
 enum class MotionSource : uint8_t {
-    Manual = 0,   // operator-driven: user ceilings, bypasses every gate but e-stop
+    Manual = 0,   // operator-driven, the jog: jog ceilings, bypasses homed;
+                  // under PAUSE only with override (SPEC 11.1)
     Stream = 1,   // machine-driven: input ceilings, every gate applies
     Pattern = 2   // machine-driven, the on-hub generator: gated and clamped as
                   // Stream is, but never counted as the live stream (0x1100)
@@ -94,6 +95,10 @@ struct MotionCensus {
     bool     homed          = false;
     bool     estop          = false;
     bool     paused         = false;
+    bool     override_mode  = false;  // SPEC 11.1 override: the rail is the operator's
+    bool     returning      = false;  // the `return` move is running
+    uint32_t returns        = 0;      // completed returns since boot; each one
+                                      // is the hub's cue to drop its override bit
     bool     busy           = false;
     bool     stream         = false;  // a Stream intent is the live source
 
@@ -132,7 +137,7 @@ struct MotionCensus {
 struct MotionTuning {
     // Input-set ceiling overrides, NORMALIZED window units. 0 = derive the
     // ceiling from the mm input limits. jmax applies to both sets, because the
-    // user set has no jerk of its own; vmax and amax to the input set only.
+    // jog set has no jerk of its own; vmax and amax to the input set only.
     float    jmax_ovr          = 0.0f;
     float    vmax_ovr          = 0.0f;
     float    amax_ovr          = 0.0f;
@@ -186,11 +191,15 @@ void motionPatternAllow();
 // unhomed. The composition declares it once on the Hub; the delegate hands
 // the Hub's answer here at attach.
 void motionSetEstopCutsPower(bool cuts);
+// SPEC 11.1 override / return. Any task, never blocks. override latches PAUSE
+// first; return is a no-op without override (MotionArbiter::returnToPause()).
+void motionOverride();
+void motionReturn();
 
 // Ceiling sets, in millimeters. Ceilings are clamps, never targets; the one
-// exception is a deadline-less Manual point move, which plans AT the user
+// exception is a deadline-less Manual point move, which plans AT the jog
 // ceilings (architecture.md section 2).
-void motionSetUserLimits(float speed_mm_s, float accel_mm_s2);
+void motionSetJogLimits(float speed_mm_s, float accel_mm_s2);
 void motionSetInputLimits(float speed_mm_s, float accel_mm_s2, float jerk_mm_s3);
 
 // The stroke window a Stream source is held inside, plus the physical rail

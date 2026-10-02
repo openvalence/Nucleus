@@ -50,6 +50,9 @@ SteerWord steerWord(float v_mm_s) {
 // ---- cross-task -------------------------------------------------------------
 
 void MotionArbiter::estop(bool on) {
+    // ESTOP drops override (SPEC 11.1); release lands in plain PAUSE.
+    _override.store(false);
+    _return_req.store(false);
     if (!on) {
         // Release lands in PAUSE (SPEC 11.2): latched BEFORE the e-stop gate
         // opens, so no intent finds both gates open in between.
@@ -75,10 +78,16 @@ void MotionArbiter::pause(bool on) {
         // A brake the owning task has not run yet belongs to the pause being
         // cleared; left set it would brake the first plan after resume.
         _brake_req.store(false);
+        _override.store(false);
         _paused.store(false);
         return;
     }
     if (!_paused.exchange(true)) _brake_req.store(true);
+}
+
+void MotionArbiter::override() {
+    pause(true);
+    _override.store(true);
 }
 
 void MotionArbiter::setWindow(float lo, float hi, float rail) {
@@ -99,6 +108,9 @@ float MotionArbiter::forceHome(float stroke_mm) {
     _frame_moved = true;   // 0.0 mm now means a different emitter count
     _rail      = stroke;
     _homed     = true;
+    // Under PAUSE the recorded rest point is in the old frame: a brake request
+    // at rest re-records it in the new one on the owning task.
+    if (_paused.load()) _brake_req.store(true);
     // The engine reseeds itself at rest on the next accepted intent; nothing
     // here may call into it, this runs on the hub task. The e-stop latch is
     // NOT touched: the hub's release path drops it (estop(false)), into PAUSE.
@@ -130,11 +142,31 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
         GLOGW_EVERY_MS(1000, kTag, "REJECT: e-stop");
         return false;
     }
-    // PAUSE suspends every source (SPEC 11.1).
-    if (_paused.load()) {
+    // PAUSE suspends every source (SPEC 11.1). Under override the operator's
+    // jog is the one motion accepted, except while the return runs.
+    const bool jog = in.source == MotionSource::Manual && _override.load();
+    if (_paused.load() && !jog) {
         ++_rejected;
         GLOGW_EVERY_MS(1000, kTag, "REJECT: paused");
         return false;
+    }
+    if (jog && _returning) {
+        ++_rejected;
+        GLOGW_EVERY_MS(1000, kTag, "REJECT: returning to the paused position");
+        return false;
+    }
+    // The pause brake the owning task has not run yet runs FIRST: it records
+    // the paused position, and run after the jog it would brake the jog.
+    if (jog && _brake_req.exchange(false)) brakeToRest(now_us);
+    // The jog plans in the rail frame, entered only at rest: a frame change
+    // under a moving plan would be a discontinuity.
+    if (jog && !_rail_frame) {
+        if (_engine.isBusy(now_us)) {
+            ++_rejected;
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: jog waits for the pause brake to finish");
+            return false;
+        }
+        setRailFrame(true, now_us);
     }
     // Manual bypasses the rest (the push-to-home case): an operator must be
     // able to move an unhomed machine, and only to move it.
@@ -153,12 +185,13 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
 
     const bool manual = in.source == MotionSource::Manual;
 
-    // Window clamp. Manual reaches the whole asserted rail; a machine-driven
-    // source is held inside the configured window, itself held inside the rail.
+    // Window clamp. The jog under override reaches the whole asserted rail
+    // (SPEC 11.1 lifts the window); every other intent, Manual included, is
+    // held inside the configured window, itself held inside the rail.
     float target = in.target_mm;
-    const float lo = manual ? 0.0f : (_win_min > 0.0f ? _win_min : 0.0f);
+    const float lo = jog ? 0.0f : (_win_min > 0.0f ? _win_min : 0.0f);
     const float hi_win = _win_max < _rail ? _win_max : _rail;
-    const float hi = manual ? _rail : hi_win;
+    const float hi = jog ? _rail : hi_win;
     if (target < lo) target = lo;
     if (target > hi) target = hi;
     // THROTTLED, because a stream that overhangs the window clamps EVERY
@@ -168,8 +201,12 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
         GLOGW_EVERY_MS(1000, kTag, "WINDOW CLAMP: %.2f -> %.2f mm",
                        double(in.target_mm), double(target));
 
+    return plan(target, in, manual, now_us);
+}
+
+bool MotionArbiter::plan(float target, const MotionIntent& in, bool manual, uint64_t now_us) {
     // Limit-set selection. Ceilings are clamps, never targets; a deadline-less
-    // Manual point move is the ratified exception and plans AT the user set.
+    // Manual point move is the ratified exception and plans AT the jog set.
     // TODO(val-091.4): the soft-start cap, which shapes the INPUT set only and
     // has no source to shape yet.
     const float s  = span();
@@ -213,11 +250,17 @@ bool MotionArbiter::accept(const MotionIntent& in, uint64_t now_us) {
     return true;
 }
 
+void MotionArbiter::setRailFrame(bool on, uint64_t now_us) {
+    _rail_frame = on;
+    _engine.resetAt(toNorm(positionMm()), now_us);
+    _p_cmd_mm = positionMm();
+}
+
 kinetic::Limits MotionArbiter::limitsFor(bool manual) const {
     const float s = span();
     kinetic::Limits lim;
-    lim.vmax = manual ? _user_v / s : inputVmaxMm() / s;
-    lim.amax = manual ? _user_a / s : inputAmaxMm() / s;
+    lim.vmax = manual ? _jog_v / s : inputVmaxMm() / s;
+    lim.amax = manual ? _jog_a / s : inputAmaxMm() / s;
     lim.jmax = _ovr_j > 0.0f ? _ovr_j : _in_j / s;
     return lim;
 }
@@ -228,11 +271,17 @@ kinetic::Limits MotionArbiter::limitsFor(bool manual) const {
 // from the plan's (p, v, a) -- continuous with what the emitter is rendering,
 // unlike a census read -- at the input decel, and never a reversal. It also
 // drops every scheduled plan (Engine::brake).
+// The rest point is recorded as the paused position, the one place a
+// `return` goes back to.
 void MotionArbiter::brakeToRest(uint64_t now_us) {
     _engine.setLimits(limitsFor(false));
     [[maybe_unused]] const float v = _engine.velocityAt(now_us) * span();   // log only
-    if (!_engine.brake(now_us)) return;
+    if (!_engine.brake(now_us)) {
+        _pause_pos_mm = positionMm();
+        return;
+    }
     _demand_mm = toMm(_engine.snapshot(now_us).target);   // where it comes to rest
+    _pause_pos_mm = _demand_mm;
     GLOGI(kTag, "PAUSE: braking from %.1f mm/s", double(v));
 }
 
@@ -265,6 +314,7 @@ void MotionArbiter::applyTuning(const MotionTuning& t) {
 void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     if (_estop) {
         _brake_req.store(false);   // park already stopped it
+        _returning = false;        // estop() dropped override with it
         _emitter.park();
         // ONCE per latch, and on the task that owns the engine: without it the
         // abandoned plan keeps reading busy and canClearEstop() -- which asks
@@ -296,9 +346,33 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
 
     if (_brake_req.exchange(false)) brakeToRest(now_us);
 
+    // RETURN (SPEC 11.1): an ordinary Manual plan at the jog set, planned here
+    // because the engine is this task's. The rail clamp still applies.
+    if (_return_req.exchange(false) && _override.load()) {
+        MotionIntent back;
+        back.source = MotionSource::Manual;
+        float target = _pause_pos_mm;
+        if (target < 0.0f) target = 0.0f;
+        if (target > _rail) target = _rail;
+        back.target_mm = target;
+        _returning = plan(target, back, true, now_us);
+        if (!_returning) GLOGW(kTag, "RETURN: plan failed, override held");
+        else GLOGI(kTag, "RETURN: to the paused position %.2f mm", double(target));
+    }
+
     // The one side-effecting sample per tick: it promotes scheduled plans and
     // engages SETTLE when a plan ends still moving.
     const float p_plan_mm = toMm(_engine.positionAt(now_us));
+
+    // Arrival ends the return: override drops, plain PAUSE stays.
+    if (_returning && !_engine.isBusy(now_us)) {
+        _returning = false;
+        _override.store(false);
+        ++_returns;
+        GLOGI(kTag, "RETURN: arrived, override off, PAUSE holds");
+    }
+    // Override gone (return, resume or ESTOP): back to the window frame, at rest.
+    if (_rail_frame && !_override.load() && !_engine.isBusy(now_us)) setRailFrame(false, now_us);
 
     // Feedforward: the plan's OWN mean velocity across the interval that just
     // elapsed. Summed over a move this telescopes to exactly the plan's
@@ -384,6 +458,9 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.homed          = _homed;
     c.estop          = _estop;
     c.paused         = _paused.load();
+    c.override_mode  = _override.load();
+    c.returning      = _returning;
+    c.returns        = _returns;
     c.busy           = _engine.isBusy(now_us);
     c.mode           = s.mode;
     c.plan_kind      = s.plan_kind;

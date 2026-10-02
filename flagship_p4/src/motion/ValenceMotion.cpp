@@ -95,6 +95,8 @@ public:
     bool begin();
     bool submit(const MotionIntent& in);     // any task: enqueue and wake
     void pause(bool on);                     // any task: gate, brake request, wake
+    void override();                         // any task: pause, then the mode, wake
+    void returnToPause();                    // any task: request, wake
     void setTuning(const MotionTuning& t);   // any task: overwrite the one slot
     MotionCensus census() const;
     MotionArbiter& arbiter() { return _arb; }
@@ -167,6 +169,16 @@ void MotionTask::pause(bool on) {
     _arb.pause(on);
     // Brakes at arrival, not on the tick.
     if (on && _task != nullptr) xTaskNotifyGive(_task);
+}
+
+void MotionTask::override() {
+    _arb.override();
+    if (_task != nullptr) xTaskNotifyGive(_task);
+}
+
+void MotionTask::returnToPause() {
+    _arb.returnToPause();
+    if (_task != nullptr) xTaskNotifyGive(_task);
 }
 
 void MotionTask::setTuning(const MotionTuning& t) {
@@ -245,7 +257,9 @@ void motionEstopClear() { g_motion.arbiter().estop(false); }
 void motionPause(bool on) { g_motion.pause(on); }
 void motionPatternAllow() { g_motion.arbiter().allowPattern(); }
 void motionSetEstopCutsPower(bool cuts) { g_motion.arbiter().setEstopCutsPower(cuts); }
-void motionSetUserLimits(float v, float a) { g_motion.arbiter().setUserLimits(v, a); }
+void motionOverride() { g_motion.override(); }
+void motionReturn() { g_motion.returnToPause(); }
+void motionSetJogLimits(float v, float a) { g_motion.arbiter().setJogLimits(v, a); }
 void motionSetInputLimits(float v, float a, float j) { g_motion.arbiter().setInputLimits(v, a, j); }
 void motionSetWindow(float lo, float hi, float rail) { g_motion.arbiter().setWindow(lo, hi, rail); }
 void motionNoteStream(uint32_t b, uint32_t s, uint32_t d) { g_motion.arbiter().noteStream(b, s, d); }

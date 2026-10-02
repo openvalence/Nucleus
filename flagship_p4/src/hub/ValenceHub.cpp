@@ -57,8 +57,8 @@ namespace valence {
 // ---- anti-drift guards: catalog mirror vs valence_config.h -------------------
 static_assert(factory::window_min  == 0.0f,                        "catalog window_min drifted");
 static_assert(factory::window_max  == DEFAULT_MAX_RAIL_MM,         "catalog window_max drifted");
-static_assert(factory::user_speed  == DEFAULT_USER_MAX_SPEED_MM_S, "catalog user_speed drifted");
-static_assert(factory::user_accel  == DEFAULT_USER_ACCEL_MM_S2,    "catalog user_accel drifted");
+static_assert(factory::jog_speed   == DEFAULT_JOG_MAX_SPEED_MM_S,  "catalog jog_speed drifted");
+static_assert(factory::jog_accel   == DEFAULT_JOG_ACCEL_MM_S2,     "catalog jog_accel drifted");
 static_assert(factory::input_speed == DEFAULT_MAX_SPEED_MM_S,      "catalog input_speed drifted");
 static_assert(factory::input_accel == DEFAULT_ACCEL_MM_S2,         "catalog input_accel drifted");
 static_assert(factory::input_jerk  == DEFAULT_INPUT_MAX_JERK_MM_S3,"catalog input_jerk drifted");

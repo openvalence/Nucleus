@@ -207,8 +207,8 @@ struct DeviceFeatures {
 namespace factory {
 inline constexpr float window_min  = 0.0f;        // getDefaultConfig().min_position_mm
 inline constexpr float window_max  = 500.0f;      // DEFAULT_MAX_RAIL_MM
-inline constexpr float user_speed  = 50.0f;       // DEFAULT_USER_MAX_SPEED_MM_S
-inline constexpr float user_accel  = 200.0f;      // DEFAULT_USER_ACCEL_MM_S2
+inline constexpr float jog_speed  = 50.0f;       // DEFAULT_JOG_MAX_SPEED_MM_S
+inline constexpr float jog_accel  = 200.0f;      // DEFAULT_JOG_ACCEL_MM_S2
 inline constexpr float input_speed = 950.0f;      // DEFAULT_MAX_SPEED_MM_S
 inline constexpr float input_accel = 50000.0f;    // DEFAULT_ACCEL_MM_S2
 inline constexpr float input_jerk  = 2000000.0f;  // DEFAULT_INPUT_MAX_JERK_MM_S3
@@ -537,22 +537,22 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .settingKey = 2, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
-    c.addLayoutField({.name = "user_speed",  .type = PackedFieldType::f32, .unit = "mm/s",  .scale = 1.0f,
+    c.addLayoutField({.name = "jog_speed",  .type = PackedFieldType::f32, .unit = "mm/s",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max,
-                      .dflt = SettingDefault::ofFloat(factory::user_speed),
-                      .group = "Manual limits",
-                      .desc = "Speed ceiling for moves YOU drive by hand. Kept gentle by default: "
-                              "it is a ceiling, not a target.",
+                      .dflt = SettingDefault::ofFloat(factory::jog_speed),
+                      .group = "Jog limits",
+                      .desc = "Speed ceiling for the jog, the moves YOU drive by hand. Kept gentle "
+                              "by default: it is a ceiling, not a target.",
                       .role = roles::limit_jog_speed, .step = 1.0f,
                       .settingKey = 3, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
-    c.addLayoutField({.name = "user_accel",  .type = PackedFieldType::f32, .unit = "mm/s2", .scale = 1.0f,
+    c.addLayoutField({.name = "jog_accel",  .type = PackedFieldType::f32, .unit = "mm/s2", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max,
-                      .dflt = SettingDefault::ofFloat(factory::user_accel),
-                      .group = "Manual limits",
-                      .desc = "How hard a hand-driven move is allowed to pick up speed. Lower "
-                              "feels softer at the start and end of every move.",
+                      .dflt = SettingDefault::ofFloat(factory::jog_accel),
+                      .group = "Jog limits",
+                      .desc = "How hard a jog is allowed to pick up speed. Lower feels softer at "
+                              "the start and end of every move.",
                       .role = roles::limit_jog_accel, .step = 10.0f,
                       .settingKey = 4, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -600,7 +600,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasUnitId = true, .unitId = valence::unit_ids::mm_s3});
     // DYNAMIC ENABLED STATE. Bit i gates the i-th SETTING-ANNOTATED field of
     // this layout, in layout order:
-    //   0 window_min  1 window_max  2 user_speed  3 user_accel
+    //   0 window_min  1 window_max  2 jog_speed  3 jog_accel
     //   4 input_speed 5 input_accel 6 max_rail     7 input_jerk
     // max_rail sits at bit 6 (declared before input_jerk, which takes bit 7)
     // — a relabeling of what a bit means, never a byte-offset reshuffle
@@ -614,7 +614,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                         .desc = "Which of these settings the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
-                       {"window_min", "window_max", "user_speed", "user_accel",
+                       {"window_min", "window_max", "jog_speed", "jog_accel",
                         "input_speed", "input_accel", "max_rail", "input_jerk"});
     // measured_stroke (field 10, byte 33): THE REAL HOMING MEASUREMENT,
     // distinct from max_rail (the configured ceiling above). 0 until the
@@ -1711,8 +1711,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "move" — INTENT, control, 20 Hz, critical --------------------------
-    // {1:"position" f32 mm, 2:"bypass" bool}. This channel maps to arbiter
-    // source 0 (MANUAL) in the delegate.
+    // {1:"position" f32 mm}: the JOG (SPEC 11.1, 11.4). This channel maps to
+    // arbiter source 0 (MANUAL) in the delegate. Key 2 (the per-move bypass)
+    // is retired by RFC-085 and never reused: a jog under override is already
+    // outside the limits by mode.
     //
     // NO `action.*` ROLE HERE, DELIBERATELY — and that refusal became RFC-032:
     // RFC-019's action roles mark a schema field as a VERB ("do this");
@@ -1735,7 +1737,6 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .role = roles::command_position,
                       .hasRank = true, .rank = valence::ui_ranks::hero,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
-    c.addSchemaField({.key = 2, .name = "bypass", .type = CborFieldType::bool_t, .unit = ""});
     };
 
     // ---- "config-set" — INTENT, control, 10 Hz ------------------------------
@@ -1759,9 +1760,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm});
     c.addSchemaField({.key = 2, .name = "window_max",  .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm});
-    c.addSchemaField({.key = 3, .name = "user_speed",  .type = CborFieldType::f32_t, .unit = "mm/s",
+    c.addSchemaField({.key = 3, .name = "jog_speed",  .type = CborFieldType::f32_t, .unit = "mm/s",
                       .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max});
-    c.addSchemaField({.key = 4, .name = "user_accel",  .type = CborFieldType::f32_t, .unit = "mm/s2",
+    c.addSchemaField({.key = 4, .name = "jog_accel",  .type = CborFieldType::f32_t, .unit = "mm/s2",
                       .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max});
     c.addSchemaField({.key = 5, .name = "input_speed", .type = CborFieldType::f32_t, .unit = "mm/s",
                       .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max});

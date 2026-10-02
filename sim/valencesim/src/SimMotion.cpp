@@ -161,7 +161,9 @@ void motionEstopClear() { g_sim.arbiter().estop(false); }
 void motionPause(bool on) { g_sim.arbiter().pause(on); }
 void motionPatternAllow() { g_sim.arbiter().allowPattern(); }
 void motionSetEstopCutsPower(bool cuts) { g_sim.arbiter().setEstopCutsPower(cuts); }
-void motionSetUserLimits(float v, float a) { g_sim.arbiter().setUserLimits(v, a); }
+void motionOverride() { g_sim.arbiter().override(); }
+void motionReturn() { g_sim.arbiter().returnToPause(); }
+void motionSetJogLimits(float v, float a) { g_sim.arbiter().setJogLimits(v, a); }
 void motionSetInputLimits(float v, float a, float j) { g_sim.arbiter().setInputLimits(v, a, j); }
 void motionSetWindow(float lo, float hi, float rail) { g_sim.arbiter().setWindow(lo, hi, rail); }
 void motionNoteStream(uint32_t b, uint32_t s, uint32_t d) { g_sim.arbiter().noteStream(b, s, d); }

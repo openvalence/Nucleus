@@ -205,7 +205,7 @@ TEST_CASE("e-stop on a hub that does not cut power is a halt that keeps home") {
     CHECK(r->submit(MotionSource::Stream, 50.0f));
 }
 
-TEST_CASE("window clamp: Stream held in the window, Manual reaches the whole rail") {
+TEST_CASE("window clamp: every source held in the window; the jog under override reaches the rail") {
     auto r = rig();
     r->arb.forceHome(500.0f);
     r->arb.setWindow(100.0f, 200.0f, 400.0f);
@@ -215,6 +215,10 @@ TEST_CASE("window clamp: Stream held in the window, Manual reaches the whole rai
     REQUIRE(r->submit(MotionSource::Stream, 20.0f));
     CHECK(r->census().demand_mm == doctest::Approx(100.0f));
     REQUIRE(r->submit(MotionSource::Manual, 390.0f));
+    CHECK(r->census().demand_mm == doctest::Approx(200.0f));
+    r->run(5'000'000);
+    r->arb.override();
+    REQUIRE(r->submit(MotionSource::Manual, 390.0f));
     CHECK(r->census().demand_mm == doctest::Approx(390.0f));
     REQUIRE(r->submit(MotionSource::Manual, 450.0f));
     CHECK(r->census().demand_mm == doctest::Approx(400.0f));
@@ -222,7 +226,7 @@ TEST_CASE("window clamp: Stream held in the window, Manual reaches the whole rai
     CHECK(r->census().demand_mm == doctest::Approx(0.0f));
 }
 
-TEST_CASE("a Manual point move lands on target through the emitter, at the user ceiling") {
+TEST_CASE("a Manual point move lands on target through the emitter, at the jog ceiling") {
     auto r = rig();
     REQUIRE(r->submit(MotionSource::Manual, 60.0f));
     float peak = 0.0f;
@@ -234,8 +238,8 @@ TEST_CASE("a Manual point move lands on target through the emitter, at the user 
     const MotionCensus c = r->census();
     CHECK_FALSE(c.busy);
     CHECK(std::fabs(c.position_mm - 60.0f) <= 2.0f * valence::kMmPerStep);
-    CHECK(peak <= DEFAULT_USER_MAX_SPEED_MM_S * 1.01f);
-    CHECK(peak >= DEFAULT_USER_MAX_SPEED_MM_S * 0.9f);
+    CHECK(peak <= DEFAULT_JOG_MAX_SPEED_MM_S * 1.01f);
+    CHECK(peak >= DEFAULT_JOG_MAX_SPEED_MM_S * 0.9f);
 }
 
 TEST_CASE("a frame move is not motion: force_home re-anchors and parks for one tick") {
@@ -425,4 +429,82 @@ TEST_CASE("a stream sample under PAUSE is refused and counted; no motion intent 
     CHECK(r->submit(MotionSource::Stream, 300.0f));
     r->run(200'000);
     CHECK(r->emitter.n != held);
+}
+
+TEST_CASE("override: PAUSE holds every source but the jog, which reaches outside the window") {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->arb.setWindow(100.0f, 200.0f, 400.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Stream, 150.0f));
+    r->run(2'000'000);
+    r->arb.override();
+    const MotionCensus c = r->census();
+    CHECK(c.paused);
+    CHECK(c.override_mode);
+    CHECK_FALSE(r->submit(MotionSource::Stream, 180.0f));
+    CHECK_FALSE(r->submit(MotionSource::Pattern, 180.0f));
+    REQUIRE(r->submit(MotionSource::Manual, 350.0f));
+    CHECK(r->census().demand_mm == doctest::Approx(350.0f));
+    r->run(10'000'000);
+    CHECK(r->census().position_mm == doctest::Approx(350.0f).epsilon(0.01));
+    // resume clears override with PAUSE; the hub refuses that resume while
+    // override holds, so this is the arbiter's half only.
+    r->arb.pause(false);
+    CHECK_FALSE(r->census().override_mode);
+}
+
+TEST_CASE("return: a jog-set move back to the paused position, then override drops and PAUSE holds") {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 120.0f));
+    r->run(6'000'000);
+    REQUIRE(r->census().position_mm == doctest::Approx(120.0f).epsilon(0.01));
+    r->arb.pause(true);
+    r->run(1000);
+    r->arb.override();
+    REQUIRE(r->submit(MotionSource::Manual, 40.0f));
+    r->run(4'000'000);
+    REQUIRE(r->census().position_mm == doctest::Approx(40.0f).epsilon(0.02));
+
+    const uint32_t before = r->census().returns;
+    r->arb.returnToPause();
+    r->run(2000);
+    CHECK(r->census().returning);
+    // Jog is refused while the return runs.
+    CHECK_FALSE(r->submit(MotionSource::Manual, 10.0f));
+    float peak = 0.0f;
+    for (int i = 0; i < 6000 && r->census().returning; ++i) {
+        r->run(1000);
+        peak = std::max(peak, std::fabs(r->census().velocity_mm_s));
+    }
+    const MotionCensus c = r->census();
+    CHECK_FALSE(c.returning);
+    CHECK(c.returns == before + 1);
+    CHECK_FALSE(c.override_mode);
+    CHECK(c.paused);
+    CHECK(c.position_mm == doctest::Approx(120.0f).epsilon(0.01));
+    CHECK(peak <= DEFAULT_JOG_MAX_SPEED_MM_S * 1.01f);
+    // Plain PAUSE again: the jog is refused until resume.
+    CHECK_FALSE(r->submit(MotionSource::Manual, 60.0f));
+}
+
+TEST_CASE("ESTOP drops override and a running return; release lands in plain PAUSE") {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    r->arb.override();
+    REQUIRE(r->submit(MotionSource::Manual, 200.0f));
+    r->run(500'000);
+    r->arb.returnToPause();
+    r->run(2000);
+    r->arb.estop(true);
+    r->run(1000);
+    CHECK_FALSE(r->census().override_mode);
+    CHECK_FALSE(r->census().returning);
+    r->arb.estop(false);
+    CHECK(r->census().paused);
+    CHECK_FALSE(r->census().override_mode);
+    CHECK_FALSE(r->submit(MotionSource::Manual, 50.0f));
 }

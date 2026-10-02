@@ -125,6 +125,8 @@ public:
                                                  AccessLevel role, bool& cfgChanged) override;
     std::optional<uint8_t> sourceForChannel(uint16_t channel_id) override;
     bool canClearEstop() override;
+    bool admitsUnderPause(uint16_t channel_id, const IntentValueMap& value,
+                          bool overrideLatched) override;
     void onEstop(uint8_t cause, uint8_t origin) override;
     void onStreamBundle(uint16_t channel_id, uint32_t session_id,
                         const BundleView& bundle) override;
@@ -143,6 +145,7 @@ private:
     Result<IntentValueMap, NackCode> applyPatternAdvanced(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applyPresets(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applySafety(const IntentValueMap& requested);
+    bool railOwned() const;
     void haltGenerator();
     void pushPattern();
     void publishPatternPlane(const MotionCensus& mo);
@@ -171,6 +174,13 @@ private:
     // inside the hub's intent dispatch.
     bool _clearLatch = false;
     bool _homeDone = false;
+    // SPEC 11.4 ownership as the hub reported it, indexed by MotionSource:
+    // the session id that owns each source, 0 = unowned.
+    std::array<uint32_t, 4> _owner{};
+    // A `return` is running: set on its acceptance, cleared when the
+    // arbiter's census.returns moves past _returnsAtRequest, or by ESTOP.
+    bool _returnPending = false;
+    uint32_t _returnsAtRequest = 0;
 
     // The live pattern generator settings. This copy IS the setting (the
     // delegate is its one writer); the generator's task runs on whatever

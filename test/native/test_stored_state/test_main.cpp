@@ -59,7 +59,7 @@ StoredConfig sampleConfig() {
     StoredConfig c;
     c.window_min = 20.0f;
     c.window_max = 180.0f;
-    c.user_speed = 75.0f;
+    c.jog_speed = 75.0f;
     c.input_jerk = 900000.0f;
     c.max_rail = 240.0f;
     return c;
@@ -158,7 +158,7 @@ TEST_CASE("config blob: every rejection leaves the factory values standing") {
     }
     SUBCASE("non-finite config is rejected whole") {
         StoredConfig c = sampleConfig();
-        c.user_accel = std::numeric_limits<float>::quiet_NaN();
+        c.jog_accel = std::numeric_limits<float>::quiet_NaN();
         std::array<std::byte, stored::kConfigBlobBytes> b{};
         REQUIRE(stored::encodeConfig(b, c, sampleTuning(), 1) == b.size());
         expectRejected(b);
@@ -243,4 +243,37 @@ TEST_CASE("presets blob: every rejection leaves the store untouched") {
         b[slot2 + PatternPresetStore::kNameMax - 1] = std::byte{'z'};
         expectRejected(b);
     }
+}
+
+// A v2 blob byte for byte as the firmware wrote it before the jog rename, when
+// bytes 15..22 held user_speed and user_accel. The layout is positional, so the
+// rename orphans nothing: the same bytes decode into jog_speed and jog_accel.
+TEST_CASE("config blob: a pre-rename v2 blob decodes into the jog fields") {
+    std::array<std::byte, 4 + 1 + 2 + 32 + 32 + 8 + 7> b{};
+    size_t n = 0;
+    auto put = [&](const auto v) {
+        std::memcpy(b.data() + n, &v, sizeof v);
+        n += sizeof v;
+    };
+    put(uint32_t(0x56434647u));  // "VCFG"
+    put(uint8_t(2));
+    put(uint16_t(31));
+    // window_min, window_max, user_speed, user_accel, input_speed, input_accel,
+    // input_jerk, max_rail
+    for (float v : {10.0f, 190.0f, 64.0f, 333.0f, 800.0f, 40000.0f, 1500000.0f, 300.0f}) put(v);
+    for (float v : {0.0f, 0.0f, 0.0f, 0.5f, 1.0f, 2.0f, 0.1f, 0.5f}) put(v);
+    put(uint32_t(30000));   // chase_dense_us
+    put(uint32_t(20000));   // settle_grace_us
+    for (uint8_t v : {uint8_t(1), uint8_t(0), uint8_t(1), uint8_t(1), uint8_t(0), uint8_t(3), uint8_t(1)}) put(v);
+    REQUIRE(n == b.size());
+
+    StoredConfig c;
+    MotionTuning t;
+    uint16_t gen = 0;
+    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, gen));
+    CHECK(gen == 31);
+    CHECK(c.jog_speed == 64.0f);
+    CHECK(c.jog_accel == 333.0f);
+    CHECK(c.input_speed == 800.0f);
+    CHECK(c.max_rail == 300.0f);
 }

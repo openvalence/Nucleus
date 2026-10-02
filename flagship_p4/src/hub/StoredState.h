@@ -39,8 +39,8 @@ namespace valence {
 struct StoredConfig {
     float window_min  = factory::window_min;
     float window_max  = factory::window_max;
-    float user_speed  = factory::user_speed;
-    float user_accel  = factory::user_accel;
+    float jog_speed  = factory::jog_speed;
+    float jog_accel  = factory::jog_accel;
     float input_speed = factory::input_speed;
     float input_accel = factory::input_accel;
     float input_jerk  = factory::input_jerk;
@@ -104,8 +104,8 @@ inline bool configValid(const StoredConfig& c) {
     return in(c.window_min,  0.0f, ceiling::rail_mm)
         && in(c.window_max,  0.0f, ceiling::rail_mm)
         && c.window_min < c.window_max
-        && in(c.user_speed,  ceiling::speed_min, ceiling::speed_max)
-        && in(c.user_accel,  ceiling::accel_min, ceiling::accel_max)
+        && in(c.jog_speed,  ceiling::speed_min, ceiling::speed_max)
+        && in(c.jog_accel,  ceiling::accel_min, ceiling::accel_max)
         && in(c.input_speed, ceiling::speed_min, ceiling::speed_max)
         && in(c.input_accel, ceiling::accel_min, ceiling::accel_max)
         && in(c.input_jerk,  ceiling::jerk_min,  ceiling::jerk_max)
@@ -139,7 +139,7 @@ inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
     put(out, n, kConfigMagic);
     put(out, n, kConfigVersion);
     put(out, n, cfgGen);
-    for (float v : {c.window_min, c.window_max, c.user_speed, c.user_accel,
+    for (float v : {c.window_min, c.window_max, c.jog_speed, c.jog_accel,
                     c.input_speed, c.input_accel, c.input_jerk, c.max_rail})
         put(out, n, v);
     for (float v : {t.jmax_ovr, t.vmax_ovr, t.amax_ovr, t.chase_gain, t.chase_lookahead,
@@ -167,7 +167,7 @@ inline bool decodeConfig(std::span<const std::byte> in, float factoryGuard,
     if (gen == 0) return false;
 
     StoredConfig c;
-    for (float* f : {&c.window_min, &c.window_max, &c.user_speed, &c.user_accel,
+    for (float* f : {&c.window_min, &c.window_max, &c.jog_speed, &c.jog_accel,
                      &c.input_speed, &c.input_accel, &c.input_jerk, &c.max_rail})
         *f = get<float>(in, n);
 

@@ -19,6 +19,7 @@
 
 #include "ValenceDevice.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "geiger/geiger.h"
@@ -223,7 +224,8 @@ void publishMotion(Hub& hub, const MotionCensus& m, bool genRunning) {
     // homing cycle on this board. gen_running is the generator DRIVING, not
     // merely switched on (patternActive()).
     packU8(buf, n, uint8_t((m.homed ? 0x01u : 0u) | (genRunning ? 0x04u : 0u) |
-                 (m.paused ? 0x08u : 0u) | (m.estop ? 0x20u : 0u) | (m.stream ? 0x40u : 0u)));
+                 (m.paused ? 0x08u : 0u) | (m.override_mode ? 0x10u : 0u) |
+                 (m.estop ? 0x20u : 0u) | (m.stream ? 0x40u : 0u)));
     packU16(buf, n, wireU16(m.demand_mm, 100.0f));     // raw_10um: the asked position
     // AT RATE, not on change. An on-change gate looks like an economy and is a
     // ground-truth hazard on a hero channel: a machine at rest stops pushing,
@@ -409,8 +411,8 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
 
     const auto* f1 = findField(requested, 1);  // window_min
     const auto* f2 = findField(requested, 2);  // window_max
-    const auto* f3 = findField(requested, 3);  // user_speed
-    const auto* f4 = findField(requested, 4);  // user_accel
+    const auto* f3 = findField(requested, 3);  // jog_speed
+    const auto* f4 = findField(requested, 4);  // jog_accel
     const auto* f5 = findField(requested, 5);  // input_speed
     const auto* f6 = findField(requested, 6);  // input_accel
     const auto* f7 = findField(requested, 7);  // input_jerk
@@ -419,8 +421,8 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     StoredConfig next = _cfg;
     if (f1) next.window_min  = clampf(fieldF32(f1, next.window_min),  0.0f, ceiling::rail_mm);
     if (f2) next.window_max  = clampf(fieldF32(f2, next.window_max),  0.0f, ceiling::rail_mm);
-    if (f3) next.user_speed  = clampf(fieldF32(f3, next.user_speed),  ceiling::speed_min, ceiling::speed_max);
-    if (f4) next.user_accel  = clampf(fieldF32(f4, next.user_accel),  ceiling::accel_min, ceiling::accel_max);
+    if (f3) next.jog_speed  = clampf(fieldF32(f3, next.jog_speed),  ceiling::speed_min, ceiling::speed_max);
+    if (f4) next.jog_accel  = clampf(fieldF32(f4, next.jog_accel),  ceiling::accel_min, ceiling::accel_max);
     if (f5) next.input_speed = clampf(fieldF32(f5, next.input_speed), ceiling::speed_min, ceiling::speed_max);
     if (f6) next.input_accel = clampf(fieldF32(f6, next.input_accel), ceiling::accel_min, ceiling::accel_max);
     if (f7) next.input_jerk  = clampf(fieldF32(f7, next.input_jerk),  ceiling::jerk_min, ceiling::jerk_max);
@@ -443,8 +445,8 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     uint32_t n = 0;
     if (f1) applied.fields[n++] = {1, IntentValue::ofF32(_cfg.window_min)};
     if (f2) applied.fields[n++] = {2, IntentValue::ofF32(_cfg.window_max)};
-    if (f3) applied.fields[n++] = {3, IntentValue::ofF32(_cfg.user_speed)};
-    if (f4) applied.fields[n++] = {4, IntentValue::ofF32(_cfg.user_accel)};
+    if (f3) applied.fields[n++] = {3, IntentValue::ofF32(_cfg.jog_speed)};
+    if (f4) applied.fields[n++] = {4, IntentValue::ofF32(_cfg.jog_accel)};
     if (f5) applied.fields[n++] = {5, IntentValue::ofF32(_cfg.input_speed)};
     if (f6) applied.fields[n++] = {6, IntentValue::ofF32(_cfg.input_accel)};
     if (f7) applied.fields[n++] = {7, IntentValue::ofF32(_cfg.input_jerk)};
@@ -764,16 +766,23 @@ void ValenceDevice::publishPatternPlane(const MotionCensus& mo) {
     }
 }
 
-// ---- 0x3100 move ---------------------------------------------------------------
+// ---- 0x3100 move, the jog ------------------------------------------------------
 // MANUAL source: the wire operator is the one driving. The arbiter lets a
 // Manual intent through an unhomed machine (the push-to-home case a local
 // button would use); this board has no such button, so the WIRE door is
 // gated on homed here. force_home is that door (operator ruling
 // 2026-09-21), and a refusal carries its reason rather than a count.
+// SPEC 11.4: a jog never takes the rail from a source. Without override it is
+// refused SOURCE_CONFLICT while the stream or the generator owns the rail; the
+// hub has already admitted it under PAUSE only with override latched.
 Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     const MotionCensus c = motionCensus();
     if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
     if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
+    const bool overrideOn = _hub != nullptr &&
+                            (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
+    if (!overrideOn && railOwned()) return Ret::err(NackCode::SOURCE_CONFLICT);
+    if (_returnPending) return Ret::err(NackCode::INTERLOCK);
 
     MotionIntent in;
     in.source    = MotionSource::Manual;
@@ -781,27 +790,72 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     if (!std::isfinite(in.target_mm)) return Ret::err(NackCode::INVALID_VALUE);
     if (!motionSubmit(in)) return Ret::err(NackCode::INTERLOCK);
 
-    // Ground truth: echo the post-clamp position, against the SAME rail the
-    // arbiter clamps a Manual intent to. `bypass` echoes false always --
-    // nothing here bypasses anything, and echoing the request back would
-    // report a capability the machine does not have.
+    // Ground truth: echo the post-clamp position, against the SAME bounds the
+    // arbiter clamps a Manual intent to: the whole rail under override, the
+    // travel window inside the rail otherwise.
+    const float lo = overrideOn ? 0.0f : std::max(0.0f, _cfg.window_min);
+    const float hi = overrideOn ? c.rail_mm : std::min(_cfg.window_max, c.rail_mm);
     IntentValueMap applied{};
-    applied.count = 2;
-    applied.fields[0] = {1, IntentValue::ofF32(clampf(in.target_mm, 0.0f, c.rail_mm))};
-    applied.fields[1] = {2, IntentValue::ofBool(false)};
+    applied.count = 1;
+    applied.fields[0] = {1, IntentValue::ofF32(clampf(in.target_mm, lo, hi))};
     return Ret::ok(applied);
+}
+
+// The rail is a source's while the stream or the generator owns it, or the
+// generator drives it unowned (background_run).
+bool ValenceDevice::railOwned() const {
+    return _owner[uint8_t(MotionSource::Stream)] != 0 || _owner[uint8_t(MotionSource::Pattern)] != 0 ||
+           patternActive();
+}
+
+// SPEC 11.1: what the hub may let through while PAUSE is latched. The home
+// verb always (it is not source-mapped here, so this is belt and braces); the
+// jog only under override and never while the return runs; a pattern_cmd
+// that starts nothing (a knob or a stop is not a motion intent). Every
+// stream bundle is the hub's to drop and never reaches this.
+bool ValenceDevice::admitsUnderPause(uint16_t channel_id, const IntentValueMap& value,
+                                     bool overrideLatched) {
+    if (channel_id == ch::home) return true;
+    if (channel_id == ch::move) return overrideLatched && !_returnPending;
+    if (channel_id == ch::pattern_cmd) {
+        const std::optional<bool> running = boolOf(findField(value, 1));
+        return !(running && *running);
+    }
+    return false;
 }
 
 // ---- 0x0005 safety-intents ------------------------------------------------------
 // The delegate half of SPEC 11.1. estop and release never reach here (the hub
 // owns both). The hub latches PAUSE on an accepted pause and clears it on an
 // accepted resume, and has already refused a resume under ESTOP, override or
-// home_required, so resume needs no gate of its own. override and return are
-// the rail-bound mode (val-091.35); until it lands they and the four retired
-// numbers are UNSUPPORTED_OP, so the hub latches NOTHING for them.
+// home_required, so resume needs no gate of its own. override latches PAUSE
+// and the override mode in the hub on acceptance; return latches nothing, and
+// tick() drops the hub's override bit when the arbiter reports the arrival.
+// The four retired numbers are UNSUPPORTED_OP, so the hub latches NOTHING.
 Ret ValenceDevice::applySafety(const IntentValueMap& requested) {
     const uint64_t op = fieldU64(findField(requested, 1), 0);
     switch (op) {
+        case safety_ops::override:
+            // The rail is the operator's from here; the suspended source stays
+            // suspended, so hand and stream never command position at once.
+            // ESTOP drops override, so it is never latched under one.
+            if (motionCensus().estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+            motionOverride();
+            GLOGW(kTag, "OVERRIDE: PAUSE held, the rail is the operator's, jog enabled");
+            break;
+        case safety_ops::return_op: {
+            if (motionCensus().estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+            // No override, or a return already running: nothing to start, and
+            // the ECHO says what is true (no further gate, SPEC 11.1).
+            const bool overrideOn = (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
+            if (overrideOn && !_returnPending) {
+                _returnsAtRequest = motionCensus().returns;
+                _returnPending = true;
+                motionReturn();
+                GLOGI(kTag, "RETURN: back to the paused position at the jog set");
+            }
+            break;
+        }
         case safety_ops::pause:
             // Never refused: pausing needs no homing and no role (the catalog
             // marks it watch, ROLE-EXEMPT). The arbiter latches BEFORE it asks
@@ -911,6 +965,7 @@ bool ValenceDevice::canClearEstop() {
 // the latch as the spec requires.
 void ValenceDevice::onEstop(uint8_t cause, uint8_t origin) {
     motionEstop();
+    _returnPending = false;   // the arbiter dropped override and the return
     // The generator stops with the machine and stays stopped: clearing the
     // latch never restarts it (the arbiter's Pattern gate stays closed until a
     // start). This makes 0x1200's running tell the same truth.
@@ -1005,11 +1060,13 @@ void ValenceDevice::onSessionLeft(uint32_t session_id) {
     (void)session_id;
 }
 
-// §11.4: the hub only RELEASES here on a session's way out (owner 0), whether
-// it went STALE or was torn down; the reason is deliberately not consulted.
-// The generator is the one hub-autonomous source, and background_run is the
-// operator's standing answer to "keep going with nobody attached?".
+// §11.4: every transition lands in _owner, the jog's SOURCE_CONFLICT answer.
+// A release (owner 0) comes on a session's way out, whether it went STALE or
+// was torn down; the reason is deliberately not consulted. The generator is
+// the one hub-autonomous source, and background_run is the operator's
+// standing answer to "keep going with nobody attached?".
 void ValenceDevice::onSourceOwnership(uint8_t source_id, uint32_t owner_session, uint8_t reason) {
+    if (source_id < _owner.size()) _owner[source_id] = owner_session;
     if (owner_session != 0 || source_id != uint8_t(MotionSource::Pattern)) return;
     if (_pat.ownerReleased()) {
         _patDirty = true;
@@ -1059,8 +1116,8 @@ void ValenceDevice::publishMachineConfig() {
     std::span<std::byte> s(buf);
     putF32(s.subspan(0, 4), c.window_min);
     putF32(s.subspan(4, 4), c.window_max);
-    putF32(s.subspan(8, 4), c.user_speed);
-    putF32(s.subspan(12, 4), c.user_accel);
+    putF32(s.subspan(8, 4), c.jog_speed);
+    putF32(s.subspan(12, 4), c.jog_accel);
     putF32(s.subspan(16, 4), c.input_speed);
     putF32(s.subspan(20, 4), c.input_accel);
     putF32(s.subspan(24, 4), c.max_rail);
@@ -1082,7 +1139,7 @@ void ValenceDevice::publishMachineConfig() {
 
 void ValenceDevice::pushConfigToMotion() const {
     motionSetWindow(_cfg.window_min, _cfg.window_max, _cfg.max_rail);
-    motionSetUserLimits(_cfg.user_speed, _cfg.user_accel);
+    motionSetJogLimits(_cfg.jog_speed, _cfg.jog_accel);
     motionSetInputLimits(_cfg.input_speed, _cfg.input_accel, _cfg.input_jerk);
 }
 
@@ -1144,11 +1201,18 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _homeDone = false;
         _hub->setHomeRequired(false);
     }
-
     // The motion plane, from ONE census so no two channels disagree about the
     // same instant. 0x1100 publishes at rate under its 60 Hz ceiling; 0x1110 is
     // a strip that is only news while a plan runs.
     const MotionCensus mo = motionCensus();
+
+    // RETURN arrived (SPEC 11.1): override drops, plain PAUSE stays. A counter,
+    // not the census flag, because the census lags the request by up to a
+    // publish interval and would read "no override" before it ever started.
+    if (_returnPending && mo.returns != _returnsAtRequest) {
+        _returnPending = false;
+        _hub->setOverride(false);
+    }
     if (uint32_t(nowMs - _lastMotionMs) >= 33u) {
         _lastMotionMs = nowMs;
         publishMotion(*_hub, mo, patternActive());

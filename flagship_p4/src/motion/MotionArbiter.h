@@ -15,8 +15,9 @@
 //   snapshot) touch the engine and run on ONE task, the host's motion task.
 //   accept() calls commit(), which nests KB-scale Ruckig temporaries on that
 //   task's stack (T1, memory-budget.md T21).
-// - CROSS-TASK methods (estop, pause, allowPattern, setEstopCutsPower, the
-//   limit and window setters, forceHome, noteStream) never touch the engine.
+// - CROSS-TASK methods (estop, pause, override, returnToPause, allowPattern,
+//   setEstopCutsPower, the limit and window setters, forceHome, noteStream)
+//   never touch the engine.
 //   They write flags and scalars the owning task reads on its next pass;
 //   estop() also parks the emitter on the CALLING task, because an e-stop that
 //   waits for a tick is not one.
@@ -130,13 +131,22 @@ public:
     // only clear; the hub refuses it while ESTOP, override or home_required
     // holds, so this never sees those cases.
     void pause(bool on);
+    // SPEC 11.1 OVERRIDE: latches PAUSE first (override never exists without
+    // it), then hands the rail to the operator: a Manual intent is the one
+    // motion accepted, at the jog set, anywhere on the rail. ESTOP drops it.
+    void override();
+    // SPEC 11.1 RETURN: the owning task plans a jog-set move back to where the
+    // pause brought the machine to rest; on arrival override drops and
+    // returns() counts once. Manual intents are refused while it runs. A no-op
+    // without override.
+    void returnToPause() { if (_override.load()) _return_req.store(true); }
     // Reopens the Pattern gate estop(true) closed. The generator's own start
     // is the one caller.
     void allowPattern() { _pattern_stopped.store(false); }
     // The hub's estop_cuts_power declaration (SPEC 11.2): true, the motor is
     // limp after an ESTOP and the position reference is gone.
     void setEstopCutsPower(bool cuts) { _cuts_power = cuts; }
-    void setUserLimits(float v, float a) { _user_v = v; _user_a = a; }
+    void setJogLimits(float v, float a) { _jog_v = v; _jog_a = a; }
     void setInputLimits(float v, float a, float j) { _in_v = v; _in_a = a; _in_j = j; }
     void setWindow(float lo, float hi, float rail);
     float forceHome(float stroke_mm);
@@ -148,17 +158,28 @@ public:
     float rail() const { return _rail; }
 
 private:
-    float span() const { return _win_max - _win_min; }
-    float toNorm(float mm) const { return (mm - _win_min) / span(); }
-    float toMm(float norm) const { return _win_min + norm * span(); }
+    // The engine's frame: its normalized 0..1 is the travel window, or the
+    // whole rail while the operator jogs under override (the engine clamps to
+    // its frame, so lifting the window means widening the frame).
+    float frameLo() const { return _rail_frame ? 0.0f : _win_min; }
+    float span() const { return _rail_frame ? _rail : _win_max - _win_min; }
+    float toNorm(float mm) const { return (mm - frameLo()) / span(); }
+    float toMm(float norm) const { return frameLo() + norm * span(); }
+    float winSpan() const { return _win_max - _win_min; }
     // The INPUT set's ceilings as the engine plans them, in mm: the mm limit,
     // or the normalized override scaled by the CURRENT window. evaluate()'s
     // tracking cap reads the same answer, so a plan an override allowed is
     // never capped below its own ceiling at render time.
-    float inputVmaxMm() const { return _ovr_v > 0.0f ? _ovr_v * span() : _in_v; }
-    float inputAmaxMm() const { return _ovr_a > 0.0f ? _ovr_a * span() : _in_a; }
+    float inputVmaxMm() const { return _ovr_v > 0.0f ? _ovr_v * winSpan() : _in_v; }
+    float inputAmaxMm() const { return _ovr_a > 0.0f ? _ovr_a * winSpan() : _in_a; }
+    // Moves the engine's frame at rest: reseeds it at the carriage, so the
+    // move is a relabeling, never motion.
+    void setRailFrame(bool on, uint64_t now_us);
     kinetic::Limits limitsFor(bool manual) const;
     void brakeToRest(uint64_t now_us);
+    // Plans `target` (already clamped, mm) from the machine's actual state.
+    // Owning task; counts the plan cost and a failure as a rejection.
+    bool plan(float target, const MotionIntent& in, bool manual, uint64_t now_us);
 
     MotionEmitter& _emitter;
     Clock          _now_us;
@@ -169,8 +190,8 @@ private:
     float _win_max = DEFAULT_MAX_RAIL_MM;
     float _rail    = DEFAULT_MAX_RAIL_MM;
 
-    float _user_v = DEFAULT_USER_MAX_SPEED_MM_S;
-    float _user_a = DEFAULT_USER_ACCEL_MM_S2;
+    float _jog_v = DEFAULT_JOG_MAX_SPEED_MM_S;
+    float _jog_a = DEFAULT_JOG_ACCEL_MM_S2;
     float _in_v   = DEFAULT_MAX_SPEED_MM_S;
     float _in_a   = DEFAULT_ACCEL_MM_S2;
     float _in_j   = DEFAULT_INPUT_MAX_JERK_MM_S3;
@@ -190,8 +211,16 @@ private:
     // Written by pause()/estop()/allowPattern() on any task. Atomics, not
     // volatile: the gate store must be visible before the brake request is.
     std::atomic<bool> _paused{false};
+    std::atomic<bool> _override{false};
+    std::atomic<bool> _return_req{false};
     std::atomic<bool> _pattern_stopped{false};
     std::atomic<bool> _brake_req{false};
+    // Owning task only. _pause_pos_mm is where the last pause brought the
+    // machine to rest (the return target); _returns counts completed returns.
+    bool     _rail_frame  = false;
+    bool     _returning   = false;
+    float    _pause_pos_mm = 0.0f;
+    uint32_t _returns     = 0;
     // Set by setWindow()/forceHome() on any task, consumed by evaluate() on
     // the owning task: the mm FRAME moved, the carriage did not.
     volatile bool _frame_moved = false;
