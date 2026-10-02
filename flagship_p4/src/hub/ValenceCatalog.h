@@ -516,9 +516,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     //
     // Every field below carries the paired INTENT key (`setting_key` ->
     // 0x0101), a factory `default`, min/max/step, a `group` card heading, a
-    // USER-FACING `desc`, and a registry `role`. `settingChannel` = 0x0101,
-    // `category` = limits — a generic client renders a full settings page
-    // from the catalog alone.
+    // USER-FACING `desc`, and a registry `role`. `settingChannel` = 0x3000, so
+    // a generic client renders a full settings page from the catalog alone.
+    //
+    // Category setup (RFC-079): the machine's geometry and ceilings are the
+    // owner's commissioning, entered through the setup wizard, never firmware
+    // knowledge. Categories are static per entry, so it is setup in every mode;
+    // the wizard steps the setup entries in authoring (ascending id) order,
+    // this one before the kinetic ceilings on 0x1120.
     //
     // `max_rail` is a REAL SAVABLE SETTING, not derived truth: the
     // user-configured ceiling that bounds the sensorless-homing search sweep
@@ -533,7 +538,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = valence::ui_categories::limits,
+                .hasCategory = true, .category = valence::ui_categories::setup,
                 .hasSettingChannel = true, .settingChannel = ch::config_set,
                 .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "window_min",  .type = PackedFieldType::f32, .unit = "mm",    .scale = 1.0f,
@@ -1302,12 +1307,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // ---- "kinetic-*" — STATE, tuning -------------------------------------
     // The motion engine's live-tune surface. No controls outside Valence.
     //
-    // THREE CHANNELS, ONE TAB. A settings channel is capped at 8 settings
+    // THREE CHANNELS, TWO TABS. A settings channel is capped at 8 settings
     // because its enabled_mask is a bitfield8 and bit i gates the i-th
-    // setting of ITS layout — a WIRE limit the user never sees: SPEC §8.8
+    // setting of ITS layout, a WIRE limit the user never sees: SPEC §8.8
     // ("a category spans channels; two channels in the same category merge
-    // into one tab") lets all three carry category = tuning and differ only
-    // by `group`. One Tuning tab, three cards, nothing dropped.
+    // into one tab") lets the chase and waveform cards share category tuning
+    // and differ only by `group`. kinetic-limits holds the planner CEILINGS,
+    // which are commissioning (RFC-079), so it alone carries category setup;
+    // it shares no channel with tuning, so nothing had to split.
     //
     // ONE SHARED WRITER (0x0105). `settingChannel` is per-entry and
     // `setting_key` is a key WITHIN that writer, so several STATE channels
@@ -1323,7 +1330,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = valence::ui_categories::tuning,
+                .hasCategory = true, .category = valence::ui_categories::setup,
                 .hasSettingChannel = true, .settingChannel = ch::kinetic_set,
                 .hasRank = true, .rank = valence::ui_ranks::advanced});
     c.addLayoutField({.name = "jmax_ovr", .type = PackedFieldType::f32, .unit = "1/s3", .scale = 1.0f,
