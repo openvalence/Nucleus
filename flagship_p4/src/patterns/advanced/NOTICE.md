@@ -11,7 +11,7 @@ CERN-OHL-S-2.0: the Advanced Penetration modifier and half-stroke math.
 
 ## Modifications (CERN-OHL-S-2.0 section 3.3(b))
 
-Modified by the Nucleus authors, 2026-09-25 through 2026-10-03:
+Modified by AtlanticTM, 2026-09-25 through 2026-10-03:
 
 - Float math throughout where the original used u8 arithmetic.
 - Linear knobs: speed is master percent times half percent times the input
