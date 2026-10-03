@@ -275,6 +275,12 @@ int main(int argc, char** argv) {
 
     ix::initNetSystem();
     std::signal(SIGINT, onSignal);
+#ifndef _WIN32
+    // macOS has no MSG_NOSIGNAL and IXWebSocket sets SO_NOSIGPIPE only on
+    // sockets it connects, never on accepted ones: a client that drops
+    // mid-send would kill the twin. The failed send returns EPIPE instead.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
 #ifdef _WIN32
     // Without this a 1 ms sleep lands at ~15.6 ms and the motion tick with it.
     timeBeginPeriod(1);

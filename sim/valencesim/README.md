@@ -23,7 +23,7 @@ with no device semantics.
 | Pattern presets (0x5220) | `PatternPresetStore` inside the delegate | persisted: `PREFIX.presets` holds the board's NVS `presets` blob, same debounce |
 | `background_run` | the delegate's `PatternSettings` | in memory, same as the board: persisting it waits on an operator ruling (bd val-wcm) |
 | WebSocket port | `../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home | real host binding |
-| UDP discovery responder (SPEC 13.8) | `flagship_p4/src/hub/ValenceDiscovery.cpp`, compiled verbatim (Winsock here, lwIP on the board) | real: answers DISCOVER_PROBE on the registry port with the twin's name, `hub_instance_id`, WS port, version, etag and pairing window |
+| UDP discovery responder (SPEC 13.8) | `flagship_p4/src/hub/ValenceDiscovery.cpp`, compiled verbatim (Winsock or POSIX here, lwIP on the board) | real: answers DISCOVER_PROBE on the registry port with the twin's name, `hub_instance_id`, WS port, version, etag and pairing window |
 | `/uitoken` token: slot table, rate gate, HMAC derivation | `flagship_p4/src/hub/UiTokenTable.h`, compiled verbatim | real |
 | `/uitoken` endpoint | `src/SimUiToken.cpp` on IXWebSocket's HTTP server, a `std::mutex` for the board's spinlock | same contract, on 127.0.0.1 |
 | Config and tuning persistence (0x1000, 0x1030, 0x1120-0x1122, cfg_gen) | `StoredState.h` codec, compiled verbatim | persisted: `PREFIX.cfg` holds the board's NVS `cfg` blob; a file stands in for NVS |
@@ -51,6 +51,12 @@ Output: `sim/valencesim/build/valencesim.exe`, statically linked. The first
 configure fetches IXWebSocket v11.4.6 and applies Valence Bench's
 subprotocol-echo patch from `../Valence/hub/bench/cmake/`. The sibling
 checkout must exist beside this repo (override with `-DVALENCE_ROOT=`).
+
+Linux and macOS: the same two `cmake` lines without the compiler flags (a
+C++23 GCC or Clang, `cmake`, `ninja`, `git`; built with GCC 16 and with Clang
+23 on libc++, macOS itself untried). Output `build/valencesim`; Linux GCC
+links libstdc++ in. Phosphor's CI builds all three for its sidecar (Phosphor
+`docs/BUILD.md`).
 
 ## Run
 

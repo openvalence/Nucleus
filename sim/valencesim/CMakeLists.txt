@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 project(valencesim CXX)
 
-# Host build only -- never part of a PlatformIO firmware build. Windows-first
-# (WinLibs MinGW-w64 GCC), the same toolchain as Valence Bench.
+# Host build only -- never part of a PlatformIO firmware build. GCC or Clang:
+# MinGW-w64 on Windows (the Valence Bench toolchain, never MSVC), Linux and
+# macOS. Phosphor bundles the result as its simulator sidecar.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -69,6 +70,14 @@ target_compile_options(valencesim PRIVATE -O2 -Wall -Wextra)
 # Standalone exe: no libstdc++/libgcc/winpthread DLL hunting.
 if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_link_options(valencesim PRIVATE -static)
+elseif(UNIX AND NOT APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # A bundled sidecar meets distros older than the build host's libstdc++.
+    target_link_options(valencesim PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
+# Firmware sources include lwIP's socket header on every non-Winsock host.
+if(NOT WIN32)
+    target_include_directories(valencesim PRIVATE posix)
 endif()
 
 target_link_libraries(valencesim PRIVATE ixwebsocket)
