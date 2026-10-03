@@ -298,6 +298,24 @@ TEST_CASE("advanced knobs clamp and the depth pair never crosses") {
     CHECK(m.offset == 100);
 }
 
+TEST_CASE("advanced knobs are linear: master x k with half / k keeps the stroke") {
+    auto plan = [](int master, int half_in, int accel_in) {
+        advpat::Settings ap;
+        ap.master.set(master);
+        ap.setBase(advpat::SPEED_IN, half_in);
+        ap.setBase(advpat::ACCEL_IN, accel_in);
+        return ap.planStroke(0);
+    };
+    const advpat::StrokePlan m40 = plan(40, 100, 40);
+    const advpat::StrokePlan m80 = plan(80, 100, 40);
+    CHECK(m40.speed_frac == 0.4f);
+    CHECK(m80.speed_frac == 2.0f * m40.speed_frac);
+    CHECK(plan(80, 50, 40).speed_frac == m40.speed_frac);
+    CHECK(m40.accel_knob == 0.4f);
+    CHECK(plan(40, 100, 100).accel_knob == 1.0f);
+    CHECK_FALSE(plan(0, 100, 40).moving);
+}
+
 TEST_CASE("preset payload round-trips and the store bumps its generation") {
     PatternSettings a = advancedSettings();
     a.ap.setBase(advpat::SPEED_OUT, 33);
@@ -440,38 +458,40 @@ TEST_CASE("presets: a version-1 blob migrates the retired amount and strokes the
 
 namespace {
 
-// The engine's intents before RFC-095 (Nucleus 8c37cbb) for advancedSettings()
-// from a homed carriage at the window floor: {at_us, target_mm, duration_us}.
+// The engine's intents with both dwells 0 for advancedSettings() from a homed
+// carriage at the window floor: {at_us, target_mm, duration_us}. Recorded by
+// running the engine with this suite's settings and 1 ms tick loop, never
+// hand-edited (method: the commit that made the knobs linear).
 struct Recorded {
     uint64_t at_us;
     float    target_mm;
     uint32_t duration_us;
 };
-constexpr Recorded kBeforeDwell[] = {
-    {3000000, 0x1.5p+7f, 590204},
-    {3591000, 0x1.4p+5f, 459912},
-    {4051000, 0x1.1p+7f, 344934},
-    {4396000, 0x1.4p+5f, 344934},
-    {4741000, 0x1.ap+6f, 229956},
-    {4971000, 0x1.4p+5f, 229956},
-    {5201000, 0x1.ap+6f, 229956},
-    {5431000, 0x1.4p+5f, 229956},
-    {5661000, 0x1.1p+7f, 382835},
-    {6044000, 0x1.4p+5f, 344934},
-    {6389000, 0x1.5p+7f, 573457},
-    {6963000, 0x1.4p+5f, 459912},
-    {7423000, 0x1.9p+7f, 817767},
-    {8241000, 0x1.4p+5f, 574890},
-    {8816000, 0x1.5p+7f, 761444},
-    {9578000, 0x1.4p+5f, 459912},
-    {10038000, 0x1.1p+7f, 683038},
-    {10722000, 0x1.4p+5f, 344934},
-    {11067000, 0x1.ap+6f, 380722},
-    {11448000, 0x1.4p+5f, 229956},
-    {11678000, 0x1.ap+6f, 327107},
-    {12006000, 0x1.4p+5f, 229956},
-    {12236000, 0x1.1p+7f, 430092},
-    {12667000, 0x1.4p+5f, 344934},
+constexpr Recorded kDwellZero[] = {
+    {3000000, 0x1.5p+7f, 350826},
+    {3351000, 0x1.4p+5f, 273379},
+    {3625000, 0x1.1p+7f, 205034},
+    {3831000, 0x1.4p+5f, 205034},
+    {4037000, 0x1.ap+6f, 136689},
+    {4174000, 0x1.4p+5f, 136689},
+    {4311000, 0x1.ap+6f, 136689},
+    {4448000, 0x1.4p+5f, 136689},
+    {4585000, 0x1.1p+7f, 227563},
+    {4813000, 0x1.4p+5f, 205034},
+    {5019000, 0x1.5p+7f, 340871},
+    {5360000, 0x1.4p+5f, 273379},
+    {5634000, 0x1.9p+7f, 486093},
+    {6121000, 0x1.4p+5f, 341723},
+    {6463000, 0x1.5p+7f, 452614},
+    {6916000, 0x1.4p+5f, 273379},
+    {7190000, 0x1.1p+7f, 406008},
+    {7597000, 0x1.4p+5f, 205034},
+    {7803000, 0x1.ap+6f, 226307},
+    {8030000, 0x1.4p+5f, 136689},
+    {8167000, 0x1.ap+6f, 194437},
+    {8362000, 0x1.4p+5f, 136689},
+    {8499000, 0x1.1p+7f, 255653},
+    {8755000, 0x1.4p+5f, 205034},
 };
 
 // A symmetric stroke: equal speeds and accels, 10 % to 90 %, so from the
@@ -501,7 +521,7 @@ bool isHold(const std::vector<Emitted>& r, size_t i) {
 
 }  // namespace
 
-TEST_CASE("RFC-095: dwell 0 strokes sample for sample as before the dwell existed") {
+TEST_CASE("RFC-095: dwell 0 strokes sample for sample as the recorded engine") {
     PatternSettings s = advancedSettings();
     REQUIRE(s.ap.dwell_crest.value == 0);
     REQUIRE(s.ap.dwell_trough.value == 0);
@@ -509,12 +529,12 @@ TEST_CASE("RFC-095: dwell 0 strokes sample for sample as before the dwell existe
     g->apply(s);
     uint64_t now = 3'000'000;
     const auto r = run(*g, now, 30000, homedIdle());
-    REQUIRE(r.size() >= std::size(kBeforeDwell));
-    for (size_t i = 0; i < std::size(kBeforeDwell); ++i) {
+    REQUIRE(r.size() >= std::size(kDwellZero));
+    for (size_t i = 0; i < std::size(kDwellZero); ++i) {
         CAPTURE(i);
-        CHECK(r[i].at_us == kBeforeDwell[i].at_us);
-        CHECK(r[i].it.target_mm == kBeforeDwell[i].target_mm);
-        CHECK(r[i].it.duration_us == kBeforeDwell[i].duration_us);
+        CHECK(r[i].at_us == kDwellZero[i].at_us);
+        CHECK(r[i].it.target_mm == kDwellZero[i].target_mm);
+        CHECK(r[i].it.duration_us == kDwellZero[i].duration_us);
         CHECK(r[i].it.has_end_vel);
         CHECK(r[i].it.end_vel_mm_s == 0.0f);
     }

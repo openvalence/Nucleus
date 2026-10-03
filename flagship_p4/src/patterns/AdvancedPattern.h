@@ -11,6 +11,10 @@
 // - BaseId order is the order of the pattern-advanced-cmd keys
 //   (ValenceCatalog.h apBaseKey / apModKeyBase) and of the preset payload;
 //   append, never reorder.
+// - LINEAR KNOBS (operator ruling 2026-10-03): speed = master % x half % x
+//   the input ceiling, accel knob = accel %. Do not ease them: a client
+//   predicts the stroke from the percent (the advgen.master registry note,
+//   Phosphor's master x k / half / k link).
 // See: https://github.com/fray-d/OSSM-Lite (CERN-OHL-S v2, the algorithm's
 // origin), ValenceCatalog.h (pattern-advanced, pattern-adv-mod-*)
 
@@ -33,11 +37,6 @@ enum BaseId : uint8_t {
 
 // BaseId 0..5 are 0..100 percent knobs; the dwells follow them.
 constexpr uint8_t PERCENT_BASE_COUNT = 6;
-
-// Knob-feel curve exponents: fray-d's speed curve default and his hardcoded
-// accel curve.
-constexpr float SPEED_CURVE_EXP = 0.8f;
-constexpr float ACCEL_CURVE_EXP = 0.6f;
 
 // ---- modifier ---------------------------------------------------------------
 
@@ -84,7 +83,6 @@ struct BaseControl {
 
     float modifiedValue(int stroke_count) const;
     float normalizedModified(int stroke_count) const { return modifiedValue(stroke_count) / 100.0f; }
-    float rampedModified(float curve_exp, int stroke_count) const;
 
     bool operator==(const BaseControl&) const = default;
 };

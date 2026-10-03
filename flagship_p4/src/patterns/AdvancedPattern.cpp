@@ -1,12 +1,11 @@
 // AdvancedPattern -- fray-d's modifier and half-stroke math, float throughout
 // Constraints:
 // - Pure: see AdvancedPattern.h. Integer steps are promoted to float where the
-//   original u8 arithmetic truncated; behavior is otherwise the original's.
+//   original u8 arithmetic truncated. The knobs are linear where fray-d
+//   eased them (AdvancedPattern.h).
 // See: AdvancedPattern.h
 
 #include "AdvancedPattern.h"
-
-#include <cmath>
 
 namespace advpat {
 
@@ -51,15 +50,6 @@ float BaseControl::modifiedValue(int stroke_count) const {
     return float(value) - difference * (1.0f - modifier.modification(cycle));
 }
 
-// An ease curve, pow(1 - pow(1 - x, e), 1/e): gentle at the bottom of the knob,
-// resolution at the top.
-float BaseControl::rampedModified(float curve_exp, int stroke_count) const {
-    const float x = normalizedModified(stroke_count);
-    if (x <= 0.0f) return 0.0f;
-    if (x >= 1.0f) return 1.0f;
-    return std::pow(1.0f - std::pow(1.0f - x, curve_exp), 1.0f / curve_exp);
-}
-
 // ---- settings ---------------------------------------------------------------
 
 BaseControl* Settings::byId(uint8_t id) {
@@ -91,21 +81,19 @@ StrokePlan Settings::planStroke(uint32_t stroke_count) const {
     StrokePlan p{};
     const float master_frac = float(master.value) / 100.0f;
     if (master_frac <= 0.0f) return p;
-    const float master_ramp =
-        std::pow(1.0f - std::pow(1.0f - master_frac, SPEED_CURVE_EXP), 1.0f / SPEED_CURVE_EXP);
 
     const int  sc = int(stroke_count);
     const bool in_stroke = (stroke_count % 2u) == 0u;
     p.moving = true;
     if (in_stroke) {
         p.target_frac = max_depth.normalizedModified(sc);
-        p.speed_frac  = master_ramp * in_speed.normalizedModified(sc);
-        p.accel_knob  = in_accel.rampedModified(ACCEL_CURVE_EXP, sc);
+        p.speed_frac  = master_frac * in_speed.normalizedModified(sc);
+        p.accel_knob  = in_accel.normalizedModified(sc);
         p.dwell_strokes = dwell_crest.modifiedValue(sc) / 100.0f;
     } else {
         p.target_frac = min_depth.normalizedModified(sc);
-        p.speed_frac  = master_ramp * out_speed.normalizedModified(sc);
-        p.accel_knob  = out_accel.rampedModified(ACCEL_CURVE_EXP, sc);
+        p.speed_frac  = master_frac * out_speed.normalizedModified(sc);
+        p.accel_knob  = out_accel.normalizedModified(sc);
         p.dwell_strokes = dwell_trough.modifiedValue(sc) / 100.0f;
     }
     if (p.target_frac < 0.0f) p.target_frac = 0.0f;
