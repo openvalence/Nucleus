@@ -45,7 +45,7 @@
 
 // ---- Speed / accel / jerk: factory defaults and hard ceilings ---------------
 #define MAX_SPEED_MM_S              10000.0f
-#define DEFAULT_MAX_SPEED_MM_S      950.0f
+#define DEFAULT_MAX_SPEED_MM_S      1000.0f
 #define DEFAULT_JOG_MAX_SPEED_MM_S  50.0f
 #define DEFAULT_JOG_ACCEL_MM_S2     200.0f
 #define DEFAULT_ACCEL_MM_S2         50000.0f

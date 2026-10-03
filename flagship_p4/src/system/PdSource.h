@@ -269,7 +269,7 @@ inline constexpr float kMovingMassKg    = 2.0f;    // carriage, payload, rotor r
 inline constexpr float kDriveEfficiency = 0.75f;   // drive and motor at a peak
 inline constexpr float kIdleW           = 15.0f;   // logic, fan, drive standby, accessories
 
-// Evaluated at the factory speed ceiling (950 mm/s), the highest input accel
+// Evaluated at the factory speed ceiling (1000 mm/s), the highest input accel
 // each contract carries:
 //   contract           budget    accel ceiling carried
 //   24 V x 3 A         64.8 W    19,600 mm/s^2
@@ -278,7 +278,7 @@ inline constexpr float kIdleW           = 15.0f;   // logic, fan, drive standby,
 //   28 V x 5 A        126.0 W    43,800 mm/s^2
 //   36 V x 5 A        162.0 W    58,000 mm/s^2
 //   48 V x 5 A, buck  205.2 W    75,000 mm/s^2
-// The factory ceilings (950 mm/s, 50,000 mm/s^2) peak at 141.7 W: a 36 V or a
+// The factory ceilings (1000 mm/s, 50,000 mm/s^2) peak at 148.3 W: a 36 V or a
 // 48 V source at 5 A carries them, a 28 V one does not.
 
 struct Ceilings {
