@@ -10,7 +10,9 @@ the output.
 Checks here: printf-outside-geiger, valence-purity, this-assign,
 new-log-macro, led-outside-flux, borrowed-member, sole-caller,
 static-in-critical, british-spelling (codespell plus the camelCase subword
-gap), and the valence.pin rule with the frozen-artifact hash cross-check.
+gap), the valence.pin rule with the frozen-artifact hash cross-check, and the
+kinetic.pin rule (lib/kinetic and lib/ruckig byte-identical to ../Kinetic at
+the pinned sha).
 
 NOT ported, each for a stated reason:
   links2004-ghost  -- names a WebSocket stack that never existed in this tree.
@@ -56,6 +58,17 @@ FROZEN_SHA256_SIBLING = {
     "spec/vectors/fixtures/mini-catalog.yaml":
         "7576f08b5c190a5c720b5ec09a1fe3476fc97d3e0f11ba417720c953d2cfe44e",
 }
+
+# kinetic.pin: the engine's home is the sibling Kinetic repo. Nucleus path ->
+# Kinetic path; every file under a directory entry is compared. Each repo's
+# VENDORED.md is its own provenance note (its own paths) and is not compared.
+KINETIC_SIBLING = ROOT.parent / "Kinetic"
+KINETIC_PIN_FILE = ROOT / "kinetic.pin"
+KINETIC_PINNED_PATHS = {
+    "lib/kinetic/include/kinetic/kinetic.hpp": "include/kinetic/kinetic.hpp",
+    "lib/ruckig": "third_party/ruckig",
+}
+KINETIC_UNPINNED_NAMES = ("VENDORED.md",)
 
 VENDORED_PREFIXES = ("lib/ruckig/", "lib/valence/", "managed_components/")
 BINARY_SUFFIXES = (".bin", ".png", ".jpg", ".webp", ".ico", ".pdf",
@@ -443,8 +456,68 @@ def run_pin_check():
     return findings
 
 
+def run_kinetic_pin_check():
+    """kinetic.pin RULE: FAIL if the pin is missing, names a commit ../Kinetic
+    does not have, or any pinned file differs from ../Kinetic at that commit
+    (git blob ids, so line-ending normalization is git's, not ours). SKIP with
+    a notice when ../Kinetic is not checked out beside Nucleus. A Kinetic HEAD
+    past the pin is a notice, not a finding: the pinned bytes are the
+    contract."""
+    try:
+        pinned = KINETIC_PIN_FILE.read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError):
+        return [("kinetic-pin-missing", "kinetic.pin", 0, "", "kinetic.pin is missing")]
+
+    if not (KINETIC_SIBLING / ".git").exists():
+        print("NOTICE: ../Kinetic not found beside Nucleus -- kinetic.pin byte check skipped")
+        return []
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(KINETIC_SIBLING), *args],
+                              capture_output=True, text=True)
+
+    if git("cat-file", "-e", pinned + "^{commit}").returncode != 0:
+        return [("kinetic-pin-unknown", "kinetic.pin", 0, pinned[:16],
+                 "../Kinetic has no commit " + pinned[:16] + " -- fetch it or fix the pin")]
+    head = git("rev-parse", "HEAD").stdout.strip()
+    if head != pinned:
+        print("NOTICE: ../Kinetic HEAD %s is not kinetic.pin %s (not a lint failure)"
+              % (head[:16], pinned[:16]))
+
+    theirs = {}
+    for line in git("ls-tree", "-r", pinned, "--", *KINETIC_PINNED_PATHS.values()).stdout.splitlines():
+        meta, path = line.split("	", 1)
+        theirs[path] = meta.split()[2]
+
+    ours = {}
+    for rel, krel in KINETIC_PINNED_PATHS.items():
+        p = ROOT / rel
+        files = [p] if p.is_file() else sorted(f for f in p.rglob("*") if f.is_file())
+        for f in files:
+            sub = f.relative_to(p).as_posix() if f != p else ""
+            ours[f.relative_to(ROOT).as_posix()] = krel + ("/" + sub if sub else "")
+    ours = {n: k for n, k in ours.items() if Path(n).name not in KINETIC_UNPINNED_NAMES}
+    theirs = {k: b for k, b in theirs.items() if Path(k).name not in KINETIC_UNPINNED_NAMES}
+
+    names = list(ours)
+    blobs = subprocess.run(["git", "hash-object", "--", *names], cwd=ROOT,
+                           capture_output=True, text=True).stdout.split()
+    findings = []
+    for name, blob in zip(names, blobs):
+        want = theirs.pop(ours[name], None)
+        if want != blob:
+            findings.append(("kinetic-pin-drift", name, 0, blob[:16],
+                             "differs from ../Kinetic/%s at kinetic.pin %s -- change Kinetic "
+                             "first, then bump the pin and copy" % (ours[name], pinned[:16])))
+    for krel in sorted(theirs):
+        findings.append(("kinetic-pin-drift", krel, 0, "",
+                         "in ../Kinetic at kinetic.pin but missing here"))
+    return findings
+
+
 def main(argv):
-    findings = (run_grep_checks() + run_pin_check() + run_codespell_check()
+    findings = (run_grep_checks() + run_pin_check() + run_kinetic_pin_check()
+                + run_codespell_check()
                 + run_camelcase_check() + run_critical_static_check())
 
     if not findings:

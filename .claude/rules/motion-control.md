@@ -16,8 +16,10 @@ Every command becomes ONE trajectory planned from the engine's actual
 
 - **Map:** header-only, hardware-free `kinetic::Engine` wrapping vendored
   `lib/ruckig/`, which is BYTE-IDENTICAL to upstream. Wrap, never patch; see
-  `lib/ruckig/VENDORED.md`. A namespace rename here is gated on the native
-  suite, never a blind sed pass.
+  `lib/ruckig/VENDORED.md`. The library's home is the sibling Kinetic repo;
+  both directories here are its copy at `kinetic.pin`, and canon_lint fails
+  on any byte drift. An engine change lands in Kinetic first. A namespace
+  rename is gated on the native suite, never a blind sed pass.
 - **Division of labor (MEASURED; re-run the bench before re-litigating).**
   Ruckig Community is a point-to-point planner, not a waveform interpolator.
   WAVEFORM (every duration-carrying segment, with NO duration floor: a 10 ms
