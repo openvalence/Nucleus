@@ -65,6 +65,11 @@ idf_component_register(SRCS "main.cpp"
                                      espressif__esp_hosted
                                      espressif__esp_wifi_remote)
 
+# Float multiply-adds stay unfused (val-63b): GCC's default -ffp-contract=fast
+# emits fmadd.s, and the planner must match kinetic.wasm and the native suite,
+# both built -ffp-contract=off, bit for bit. Do not drop it for speed.
+target_compile_options(${COMPONENT_LIB} PRIVATE -ffp-contract=off)
+
 # ulp_embed_binary builds ulp/ with the LP core toolchain, embeds ulp_main.bin
 # into the app, and generates ulp_main.h (every LP global as ulp_<name>). The
 # app name MUST be ulp_main: pioarduino's ulp.py hardcodes it.
