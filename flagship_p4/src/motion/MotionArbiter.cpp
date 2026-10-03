@@ -210,13 +210,15 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
     // Neither does motor power: a plan rendered into an unpowered drive moves
     // position truth and not the carriage. The bench profile renders it
     // anyway, on purpose: a devkit has no drive to desync.
+    // ONE load of the switch's word, and the profile tested as the constexpr
+    // it is: a second load could see power arrive in between and log a bench
+    // bypass on a release image, and the release image compiles no bypass.
     if (!_powered.load()) {
-        if (!powerGateOpen()) {
+        if constexpr (!kBenchNoMotor) {
             ++_rejected;
             GLOGW_EVERY_MS(1000, kTag, "REJECT: motor power off");
             return false;
-        }
-        if (!_bench_noted) {
+        } else if (!_bench_noted) {
             _bench_noted = true;
             GLOGW(kTag, "BENCH: motor power gate bypassed");
         }
