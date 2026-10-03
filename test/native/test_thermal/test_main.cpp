@@ -149,14 +149,30 @@ TEST_CASE("fan: a stall with a tach is retried with a kick, and recovers") {
     CHECK(r.fan.rpm > 0.0f);
 }
 
-TEST_CASE("fan: no tach wire runs open-loop duty at the curve fraction") {
+TEST_CASE("fan: no tach pulse by the end of the kick is no fan fitted: off for the boot") {
+    // bd val-30d: a devkit with nothing on J6 and a floating THERM drove a
+    // phantom 100 % into nothing.
     Rig r;
     r.fan.tach = false;
-    r.run(55.0f, 20);
-    CHECK(r.last.mode == FanMode::running);
-    CHECK_FALSE(r.last.tach);
-    CHECK(r.last.duty == doctest::Approx(th::fanCurveFraction(55.0f)));
+    r.run(55.0f, 1 + int(th::kKickMs / th::kStepMs));
+    CHECK_FALSE(r.last.fitted);
+    CHECK(r.last.mode == FanMode::off);
+    CHECK(r.last.duty == 0.0f);
+    // Stays off whatever the demand does, and never kicks again.
+    r.run(th::kNaN, 10);
+    r.run(70.0f, 30);
+    CHECK_FALSE(r.last.fitted);
+    CHECK(r.last.duty == 0.0f);
+    CHECK(r.last.mode == FanMode::off);
     CHECK(r.stalls == 0);
+    CHECK(r.last.target > 0.0f);   // the demand is still reported
+}
+
+TEST_CASE("fan: a fan with a tach is fitted and is not mistaken for absent") {
+    Rig r;
+    r.run(55.0f, 20);
+    CHECK(r.last.fitted);
+    CHECK(r.last.mode == FanMode::running);
 }
 
 TEST_CASE("fan: an unusable THERM reading runs the no-sensor fraction, never off") {
@@ -169,7 +185,20 @@ TEST_CASE("fan: an unusable THERM reading runs the no-sensor fraction, never off
 
 TEST_CASE("fan: the duty floor holds a slow demand above stall voltage") {
     Rig r;
-    r.fan.tach = false;
-    r.run(41.0f, 10);
+    r.fan.top = 400.0f;    // a fan that barely turns: the loop drives duty down hard
+    r.run(41.0f, 30);
+    CHECK(r.last.mode == FanMode::running);
     CHECK(r.last.duty >= th::kMinDuty);
+}
+
+TEST_CASE("thermistor: the sanity window, and the pull-up's direction: an open pin reads cold, never a room") {
+    // The divider pulls THERM to the rail, so an open J7 sits at full scale;
+    // the ADC's calibrated top lands a little under the rail.
+    CHECK(std::isnan(th::thermCelsius(th::kRailV * 0.97f)));
+    CHECK(std::isnan(th::thermCelsius(voltsFor(b3950Ohms(-15.0)))));   // below the window
+    CHECK(th::thermCelsius(voltsFor(b3950Ohms(-5.0))) == doctest::Approx(-5.0).epsilon(0.01).scale(10.0));
+    // The hot side is never discarded short of the table's end.
+    CHECK(th::thermCelsius(voltsFor(b3950Ohms(115.0))) == doctest::Approx(115.0).epsilon(0.01));
+    // Calibration knob present and neutral by default.
+    CHECK(th::kOffsetC == 0.0f);
 }

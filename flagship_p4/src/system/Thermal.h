@@ -8,12 +8,15 @@
 //   drives this file.
 // - SINGLE OWNER: FanPolicy is not safe against a concurrent call.
 // - The fan rail is a controller-less buck that runs discontinuous at fan
-//   current, so duty does not map to speed: with a tach the policy closes
-//   the loop on RPM, and only a fan with no tach runs on open-loop duty
-//   (Hardware SPEC.md 2026-09-23 fan-filter row).
-// - NaN is "no reading": an open or shorted J7 reads outside the table and
-//   becomes NaN, never a clamped edge value. The fan runs kNoSensorFraction
-//   then, never off.
+//   current, so duty does not map to speed: the policy closes the loop on
+//   tach RPM (Hardware SPEC.md 2026-09-23 fan-filter row).
+// - J6 is a tach header. A kick that ends with no tach pulse is NO FAN
+//   FITTED (operator ruling 2026-10-02, bd val-30d): duty 0 for the rest of
+//   the boot, never a phantom duty into nothing. A two-wire fan reads the
+//   same and is not driven; a reboot looks again.
+// - NaN is "no reading": an open or shorted J7, or a reading outside the
+//   sanity window, becomes NaN, never a clamped edge value. A fitted fan
+//   runs kNoSensorFraction then, never off.
 // - Units: volts, ohms, degrees C, duty and fraction in 0..1, RPM,
 //   milliseconds in the host's clock (wrap-safe).
 // See: Hardware flagship/SPEC.md 2026-09-23 fan rows, docs/board-map.md
@@ -40,6 +43,15 @@ inline constexpr float kRailV      = 3.3f;
 // CALIBRATION: added to every reading. Set it from one reference
 // thermometer reading taken at room temperature.
 inline constexpr float kOffsetC = 0.0f;
+
+// SANITY WINDOW, and the divider's pull direction is why its cold edge is
+// the one that matters: the pull-up goes to the rail (Hardware SPEC.md
+// 2026-09-22 sensing row), so an open J7, a broken wire or a lifted NTC
+// reads at or near full scale, which the table maps to its coldest end.
+// Colder than this is that open pin, not a room. The hot edge stays the
+// table's own: a hot reading is never discarded, because discarding it
+// would turn a real overheat into "no reading".
+inline constexpr float kSaneMinC = -10.0f;
 
 struct NtcPoint {
     float celsius;
@@ -133,7 +145,11 @@ inline float ntcCelsius(float ohms) {
     return kNaN;
 }
 
-inline float thermCelsius(float volts) { return ntcCelsius(ntcOhms(volts)); }
+// NaN outside the sanity window as well as outside the table.
+inline float thermCelsius(float volts) {
+    const float c = ntcCelsius(ntcOhms(volts));
+    return c >= kSaneMinC ? c : kNaN;   // NaN fails the comparison too
+}
 
 // The curve's speed fraction at a temperature, held at both ends.
 inline float fanCurveFraction(float celsius) {
@@ -158,6 +174,7 @@ struct FanCommand {
     bool    sensor    = false;  // a usable THERM reading drove the demand
     bool    tach      = false;  // a kick has seen tach pulses this boot: closed loop
     bool    stalled   = false;  // this step began a stall retry
+    bool    fitted    = true;   // false: the first kick saw no tach, no fan is fitted
 };
 
 class FanPolicy {
@@ -181,22 +198,30 @@ public:
         }
         c.target = demand;
 
-        if (demand <= 0.0f) {
+        if (_absent) {
+            _duty = 0.0f;
+        } else if (demand <= 0.0f) {
             _mode = FanMode::off;
             _duty = 0.0f;
         } else if (_mode == FanMode::off) {
             startKick(nowMs);
         } else if (_mode == FanMode::kicking) {
+            // Sticky for the boot: a fan that once showed a tach and now
+            // shows none at full duty is stalled, not absent.
+            _tach = _tach || rpm > 0.0f;
+            if (rpm > _topRpm) _topRpm = rpm;
             if (nowMs - _kickAtMs >= kKickMs) {
-                // Sticky for the boot: a fan that once showed a tach and now
-                // shows none at full duty is stalled, not tach-less.
-                _tach = _tach || rpm > 0.0f;
-                if (rpm > _topRpm) _topRpm = rpm;
-                _mode = FanMode::running;
-                _duty = clampDuty(demand);   // feed-forward start, the loop trims it
-                _zeroSinceMs = nowMs;
+                if (!_tach) {
+                    _absent = true;
+                    _mode = FanMode::off;
+                    _duty = 0.0f;
+                } else {
+                    _mode = FanMode::running;
+                    _duty = clampDuty(demand);   // feed-forward start, the loop trims it
+                    _zeroSinceMs = nowMs;
+                }
             }
-        } else if (_tach) {
+        } else {
             if (rpm > 0.0f) {
                 _zeroSinceMs = nowMs;
                 // No reading can beat the true top speed, so the highest seen
@@ -207,12 +232,11 @@ public:
                 startKick(nowMs);
                 c.stalled = true;
             }
-        } else {
-            _duty = clampDuty(demand);
         }
         c.duty = _duty;
         c.mode = _mode;
         c.tach = _tach;
+        c.fitted = !_absent;
         return c;
     }
 
@@ -230,6 +254,7 @@ private:
     FanMode  _mode = FanMode::off;
     bool     _on = false;
     bool     _tach = false;
+    bool     _absent = false;   // the no-fan verdict, sticky for the boot
     float    _duty = 0.0f;
     float    _topRpm = 0.0f;
     uint32_t _kickAtMs = 0;

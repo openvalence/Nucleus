@@ -54,6 +54,7 @@ uint64_t g_lastCountUs = 0;
 thermal::FanMode g_lastMode = thermal::FanMode::off;
 bool g_lastSensor = true;
 bool g_lastTach = false;
+bool g_lastFitted = true;
 
 // ---- the snapshot, any task -------------------------------------------------
 
@@ -62,6 +63,7 @@ std::atomic<float> g_duty{0.0f};
 std::atomic<float> g_rpm{0.0f};
 std::atomic<uint8_t> g_mode{0};
 std::atomic<bool> g_tachSeen{false};
+std::atomic<bool> g_fitted{true};
 
 void writeDuty(float duty) {
     const uint32_t d = uint32_t(std::lround(duty * float(kDutyMax)));
@@ -162,9 +164,13 @@ void fanService(uint32_t nowMs) {
     if (celsius && c.sensor != g_lastSensor) {
         g_lastSensor = c.sensor;
         if (c.sensor) GLOGI(kTag, "THERM reads %.1f C", double(*celsius));
-        else GLOGW(kTag, "THERM unreadable (%.2f V: J7 open or shorted): fan at %.0f%%",
+        else GLOGW(kTag, "THERM unreadable (%.2f V: J7 open, shorted or out of window): fan demand %.0f%%",
                    double(volts.value_or(thermal::kNaN)), double(thermal::kNoSensorFraction * 100.0f));
     }
+    if (!c.fitted && g_lastFitted)
+        GLOGW(kTag, "no fan fitted: no tach pulse in the %lu ms kick; FAN_PWM off for this boot",
+              static_cast<unsigned long>(thermal::kKickMs));
+    g_lastFitted = c.fitted;
     if (c.tach && !g_lastTach)
         GLOGI(kTag, "tach seen: top speed %.0f rpm, closing the loop on RPM", double(g_policy.topRpm()));
     g_lastTach = c.tach;
@@ -182,6 +188,7 @@ void fanService(uint32_t nowMs) {
     g_rpm.store(rpm, std::memory_order_relaxed);
     g_mode.store(uint8_t(c.mode), std::memory_order_relaxed);
     g_tachSeen.store(c.tach, std::memory_order_relaxed);
+    g_fitted.store(c.fitted, std::memory_order_relaxed);
 }
 
 FanStatus fanStatus() {
@@ -191,6 +198,7 @@ FanStatus fanStatus() {
     s.rpm = g_rpm.load(std::memory_order_relaxed);
     s.mode = thermal::FanMode(g_mode.load(std::memory_order_relaxed));
     s.tach = g_tachSeen.load(std::memory_order_relaxed);
+    s.fitted = g_fitted.load(std::memory_order_relaxed);
     return s;
 }
 

@@ -32,6 +32,7 @@ struct FanStatus {
     float            rpm     = 0.0f;            // measured over the last step
     thermal::FanMode mode    = thermal::FanMode::off;
     bool             tach    = false;           // closed loop on RPM
+    bool             fitted  = true;            // false: no tach after the kick, no fan
 };
 
 // Configures LEDC (duty 0) and the PCNT tach counter. False when either
