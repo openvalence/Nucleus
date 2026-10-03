@@ -1,5 +1,15 @@
 menu "Nucleus"
 
+config NUCLEUS_BENCH_QUAD_LP10_12
+    bool "Bench only: quadrature on LPG10/LPG12 instead of LPG3/LPG5"
+    default n
+    help
+        Duct-tape bench (operator 2026-10-03): QUAD_A moves to LPG10 and
+        QUAD_B to LPG12 so the devkit can splice into the old PCB. Those two
+        pads are the accessory header IO2/IO1 on the flagship, so both are
+        marked absent under this option. Never on in a release build; the
+        flagship_p4_bench env sets it through custom_sdkconfig.
+
 config NUCLEUS_DRIVE_LINK
     bool "RS485 Modbus link to the drive"
     default y

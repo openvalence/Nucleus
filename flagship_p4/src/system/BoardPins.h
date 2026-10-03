@@ -23,12 +23,18 @@
 // each pin), ../Hardware/flagship/SPEC.md
 
 #pragma once
+#include "sdkconfig.h"   // CONFIG_NUCLEUS_BENCH_QUAD_LP10_12 reaches the LP build too
 
 // ---- motion: quadrature to the drive, LP core only --------------------------
 // Through the always-enabled 74AHCT125 gates 1-2 (U10) to J4 MOTION, tapped
 // before the buffer on TP601/TP604.
+#ifdef CONFIG_NUCLEUS_BENCH_QUAD_LP10_12
+#define BOARD_GPIO_QUAD_A 10  // LPG10: duct-tape bench only (Kconfig); takes ACC_IO2
+#define BOARD_GPIO_QUAD_B 12  // LPG12: duct-tape bench only (Kconfig); takes ACC_IO1
+#else
 #define BOARD_GPIO_QUAD_A 3   // LPG3
 #define BOARD_GPIO_QUAD_B 5   // LPG5
+#endif
 
 // ---- motor switch (U2, TPS48111) --------------------------------------------
 // MOTOR_EN and PRECHARGE_EN carry 100k pull-downs (R409, R410): a P4 in reset
@@ -100,8 +106,13 @@
 // The HP UART behind those two pads, opened on a consumer's first ask
 // (ValenceAccessoryIo.cpp). Never UART0 (G37's ROM log) or the LP UART.
 #define BOARD_UART_ACC          2
+#ifdef CONFIG_NUCLEUS_BENCH_QUAD_LP10_12
+#define BOARD_GPIO_ACC_IO1     -1   // absent: LPG12 is QUAD_B on the duct-tape bench
+#define BOARD_GPIO_ACC_IO2     -1   // absent: LPG10 is QUAD_A on the duct-tape bench
+#else
 #define BOARD_GPIO_ACC_IO1     12   // LPG12, J15
 #define BOARD_GPIO_ACC_IO2     10   // LPG10, J15
+#endif
 #define BOARD_GPIO_ACC_IO3      8   // LPG8, J15
 #define BOARD_GPIO_ACC_IO4      7   // LPG7, J15
 #define BOARD_GPIO_ACC_IO5      1   // LPG1, J15

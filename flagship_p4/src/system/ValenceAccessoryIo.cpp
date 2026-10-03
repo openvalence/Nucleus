@@ -96,6 +96,7 @@ uint32_t g_estopsSeen = 0;
 
 // A plain HP GPIO input on an LP pad, without gpio_config().
 void padInput(int n, gpio_pull_mode_t pull) {
+    if (n < 0) return;   // absent pad (bench override): never configured
     gpio_set_direction(pin(n), GPIO_MODE_INPUT);
     gpio_set_pull_mode(pin(n), pull);
 }
@@ -163,6 +164,7 @@ void servicePwm() {
 
 void serviceGpio() {
     for (uint8_t i = 0; i < accessory::kGpioCount; ++i) {
+        if (kIoPin[i] < 0) continue;   // absent pad (bench override)
         const Dir dir = g_req.dir(i);
         if (dir != g_dirOut[i]) {
             // Every pad left boot as an input with a pull-down, which is also
@@ -247,7 +249,7 @@ bool accessoryGpioSet(uint8_t io, bool high) {
 }
 
 std::optional<bool> accessoryGpioGet(uint8_t io) {
-    if (io < 1 || io > accessory::kGpioCount) return std::nullopt;
+    if (io < 1 || io > accessory::kGpioCount || kIoPin[io - 1] < 0) return std::nullopt;
     return gpio_get_level(pin(kIoPin[io - 1])) != 0;
 }
 
