@@ -30,8 +30,9 @@ struct SelfCheckFacts {
     bool hostLink = false;   // esp_hosted connected and the C6 reported its version
 };
 
-// Drives MOTOR_EN, PRECHARGE_EN and ESTOP_BYP low and configures the input
-// pins the check reads. Call before anything else in app_main.
+// Drives MOTOR_EN, PRECHARGE_EN and ESTOP_BYP low and configures MSW_FLT_N as
+// an input; the e-stop row reads ValenceEstopInput.h. Call before anything
+// else in app_main.
 void selfCheckHoldMotorOff();
 
 // Runs every check in table order and logs each result plus a summary.

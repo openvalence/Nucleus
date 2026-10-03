@@ -18,6 +18,7 @@
 #include "system/BoardPins.h"
 #include "system/SelfCheck.h"
 #include "system/Supervisor.h"
+#include "system/ValenceEstopInput.h"
 #include "system/ValenceMotorSwitch.h"
 #include "system/ValencePower.h"
 
@@ -150,24 +151,33 @@ void checkSwitchFault() {
     g_table.record(Check::switch_fault, Verdict::pass, "MSW_FLT_N high");
 }
 
+// The live reading, the same one the hub latches on (ValenceEstopInput.h).
 void checkEStop() {
-    const bool nc = gpio_get_level(pin(BOARD_GPIO_ESTOP_NC)) != 0;
-    const bool no = gpio_get_level(pin(BOARD_GPIO_ESTOP_NO)) != 0;
-    switch (selfcheck::decodeEStop(nc, no)) {
-        case selfcheck::EStop::normal:
+    const estop::Reading e = estopInputRead();
+    if (!e.known) {
+        g_table.record(Check::estop, Verdict::fail, "never sampled: the BoardIo task is not running");
+        return;
+    }
+    if (e.masked) {
+        g_table.record(Check::estop, Verdict::skipped,
+                       "bench profile: no E-stop wired (NC and NO open), read as released");
+        return;
+    }
+    switch (e.state) {
+        case estop::Contacts::released:
             g_table.record(Check::estop, Verdict::pass, "present and released");
             return;
-        case selfcheck::EStop::pressed:
+        case estop::Contacts::pressed:
             g_table.record(Check::estop, Verdict::fail,
                            "pressed: the hardware stop holds motor power off");
             return;
-        case selfcheck::EStop::unplugged:
+        case estop::Contacts::unplugged:
             g_table.record(Check::estop, Verdict::fail,
-                           "no E-stop found (NC and NO open); bypass not built (val-091.23)");
+                           "no E-stop found (NC and NO open); bypass not built (val-091.70)");
             return;
-        case selfcheck::EStop::wiring_fault:
+        case estop::Contacts::wiring_fault:
             g_table.record(Check::estop, Verdict::fail,
-                           "NC and NO both closed: wiring fault or a non-E-stop plug");
+                           "wiring fault: NC and NO both closed, a non-E-stop plug, or chatter");
             return;
     }
 }
@@ -238,11 +248,10 @@ void selfCheckHoldMotorOff() {
     gpio_config(&out);
     for (int n : kHeldLow) gpio_set_level(pin(n), 0);
 
-    // The board fits external pull-ups on all three; the internal ones only
-    // give a bare stamp a defined reading.
+    // The board fits an external pull-up; the internal one only gives a bare
+    // stamp a defined reading. The e-stop pads are ValenceEstopInput's.
     gpio_config_t in{};
-    in.pin_bit_mask = (1ULL << BOARD_GPIO_ESTOP_NC) | (1ULL << BOARD_GPIO_ESTOP_NO)
-                    | (1ULL << BOARD_GPIO_MSW_FLT_N);
+    in.pin_bit_mask = 1ULL << BOARD_GPIO_MSW_FLT_N;
     in.mode = GPIO_MODE_INPUT;
     in.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&in);

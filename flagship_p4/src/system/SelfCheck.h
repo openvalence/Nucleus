@@ -119,17 +119,8 @@ private:
 };
 
 // ---- pure decisions the host feeds raw readings into ------------------------
-
-// The external E-stop's two contacts as the P4 reads them through the 2.2k
-// pull-ups (Hardware SPEC.md 2026-09-23 E-stop row): HIGH means open.
-enum class EStop : uint8_t { normal, pressed, unplugged, wiring_fault };
-
-constexpr EStop decodeEStop(bool ncHigh, bool noHigh) {
-    if (!ncHigh && noHigh) return EStop::normal;
-    if (ncHigh && !noHigh) return EStop::pressed;
-    if (ncHigh && noHigh) return EStop::unplugged;
-    return EStop::wiring_fault;
-}
+// The E-stop contacts' decode is EstopInput.h's: the runtime reader and this
+// table's estop row share one reading.
 
 // THE CALIBRATION KNOBS, unmeasured on a Flagship.
 // TODO(val-091.21): set both from the first board's bench readings.

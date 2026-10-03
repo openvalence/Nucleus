@@ -1,14 +1,15 @@
 // test_valence_device -- native doctest suite for the delegate's safety seams with the hub
 // Constraints:
 // - ValenceDevice.cpp is compiled verbatim into this one translation unit,
-//   driven by a real Hub over InProcessLink. The motion, pattern and motor
-//   switch doors are fakes below: the composition's seam, never the board.
+//   driven by a real Hub over InProcessLink. The motion, pattern, motor
+//   switch, button and e-stop doors are fakes below: the composition's seam,
+//   never the board.
 // - The capacity macros are defined here, before any Valence include, and this
 //   binary has no other translation unit that sees Catalog32. They only need
 //   to hold the machine's own catalog; the board's values live in
 //   flagship_p4/valence_capacity.cmake and are not restated here.
-// See: Valence SPEC.md §5.5, §11.2, §16.1; bd val-091.56, rfc-1ek, rfc-2w2,
-// Valence RFC-095
+// See: Valence SPEC.md §5.5, §11.2, §16.1; bd val-091.23, val-091.56,
+// rfc-1ek, rfc-2w2, Valence RFC-095
 
 #define VALENCE_CATALOG_ENTRIES 64
 #define VALENCE_CATALOG_LAYOUT_FIELDS 256
@@ -61,6 +62,8 @@ ReturnStart g_returnAnswer = ReturnStart::queued;
 button::Gesture g_homeGesture = button::Gesture::none;
 button::Gesture g_pairGesture = button::Gesture::none;
 int g_forceHomes = 0;
+// The fake e-stop reading: what the BoardIo task would have published.
+estop::Reading g_estop{};
 
 }  // namespace
 
@@ -117,6 +120,8 @@ std::optional<float> motorSwitchThermVolts() { return std::nullopt; }
 button::Gesture homeButtonTake() { return std::exchange(g_homeGesture, button::Gesture::none); }
 button::Gesture pairButtonTake() { return std::exchange(g_pairGesture, button::Gesture::none); }
 
+estop::Reading estopInputRead() { return g_estop; }
+
 }  // namespace valence
 
 // ---- rig ------------------------------------------------------------------------
@@ -170,6 +175,8 @@ struct Rig {
         g_forceHomes = 0;
         g_switch = MotorSwitchStatus{};
         g_switch.state = motorswitch::State::on;
+        g_estop = estop::Reading{};
+        g_estop.known = true;
         REQUIRE(buildValenceCatalog(catalog, boardFeatures()));
         device.setUnvouchedRole(AccessLevel::control);
         device.setSetupWritten(kSetupRequiredMask);
@@ -210,6 +217,13 @@ struct Rig {
         REQUIRE(it != del.lastState.end());
         REQUIRE(it->second.size() >= 8);
         return getU16(std::span<const std::byte>(it->second).subspan(6, 2));
+    }
+
+    uint8_t snapshotCause() {
+        const auto it = del.lastState.find(0x0003);
+        REQUIRE(it != del.lastState.end());
+        REQUIRE(it->second.size() >= 2);
+        return uint8_t(it->second[1]);
     }
 };
 
@@ -503,4 +517,140 @@ TEST_CASE("VD-13: a planned reboot takes the armed persists at once, then none")
     rig->step(20);   // applied and armed, well inside the debounce
     CHECK(rig->device.takePendingPersist() == kPersistConfig);
     CHECK(rig->device.takePendingPersist() == 0);
+}
+
+// ---- bd val-091.23: the e-stop at the machine ------------------------------------
+
+namespace {
+
+void setEstop(estop::Contacts c) {
+    g_estop.state = c;
+    g_estop.known = true;
+}
+
+}  // namespace
+
+TEST_CASE("VD-14: a pressed e-stop latches ESTOP through onEstop, cause user") {
+    auto rig = std::make_unique<Rig>();
+    setEstop(estop::Contacts::pressed);
+    rig->step();
+    REQUIRE(rig->hub->estopLatched());
+    CHECK(g_census.estop);   // onEstop() ran motionEstop(): the board's cut and park
+    CHECK(rig->snapshotCause() == safety_causes::user);
+}
+
+TEST_CASE("VD-15: releasing the button resumes nothing; only release clears, into PAUSE") {
+    auto rig = std::make_unique<Rig>();
+    setEstop(estop::Contacts::pressed);
+    rig->step();
+    REQUIRE(rig->hub->estopLatched());
+    const uint16_t seq = rig->hub->estopSeq();
+
+    setEstop(estop::Contacts::released);
+    rig->step(500);
+    CHECK(rig->hub->estopLatched());
+    CHECK(g_census.estop);
+    CHECK(rig->hub->estopSeq() == seq);
+
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::release)).has_value());
+    rig->step();
+    CHECK(rig->del.nacks.empty());
+    CHECK_FALSE(rig->hub->estopLatched());
+    CHECK(rig->hub->pauseLatched());
+    CHECK_FALSE(g_census.estop);
+}
+
+TEST_CASE("VD-16: a release while the button is pressed is refused and names the button") {
+    auto rig = std::make_unique<Rig>();
+    setEstop(estop::Contacts::pressed);
+    rig->step();
+    REQUIRE(rig->hub->estopLatched());
+
+    CHECK_FALSE(rig->device.canClearEstop());
+    CHECK(rig->device.intentNackDetail(channels::safety_intents, NackCode::CLEAR_REFUSED) ==
+          "e-stop pressed at the machine");
+    CHECK(g_census.estop);   // the arbiter's latch was not dropped
+
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::release)).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::CLEAR_REFUSED);
+    CHECK(rig->hub->estopLatched());
+
+    // force_home's release goes through the same door.
+    IntentValueMap home{};
+    home.count = 2;
+    home.fields[0] = IntentValueField{1, IntentValue::ofU64(2)};
+    home.fields[1] = IntentValueField{2, IntentValue::ofF32(200.0f)};
+    REQUIRE(rig->client->sendIntent(ch::home, home).has_value());
+    rig->step();
+    REQUIRE(g_forceHomes == 1);
+    CHECK(rig->hub->estopLatched());
+}
+
+TEST_CASE("VD-17: both-open and both-closed contacts latch cause fault and name themselves") {
+    struct Row {
+        estop::Contacts contacts;
+        const char* detail;
+    };
+    for (const Row row : {Row{estop::Contacts::unplugged, "no e-stop found at the machine"},
+                          Row{estop::Contacts::wiring_fault, "e-stop wiring fault at the machine"}}) {
+        auto rig = std::make_unique<Rig>();
+        setEstop(row.contacts);
+        rig->step();
+        REQUIRE(rig->hub->estopLatched());
+        CHECK(rig->snapshotCause() == safety_causes::fault);
+        CHECK_FALSE(rig->device.canClearEstop());
+        CHECK(rig->device.intentNackDetail(channels::safety_intents, NackCode::CLEAR_REFUSED) == row.detail);
+    }
+}
+
+TEST_CASE("VD-18: an unread e-stop latches nothing and refuses the release") {
+    auto rig = std::make_unique<Rig>();
+    g_estop = estop::Reading{};
+    rig->step();
+    CHECK_FALSE(rig->hub->estopLatched());
+    CHECK_FALSE(rig->device.canClearEstop());
+    CHECK(rig->device.intentNackDetail(channels::safety_intents, NackCode::CLEAR_REFUSED) ==
+          "e-stop input not read");
+}
+
+TEST_CASE("VD-19: an EN-node switch fault waits for the e-stop to name it: a press is cause user") {
+    auto rig = std::make_unique<Rig>();
+    g_switch.state = motorswitch::State::faulted;
+    g_switch.last_fault = motorswitch::Fault::en_node;
+    ++g_switch.faults;
+    rig->step(40);
+    CHECK_FALSE(rig->hub->estopLatched());
+
+    setEstop(estop::Contacts::pressed);
+    rig->step(2);
+    REQUIRE(rig->hub->estopLatched());
+    CHECK(rig->snapshotCause() == safety_causes::user);
+    const uint16_t seq = rig->hub->estopSeq();
+    rig->step(200);   // the switch fault is spent on the e-stop's latch, never a second one
+    CHECK(rig->hub->estopSeq() == seq);
+    CHECK(rig->snapshotCause() == safety_causes::user);
+}
+
+TEST_CASE("VD-20: an EN-node fault the e-stop does not name latches fault after the window") {
+    auto rig = std::make_unique<Rig>();
+    g_switch.state = motorswitch::State::faulted;
+    g_switch.last_fault = motorswitch::Fault::en_node;
+    ++g_switch.faults;
+    rig->step(int(kEstopNameMs) - 10);
+    CHECK_FALSE(rig->hub->estopLatched());
+    rig->step(20);
+    REQUIRE(rig->hub->estopLatched());
+    CHECK(rig->snapshotCause() == safety_causes::fault);
+}
+
+TEST_CASE("VD-21: any other switch fault latches at once") {
+    auto rig = std::make_unique<Rig>();
+    g_switch.state = motorswitch::State::faulted;
+    g_switch.last_fault = motorswitch::Fault::inrush;
+    ++g_switch.faults;
+    rig->step(2);
+    CHECK(rig->hub->estopLatched());
+    CHECK(rig->snapshotCause() == safety_causes::fault);
 }

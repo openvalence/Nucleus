@@ -61,7 +61,9 @@
 // itself is hardware; these only report it.
 #define BOARD_GPIO_ESTOP_NC  39
 #define BOARD_GPIO_ESTOP_NO  30
-// Masks an UNPLUGGED cable only, never a connected button; 100k pull-down.
+// Masks any state where NO reads open (unplugged, a broken NO wire, a 2-wire
+// NC button), never a pressed button with NO closed (SPEC 2026-10-02
+// correction); 100k pull-down.
 #define BOARD_GPIO_ESTOP_BYP 29
 
 // ---- buttons, status LED, debug ---------------------------------------------

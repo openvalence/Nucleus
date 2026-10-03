@@ -1,8 +1,8 @@
 // test_self_check -- native doctest suite for the boot self-check table
 // Constraints:
-// - Hardware-free: the table, the E-stop decode and the board-monitor judges
-//   over sealed Supervisor.h blocks. The reads live in
-//   ValenceSelfCheck.cpp and are bench work (val-091.21).
+// - Hardware-free: the table and the board-monitor judges over sealed
+//   Supervisor.h blocks. The reads live in ValenceSelfCheck.cpp and are
+//   bench work (val-091.21); the E-stop decode is test_estop_input's.
 // - The gate under test is the ruling, not the code: motor power opens only
 //   when EVERY entry passed; skipped and pending hold it shut.
 // See: flagship_p4/src/system/SelfCheck.h, bd val-091.21
@@ -17,7 +17,6 @@
 #include "../../../flagship_p4/src/system/SelfCheck.h"
 
 using valence::selfcheck::Check;
-using valence::selfcheck::EStop;
 using valence::selfcheck::Result;
 using valence::selfcheck::Table;
 namespace sc = valence::selfcheck;
@@ -120,13 +119,6 @@ TEST_CASE("an out-of-range check is ignored, never written past the table") {
     passAll(t);
     t.record(Check::count_, Result::fail, "nowhere");
     CHECK(t.motorPowerAllowed());
-}
-
-TEST_CASE("E-stop decode: (NC, NO) read HIGH when open") {
-    CHECK(sc::decodeEStop(false, true) == EStop::normal);
-    CHECK(sc::decodeEStop(true, false) == EStop::pressed);
-    CHECK(sc::decodeEStop(true, true) == EStop::unplugged);
-    CHECK(sc::decodeEStop(false, false) == EStop::wiring_fault);
 }
 
 TEST_CASE("result names") {

@@ -153,6 +153,11 @@ public:
     // writes them now instead of after the debounce.
     uint8_t takePendingPersist();
 
+    // ---- the e-stop at the machine (bd val-091.23) --------------------------
+    // tick() latches ESTOP while ValenceEstopInput.h's reading stops, and
+    // canClearEstop() refuses the release until it reads released. Releasing
+    // the button clears nothing.
+
     // 0x0006 link RSSI in dBm, 0 = no reading. PUSHED IN from whichever task
     // owns the radio; never read on the hub task (see ValenceHub.h).
     void setLinkRssi(int8_t rssi) { _linkRssi.store(rssi, std::memory_order_relaxed); }
@@ -255,6 +260,10 @@ private:
     uint32_t _returnsAtRequest = 0;
     // The motor switch's fault count as tick() last acted on it.
     uint16_t _mswFaultsSeen = 0;
+    // A switch fault not yet acted on, and the tick it was first seen: an
+    // EN-node one waits for the e-stop reader to name it (tick()).
+    bool _mswFaultWaiting = false;
+    uint32_t _mswFaultSinceMs = 0;
     // SPEC 16.1 NACK detail for the refusal this delegate last made, NUL
     // terminated; empty when it gave no reason. Three callers refuse and the
     // hub may ask after each: applyIntent(), admitsUnderPause() and

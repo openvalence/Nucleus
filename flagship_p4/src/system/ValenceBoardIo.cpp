@@ -11,6 +11,7 @@
 
 #include "geiger/geiger.h"
 #include "system/ValenceButtons.h"
+#include "system/ValenceEstopInput.h"
 #include "system/ValenceFan.h"
 #include "system/ValenceGlow.h"
 
@@ -27,6 +28,7 @@ void taskMain(void*) {
     for (;;) {
         vTaskDelayUntil(&last, pdMS_TO_TICKS(kBoardIoPeriodMs));
         const uint32_t nowMs = uint32_t(esp_timer_get_time() / 1000);
+        estopInputService(nowMs);
         buttonsService(nowMs);
         glowService(nowMs);
         fanService(nowMs);
@@ -39,10 +41,12 @@ bool boardIoBegin() {
     glowBegin();
     fanBegin();
     buttonsBegin();
+    estopInputBegin();
     if (xTaskCreatePinnedToCore(&taskMain, "BoardIo", kBoardIoTaskStackBytes, nullptr, 3, &g_task, 0) !=
         pdPASS) {
         g_task = nullptr;
-        GLOGE(kTag, "BoardIo task did not start: no status pixel, fan off, HOME and PAIR unread");
+        GLOGE(kTag, "BoardIo task did not start: e-stop unread (release refused), no status pixel, "
+                    "fan off, HOME and PAIR unread");
         return false;
     }
     return true;

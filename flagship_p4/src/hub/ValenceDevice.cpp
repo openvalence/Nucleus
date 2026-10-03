@@ -28,6 +28,7 @@
 #include "motion/ValenceMotion.h"
 #include "patterns/ValencePattern.h"
 #include "system/ValenceButtons.h"
+#include "system/ValenceEstopInput.h"
 #include "system/ValenceMotorSwitch.h"
 
 #include "valence/util/byte_io.hpp"
@@ -97,6 +98,37 @@ constexpr uint32_t kCfgPersistDebounceMs = 2000;
 // power anyway. The arbiter brakes at the input decel, well under a second
 // from the speed ceiling.
 constexpr uint32_t kRebootBrakeMs = 2000;
+
+// How long an EN-node motor switch fault waits for the e-stop reader to name
+// it. The switch's 5 ms watch sees the e-stop's hardware stop first; the
+// reader settles a press one 10 ms BoardIo sample, the button's NC-open to
+// NO-closed travel and estop::kDebounceMs later, plus a hub tick. Covers
+// 50 ms of travel. Only the protocol latch waits: power is already off and
+// the emitter parked.
+// TODO(val-091.69): from a scoped slam of the real button.
+constexpr uint32_t kEstopNameMs = 100;
+static_assert(kEstopNameMs > estop::kDebounceMs + 25, "the naming window cannot cover a press");
+
+// Registry safety_causes (registry.yaml:574): a pressed button is the
+// operator's act, `user` ("physical button"); a missing or miswired input is
+// the hub's own detection, `fault`.
+uint8_t estopCause(estop::Contacts c) {
+    return c == estop::Contacts::pressed ? safety_causes::user : safety_causes::fault;
+}
+
+// SPEC 16.1 detail for a release the e-stop contacts refuse (SPEC 11.2 (a):
+// the cause is not resolved while they read a stop); nullptr when they allow
+// it. A reading not yet known refuses: a stop nobody can see is not resolved.
+const char* estopRefusal(const estop::Reading& r) {
+    if (!r.known) return "e-stop input not read";
+    switch (r.state) {
+        case estop::Contacts::released:     return nullptr;
+        case estop::Contacts::pressed:      return "e-stop pressed at the machine";
+        case estop::Contacts::unplugged:    return "no e-stop found at the machine";
+        case estop::Contacts::wiring_fault: return "e-stop wiring fault at the machine";
+    }
+    return "e-stop input not read";
+}
 
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -1209,8 +1241,16 @@ std::optional<uint8_t> ValenceDevice::sourceForChannel(uint16_t channel_id) {
 // refused. A self-check that holds power off is not the latch's cause: the
 // release lands in PAUSE with the switch off, and the arbiter's power gate
 // refuses motion until it is on.
+// The e-stop contacts are checked FIRST, whatever latched the ESTOP: a button
+// still pressed at the machine is a cause unresolved (§11.2 (a)), and its
+// refusal names the act that resolves it.
 bool ValenceDevice::canClearEstop() {
     _nackDetail[0] = '\0';
+    if (const char* held = estopRefusal(estopInputRead())) {
+        GLOGW(kTag, "release refused CLEAR_REFUSED: %s", held);
+        noteDetail(held);
+        return false;
+    }
     const MotionCensus c = motionCensus();
     if (c.busy || c.step_q8 != 0) {
         noteDetail("motion not at rest");
@@ -1566,12 +1606,25 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _clearLatch = false;
         if (_hub->estopLatched()) {
             if (_hub->releaseEstop()) GLOGW(kTag, "ESTOP released by force_home: PAUSE, resume to run");
-            else GLOGW(kTag, "force_home could not release the ESTOP latch: motion is not parked");
+            else GLOGW(kTag, "force_home could not release the ESTOP latch: %s", _nackDetail.data());
         }
     }
     if (_homeDone) {
         _homeDone = false;
         _hub->setHomeRequired(false);
+    }
+    // The e-stop at the machine (val-091.23): a reading that stops latches
+    // ESTOP whenever none is latched, through the same hub-side door as the
+    // fault latch below (SPEC 11.2: onEstop() cuts power and parks first).
+    // LEVEL, not edge: canClearEstop() refuses the release while the reading
+    // stops, so the latch outlives the press, and the button's own release
+    // clears nothing. After the home blocks above, so a force_home in this
+    // tick cannot clear the home_required this latch sets.
+    const estop::Reading es = estopInputRead();
+    if (es.stops() && !_hub->estopLatched()) {
+        GLOGW(kTag, "e-stop %s at the machine: latching ESTOP, cause %s",
+              estop::contactsName(es.state), es.state == estop::Contacts::pressed ? "user" : "fault");
+        _hub->latchEstop(estopCause(es.state), uint8_t(AccessLevel::configure));
     }
     // A motor switch fault already cut power with no ESTOP behind it. Latch
     // one, cause fault (SPEC 11.2), so the release is the explicit re-enable
@@ -1579,13 +1632,25 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     // its highest tier. The seq is the hub's one SPEC 5.5 counter, never one
     // kept here: a count of this delegate's own initiations drifts from the
     // seq a raw 0xE5 frame or the `estop` op set.
+    // An EN-node fault is also how the e-stop's hardware stop reaches the
+    // switch, which sees it first: it waits kEstopNameMs for the block above
+    // to latch it with the e-stop's own cause.
     const MotorSwitchStatus sw = motorSwitchStatus();
     if (sw.faults != _mswFaultsSeen) {
-        _mswFaultsSeen = sw.faults;
-        if (!_hub->estopLatched()) {
-            GLOGE(kTag, "motor switch fault (%s): latching ESTOP, cause fault",
-                  motorswitch::faultName(sw.last_fault));
-            _hub->latchEstop(safety_causes::fault, uint8_t(AccessLevel::configure));
+        if (!_mswFaultWaiting) {
+            _mswFaultWaiting = true;
+            _mswFaultSinceMs = nowMs;
+        }
+        const bool naming = sw.last_fault == motorswitch::Fault::en_node &&
+                            uint32_t(nowMs - _mswFaultSinceMs) < kEstopNameMs;
+        if (_hub->estopLatched() || !naming) {
+            _mswFaultsSeen = sw.faults;
+            _mswFaultWaiting = false;
+            if (!_hub->estopLatched()) {
+                GLOGE(kTag, "motor switch fault (%s): latching ESTOP, cause fault",
+                      motorswitch::faultName(sw.last_fault));
+                _hub->latchEstop(safety_causes::fault, uint8_t(AccessLevel::configure));
+            }
         }
     }
     // The motion plane, from ONE census so no two channels disagree about the
