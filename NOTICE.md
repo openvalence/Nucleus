@@ -47,7 +47,8 @@ Section numbers are CERN-OHL-S-2.0's own.
 | ch32fun (PlatformIO `ch32v003fun` framework) | https://github.com/cnlohr/ch32fun | unknown (not fetched on this host) | The `flagship_ch32v003` monitor firmware build |
 | Valence protocol (`spec/`) | https://github.com/openvalence/Valence | CC BY 4.0 (Valence/LICENSE-SPEC) | The wire protocol Nucleus speaks; consumed by pinned sha in `valence.pin` |
 | Valence library and JS client (`lib/valence`) | https://github.com/openvalence/Valence | MIT, per `Valence/LICENSE` | `lib/valence`, the Valence library, pinned by sha in `valence.pin` |
-| Flux, Geiger, Kinetic | this repository | first-party, Apache-2.0 | `lib/flux` (LED grammar), `lib/geiger` (logging), `lib/kinetic` (motion planner) |
+| Flux, Geiger | this repository | first-party, Apache-2.0 | `lib/flux` (LED grammar), `lib/geiger` (logging) |
+| Kinetic | https://github.com/openvalence/Kinetic, pinned by sha in `kinetic.pin` | first-party, Apache-2.0 | `lib/kinetic` (motion planner) |
 
 `flagship_p4/managed_components/` is git-ignored;
 `flagship_p4/dependencies.lock` pins the versions above.
