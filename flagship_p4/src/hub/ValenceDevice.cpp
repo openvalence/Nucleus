@@ -1455,18 +1455,17 @@ void ValenceDevice::pushConfigToMotion() const {
 
 // ---- persistence ----------------------------------------------------------------
 
-bool ValenceDevice::adoptConfigBlob(std::span<const std::byte> blob, uint16_t& cfgGen) {
-    StoredConfig c;
-    MotionTuning t;
-    StoredModes m;
-    if (!stored::decodeConfig(blob, motionDefaultTuning().overshoot_guard, c, t, m, cfgGen)) return false;
-    _cfg = c;
-    _modes = m;
+// Decodes straight into the members: decodeConfig() assigns its outputs only
+// once every check has passed, so a refused blob leaves the factory values.
+std::expected<void, stored::ConfigReject> ValenceDevice::adoptConfigBlob(std::span<const std::byte> blob,
+                                                                         uint16_t& cfgGen) {
+    const auto adopted =
+        stored::decodeConfig(blob, motionDefaultTuning().overshoot_guard, _cfg, _tune, _modes, cfgGen);
+    if (!adopted) return adopted;
     _cfgDirty = false;
     // The engine adopts through the live write's own door, never a side path.
-    _tune = t;
     motionSetTuning(_tune);
-    return true;
+    return {};
 }
 
 bool ValenceDevice::adoptPresetsBlob(std::span<const std::byte> blob) {

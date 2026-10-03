@@ -8,13 +8,22 @@
 //   file) and the native suite all run this one codec.
 // - ONE BLOB PER CONCERN, opening [magic u32][version u8], decoded only at the
 //   exact length its version defines. An unknown version, a short or long
-//   read, a non-finite or out-of-range value: the blob is REJECTED WHOLE and
-//   the factory values stand. A layout change never misreads bytes, and
-//   nothing is clamped into shape at boot (a clamp is a config change, which
-//   §4.2 would make bump cfg_gen in the middle of restoring it).
-// - LAYOUT CHANGES APPEND AND MIGRATE: every older version still decodes, its
-//   missing tail taking the factory value, so a firmware update never orphans
-//   a stored setting. The next write is the current version.
+//   read, a non-finite or out-of-range value: the blob is REJECTED WHOLE, the
+//   factory values stand, and the ConfigReject names the check that refused
+//   it for the boot log. A layout change never misreads bytes, and nothing is
+//   clamped into shape at boot (a clamp is a config change, which §4.2 would
+//   make bump cfg_gen in the middle of restoring it).
+// - LAYOUT CHANGES APPEND AND MIGRATE: every version from kConfigOldestVersion
+//   up still decodes, its missing tail taking the factory value, and the range
+//   checks run on the extended values. A firmware update never orphans a
+//   stored setting; the next write is the current version. A NEWER version is
+//   refused whole, never read as the prefix this firmware knows.
+// - A TUNING FIELD APPENDED LATER takes the engine's factory value, passed in
+//   as factoryGuard is, never MotionTuning{}'s zero.
+// - THE FIRST-RUN RECORD SURVIVES MIGRATION: every layout from v5 on carries
+//   setup_written and decode keeps it, because losing it re-gates content
+//   motion on an upgraded machine (RFC-079). Older blobs have no record and
+//   decode uncommissioned.
 // - cfg_gen RIDES WITH EVERY VALUE IT COVERS. Both 0x3000 and the tuning
 //   writers bump it, so all of them share this one blob: one NVS write is
 //   atomic, and a generation can never land without its values or the reverse.
@@ -30,6 +39,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <expected>
 #include <span>
 
 #include "ValenceCatalog.h"
@@ -106,6 +116,9 @@ namespace stored {
 
 inline constexpr uint32_t kConfigMagic   = 0x56434647u;  // "VCFG"
 inline constexpr uint8_t  kConfigVersion = 5;            // bump on ANY layout change
+// v1, the 40 B struct dump this codec replaced (u16 version), is retired:
+// refused, never migrated.
+inline constexpr uint8_t  kConfigOldestVersion = 2;
 // v2: magic 4, version 1, cfg_gen 2, config 8 x f32, tuning 8 x f32 + 2 x u32 + 7 x u8
 inline constexpr size_t   kConfigV2Bytes = 4 + 1 + 2 + 32 + 32 + 8 + 7;
 // v3 appends the schedule_horizon ordinal (u8), v4 the flip (u8, 0/1), v5
@@ -120,6 +133,38 @@ inline constexpr size_t configBytesFor(uint8_t version) {
          : version == 3 ? kConfigV3Bytes
          : version == 4 ? kConfigV4Bytes
          : version == 5 ? kConfigBlobBytes : 0;
+}
+
+static_assert([] {
+    for (unsigned v = kConfigOldestVersion; v <= kConfigVersion; ++v)
+        if (configBytesFor(uint8_t(v)) == 0) return false;
+    return configBytesFor(kConfigVersion) == kConfigBlobBytes;
+}(), "every readable config version needs its length in configBytesFor()");
+
+// Why decodeConfig() refused a blob, one value per check.
+enum class ConfigReject : uint8_t {
+    BadMagic,         // not a config blob
+    RetiredVersion,   // older than kConfigOldestVersion
+    NewerVersion,     // written by a newer firmware
+    BadSize,          // shorter than the header, or not its version's length
+    NoGeneration,     // a stored cfg_gen of 0
+    BadConfig,        // a 0x1000 value non-finite or outside its bounds
+    BadTuning,        // a 0x1120-0x1122 value outside its bounds, or a flag byte not 0/1
+    BadModes,         // a 0x1030 value outside its bounds, or the flip byte not 0/1
+};
+
+inline const char* configRejectName(ConfigReject r) {
+    switch (r) {
+        case ConfigReject::BadMagic:       return "bad magic";
+        case ConfigReject::RetiredVersion: return "retired layout";
+        case ConfigReject::NewerVersion:   return "newer firmware's layout";
+        case ConfigReject::BadSize:        return "length does not match its version";
+        case ConfigReject::NoGeneration:   return "cfg_gen 0";
+        case ConfigReject::BadConfig:      return "machine config out of range";
+        case ConfigReject::BadTuning:      return "kinetic tuning out of range";
+        case ConfigReject::BadModes:       return "machine modes out of range";
+    }
+    return "unknown";
 }
 
 namespace detail {
@@ -198,19 +243,23 @@ inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
     return n;
 }
 
-// All-or-nothing: false leaves every output untouched, so the caller's factory
-// values stand. factoryGuard is the running engine's overshoot multiplier.
-inline bool decodeConfig(std::span<const std::byte> in, float factoryGuard,
-                         StoredConfig& cfgOut, MotionTuning& tuneOut, StoredModes& modesOut,
-                         uint16_t& genOut) {
+// All-or-nothing: an error leaves every output untouched, so the caller's
+// factory values stand. factoryGuard is the running engine's overshoot
+// multiplier. Stack cost: the ~100 B of staged values.
+inline std::expected<void, ConfigReject> decodeConfig(std::span<const std::byte> in, float factoryGuard,
+                                                      StoredConfig& cfgOut, MotionTuning& tuneOut,
+                                                      StoredModes& modesOut, uint16_t& genOut) {
     using detail::get;
-    if (in.size() < 5) return false;
+    using Err = std::unexpected<ConfigReject>;
+    if (in.size() < 5) return Err(ConfigReject::BadSize);
     size_t n = 0;
-    if (get<uint32_t>(in, n) != kConfigMagic) return false;
+    if (get<uint32_t>(in, n) != kConfigMagic) return Err(ConfigReject::BadMagic);
     const uint8_t version = get<uint8_t>(in, n);
-    if (configBytesFor(version) == 0 || in.size() != configBytesFor(version)) return false;
+    if (version < kConfigOldestVersion) return Err(ConfigReject::RetiredVersion);
+    if (version > kConfigVersion) return Err(ConfigReject::NewerVersion);
+    if (in.size() != configBytesFor(version)) return Err(ConfigReject::BadSize);
     const uint16_t gen = get<uint16_t>(in, n);
-    if (gen == 0) return false;
+    if (gen == 0) return Err(ConfigReject::NoGeneration);
 
     StoredConfig c;
     for (float* f : {&c.window_min, &c.window_max, &c.jog_speed, &c.jog_accel,
@@ -226,7 +275,7 @@ inline bool decodeConfig(std::span<const std::byte> in, float factoryGuard,
     std::array<uint8_t, 7> b{};
     for (uint8_t& v : b) v = get<uint8_t>(in, n);
     for (size_t i : {0u, 1u, 2u, 6u})
-        if (b[i] > 1) return false;
+        if (b[i] > 1) return Err(ConfigReject::BadTuning);
     t.chase_ff          = b[0] != 0;
     t.chase_accel_ff    = b[1] != 0;
     t.chase_aim_extrap  = b[2] != 0;
@@ -239,17 +288,19 @@ inline bool decodeConfig(std::span<const std::byte> in, float factoryGuard,
     if (version >= 3) m.horizon = get<uint8_t>(in, n);
     if (version >= 4) {
         const uint8_t f = get<uint8_t>(in, n);
-        if (f > 1) return false;
+        if (f > 1) return Err(ConfigReject::BadModes);
         m.flipped = f != 0;
     }
     if (version >= 5) m.setup_written = get<uint8_t>(in, n);
 
-    if (!configValid(c) || !tuningValid(t) || !modesValid(m)) return false;
+    if (!configValid(c)) return Err(ConfigReject::BadConfig);
+    if (!tuningValid(t)) return Err(ConfigReject::BadTuning);
+    if (!modesValid(m)) return Err(ConfigReject::BadModes);
     cfgOut = c;
     tuneOut = t;
     modesOut = m;
     genOut = gen;
-    return true;
+    return {};
 }
 
 }  // namespace stored

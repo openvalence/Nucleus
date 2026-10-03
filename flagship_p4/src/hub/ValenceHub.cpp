@@ -8,7 +8,8 @@
 //   is hardware-free so the host twin (sim/valencesim) runs it verbatim. What
 //   stays here is what only the P4 has: NVS, PSRAM, esp_netif, the task.
 // - PERSISTED STATE IS FOUR NVS BLOBS in namespace "valence", one per concern:
-//   "cfg" (StoredState.h: 0x1000, 0x1030 and 0x1120-0x1122 with cfg_gen, 86 B),
+//   "cfg" (StoredState.h: 0x1000, 0x1030 and 0x1120-0x1122 with cfg_gen,
+//   stored::kConfigBlobBytes),
 //   "presets" (PatternPresetStore: the 24 slots with their generation,
 //   2,119 B), "trust" (the §12.3 trust ledger, tokens included, at most
 //   trust_ledger_max_bytes) and "pgest" (the power-cycle gesture counter,
@@ -103,19 +104,23 @@ constexpr size_t kBlobScratchBytes = PatternPresetStore::kBlobBytes;
 static_assert(stored::kConfigBlobBytes <= kBlobScratchBytes, "cfg blob outgrew the scratch");
 
 // Absent covers a namespace or key never written; Failed is every other
-// error, including a blob larger than the scratch. A wrong-size blob that
-// fits comes back as-is: rejecting it is the decoder's job, and it does.
+// error, including a blob larger than the scratch, and is logged HERE because
+// the IDF error dies with this frame. A wrong-size blob that fits comes back
+// as-is: rejecting it is the decoder's job, and it does.
 KeyLoad loadKey(const char* key, std::span<std::byte> scratch) {
     nvs_handle_t h;
     esp_err_t err = nvs_open(kNvsNamespace, NVS_READONLY, &h);
     if (err == ESP_ERR_NVS_NOT_FOUND) return {};
-    if (err != ESP_OK) return {KeyLoadStatus::Failed, {}};
     size_t len = scratch.size();
-    err = nvs_get_blob(h, key, scratch.data(), &len);
-    nvs_close(h);
+    if (err == ESP_OK) {
+        err = nvs_get_blob(h, key, scratch.data(), &len);
+        nvs_close(h);
+    }
     if (err == ESP_ERR_NVS_NOT_FOUND) return {};
-    if (err != ESP_OK) return {KeyLoadStatus::Failed, {}};
-    return {KeyLoadStatus::Loaded, scratch.first(len)};
+    if (err == ESP_OK) return {KeyLoadStatus::Loaded, scratch.first(len)};
+    GLOGW(kTag, "stored %s unreadable: %s (scratch %u B)", key, esp_err_to_name(err),
+          unsigned(scratch.size()));
+    return {KeyLoadStatus::Failed, {}};
 }
 
 // The stored bytes, or an empty span for absent, unreadable or too large.
@@ -387,10 +392,15 @@ bool hubBegin() {
     // already adopted. A rejected blob is logged and the factory values stand.
     std::span<std::byte> scratch(g_box->blobScratch);
     uint16_t storedGen = 0;
+    bool haveStored = false;
     std::span<const std::byte> blob = loadBlob(kNvsCfgKey, scratch);
-    const bool haveStored = !blob.empty() && g_box->device.adoptConfigBlob(blob, storedGen);
-    if (!blob.empty() && !haveStored)
-        GLOGW(kTag, "stored config rejected (magic/version/size/range) -- factory values stand");
+    if (!blob.empty()) {
+        const auto adopted = g_box->device.adoptConfigBlob(blob, storedGen);
+        haveStored = adopted.has_value();
+        if (!haveStored)
+            GLOGW(kTag, "stored config rejected: %s (%u B) -- factory values stand",
+                  stored::configRejectName(adopted.error()), unsigned(blob.size()));
+    }
     blob = loadBlob(kNvsPresetsKey, scratch);
     if (!blob.empty()) {
         if (g_box->device.adoptPresetsBlob(blob)) GLOGI(kTag, "pattern presets adopted from NVS");

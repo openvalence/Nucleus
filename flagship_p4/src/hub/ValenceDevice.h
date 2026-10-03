@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -104,10 +105,12 @@ public:
     // class owns what the bytes MEAN. Boot adoption is deliberately NOT an
     // intent and NOT a change: no ECHO, no dirty flag, no cfg_gen bump, and
     // attach()'s retained pushes ARE the announcement. Call both adopts before
-    // the Hub is built over this delegate. false = the blob was rejected whole
-    // and the factory values stand. The composition restores cfgGen into the
-    // Hub itself: only it holds the Hub at that point.
-    bool adoptConfigBlob(std::span<const std::byte> blob, uint16_t& cfgGen);
+    // the Hub is built over this delegate. An error or false = the blob was
+    // rejected whole and the factory values stand; the config's error names
+    // the check that refused it. The composition restores cfgGen into the Hub
+    // itself: only it holds the Hub at that point.
+    std::expected<void, stored::ConfigReject> adoptConfigBlob(std::span<const std::byte> blob,
+                                                              uint16_t& cfgGen);
     bool adoptPresetsBlob(std::span<const std::byte> blob);
     // Bytes written, 0 when `out` is too small.
     size_t encodeConfigBlob(std::span<std::byte> out, uint16_t cfgGen) const {
