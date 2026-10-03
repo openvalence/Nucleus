@@ -155,7 +155,7 @@ The PD daughterboard's pads, owed under val-091.31:
 | Function | Net | P4 pad | Firmware today | Firmness |
 |---|---|---|---|---|
 | SDIO 3.0 4-bit to the stacked Stamp-AddOn C6: CLK 43, CMD 44, D0-D3 45-48, slave reset 42 | stamp-internal header | not on stamp pads | `flagship_p4/sdkconfig.defaults:64-74` (Kconfig owns them), brought up in `main.cpp:76` (`wifi_up`), version read at `:97` and judged by the self-check's host-link entry | Firm: stamp hardware |
-| USB-C on the stamp: USB-Serial/JTAG console and the serial rescue path | G24/G25 | pads 43/44 NC on the board | IDF console | Firm |
+| USB-C on the stamp: USB-Serial/JTAG console, the serial rescue path and the Valence serial binding (SPEC §13.5) | G24/G25 | pads 43/44 NC on the board | IDF console, moved onto the IDF driver at hub start so console text and Valence frames share one ring without tearing each other (`hub/ValenceSerialPort.cpp`) | Firm |
 | USB 2.0 host pair, MIPI DSI lanes, stamp 5V_USB_IN | NC | pads 40/41, 57-64, 15 | none | Firm |
 | Stamp VIN (from the 5 V buck), SYS_5V out (+5V_SYS), SOC_3.3V out (+3V3_SYS) | `+5V`, `+5V_SYS`, `+3V3_SYS` | pads 14, 39, 28 | none | Firm |
 

@@ -14,6 +14,7 @@ idf_component_register(SRCS "main.cpp"
                             "hub/ValenceHub.cpp" "hub/ValenceDevice.cpp"
                             "hub/ValenceWsPort.cpp"
                             "hub/ValenceUiToken.cpp" "hub/ValenceDiscovery.cpp"
+                            "hub/ValenceSerialPort.cpp" "hub/ValenceProvisioning.cpp"
                             "motion/ValenceMotion.cpp" "motion/MotionArbiter.cpp"
                             "patterns/ValencePattern.cpp" "patterns/PatternEngine.cpp"
                             "patterns/AdvancedPattern.cpp"
@@ -58,6 +59,7 @@ idf_component_register(SRCS "main.cpp"
                                      esp_driver_ledc esp_driver_pcnt esp_driver_rmt esp_driver_uart
                                      esp_event esp_netif
                                      esp_wifi lwip nvs_flash spi_flash
+                                     esp_driver_usb_serial_jtag
                                      espressif__esp_hosted
                                      espressif__esp_wifi_remote)
 

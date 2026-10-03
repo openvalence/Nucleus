@@ -7,7 +7,9 @@
 // - The delegate and every retained STATE publisher are ValenceDevice, which
 //   is hardware-free so the host twin (sim/valencesim) runs it verbatim. What
 //   stays here is what only the P4 has: NVS, PSRAM, esp_netif, the task.
-// - PERSISTED STATE IS FOUR NVS BLOBS in namespace "valence", one per concern:
+// - PERSISTED STATE IS FIVE NVS BLOBS in namespace "valence", one per concern
+//   ("sta", the provisioned station, is ValenceProvisioning.cpp's, written
+//   once per wifi_join that joined); the other four:
 //   "cfg" (StoredState.h: 0x1000, 0x1030 and 0x1120-0x1122 with cfg_gen,
 //   stored::kConfigBlobBytes),
 //   "presets" (PatternPresetStore: the 24 slots with their generation,
@@ -61,6 +63,8 @@
 #include "geiger/geiger.h"
 #include "TrustStore.h"
 #include "ValencePlatform.h"
+#include "ValenceProvisioning.h"
+#include "ValenceSerialPort.h"
 #include "ValenceUiToken.h"
 #include "ValenceWsPort.h"
 #include "system/ValenceHttp.h"
@@ -188,6 +192,11 @@ struct HubBox {
     ValenceDevice device{};
     std::optional<valence::Hub> hub{};
     ValenceWsPort port{};
+    // The serial binding's rings and scratch, ~8 KB; hub task only, nothing
+    // ISR-reachable (the driver's rings are its own, internal).
+    ValenceSerialPort serial{};
+    // Built after the hub it reads; hub task only.
+    std::optional<Provisioning> desk{};
     // SPEC 13.8: one UDP socket and the reply template. Hub task only.
     ValenceDiscoveryPort discovery{};
     ValenceUiTokenMinter minter{};
@@ -268,6 +277,7 @@ uint64_t loadOrMintInstanceId() {
     if (g_box->trust.flush(g_box->hub->pairing(), g_nvs, nowMs) & kTrustLedgerFailed)
         GLOGW(kTag, "trust ledger change not persisted before the reboot");
     g_box->port.goodbyeAll(NackCode::REBOOTING);
+    g_box->serial.goodbye(NackCode::REBOOTING);
     GLOGW(kTag, "rebooting: HOME hold");
     geiger::drainToSinks();
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -300,7 +310,10 @@ void hubTask(void*) {
         // Port first: it performs the deferred attach/detach and re-arms the
         // per-tick BLOB pacing budget that update() is about to spend.
         g_box->port.loop(nowMs);
+        g_box->serial.loop(nowMs);
         g_box->hub->update(g_box->clock.nowUs());
+        // After update(): a join that finished answers on this same tick.
+        g_box->desk->tick();
 
         // The device half: deferred latch clear, the motion plane's STATE, the
         // 0x1000 republish and the hub-status line. It says which debounced
@@ -479,6 +492,14 @@ bool hubBegin() {
     GLOGI(kTag, "hub box %u B in PSRAM, boot_id=%08lx, %s",
           unsigned(sizeof(HubBox)), static_cast<unsigned long>(g_box->hub->bootId()),
           FIRMWARE_VERSION);
+
+    // The provisioning desk and the USB serial binding, before the hub task
+    // that pumps both. Non-fatal: without the pipe the hub still serves WS,
+    // and without the station every wifi_join answers `station down`.
+    g_box->desk.emplace(*g_box->hub, g_box->catalog.find(channels::provisioning), provisioningStation(),
+                        kWsPort);
+    provisioningBegin();
+    if (ISerialPipe* usb = usbSerialPipeBegin()) g_box->serial.begin(*g_box->hub, *usb, &*g_box->desk);
 
     if (!g_box->port.begin(&*g_box->hub, kWsPort)) {
         GLOGE(kTag, "WS port failed to start on :%u", unsigned(kWsPort));

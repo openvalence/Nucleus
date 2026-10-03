@@ -28,6 +28,7 @@
 #include <sdkconfig.h>
 #include <ulp_lp_core.h>
 #include "hub/ValenceHub.h"
+#include "hub/ValenceProvisioning.h"
 #include "motion/ValenceMotion.h"
 #include "patterns/ValencePattern.h"
 #include "system/ValenceDiag.h"
@@ -107,9 +108,13 @@ static bool wifi_up() {
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event, nullptr);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event, nullptr);
 
+    // A provisioned network (SPEC 13.9, written only after it joined) wins
+    // over the compiled-in one, and a provisioned SSID is never printed.
     wifi_config_t w = {};
-    strncpy(reinterpret_cast<char*>(w.sta.ssid),     SECRET_WIFI_SSID,     sizeof w.sta.ssid - 1);
-    strncpy(reinterpret_cast<char*>(w.sta.password), SECRET_WIFI_PASSWORD, sizeof w.sta.password - 1);
+    if (valence::stationCredentials(w.sta.ssid, w.sta.password))
+        printf("STA credentials: provisioned (NVS)\n");
+    else
+        printf("STA credentials: secrets.h, \"%s\"\n", SECRET_WIFI_SSID);
     if ((err = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK)        { printf("set_mode: %s\n", esp_err_to_name(err)); return false; }
     if ((err = esp_wifi_set_config(WIFI_IF_STA, &w)) != ESP_OK)    { printf("set_config: %s\n", esp_err_to_name(err)); return false; }
     if ((err = esp_wifi_start()) != ESP_OK)                        { printf("wifi_start: %s\n", esp_err_to_name(err)); return false; }
@@ -250,7 +255,7 @@ extern "C" void app_main() {
     if (lp_ok) report_lp();
     else       printf("\n--- LP core FAILED to start ---\n");
 
-    printf("\n--- network: esp_hosted over SDIO to the C6, STA \"%s\" ---\n", SECRET_WIFI_SSID);
+    printf("\n--- network: esp_hosted over SDIO to the C6 ---\n");
     const bool wifi_ok = wifi_up();
     if (!wifi_ok) printf("--- network FAILED to start ---\n");
 
