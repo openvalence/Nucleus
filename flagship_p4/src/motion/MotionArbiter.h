@@ -113,7 +113,8 @@ public:
     void applyTuning(const MotionTuning& t);
     bool accept(const MotionIntent& in, uint64_t now_us); // gates, clamp, commit
     void evaluate(uint64_t now_us, float dt_s);
-    void drainAnomalies();
+    // Returns the kinds drained, bit k = kinetic::AnomalyType k.
+    uint32_t drainAnomalies();
     // Every census field the arbiter owns. The emitter's counters (edges,
     // late, resteers, catchups, step_q8, emitter_faults) and stack_free are
     // the host's to fill: they are facts about its hardware and its task.
@@ -296,6 +297,7 @@ private:
     bool     _stream    = false;
     uint32_t _anomalies = 0;
     std::array<uint32_t, kAnomalyKinds> _anom{};
+    uint8_t  _plan_flags = 0;   // RFC-100: registry plan_flags, set by plan()
     float    _distance_mm = 0.0f;
     float    _peak_mm_s   = 0.0f;
     uint32_t _strokes     = 0;

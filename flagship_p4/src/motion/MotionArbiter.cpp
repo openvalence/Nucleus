@@ -35,6 +35,21 @@ bool isGenerator(MotionSource s) { return s == MotionSource::Pattern || s == Mot
     return id < kMotionSourceNames.size() ? kMotionSourceNames[id] : "none";
 }
 
+static_assert(kAnomalyKinds <= 32, "drainAnomalies() reports the kinds as one word");
+
+// RFC-100: the registry plan_flags bits one plan earned, from the anomaly
+// kinds its commit recorded and whether the window clamp moved its target.
+uint8_t planFlags(uint32_t kinds, bool window_clamped) {
+    using kinetic::AnomalyType;
+    const auto has = [kinds](AnomalyType k) { return ((kinds >> uint8_t(k)) & 1u) != 0; };
+    uint8_t f = 0;
+    if (has(AnomalyType::WaveformScaled) || has(AnomalyType::WaveformSmoothed)) f |= plan_flags::shaped;
+    if (has(AnomalyType::DeadlineStretched)) f |= plan_flags::stretched;
+    if (has(AnomalyType::WaveformFallback)) f |= plan_flags::fallback;
+    if (window_clamped || has(AnomalyType::EndVelClamped)) f |= plan_flags::clamped;
+    return f;
+}
+
 }  // namespace
 
 // ---- the steering word ------------------------------------------------------
@@ -332,18 +347,23 @@ bool MotionArbiter::plan(float target, const MotionIntent& in, bool manual, uint
     // tells them apart by the duration.
     cmd.has_anchor   = in.anchor_us > now_us;
     cmd.anchor_us    = in.anchor_us;
+    // Earlier plans' anomalies are theirs: drained before the commit, so the
+    // drain after it holds this plan's alone.
+    drainAnomalies();
     const uint64_t t0 = _now_us();
     const bool ok = _engine.commit(cmd, now_us);
     const uint32_t plan_us = uint32_t(_now_us() - t0);
     _plan_us_last = plan_us;
     if (plan_us > _plan_us_max) _plan_us_max = plan_us;
     _plan_us_avg += (float(plan_us) - _plan_us_avg) * 0.125f;
+    const uint32_t kinds = drainAnomalies();
     if (!ok) {
         ++_rejected;
         GLOGW_EVERY_MS(1000, kTag, "REJECT: plan failed for %.2f mm", double(target));
         return false;
     }
     ++_intents;
+    _plan_flags = planFlags(kinds, target != in.target_mm);
     _demand_mm = target;
     _stream    = in.source == MotionSource::Stream;
     return true;
@@ -527,12 +547,17 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
 // Drains the engine's anomaly ring into the per-kind table 0x1111 publishes.
 // A kind past the table is DROPPED rather than folded into a neighbor: a
 // miscounted kind reads as a diagnosis that never happened.
-void MotionArbiter::drainAnomalies() {
+uint32_t MotionArbiter::drainAnomalies() {
+    uint32_t kinds = 0;
     kinetic::Anomaly a;
     while (_engine.popAnomaly(a)) {
-        if (a.kind < kAnomalyKinds) ++_anom[a.kind];
+        if (a.kind < kAnomalyKinds) {
+            ++_anom[a.kind];
+            kinds |= 1u << a.kind;
+        }
         ++_anomalies;
     }
+    return kinds;
 }
 
 MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
@@ -592,6 +617,8 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     // segment so a client reads a live plan, never a stalled source.
     c.plan_hold = c.busy && s.mode == uint8_t(kinetic::Mode::Waveform) &&
                   std::fabs(s.target - s.start) < limits::segment_dwell_span;
+    // A SETTLE brake is the engine's own plan, never a bent command.
+    c.plan_flags = c.busy && s.mode != uint8_t(kinetic::Mode::Settle) ? _plan_flags : 0;
     c.plans          = s.plans;
     c.failures       = s.failures;
     c.anomalies      = _anomalies;

@@ -375,7 +375,7 @@ void publishMotion(Hub& hub, const MotionCensus& m, bool genRunning) {
 }
 
 void publishPlanStrip(Hub& hub, const MotionCensus& m) {
-    std::array<std::byte, 18> buf{};
+    std::array<std::byte, 19> buf{};
     size_t n = 0;
     // flags: active, live_mode, grad_mode. live_mode and grad_mode named a
     // legacy interpolator split that has no counterpart in this engine.
@@ -389,6 +389,7 @@ void publishPlanStrip(Hub& hub, const MotionCensus& m) {
     packI16(buf, n, wireI16(m.plan_vel, 1000.0f));
     packU32(buf, n, m.plan_duration_us);
     packU32(buf, n, m.plan_elapsed_us);
+    packU8(buf, n, m.plan_flags);   // RFC-100 plan.flags
     publishPacked(hub, ch::plan_strip, buf, n);
 }
 

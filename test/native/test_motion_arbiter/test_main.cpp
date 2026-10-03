@@ -831,3 +831,59 @@ TEST_CASE("RFC-095: a dwell lands as a hold segment, a live plan at rest on the 
     r->arb.drainAnomalies();
     CHECK(r->census().anom[size_t(kinetic::AnomalyType::DwellZeroed)] == 0);
 }
+
+// Homed at 0 mm and asked for 280 mm in 330 ms, Blend holds the deadline by
+// shortening the stroke and Stretch hands the segment to the fallback planner,
+// which still makes it; in 40 ms nothing does.
+std::unique_ptr<Rig> rigAtOrigin(uint8_t infeasible_policy) {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->arb.setWindow(100.0f, 300.0f, 400.0f);
+    valence::MotionTuning t = valence::motionDefaultTuning();
+    t.infeasible_policy = infeasible_policy;
+    r->arb.applyTuning(t);
+    r->run(1000);
+    return r;
+}
+
+bool tightSegment(Rig& r, uint32_t duration_us) {
+    MotionIntent in;
+    in.source = MotionSource::Stream;
+    in.target_mm = 280.0f;
+    in.duration_us = duration_us;
+    in.has_end_vel = true;
+    in.end_vel_mm_s = 0.0f;
+    return r.arb.accept(in, g_now_us);
+}
+
+TEST_CASE("RFC-100: plan_flags name how the last plan was bent, and read 0 with nothing in flight") {
+    namespace pf = valence::plan_flags;
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->arb.setWindow(100.0f, 300.0f, 400.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Stream, 200.0f));
+    CHECK(r->census().busy);
+    CHECK(r->census().plan_flags == 0);
+    // Past the window: the clamp changed the command.
+    REQUIRE(r->submit(MotionSource::Stream, 350.0f));
+    CHECK(r->census().plan_flags == pf::clamped);
+    // The next clean plan clears it.
+    REQUIRE(r->submit(MotionSource::Stream, 250.0f));
+    CHECK(r->census().plan_flags == 0);
+    r->run(10'000'000);
+    REQUIRE_FALSE(r->census().busy);
+    CHECK(r->census().plan_flags == 0);
+
+    auto blend = rigAtOrigin(1);
+    REQUIRE(tightSegment(*blend, 330'000));
+    CHECK(blend->census().plan_flags == pf::shaped);
+
+    auto stretch = rigAtOrigin(0);
+    REQUIRE(tightSegment(*stretch, 330'000));
+    CHECK(stretch->census().plan_flags == pf::fallback);
+    REQUIRE(tightSegment(*stretch, 40'000));
+    CHECK(stretch->census().plan_flags == (pf::fallback | pf::stretched));
+    stretch->run(10'000'000);
+    CHECK(stretch->census().plan_flags == 0);
+}

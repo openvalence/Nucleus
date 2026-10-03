@@ -992,7 +992,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     //
     // Normalized units, matching the engine's own domain (1.0 == the full
     // stroke window): positions scale 10000, velocity scale 1000.
-    // durationUs/elapsedUs stay µs u32.  [1+1+2+2+2+2+4+4 = 18 B]
+    // durationUs/elapsedUs stay µs u32. RFC-100 appends the plan.flags byte.
+    // [1+1+2+2+2+2+4+4+1 = 19 B]
     auto addPlanStrip = [&]() {
     c.addEntry({.id = ch::plan_strip, .name = "plan-strip",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1034,6 +1035,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .group = card::active_plan, .desc = "Time elapsed in the current plan",
                       .role = roles::plan_elapsed,
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
+    // Labels in registry plan_flags bit order.
+    c.addBitfieldField({.name = "feasibility", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f,
+                        .group = card::active_plan,
+                        .desc = "How the planner bent the current plan",
+                        .role = roles::plan_flags},
+                       {"shaped", "stretched", "fallback", "clamped"});
     };
 
     // ---- "power" — STATE, background, 10 Hz ---------------------------------

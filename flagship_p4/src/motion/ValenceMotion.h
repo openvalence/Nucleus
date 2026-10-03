@@ -128,6 +128,11 @@ struct MotionCensus {
     uint32_t plan_elapsed_us  = 0;
     bool     plan_hold        = false;  // the active plan is a hold: timed, its
                                         // start its end (SPEC 9.6)
+    // RFC-100 plan.flags: registry plan_flags bits of the plan the arbiter
+    // committed last, 0 while no plan or a SETTLE brake is in flight. A
+    // stream's anchored plan sets them when it is planned, up to one schedule
+    // horizon before its segment starts.
+    uint8_t  plan_flags       = 0;
 
     // ---- planner diagnostics, as 0x1111 publishes them ----
     uint32_t plans          = 0;
