@@ -50,5 +50,8 @@ delete `.pio`.** That trap and the rest are in
 
 ## Licensing
 
-Nucleus is licensed under CERN-OHL-S-2.0 (`LICENSE`). Third-party components keep
-their own licenses; `NOTICE.md` lists each with its origin and what uses it.
+Nucleus is licensed under Apache-2.0 (`LICENSE`), except
+`flagship_p4/src/patterns/advanced/`, which is derived from fray-d's OSSM-Lite
+and stays CERN-OHL-S-2.0 (its own `LICENSE` and `NOTICE.md`). Third-party
+components keep their own licenses; `NOTICE.md` lists each with its origin and
+what uses it, and is the Apache NOTICE file.

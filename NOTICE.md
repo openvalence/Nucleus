@@ -1,35 +1,39 @@
 # Notice
 
+Nucleus
+Copyright 2026 the Nucleus authors
+
+This file is the NOTICE file of Apache License 2.0 section 4(d): a
+redistribution of Nucleus or of a work derived from it carries the
+attribution notices in this file.
+
 Nucleus (the firmware and the host device simulator in this repository) is
-licensed under the CERN Open Hardware License version 2, Strongly Reciprocal
-(CERN-OHL-S-2.0). The full text is in `LICENSE`.
+licensed under the Apache License, Version 2.0, full text in `LICENSE`, with
+one exception: `flagship_p4/src/patterns/advanced/` is derived from fray-d's
+OSSM-Lite and stays under the CERN Open Hardware License version 2, Strongly
+Reciprocal (CERN-OHL-S-2.0), with its own `LICENSE` and `NOTICE.md` there.
 
-Source location: the Nucleus repository in the openvalence organization on
-GitHub, https://github.com/openvalence/Nucleus.
+Source location: https://github.com/openvalence/Nucleus.
 
-## What CERN-OHL-S-2.0 requires of a derivative
+## How the two licenses meet
 
-Section numbers are the license's own.
+Section numbers are CERN-OHL-S-2.0's own.
 
-- Keep every notice: copyright, acknowledgment, source location, and the
-  references to the license and its disclaimer (3.1, 3.2).
-- A modified work must carry a notice stating that you modified it, with the
-  date and a brief description of how (3.3b).
-- The modified source, as a whole, is licensed under CERN-OHL-S-2.0 (3.3d).
-  Including covered source in a larger work counts as modifying it, so the
-  larger work becomes covered source (3.2).
-- Available Components keep their own licenses and are excluded from that
-  relicensing (3.3d). The third-party table below is that exclusion.
-- Convey a product (a flashed board, a firmware image) only with the Complete
-  Source or with notice of where to get it (4); a notice may require the
-  source location to be displayed on the product or its documentation.
-- The work is provided as is, with no warranty and no liability (6).
+- The carve-out is complete source under CERN-OHL-S-2.0, so it is an
+  Available Component (1.7(a)). A firmware image that includes it is a
+  Product of that unit; whoever conveys the image ships the Complete Source
+  or notice of its Source Location (4), and this repository is that location.
+- The Apache-2.0 code is an Available Component of such a Product as well
+  (1.7(a) through 1.2(c)), so it keeps its own license and is not relicensed
+  (3.3(d)).
+- A build without `flagship_p4/src/patterns/advanced/` carries no
+  CERN-OHL-S-2.0 obligation.
 
 ## Third-party components
 
 | Component | Origin | License | Used by Nucleus for |
 |---|---|---|---|
-| OSSM-Lite (fray-d) | https://github.com/fray-d/OSSM-Lite | CERN-OHL-S-2.0 | The Advanced pattern modulators in `flagship_p4/src/hub/ValenceCatalog.h` (RFC-066), and the Advanced generator's stroke and modulation math in `flagship_p4/src/patterns/AdvancedPattern.*` and `PatternEngine.cpp` |
+| OSSM-Lite (fray-d) | https://github.com/fray-d/OSSM-Lite | CERN-OHL-S-2.0 | The Advanced generator's stroke and modulation math, carved out in `flagship_p4/src/patterns/advanced/` (its `NOTICE.md` lists the modifications). The modulator field definitions in `flagship_p4/src/hub/ValenceCatalog.h` (RFC-066) are Valence interface vocabulary, credited there, and stay Apache-2.0 |
 | Ruckig Community Version 0.19.4 | https://github.com/pantor/ruckig | MIT, Copyright (c) 2021 Lars Berscheid | `lib/ruckig`, vendored unmodified (`lib/ruckig/VENDORED.md`); the jerk-limited trajectory solver under `lib/kinetic` |
 | StrokeEngine patterns (theelims) | https://github.com/theelims/StrokeEngine, as carried by https://github.com/KinkyMakers/OSSM-hardware (`Software/lib/StrokeEngine/src/`) | MIT, Copyright (C) 2021 theelims | `lib/strokeengine_patterns`, the seven core stroke patterns (`lib/strokeengine_patterns/VENDORED.md`) |
 | ESP-IDF 5.5.4 | https://github.com/espressif/esp-idf | Apache-2.0 | The framework the P4 firmware builds on (`flagship_p4`); fetched at build time, not stored in this repository |
@@ -43,11 +47,10 @@ Section numbers are the license's own.
 | ch32fun (PlatformIO `ch32v003fun` framework) | https://github.com/cnlohr/ch32fun | unknown (not fetched on this host) | The `flagship_ch32v003` monitor firmware build |
 | Valence protocol (`spec/`) | https://github.com/openvalence/Valence | CC BY 4.0 (Valence/LICENSE-SPEC) | The wire protocol Nucleus speaks; consumed by pinned sha in `valence.pin` |
 | Valence library and JS client (`lib/valence`) | https://github.com/openvalence/Valence | MIT, per `Valence/LICENSE` | `lib/valence`, the Valence library, pinned by sha in `valence.pin` |
-| Flux, Geiger, Kinetic | this repository | first-party, CERN-OHL-S-2.0 | `lib/flux` (LED grammar), `lib/geiger` (logging), `lib/kinetic` (motion planner) |
+| Flux, Geiger, Kinetic | this repository | first-party, Apache-2.0 | `lib/flux` (LED grammar), `lib/geiger` (logging), `lib/kinetic` (motion planner) |
 
-The managed components and ESP-IDF are Available Components in the sense of
-the license: they keep their own terms. `flagship_p4/managed_components/` is
-git-ignored; `flagship_p4/dependencies.lock` pins the versions above.
+`flagship_p4/managed_components/` is git-ignored;
+`flagship_p4/dependencies.lock` pins the versions above.
 
 No other copied or adapted code with an attribution marker exists in
 `flagship_p4/src`, `sim`, `flagship_ch32v003`, `test` or `tools`.
