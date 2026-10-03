@@ -183,12 +183,27 @@ inline constexpr uint8_t kPlanStyleHold = 4;
 // same static_assert home as the preset mirror above.
 inline constexpr std::array<const char*, 4> kSourceLabels{"Jog", "Stream", "Classic", "Advanced"};
 
-// Subgroups the folded categories became (RFC-094, RENDERING §3): every drawn
-// field of a `motion` entry that was `tuning`, and of a `system` entry that
-// was `library`, carries one. Masks and retired padding are never drawn and
-// stay ungrouped.
-inline constexpr std::string_view kTuningGroup = "Tuning";
-inline constexpr std::string_view kLibraryGroup = "Library";
+// Card headings under the subgroups the folded categories became (RFC-094,
+// RENDERING §3). "<subgroup> / <card>": the first " / " names the section the
+// card sits under (Valence RFC-096 draft, a presentation convention; on the
+// wire it stays one free-text `group`, SPEC §8.8). Every drawn field of a
+// `motion` entry that was `tuning`, and of a `system` entry that was
+// `library`, carries one. Masks and retired padding are never drawn and stay
+// ungrouped.
+namespace card {
+inline constexpr std::string_view active_plan      = "Tuning / Active plan";
+inline constexpr std::string_view planner          = "Tuning / Planner";
+inline constexpr std::string_view anomalies        = "Tuning / Anomalies";
+inline constexpr std::string_view plan_time        = "Tuning / Plan time";
+inline constexpr std::string_view stream_ingress   = "Tuning / Stream ingress";
+inline constexpr std::string_view motion_behavior  = "Tuning / Motion behavior";
+inline constexpr std::string_view streaming        = "Tuning / Streaming";
+inline constexpr std::string_view sample_streams   = "Tuning / Sample streams";
+inline constexpr std::string_view curve            = "Tuning / Curve";
+inline constexpr std::string_view infeasible_moves = "Tuning / Infeasible moves";
+inline constexpr std::string_view settling         = "Tuning / Settling";
+inline constexpr std::string_view pattern_presets  = "Library / Pattern presets";
+}  // namespace card
 
 // ---- motion-anomaly EVENT: the `body` (40) sub-map keys ---------------------
 // These are the CHANNEL'S OWN schema keys, exactly as valence::safety_body is
@@ -959,7 +974,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasRank = true, .rank = valence::ui_ranks::diagnostic});
     c.addBitfieldField({.name = "flags", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
-                        .group = kTuningGroup,
+                        .group = card::active_plan,
                         .desc = "Active plan and planner mode bits"},
                        {"active", "live_mode", "grad_mode"});
     // RFC-035: the plan.* role family — a generic plan-strip widget finds this
@@ -967,28 +982,28 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // documented /plan/i entry-name regex (which silently fails on a hub that
     // names the concept differently).
     c.addSelectField({.name = "style", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup,
+                      .group = card::active_plan,
                       .desc = "Planning mode of the motion core",
                       .role = roles::plan_style},
                      {"idle", "waveform", "chase", "settle", "hold"});
     c.addLayoutField({.name = "start_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = kTuningGroup, .desc = "Start of the current plan",
+                      .group = card::active_plan, .desc = "Start of the current plan",
                       .role = roles::plan_start});
     c.addLayoutField({.name = "end_norm",   .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = kTuningGroup, .desc = "End of the current plan",
+                      .group = card::active_plan, .desc = "End of the current plan",
                       .role = roles::plan_end});
     c.addLayoutField({.name = "cur_norm",   .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = kTuningGroup, .desc = "Setpoint the plan is producing now",
+                      .group = card::active_plan, .desc = "Setpoint the plan is producing now",
                       .role = roles::plan_current});
     c.addLayoutField({.name = "cur_vel",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f,
-                      .group = kTuningGroup, .desc = "Plan velocity right now, signed",
+                      .group = card::active_plan, .desc = "Plan velocity right now, signed",
                       .role = roles::plan_velocity});
     c.addLayoutField({.name = "duration_us", .type = PackedFieldType::u32, .unit = "us",    .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Total duration of the current plan",
+                      .group = card::active_plan, .desc = "Total duration of the current plan",
                       .role = roles::plan_duration,
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "elapsed_us",  .type = PackedFieldType::u32, .unit = "us",    .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Time elapsed in the current plan",
+                      .group = card::active_plan, .desc = "Time elapsed in the current plan",
                       .role = roles::plan_elapsed,
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     };
@@ -1070,77 +1085,77 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasRank = true, .rank = valence::ui_ranks::diagnostic,
                 .role = valence::channel_roles::anomaly_summary});
     c.addLayoutField({.name = "plans",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Motion plans computed successfully"});
+                      .group = card::planner, .desc = "Motion plans computed successfully"});
     // On a rejection the previous plan keeps running.
     c.addLayoutField({.name = "failures", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Commands the planner rejected"});
+                      .group = card::planner, .desc = "Commands the planner rejected"});
     c.addLayoutField({.name = "anomalies", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Planner anomalies of every kind"});
+                      .group = card::planner, .desc = "Planner anomalies of every kind"});
     c.addSelectField({.name = "mode",      .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Planning mode of the motion core"},
+                      .group = card::planner, .desc = "Planning mode of the motion core"},
                      {"idle", "waveform", "chase", "settle"});
     // Options are indexed by kinetic::PlanKind and the enum is APPEND-ONLY.
     // "cubic" (=3) arrived with curve_policy/ForceC1: a C1 cubic and a C2 quintic
     // are different curves and the client must be able to tell them apart, so
     // this list grows rather than collapsing both into "hermite".
     c.addSelectField({.name = "plan_kind", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Curve type of the active plan"},
+                      .group = card::planner, .desc = "Curve type of the active plan"},
                      {"none", "quintic", "ruckig", "cubic"});
     // Per-kind breakdown — names are kinetic::AnomalyType's, index 0 is
     // the engine's own "none" placeholder and is never counted, so it is
     // rank hidden: a permanent zero is padding, not a gauge.
     c.addLayoutField({.name = "anom_none",        .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Placeholder slot, never counts",
+                      .group = card::anomalies, .desc = "Placeholder slot, never counts",
                       .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "anom_plan_failed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Commands that could not be planned"});
+                      .group = card::anomalies, .desc = "Commands that could not be planned"});
     c.addLayoutField({.name = "anom_settle",      .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Moves braked to rest after the stream stopped"});
+                      .group = card::anomalies, .desc = "Moves braked to rest after the stream stopped"});
     c.addLayoutField({.name = "anom_endvel_clamped", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Handoff speed cut to stay inside the window"});
+                      .group = card::anomalies, .desc = "Handoff speed cut to stay inside the window"});
     c.addLayoutField({.name = "anom_deadline_stretched", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Moves stretched past their given time"});
+                      .group = card::anomalies, .desc = "Moves stretched past their given time"});
     c.addLayoutField({.name = "anom_waveform_fallback",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Sender curves reshaped for breaking a limit"});
+                      .group = card::anomalies, .desc = "Sender curves reshaped for breaking a limit"});
     c.addLayoutField({.name = "anom_waveform_scaled",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Strokes shortened to finish on time"});
+                      .group = card::anomalies, .desc = "Strokes shortened to finish on time"});
     // Retired kind (centering left the engine 2026-09-03); the counter stays
     // in the layout so the per-kind table keeps its positions, and hidden so
     // no renderer draws a permanent zero (sd-djg).
     c.addLayoutField({.name = "anom_waveform_centered",   .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Shortened strokes re-centered on their midpoint",
+                      .group = card::anomalies, .desc = "Shortened strokes re-centered on their midpoint",
                       .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "anom_handoff_bounded",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup,
+                      .group = card::anomalies,
                       .desc = "Arrival speeds bounded for the next segment"});
     c.addLayoutField({.name = "anom_waveform_smoothed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup,
+                      .group = card::anomalies,
                       .desc = "Curves flattened to keep timing and stroke"});
     c.addLayoutField({.name = "anom_dwell_zeroed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup,
+                      .group = card::anomalies,
                       .desc = "Stale arrival speeds ignored on held positions"});
     c.addLayoutField({.name = "plan_us_last", .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Compute time of the latest plan",
+                      .group = card::plan_time, .desc = "Compute time of the latest plan",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "plan_us_max",  .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Worst plan compute time since reset",
+                      .group = card::plan_time, .desc = "Worst plan compute time since reset",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "plan_us_avg",  .type = PackedFieldType::f32, .unit = "us", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Smoothed average plan compute time",
+                      .group = card::plan_time, .desc = "Smoothed average plan compute time",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "sync_bundles",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Motion bundles accepted over Valence"});
+                      .group = card::stream_ingress, .desc = "Motion bundles accepted over Valence"});
     c.addLayoutField({.name = "sync_samples",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Motion samples decoded from bundles"});
+                      .group = card::stream_ingress, .desc = "Motion samples decoded from bundles"});
     c.addLayoutField({.name = "sync_enqueued", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Samples that reached the motion core"});
+                      .group = card::stream_ingress, .desc = "Samples that reached the motion core"});
     c.addLayoutField({.name = "sync_dropped",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup,
+                      .group = card::stream_ingress,
                       .desc = "Samples dropped as late, unusable or refused"});
     c.addLayoutField({.name = "sync_seg_bundles", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup, .desc = "Bundles that carried timed segments"});
+                      .group = card::stream_ingress, .desc = "Bundles that carried timed segments"});
     c.addLayoutField({.name = "reset_gen", .type = PackedFieldType::u16, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup,
+                      .group = card::planner,
                       .desc = "Increments on every counter reset",
                       .role = roles::meta_reset_gen});
     };
@@ -1177,19 +1192,19 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                      "waveform_fallback", "waveform_scaled", "waveform_centered",
                      "handoff_bounded", "waveform_smoothed", "dwell_zeroed"});
     c.addSchemaField({.key = anom_body::kind, .name = "kind", .type = CborFieldType::uint_t, .unit = "",
-                      .group = kTuningGroup, .desc = "Anomaly kind, same as the event kind"});
+                      .group = card::anomalies, .desc = "Anomaly kind, same as the event kind"});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",
-                      .group = kTuningGroup, .desc = "Rolling event id, wraps"});
+                      .group = card::anomalies, .desc = "Rolling event id, wraps"});
     c.addSchemaField({.key = anom_body::target, .name = "target", .type = CborFieldType::f32_t,
-                      .unit = "norm", .group = kTuningGroup,
+                      .unit = "norm", .group = card::anomalies,
                       .desc = "Commanded position, 0 to 1 across the window"});
     c.addSchemaField({.key = anom_body::detail, .name = "detail", .type = CborFieldType::f32_t, .unit = "",
-                      .group = kTuningGroup, .desc = "Speed, duration or stroke fraction, per kind"});
+                      .group = card::anomalies, .desc = "Speed, duration or stroke fraction, per kind"});
     // unit_ids us, not hub_s: a schema field carries no scale and the registry
     // has no microsecond hub-time unit (RFC-086), so the wire states this
     // stamp's magnitude only, never which clock it was read from.
     c.addSchemaField({.key = anom_body::t_us, .name = "t_us", .type = CborFieldType::uint_t, .unit = "us",
-                      .group = kTuningGroup, .desc = "Motion core time of the event",
+                      .group = card::anomalies, .desc = "Motion core time of the event",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     };
 
@@ -1247,7 +1262,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // Trades a little smoothness for no overshoot micromotion.
     c.addSelectField({.name = "overshoot_clamp", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(factory::overshoot_clamp),
-                      .group = kTuningGroup,
+                      .group = card::motion_behavior,
                       .desc = "Keep smoothed curves from overshooting their points",
                       .settingKey = 4, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true,
@@ -1278,7 +1293,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // wire value is its index, so re-pointing 0 or 1 would silently re-label a
     // value another machine in this ecosystem already publishes.
     c.addSelectField({.name = "motion_backend", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .group = kTuningGroup,
+                      .group = card::motion_behavior,
                       .desc = "Signal path that drives the motor",
                       .flags = valence::setting_flags::advanced,
                       .hasRank = true, .rank = valence::ui_ranks::advanced},
@@ -1288,7 +1303,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     if (feat.has_drive) {
         c.addSelectField({.name = "home_style", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .dflt = SettingDefault::ofInt(0),
-                          .group = kTuningGroup,
+                          .group = card::motion_behavior,
                           .desc = "How the machine finds home",
                           .settingKey = 6, .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true,
@@ -1301,7 +1316,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // it while a grant is live.
     c.addSelectField({.name = "schedule_horizon", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0),
-                      .group = kTuningGroup,
+                      .group = card::streaming,
                       .desc = "How far ahead segment players may schedule",
                       .settingKey = 7, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true,
@@ -1312,7 +1327,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // gated to a homed rail at rest with no source and no override.
     c.addSelectField({.name = "flipped", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0),
-                      .group = kTuningGroup,
+                      .group = card::motion_behavior,
                       .desc = "Rail mounted reversed, position 0 at the far end",
                       .role = roles::axis_flipped,
                       .settingKey = 8, .hasSettingKey = true,
@@ -1320,7 +1335,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                      {"off", "on"});
     };
 
-    // ---- "kinetic-*" — STATE, motion, subgroup Tuning ---------------------
+    // ---- "kinetic-*" — STATE, motion, section Tuning ----------------------
     // The motion engine's live-tune surface. No controls outside Valence.
     //
     // THREE CHANNELS, TWO TABS. A settings channel is capped at 8 settings
@@ -1328,7 +1343,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // setting of ITS layout, a WIRE limit the user never sees: SPEC §8.8
     // ("a category spans channels; two channels in the same category merge
     // into one tab") lets the chase and waveform cards share category motion
-    // and subgroup Tuning (RFC-094). kinetic-limits holds the planner
+    // and section Tuning (RFC-094, `card::`). kinetic-limits holds the planner
     // CEILINGS, which are commissioning (RFC-079), so it alone carries
     // category setup; it shares no channel with the Tuning cards, so nothing
     // had to split.
@@ -1397,45 +1412,45 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasSettingChannel = true, .settingChannel = ch::kinetic_set,
                 .hasRank = true, .rank = valence::ui_ranks::advanced});
     c.addSelectField({.name = "chase_ff", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(1), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofInt(1), .group = card::sample_streams,
                       .desc = "Aim where the sender is heading",
                       .settingKey = 6, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addSelectField({.name = "chase_accel_ff", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(1), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofInt(1), .group = card::sample_streams,
                       .desc = "Also follow the sender's acceleration",
                       .settingKey = 7, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addLayoutField({.name = "chase_gain", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.5f,
-                      .dflt = SettingDefault::ofFloat(0.9f), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofFloat(0.9f), .group = card::sample_streams,
                       .desc = "Speed estimate damping, lower is steadier",
                       .step = 0.05f, .settingKey = 8, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     // Too far overshoots at turns.
     c.addLayoutField({.name = "chase_lookahead", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f,
-                      .dflt = SettingDefault::ofFloat(1.3f), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofFloat(1.3f), .group = card::sample_streams,
                       .desc = "Aim-ahead distance in stream intervals",
                       .step = 0.5f, .settingKey = 9, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "chase_dense_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 10.0f, .max = 500.0f,
-                      .dflt = SettingDefault::ofFloat(60.0f), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofFloat(60.0f), .group = card::sample_streams,
                       .desc = "Streams faster than this get predictive aiming",
                       .settingKey = 10, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true});
     c.addSelectField({.name = "chase_aim_extrap", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(1), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofInt(1), .group = card::sample_streams,
                       .desc = "Second-order aiming, sharper but can overshoot",
                       .settingKey = 11, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addLayoutField({.name = "handoff_k", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f,
-                      .dflt = SettingDefault::ofFloat(1.5f), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofFloat(1.5f), .group = card::sample_streams,
                       .desc = "Handoff speed bound, as a multiple of the chord",
                       .step = 0.1f, .settingKey = 12, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
@@ -1460,7 +1475,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 // advanced, so it stays visible without an advanced-affordance gate.
                 .hasRank = true, .rank = valence::ui_ranks::control});
     c.addSelectField({.name = "curve_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(0), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofInt(0), .group = card::curve,
                       .desc = "Keep the sender's curve or force a smoothness class",
                       .settingKey = 13, .hasSettingKey = true},
                      {"follow client", "force C1", "force C2"});
@@ -1470,24 +1485,24 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // (include/motion/EngineConfigMap.h), which is also what runs the four
     // ordinals of policies deleted 2026-09-02 as blend.
     c.addSelectField({.name = "infeasible_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(1), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofInt(1), .group = card::infeasible_moves,
                       .desc = "Handling for moves that cannot finish in time",
                       .settingKey = 14, .hasSettingKey = true},
                      {"stretch", "blend"});
     c.addLayoutField({.name = "smooth_budget", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
-                      .dflt = SettingDefault::ofFloat(0.5f), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofFloat(0.5f), .group = card::infeasible_moves,
                       .desc = "Smoothness spent before amplitude is touched",
                       .step = 0.05f, .settingKey = 16, .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "amplitude_budget", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
-                      .dflt = SettingDefault::ofFloat(0.5f), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofFloat(0.5f), .group = card::infeasible_moves,
                       .desc = "Stroke length spent before smoothness is touched",
                       .step = 0.05f, .settingKey = 17, .hasSettingKey = true, .hasStep = true});
     // More steps: smoother, slower to settle.
     c.addLayoutField({.name = "blend_steps", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 10.0f,
-                      .dflt = SettingDefault::ofInt(6), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofInt(6), .group = card::infeasible_moves,
                       .desc = "How gradually a budget is spent",
                       .settingKey = 18, .hasSettingKey = true});
     // TODO(sd-6b2.4): `infeasible_blend` (SystemState::sm_tune_infeas_blend,
@@ -1498,7 +1513,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // keys stay released.
     c.addLayoutField({.name = "settle_grace_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 200.0f,
-                      .dflt = SettingDefault::ofFloat(30.0f), .group = kTuningGroup,
+                      .dflt = SettingDefault::ofFloat(30.0f), .group = card::settling,
                       .desc = "Wait after a stream stops before braking",
                       .settingKey = 20, .hasSettingKey = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
@@ -1854,11 +1869,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasRank = true, .rank = valence::ui_ranks::detail,
                 .hasStoreId = true, .storeId = kPresetStoreId});
     c.addLayoutField({.name = "generation", .type = PackedFieldType::u16, .unit = "count", .scale = 1.0f,
-                      .group = kLibraryGroup});
+                      .group = card::pattern_presets});
     c.addLayoutField({.name = "count",      .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f,
-                      .group = kLibraryGroup});
+                      .group = card::pattern_presets});
     c.addLayoutField({.name = "capacity",   .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f,
-                      .group = kLibraryGroup});
+                      .group = card::pattern_presets});
     };
 
     // ---- "move" — INTENT, control, 20 Hz, critical --------------------------

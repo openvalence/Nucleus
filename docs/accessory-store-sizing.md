@@ -22,8 +22,11 @@ P4, the hub box's PSRAM size at boot) are still owed on bd `val-9u0.5`.
 `Catalog32`, `encodeCatalog` into an unbounded buffer, at Valence 715e21c]:
 42 entries, 188 layout, 107 schema, 164 labels, 2 stores, 23,927 B encoded.
 With the power channel (val-091.22): 43 entries, 192 layout, 24,322 B. The
-machine keeps the budget it had before RFC-077: 48 entries, 200 layout, 160
-schema, 192 labels, and 26,214 B of encoded catalog (80% of 32,768).
+machine's budget is 48 entries, 216 layout, 160 schema, 192 labels and
+27,648 B of encoded catalog. It kept the 48 / 200 / 160 / 192 and 26,214 B
+(80% of 32,768) it had before RFC-077 until layout rose with the RFC-095
+dwells (val-091.67) and bytes with the section card headings (val-mwu:
+26,300 B in use [verified 2026-10-02 -- valencesim headroom line]).
 
 ## Per accessory, at 30 channels
 
@@ -46,12 +49,12 @@ catalog is.
 | Flag | Value | Arithmetic |
 |---|---|---|
 | `VALENCE_CATALOG_ENTRIES` | 234 | 48 + 6 x 31 |
-| `VALENCE_CATALOG_LAYOUT_FIELDS` | 398 | 200 + 6 x 33 |
+| `VALENCE_CATALOG_LAYOUT_FIELDS` | 414 | 216 + 6 x 33 |
 | `VALENCE_CATALOG_SCHEMA_FIELDS` | 340 | 160 + 6 x 30 |
 | `VALENCE_CATALOG_LABELS` | 576 | 192 + 6 x 64 |
 | `VALENCE_CATALOG_STORES` | 6 | the machine's 2, the accessories and relationships STOREs, one spare |
 | `VALENCE_CATALOG_SAFE_SLOTS` | 360 | 6 x 60; the machine's own catalog declares no `safe` |
-| `VALENCE_CATALOG_SCRATCH_BYTES` | 73,728 | (26,214 + 6 x 5,120) / 0.8 = 71,168, rounded up to 72 KiB |
+| `VALENCE_CATALOG_SCRATCH_BYTES` | 73,728 | (27,648 + 6 x 5,120) / 0.8 = 72,960, rounded up to 72 KiB |
 
 Cost: `Catalog32` at these flags is 107,424 B on the P4, of which the safe
 pool is 5,760 B [verified 2026-10-02 -- `sizeof` under riscv32-esp-elf-g++

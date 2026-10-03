@@ -6,15 +6,17 @@
 # values would be two Catalog32 types (ODR), and nothing would say so.
 #
 # Sizing (val-9u0.5, recomputed 2026-10-02 for the 32-id slice of RFC-076):
-# the machine budget is 48 / 216 / 160 / 192. Layout rose from 200 with the
-# RFC-095 dwells (val-091.67: 17 layout fields), which would otherwise have
-# cost an accessory. Machine use is 44 entries, 210 layout, 123 schema and
-# 25,471 B encoded [verified 2026-10-02 -- valencesim headroom line, RFC-094]. Each
+# the machine budget is 48 / 216 / 160 / 192 and 27,648 B encoded. Layout rose
+# from 200 with the RFC-095 dwells (val-091.67: 17 layout fields), which would
+# otherwise have cost an accessory; bytes rose from 26,214 with the section
+# card headings (val-mwu) and move no flag: the scratch below still holds
+# them. Machine use is 44 entries, 210 layout, 123 schema and 26,300 B
+# encoded [verified 2026-10-02 -- valencesim headroom line, val-mwu]. Each
 # accessory gets the per-accessory budget below. The accessory count is
 # the most that keeps the total entries at or under catalog_max_entries (256),
 # the floor every client is built to handle: (256 - 48) / 31 = 6.
-# The encode scratch keeps the 80% headroom floor over the machine's 26,214 B
-# plus 6 x 5,120 B, rounded up to 72 KiB.
+# The encode scratch keeps the 80% headroom floor over the machine's 27,648 B
+# plus 6 x 5,120 B, rounded up to 72 KiB: (27,648 + 30,720) / 0.8 = 72,960.
 
 set(NUCLEUS_ACCESSORIES 6)
 # Per accessory: 30 channels (r 0x02-0x1F) + the accessory-status entry (r 0x01).
