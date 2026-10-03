@@ -85,6 +85,10 @@ public:
     // consumed (RFC-053: an ESTOP frame), so no reply. `srcIpv4` is host order.
     using DatagramHook = bool (*)(std::span<const std::byte> datagram, uint32_t srcIpv4, uint32_t nowMs);
     void setDatagramHook(DatagramHook hook) { _hook = hook; }
+    // Reply flag bits a hook's owner sets (RFC-053 item 2b: datagram_estop),
+    // read by setLive() on the hub task. Never pairing_window_open: the Hub owns it.
+    using ReplyFlagsHook = uint8_t (*)();
+    void setReplyFlagsHook(ReplyFlagsHook hook) { _flagsHook = hook; }
 
     // What only the composition root knows. Copied into the reply template,
     // truncated byte-wise to str32 and str16.
@@ -101,7 +105,8 @@ public:
                                                                           : _reply.catalog_etag.size();
         _reply.catalog_etag = {};
         for (size_t i = 0; i < n; ++i) _reply.catalog_etag[i] = catalogEtag[i];
-        _reply.flags = pairingWindowOpen ? kDiscoverFlagPairingWindowOpen : 0;
+        const uint8_t hooked = _flagsHook != nullptr ? uint8_t(_flagsHook() & ~kDiscoverFlagPairingWindowOpen) : 0;
+        _reply.flags = uint8_t((pairingWindowOpen ? kDiscoverFlagPairingWindowOpen : 0) | hooked);
     }
 
     // One datagram from `srcIpv4` (host order): the reply written to `out`
@@ -130,6 +135,7 @@ public:
 
 private:
     DatagramHook _hook = nullptr;
+    ReplyFlagsHook _flagsHook = nullptr;
     DiscoverReply _reply{};
     DiscoveryLimiter _limiter{};
     uint32_t _replies = 0;
@@ -152,6 +158,7 @@ public:
     bool begin(uint16_t port, std::string_view hubName, std::string_view fwVersion, uint16_t wsPort);
     // Composition root, before the first poll().
     void setDatagramHook(DiscoveryResponder::DatagramHook hook) { _responder.setDatagramHook(hook); }
+    void setReplyFlagsHook(DiscoveryResponder::ReplyFlagsHook hook) { _responder.setReplyFlagsHook(hook); }
     // Hub task, once per tick.
     void poll(const Hub& hub, uint32_t nowMs);
     void end();

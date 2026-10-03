@@ -60,6 +60,7 @@
 #include "ValenceCatalog.h"
 #include "ValenceDevice.h"
 #include "ValenceDiscovery.h"
+#include "ValenceEstopDatagram.h"
 #include "geiger/geiger.h"
 #include "TrustStore.h"
 #include "ValencePlatform.h"
@@ -454,6 +455,12 @@ bool hubBegin() {
     // EVERY advertised STATE gets its truthful at-rest value before the first
     // client can subscribe (ValenceDevice.cpp's file header says why).
     g_box->device.attach(*g_box->hub, g_box->catalog);
+    // RFC-053: ESTOP datagrams share the §13.8 port. The hub they latch is
+    // bound and the port offers every datagram here first, both before that
+    // port's first poll; the reply's datagram_estop bit reads the same switch.
+    estopDatagramBind(&*g_box->hub);
+    g_box->discovery.setDatagramHook(&estopDatagramHook);
+    g_box->discovery.setReplyFlagsHook(&estopDatagramReplyFlags);
 
     // SPEC §12.3: the ledger before the WS port starts, so no HELLO is judged
     // against an empty one, and the boot's half of the power-cycle gesture.

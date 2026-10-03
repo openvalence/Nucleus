@@ -12,7 +12,7 @@
 # BYTE-IDENTICAL to upstream -- wrap, never patch (lib/ruckig/VENDORED.md).
 idf_component_register(SRCS "main.cpp"
                             "hub/ValenceHub.cpp" "hub/ValenceDevice.cpp"
-                            "hub/ValenceWsPort.cpp"
+                            "hub/ValenceWsPort.cpp" "hub/ValenceEstopDatagram.cpp"
                             "hub/ValenceUiToken.cpp" "hub/ValenceDiscovery.cpp"
                             "hub/ValenceSerialPort.cpp" "hub/ValenceProvisioning.cpp"
                             "motion/ValenceMotion.cpp" "motion/MotionArbiter.cpp"

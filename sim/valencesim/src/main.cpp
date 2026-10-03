@@ -4,6 +4,7 @@
 //
 //   valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
 //              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
+//              [--no-estop-udp]
 //              [--uncommissioned] [--no-discovery] [--discovery-port N]
 //              [--headless] [--no-mdns] [--enforce]
 //
@@ -63,6 +64,7 @@
 #include "hub/ValenceCatalog.h"
 #include "hub/ValenceDevice.h"
 #include "hub/ValenceDiscovery.h"
+#include "hub/ValenceEstopDatagram.h"
 #include "hub/valence_config.h"
 #include "motion/ValenceMotion.h"
 #include "net/WsServerPort.h"
@@ -127,6 +129,7 @@ struct Options {
     bool pairingWindow = false;
     bool motorSwitch = false;
     int mswFaultS = -1;   // --msw-fault: seconds after boot, -1 = none
+    bool noEstopUdp = false;   // --no-estop-udp: RFC-053 datagrams never latch
     std::string statePrefix;   // empty = valencesim-state beside the exe
     bool discovery = true;
     uint16_t discoveryPort = uint16_t(valence::udp_discovery::port);
@@ -145,6 +148,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (!std::strcmp(a, "--pairing-window")) o.pairingWindow = true;
         else if (!std::strcmp(a, "--motor-switch")) o.motorSwitch = true;
         else if (!std::strcmp(a, "--msw-fault") && hasNext) o.mswFaultS = std::atoi(argv[++i]);
+        else if (!std::strcmp(a, "--no-estop-udp")) o.noEstopUdp = true;
         else if (!std::strcmp(a, "--state") && hasNext) o.statePrefix = argv[++i];
         else if (!std::strcmp(a, "--no-discovery")) o.discovery = false;
         else if (!std::strcmp(a, "--discovery-port") && hasNext) o.discoveryPort = uint16_t(std::atoi(argv[++i]));
@@ -260,6 +264,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "usage: valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]\n"
                      "                  [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]\n"
+                     "                  [--no-estop-udp]\n"
                      "                  [--uncommissioned] [--no-discovery] [--discovery-port N]\n"
                      "                  [--headless] [--no-mdns] [--enforce]\n");
         return 2;
@@ -340,6 +345,15 @@ int main(int argc, char** argv) {
              static_cast<unsigned long long>(hub.hubInstanceId()));
     hub.setEndpoint(opt.wsPort, 0x7F000001u);
     box->device.attach(hub, box->catalog);
+    // RFC-053: ESTOP datagrams share the §13.8 port, wired as the board's
+    // hubBegin wires them: the hub they latch, and the port's hook.
+    valence::estopDatagramBind(&hub);
+    box->discovery.setDatagramHook(&valence::estopDatagramHook);
+    box->discovery.setReplyFlagsHook(&valence::estopDatagramReplyFlags);
+    if (opt.noEstopUdp) {
+        valence::estopDatagramSetEnabled(false);
+        log.logf('W', "valencesim: --no-estop-udp: ESTOP datagrams are dropped, never latched");
+    }
     logChannel.bind(&hub);
 
     const auto etag = hub.catalogEtag();
