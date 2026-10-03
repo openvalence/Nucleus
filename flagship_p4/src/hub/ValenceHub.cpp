@@ -57,6 +57,7 @@
 
 #include "ValenceCatalog.h"
 #include "ValenceDevice.h"
+#include "ValenceDiscovery.h"
 #include "geiger/geiger.h"
 #include "TrustStore.h"
 #include "ValencePlatform.h"
@@ -187,6 +188,8 @@ struct HubBox {
     ValenceDevice device{};
     std::optional<valence::Hub> hub{};
     ValenceWsPort port{};
+    // SPEC 13.8: one UDP socket and the reply template. Hub task only.
+    ValenceDiscoveryPort discovery{};
     ValenceUiTokenMinter minter{};
     // Two ledger-sized buffers (encode scratch and the last stored bytes);
     // hub task only after boot.
@@ -322,6 +325,8 @@ void hubTask(void*) {
             g_lastEndpointMs = nowMs;
             refreshEndpoint();
         }
+        // Here and nowhere else: a reply reads the hub's etag and window (T5).
+        g_box->discovery.poll(*g_box->hub, nowMs);
 
         geiger::drainToSinks();
     }
@@ -484,6 +489,9 @@ bool hubBegin() {
     // and every paired one. Losing the mint costs the browser onramp, not the
     // machine.
     if (!g_box->minter.attachRoutes()) GLOGW(kTag, "/uitoken unavailable");
+    // Non-fatal: a typed address always works (SPEC 13.7). After the WS port,
+    // so no reply names an endpoint that is not listening.
+    g_box->discovery.begin(uint16_t(udp_discovery::port), VALENCE_HUB_NAME, FIRMWARE_VERSION, kWsPort);
 
     // Stack: internal by construction (plain xTaskCreatePinnedToCore). The size
     // and the measurement that set it live on kHubTaskStackBytes in ValenceHub.h.

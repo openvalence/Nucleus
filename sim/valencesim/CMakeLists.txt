@@ -39,6 +39,7 @@ add_executable(valencesim
     "${NUCLEUS_ROOT}/flagship_p4/src/patterns/AdvancedPattern.cpp"
     src/SimUiToken.cpp
     "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceDevice.cpp"
+    "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceDiscovery.cpp"
     "${BENCH_SRC}/net/WsServerPort.cpp"
     ${RUCKIG_SRC})
 

@@ -13,7 +13,7 @@
 idf_component_register(SRCS "main.cpp"
                             "hub/ValenceHub.cpp" "hub/ValenceDevice.cpp"
                             "hub/ValenceWsPort.cpp"
-                            "hub/ValenceUiToken.cpp"
+                            "hub/ValenceUiToken.cpp" "hub/ValenceDiscovery.cpp"
                             "motion/ValenceMotion.cpp" "motion/MotionArbiter.cpp"
                             "patterns/ValencePattern.cpp" "patterns/PatternEngine.cpp"
                             "patterns/AdvancedPattern.cpp"

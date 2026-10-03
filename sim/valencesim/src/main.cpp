@@ -4,7 +4,8 @@
 //
 //   valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
 //              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
-//              [--uncommissioned] [--headless] [--no-mdns] [--enforce]
+//              [--uncommissioned] [--no-discovery] [--discovery-port N]
+//              [--headless] [--no-mdns] [--enforce]
 //
 // Constraints:
 // - HOST-ONLY: never touches a device, never deploys, no pio.
@@ -16,6 +17,9 @@
 //   CMakeLists.txt) is drained on the hub thread only, into the sim's own
 //   SessionLog, so a run reads as one stream, and Warn and above onto the log
 //   channel 0x0008 as the board's ValenceLogBridge does.
+// - UDP DISCOVERY IS THE BOARD'S: flagship_p4/src/hub/ValenceDiscovery.cpp,
+//   polled on the hub thread like the board's hub task. --no-discovery keeps a
+//   test run off UDP; --discovery-port moves it off the registry port.
 // - The loop's 5 ms hub tick matches the P4's hub task; motion is evaluated
 //   every pass (~1 ms), matching the P4's 1 kHz motion tick as closely as a
 //   desktop scheduler allows.
@@ -58,6 +62,7 @@
 #include "geiger/geiger.h"
 #include "hub/ValenceCatalog.h"
 #include "hub/ValenceDevice.h"
+#include "hub/ValenceDiscovery.h"
 #include "hub/valence_config.h"
 #include "motion/ValenceMotion.h"
 #include "net/WsServerPort.h"
@@ -123,6 +128,8 @@ struct Options {
     bool motorSwitch = false;
     int mswFaultS = -1;   // --msw-fault: seconds after boot, -1 = none
     std::string statePrefix;   // empty = valencesim-state beside the exe
+    bool discovery = true;
+    uint16_t discoveryPort = uint16_t(valence::udp_discovery::port);
 };
 
 bool parseArgs(int argc, char** argv, Options& o) {
@@ -139,6 +146,8 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (!std::strcmp(a, "--motor-switch")) o.motorSwitch = true;
         else if (!std::strcmp(a, "--msw-fault") && hasNext) o.mswFaultS = std::atoi(argv[++i]);
         else if (!std::strcmp(a, "--state") && hasNext) o.statePrefix = argv[++i];
+        else if (!std::strcmp(a, "--no-discovery")) o.discovery = false;
+        else if (!std::strcmp(a, "--discovery-port") && hasNext) o.discoveryPort = uint16_t(std::atoi(argv[++i]));
         // No TUI and no mDNS responder exist, and --enforce names what is now
         // the only posture; all three are accepted so older command lines run
         // unchanged.
@@ -220,6 +229,7 @@ struct SimBox {
     std::optional<valence::Hub> hub{};
     bench::ValenceBenchWsPort port{};
     valence::SimUiToken minter{};
+    valence::ValenceDiscoveryPort discovery{};
     std::array<std::byte, valence::PatternPresetStore::kBlobBytes> blobScratch{};
 };
 
@@ -250,7 +260,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "usage: valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]\n"
                      "                  [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]\n"
-                     "                  [--uncommissioned] [--headless] [--no-mdns] [--enforce]\n");
+                     "                  [--uncommissioned] [--no-discovery] [--discovery-port N]\n"
+                     "                  [--headless] [--no-mdns] [--enforce]\n");
         return 2;
     }
 
@@ -368,6 +379,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "valencesim: WS listen failed on :%u\n", unsigned(opt.wsPort));
         return 1;
     }
+    // Non-fatal, as on the P4: a port another twin holds only costs discovery.
+    if (opt.discovery) box->discovery.begin(opt.discoveryPort, kHubName, FIRMWARE_VERSION, opt.wsPort);
     std::string err;
     if (!box->minter.begin(opt.httpPort, err)) {
         // Non-fatal, as on the P4: watch-tier and paired clients still work.
@@ -392,6 +405,7 @@ int main(int argc, char** argv) {
             box->port.loop(nowMs);
             hub.update(g_clock.nowUs());
             const uint8_t due = box->device.tick(nowMs);
+            box->discovery.poll(hub, nowMs);
             geiger::drainToSinks();
             if (due & valence::kPersistConfig) {
                 const size_t n = box->device.encodeConfigBlob(scratch, hub.cfgGen());
@@ -413,6 +427,7 @@ int main(int argc, char** argv) {
 
     geiger::drainToSinks();
     box->minter.stop();
+    box->discovery.end();
     box->port.stop();
 #ifdef _WIN32
     timeEndPeriod(1);
