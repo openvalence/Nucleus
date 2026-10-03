@@ -3,6 +3,7 @@
 
 #include "ValenceWsPort.h"
 
+#include <array>
 #include <cstring>
 
 #include <esp_timer.h>
@@ -12,6 +13,8 @@
 #include <unistd.h>
 
 #include "geiger/geiger.h"
+#include "valence/wire/frame_header.hpp"
+#include "valence/wire/messages/goodbye.hpp"
 
 namespace valence {
 
@@ -427,6 +430,21 @@ void ValenceWsPort::loop(uint32_t nowMs) {
             s.close();
         }
     }
+}
+
+void ValenceWsPort::goodbyeAll(valence::NackCode code) {
+    valence::GoodbyeMsg gb;
+    gb.code = code;
+    std::array<std::byte, valence::kHeaderBytes + 32> frame{};
+    const std::span<std::byte> out(frame);
+    const size_t n = valence::encodeGoodbye(gb, out.subspan(valence::kHeaderBytes));
+    if (n == 0) return;
+    valence::FrameHeader h;
+    h.type = uint8_t(valence::FrameType::GOODBYE);
+    h.len = uint16_t(n);
+    if (valence::encodeFrameHeader(h, out) != valence::kHeaderBytes) return;
+    for (uint8_t i = 0; i < kSlots; ++i)
+        if (_attached[i]) _slots[i].write(out.first(valence::kHeaderBytes + n));
 }
 
 size_t ValenceWsPort::openSockets() const {

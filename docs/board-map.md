@@ -21,15 +21,15 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 - **Firm and wired:** quadrature A/B (LP core), the private I2C bus (motor
   current monitor, and the board monitor's IDENT/STATUS at boot), the C6 SDIO
   link, the USB console, the E-stop pair and its bypass (boot self-check),
-  status LED data, fan PWM and tach (the BoardIo task,
+  status LED data, fan PWM and tach, the PAIR button (the BoardIo task,
   `system/ValenceBoardIo.cpp`). The DBG marker has its surface
   (`system/ValenceDbg.h`) and is driven from nowhere by default.
 - **Provisional and wired:** the motor switch: MOTOR_EN and PRECHARGE_EN
   (held low from the first line of `app_main`, raised only by the enable
   sequence), MSW_FLT_N, MSW_IMON and EN_NODE (the switch task's watch); THERM
-  (sampled on that same task); the HOME button (gestures logged and parked,
-  the hub binding owed, val-091.26).
-- **Firm and unwired:** board monitor SWIO, PAIR button, all thirteen
+  (sampled on that same task); the HOME button (bound by the hub delegate:
+  press homes, hold reboots, val-091.26).
+- **Firm and unwired:** board monitor SWIO, all thirteen
   accessory LP pads, PD_INT.
 - **Provisional and unwired:** CLAMP_MON, SHUNT_TEMP, RS485 TX/RX/DE,
   DRV_ALM, DRV_RDY.
@@ -106,8 +106,8 @@ into an unpowered drive and move position truth without the carriage.
 | E-stop NC contact (J9, and the daughterboard M8 in parallel), 2.2k pull-up, 1k R903; HIGH = open | `/ESTOP.ESTOP_NC` | GPIO39, pad 31 | Decoded once at boot: `ValenceSelfCheck.cpp:153` | Firm: SPEC 2026-09-23 E-stop row (+2026-09-28, 2026-10-01) | runtime latch val-091.23 |
 | E-stop NO contact, 2.2k pull-up, 1k R904 | `/ESTOP.ESTOP_NO` | GPIO30, pad 53 | same | Firm | val-091.23 |
 | E-stop bypass drive (Q903, masks an unplugged cable only), 100k pull-down R906 | `/ESTOP.ESTOP_BYP` | GPIO29, pad 54 | Driven LOW: `ValenceSelfCheck.cpp:229` | Firm | bypass policy val-091.23 |
-| HOME button SW1 (press homes, hold resets, on release), 10k pull-up, 1k series; J13 in parallel | `/UI.BTN_HOME` | GPIO49, pad 12 | Polled every 10 ms on the BoardIo task (`system/ValenceButtons.cpp:38`) into `ButtonGesture.h` (30 ms debounce, hold at 3 s, stuck at 30 s, acted on release); each gesture is a Warn log line and is parked for the hub (`homeButtonTake()`); nothing acts on it yet | Provisional | hub binding val-091.26; bench val-091.66 |
-| PAIR button SW2 (hold pairs, held at power-on = config mode), 10k pull-up, 1k series; J13 in parallel | `/UI.BTN_PAIR` | GPIO52, pad 55 | nothing | Firm: SPEC 2026-09-23 pin-map-after-LP row | val-9u0.10, val-9u0.14 |
+| HOME button SW1 (press homes, hold resets, on release), 10k pull-up, 1k series; J13 in parallel | `/UI.BTN_HOME` | GPIO49, pad 12 | Polled every 10 ms on the BoardIo task (`system/ValenceButtons.cpp`) into `ButtonGesture.h` (30 ms debounce, hold at 3 s, stuck at 30 s, acted on release), logged and parked for the hub (`homeButtonTake()`). Bound in `ValenceDevice::tick()` (operator ruling 2026-10-02): press = home op 1 through `applyHome()` (refused UNSUPPORTED_OP and logged until homing exists; force_home never on the button, RFC-025); hold = graceful reboot (brake, ESTOP, NVS flush, GOODBYE REBOOTING, restart, `ValenceHub.cpp` `rebootNow`); a hold the hub task has not taken in 2 s is a dead hub, and the BoardIo task cuts motor power and restarts itself | Provisional | bench val-091.66 |
+| PAIR button SW2 (held at power-on = config mode), 10k pull-up, 1k series; J13 in parallel | `/UI.BTN_PAIR` | GPIO52, pad 55 | Sampled with HOME, same core (`pairButtonTake()`). Press opens the presence window (SPEC 12.3, operator ruling 2026-10-02: tap pairs, superseding the SPEC row's "hold pairs"); hold is reserved and only logged; held through power-on fires nothing (config mode is val-9u0.14's) | Firm: SPEC 2026-09-23 pin-map-after-LP row | config mode val-9u0.14; bench val-091.66 |
 | Status LED data: 74AHCT125 gate 3 (U10) to the GRBW pixel D5 (XL-3528RGBW, 32 bits per pixel), chained on to J12 NEOPIXEL OUT; R601 10k pull-down | `/DRV.LED_DATA` | GPIO26 (USB1.1 D-), pad 19 | RMT TX at 10 MHz, one GRBW frame per 20 ms (`system/ValenceGlow.cpp:67`), the board's one Flux glue; `StatusLook.h` maps the machine state to a Flux pair; pixel 0 only, the J12 chain is never written | Firm: same row | bench val-091.66 |
 | DBG marker through R602 1k to TP603; the ROM boot log appears on it at every reset (U0TX) | `/DRV.DBG` | GPIO37, pad 30 | `system/ValenceDbg.h`: `dbgBegin()` claims the pad, `dbgLevel()` is one register store, `dbgPulse(n)`; called from nowhere by default | Firm: SPEC 2026-09-23 board-monitor row | bench val-091.66 |
 | BOOT strap to tweezer pad TP903 (held low at power-on = download mode) | `Net-(TP903-Pad1)` | GPIO35, pad 36 (pad 48 NC) | never used, by rule | Firm | none |

@@ -27,6 +27,7 @@
 #include "geiger/geiger.h"
 #include "motion/ValenceMotion.h"
 #include "patterns/ValencePattern.h"
+#include "system/ValenceButtons.h"
 #include "system/ValenceMotorSwitch.h"
 
 #include "valence/util/byte_io.hpp"
@@ -91,6 +92,11 @@ constexpr const char* kDetailReturning = "returning to the paused position";
 // operator lets go: a write per INTENT would put an NVS commit, and now and
 // then a sector erase, on the hub task at the intent rate.
 constexpr uint32_t kCfgPersistDebounceMs = 2000;
+
+// A HOME hold's brake gets this long to reach rest before the ESTOP cuts
+// power anyway. The arbiter brakes at the input decel, well under a second
+// from the speed ceiling.
+constexpr uint32_t kRebootBrakeMs = 2000;
 
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -1491,7 +1497,68 @@ void ValenceDevice::attach(Hub& hub) {
     }
 }
 
+// ---- the board buttons -----------------------------------------------------------
+// Hub task, from tick(): outside the hub's intent dispatch, so the hub calls
+// below (openPresenceWindow, latchEstop) may publish and broadcast.
+
+void ValenceDevice::serviceButtons(uint32_t nowMs) {
+    const button::Gesture home = homeButtonTake();
+    const button::Gesture pair = pairButtonTake();
+    if (_reboot == Reboot::none) {
+        if (home == button::Gesture::press) homeFromButton();
+        else if (home == button::Gesture::hold) beginReboot(nowMs);
+        if (pair == button::Gesture::press) {
+            _hub->openPresenceWindow();
+            GLOGW(kTag, "PAIR press: presence window open for %lu s (SPEC 12.3)",
+                  static_cast<unsigned long>(limits::pairing_window_default_s));
+        } else if (pair == button::Gesture::hold) {
+            GLOGW(kTag, "PAIR hold: no binding");
+        }
+    }
+    if (_reboot != Reboot::braking) return;
+    const MotionCensus mo = motionCensus();
+    const bool atRest = !mo.busy && mo.step_q8 == 0;
+    if (!atRest && int32_t(nowMs - _rebootBrakeUntilMs) < 0) return;
+    // The ESTOP is the power cut and the clients' truth before the GOODBYE:
+    // the hub's own initiation, at its highest tier, like the fault latch.
+    if (!_hub->estopLatched()) _hub->latchEstop(safety_causes::user, uint8_t(AccessLevel::configure));
+    _reboot = Reboot::due;
+    GLOGW(kTag, "HOME hold: %s, motor power cut, rebooting", atRest ? "at rest" : "brake timed out");
+}
+
+// The same door as the wire's home op 1, refusal included. force_home (op 2)
+// is never reachable from the button: it asserts a stroke nothing measured
+// (RFC-025).
+void ValenceDevice::homeFromButton() {
+    IntentValueMap m{};
+    m.count = 1;
+    m.fields[0] = IntentValueField{1, IntentValue::ofU64(1)};
+    const Ret r = applyHome(m);
+    if (r) GLOGW(kTag, "HOME press: homing");
+    else GLOGW(kTag, "HOME press: home refused, NACK 0x%04x (no homing cycle on this board yet)",
+               unsigned(r.error()));
+}
+
+// PAUSE's brake without PAUSE's latch: the hub's safety word moves once,
+// to ESTOP, when the brake is done (serviceButtons()).
+void ValenceDevice::beginReboot(uint32_t nowMs) {
+    GLOGW(kTag, "HOME hold: graceful reboot: braking, then ESTOP, GOODBYE REBOOTING, NVS flush, restart");
+    motionPause(true);
+    _reboot = Reboot::braking;
+    _rebootBrakeUntilMs = nowMs + kRebootBrakeMs;
+}
+
+uint8_t ValenceDevice::takePendingPersist() {
+    uint8_t due = 0;
+    if (_persistArmed) due |= kPersistConfig;
+    if (_presetsArmed) due |= kPersistPresets;
+    _persistArmed = false;
+    _presetsArmed = false;
+    return due;
+}
+
 uint8_t ValenceDevice::tick(uint32_t nowMs) {
+    serviceButtons(nowMs);
     // force_home's two hub-side effects, one tick after applyIntent because
     // both publish and broadcast and applyIntent runs inside the hub's intent
     // dispatch. The release runs canClearEstop(), so the hub and the arbiter

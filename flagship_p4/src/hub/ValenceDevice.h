@@ -138,6 +138,18 @@ public:
     // write time.
     uint8_t tick(uint32_t nowMs);
 
+    // ---- the board buttons (operator ruling 2026-10-02, bd val-091.26) --------
+    // tick() takes the gestures ValenceButtons.h parks and binds them: HOME
+    // press is home op 1 through applyHome(), as the wire's; HOME hold brakes
+    // motion, then latches ESTOP (cause user: the power cut), then reports
+    // rebootDue(); PAIR press opens the presence window (SPEC 12.3); PAIR hold
+    // is reserved and only logged. The reboot itself is the composition's:
+    // takePendingPersist(), the GOODBYEs, the restart. Never clears.
+    bool rebootDue() const { return _reboot == Reboot::due; }
+    // The kPersist* bits armed and not yet due, disarmed: a planned reboot
+    // writes them now instead of after the debounce.
+    uint8_t takePendingPersist();
+
     // 0x0006 link RSSI in dBm, 0 = no reading. PUSHED IN from whichever task
     // owns the radio; never read on the hub task (see ValenceHub.h).
     void setLinkRssi(int8_t rssi) { _linkRssi.store(rssi, std::memory_order_relaxed); }
@@ -185,6 +197,10 @@ private:
     void haltGenerator();
     void pushPattern();
     void publishPatternPlane(const MotionCensus& mo);
+
+    void serviceButtons(uint32_t nowMs);
+    void homeFromButton();
+    void beginReboot(uint32_t nowMs);
 
     void publishHubStatus();
     void publishMachineConfig();
@@ -245,6 +261,11 @@ private:
     std::array<char, limits::nack_detail_max_bytes + 1> _nackDetail{};
     // The switch status hub-status last carried, so a change publishes now.
     MotorSwitchStatus _mswSent{};
+    // A HOME hold's reboot: braking until at rest or _rebootBrakeUntilMs,
+    // then due.
+    enum class Reboot : uint8_t { none, braking, due };
+    Reboot _reboot = Reboot::none;
+    uint32_t _rebootBrakeUntilMs = 0;
 
     // The live pattern generator settings. This copy IS the setting (the
     // delegate is its one writer); the generator's task runs on whatever

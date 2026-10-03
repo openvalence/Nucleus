@@ -280,3 +280,20 @@ TEST_CASE("TS-12: a corrupt counter delays a gesture, never fakes one") {
     CHECK_FALSE(b.result.gesture);
     CHECK(nvs.counter() == 1);
 }
+
+TEST_CASE("TS-13: a planned reboot's flush writes a change held inside the interval, and nothing else") {
+    FakeNvs nvs;
+    Boot b(nvs);
+    REQUIRE(b.pm.importEntry(entry(1, AccessLevel::configure, "owner")));
+    CHECK(b.store.tick(b.pm, nvs, 1000, false) == valence::kTrustLedgerWritten);
+    // Nothing pending: the flush writes nothing.
+    CHECK(b.store.flush(b.pm, nvs, 1100) == 0);
+    CHECK(nvs.ledgerSaves() == 1);
+    // A change inside the interval: tick holds it, the flush lands it.
+    REQUIRE(b.pm.importEntry(entry(2, AccessLevel::control, "remote")));
+    CHECK(b.store.tick(b.pm, nvs, 1200, false) == 0);
+    CHECK(b.store.flush(b.pm, nvs, 1300) == valence::kTrustLedgerWritten);
+    CHECK(nvs.ledgerSaves() == 2);
+    Boot after(nvs);
+    CHECK(after.result.paired == 2);
+}

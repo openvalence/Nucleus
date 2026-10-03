@@ -143,26 +143,39 @@ public:
             const std::array<std::byte, 1> zero{};
             out |= store.save(kGestureKey, zero) ? kTrustGestureCleared : kTrustGestureFailed;
         }
-        if (_ledgerPending && (!_wroteOnce || uptimeMs - _lastWriteMs >= kLedgerWriteMinIntervalMs)) {
-            _ledgerPending = false;
-            const size_t n = p.encodeLedger(_scratch);
-            const std::span<const std::byte> blob(_scratch.data(), n);
-            if (n != 0 && _storedValid && std::ranges::equal(blob, stored())) return out;
-            _wroteOnce = true;
-            _lastWriteMs = uptimeMs;
-            if (n != 0 && store.save(kLedgerKey, blob)) {
-                remember(blob);
-                out |= kTrustLedgerWritten;
-            } else {
-                _ledgerPending = true;   // retried at the interval
-                out |= kTrustLedgerFailed;
-            }
-        }
+        if (_ledgerPending && (!_wroteOnce || uptimeMs - _lastWriteMs >= kLedgerWriteMinIntervalMs))
+            out |= writeLedger(p, store, uptimeMs);
         return out;
+    }
+
+    // Hub task, before a planned reboot: a pending ledger change is written
+    // NOW, inside the write interval, or it is lost with the boot. Returns
+    // kTrust* bits; 0 when nothing was pending.
+    uint8_t flush(PairingManager& p, IKeyStore& store, uint32_t uptimeMs) {
+        if (p.dirty()) {
+            p.clearDirty();
+            _ledgerPending = true;
+        }
+        return _ledgerPending ? writeLedger(p, store, uptimeMs) : 0;
     }
 
 private:
     static constexpr uint8_t kGestureBoots = uint8_t(limits::pairing_gesture_boot_count);
+
+    uint8_t writeLedger(PairingManager& p, IKeyStore& store, uint32_t uptimeMs) {
+        _ledgerPending = false;
+        const size_t n = p.encodeLedger(_scratch);
+        const std::span<const std::byte> blob(_scratch.data(), n);
+        if (n != 0 && _storedValid && std::ranges::equal(blob, stored())) return 0;
+        _wroteOnce = true;
+        _lastWriteMs = uptimeMs;
+        if (n != 0 && store.save(kLedgerKey, blob)) {
+            remember(blob);
+            return kTrustLedgerWritten;
+        }
+        _ledgerPending = true;   // retried at the interval
+        return kTrustLedgerFailed;
+    }
 
     void remember(std::span<const std::byte> bytes) {
         std::ranges::copy(bytes, _stored.begin());

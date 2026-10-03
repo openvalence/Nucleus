@@ -42,7 +42,7 @@ bool boardIoBegin() {
     if (xTaskCreatePinnedToCore(&taskMain, "BoardIo", kBoardIoTaskStackBytes, nullptr, 3, &g_task, 0) !=
         pdPASS) {
         g_task = nullptr;
-        GLOGE(kTag, "BoardIo task did not start: no status pixel, fan off, HOME unread");
+        GLOGE(kTag, "BoardIo task did not start: no status pixel, fan off, HOME and PAIR unread");
         return false;
     }
     return true;

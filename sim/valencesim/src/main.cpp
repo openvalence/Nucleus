@@ -62,6 +62,7 @@
 #include "motion/ValenceMotion.h"
 #include "net/WsServerPort.h"
 #include "patterns/ValencePattern.h"
+#include "system/ValenceButtons.h"
 #include "system/ValenceMotorSwitch.h"
 
 namespace {
@@ -226,6 +227,10 @@ struct SimBox {
 namespace valence {
 uint64_t deviceNowUs() { return g_clock.nowUs64(); }
 uint32_t deviceFreeHeapBytes() { return 0; }
+// The twin has no buttons: --pairing-window stands in for PAIR, and HOME's
+// reboot has no meaning for a desktop process.
+button::Gesture homeButtonTake() { return button::Gesture::none; }
+button::Gesture pairButtonTake() { return button::Gesture::none; }
 }  // namespace valence
 
 namespace geiger {

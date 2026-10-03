@@ -28,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Named directly so the library finder adds lib/valence and lib/geiger; it
@@ -56,6 +57,10 @@ MotorSwitchStatus g_switch{};
 // What the fake arbiter answers a `return` with; an arrival counts at once,
 // as MotionArbiter::returnToPause() does.
 ReturnStart g_returnAnswer = ReturnStart::queued;
+// The fake gesture source: what the BoardIo task would have parked.
+button::Gesture g_homeGesture = button::Gesture::none;
+button::Gesture g_pairGesture = button::Gesture::none;
+int g_forceHomes = 0;
 
 }  // namespace
 
@@ -87,7 +92,10 @@ void motionSetJogLimits(float, float) {}
 void motionSetInputLimits(float, float, float) {}
 void motionSetWindow(float, float, float) {}
 void motionNoteStream(uint32_t, uint32_t, uint32_t) {}
-float motionForceHome(float stroke_mm) { return stroke_mm; }
+float motionForceHome(float stroke_mm) {
+    ++g_forceHomes;
+    return stroke_mm;
+}
 MotionCensus motionCensus() { return g_census; }
 MotionTuning motionDefaultTuning() { return MotionTuning{}; }
 void motionSetTuning(const MotionTuning&) {}
@@ -105,6 +113,9 @@ MotorSwitchStatus motorSwitchStatus() { return g_switch; }
 bool motorSwitchFaultLine() { return false; }
 uint32_t motorSwitchStackFree() { return 0; }
 std::optional<float> motorSwitchThermVolts() { return std::nullopt; }
+
+button::Gesture homeButtonTake() { return std::exchange(g_homeGesture, button::Gesture::none); }
+button::Gesture pairButtonTake() { return std::exchange(g_pairGesture, button::Gesture::none); }
 
 }  // namespace valence
 
@@ -155,6 +166,8 @@ struct Rig {
         g_census.motor_on = true;
         g_census.power_gate = true;
         g_returnAnswer = ReturnStart::queued;
+        g_homeGesture = g_pairGesture = button::Gesture::none;
+        g_forceHomes = 0;
         g_switch = MotorSwitchStatus{};
         g_switch.state = motorswitch::State::on;
         REQUIRE(buildValenceCatalog(catalog, boardFeatures()));
@@ -427,4 +440,67 @@ TEST_CASE("VD-08: a refused release names why for intentNackDetail") {
     g_census.busy = false;
     CHECK(rig->device.canClearEstop());
     CHECK(rig->device.intentNackDetail(channels::safety_intents, NackCode::CLEAR_REFUSED).empty());
+}
+
+// ---- bd val-091.26: the HOME and PAIR buttons ---------------------------------
+
+TEST_CASE("VD-09: HOME press runs home op 1 through applyHome; force_home is never reached") {
+    auto rig = std::make_unique<Rig>();
+    g_homeGesture = button::Gesture::press;
+    rig->step();
+    CHECK(g_homeGesture == button::Gesture::none);   // taken
+    CHECK(g_forceHomes == 0);
+    CHECK_FALSE(rig->hub->estopLatched());
+    CHECK_FALSE(rig->device.rebootDue());
+}
+
+TEST_CASE("VD-10: HOME hold brakes first, then latches ESTOP and reports the reboot due") {
+    auto rig = std::make_unique<Rig>();
+    g_census.busy = true;
+    g_homeGesture = button::Gesture::hold;
+    rig->step(4);
+    CHECK(g_census.paused);                 // the arbiter's brake was asked for
+    CHECK_FALSE(rig->hub->estopLatched());  // still braking
+    CHECK_FALSE(rig->device.rebootDue());
+    g_census.busy = false;
+    rig->step(2);
+    CHECK(rig->hub->estopLatched());
+    CHECK(rig->device.rebootDue());
+    // Gestures during the reboot are ignored.
+    g_pairGesture = button::Gesture::press;
+    rig->step(2);
+    CHECK_FALSE(rig->hub->presenceWindowOpen());
+}
+
+TEST_CASE("VD-11: a brake that never reaches rest still reboots, after the bound") {
+    auto rig = std::make_unique<Rig>();
+    g_census.busy = true;
+    g_homeGesture = button::Gesture::hold;
+    rig->step(1000);
+    CHECK_FALSE(rig->device.rebootDue());
+    rig->step(1100);
+    CHECK(rig->hub->estopLatched());
+    CHECK(rig->device.rebootDue());
+}
+
+TEST_CASE("VD-12: PAIR press opens the presence window; PAIR hold does nothing") {
+    auto rig = std::make_unique<Rig>();
+    g_pairGesture = button::Gesture::hold;
+    rig->step();
+    CHECK_FALSE(rig->hub->presenceWindowOpen());
+    g_pairGesture = button::Gesture::press;
+    rig->step();
+    CHECK(rig->hub->presenceWindowOpen());
+    CHECK_FALSE(rig->device.rebootDue());
+}
+
+TEST_CASE("VD-13: a planned reboot takes the armed persists at once, then none") {
+    auto rig = std::make_unique<Rig>();
+    IntentValueMap m{};
+    m.count = 1;
+    m.fields[0] = IntentValueField{3, IntentValue::ofF32(42.0f)};   // jog_speed
+    REQUIRE(rig->client->sendIntent(ch::config_set, m).has_value());
+    rig->step(20);   // applied and armed, well inside the debounce
+    CHECK(rig->device.takePendingPersist() == kPersistConfig);
+    CHECK(rig->device.takePendingPersist() == 0);
 }

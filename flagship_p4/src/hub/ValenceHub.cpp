@@ -20,7 +20,9 @@
 //   Adoption never becomes an intent, an ECHO or a cfg_gen bump.
 // - NVS WRITES RUN ON THE HUB TASK (T5: never in a transport callback), each
 //   DEBOUNCED by ValenceDevice's kCfgPersistDebounceMs of quiet, and are HELD
-//   while an OTA transfer is in flight (otaInFlight()). Wear arithmetic, 4 KB
+//   while an OTA transfer is in flight (otaInFlight()); the one exception is
+//   a HOME-hold reboot, which writes everything pending at once
+//   (rebootNow()). Wear arithmetic, 4 KB
 //   page = 126 entries of 32 B: "cfg" costs ~5 entries a write (blob index,
 //   data header, 3 data), so ~25 writes fill a page and cost one sector erase;
 //   at the 2 s floor that is one erase per ~50 s, and the 100,000-cycle floor
@@ -246,6 +248,24 @@ uint64_t loadOrMintInstanceId() {
     return id;
 }
 
+// A HOME hold (val-091.26), once the device has braked and latched ESTOP
+// (its power cut): every pending blob written now, the GOODBYEs, the restart.
+// Hub task, and its LAST act: the flush blocks on NVS and the delay lets the
+// GOODBYEs and the log line leave over the C6, which is acceptable here and
+// nowhere else because nothing on this task runs after it. Held writes of an
+// OTA in flight are written too: the transfer dies with the boot anyway.
+[[noreturn]] void rebootNow(uint32_t nowMs) {
+    g_persistDue |= g_box->device.takePendingPersist();
+    if (g_persistDue != 0) persistDue();
+    if (g_box->trust.flush(g_box->hub->pairing(), g_nvs, nowMs) & kTrustLedgerFailed)
+        GLOGW(kTag, "trust ledger change not persisted before the reboot");
+    g_box->port.goodbyeAll(NackCode::REBOOTING);
+    GLOGW(kTag, "rebooting: HOME hold");
+    geiger::drainToSinks();
+    vTaskDelay(pdMS_TO_TICKS(200));
+    esp_restart();
+}
+
 // ---- the hub task ------------------------------------------------------------
 // CORE 1. The LP core renders motion's edges, so HP core 1 carries no
 // emitter; core 0 runs app_main and the esp_hosted SDIO
@@ -283,6 +303,7 @@ void hubTask(void*) {
         // successful update reboots before the hold drains, so a change made
         // DURING an update does not survive it; one made before it does.
         g_persistDue |= g_box->device.tick(nowMs);
+        if (g_box->device.rebootDue()) rebootNow(nowMs);
         const bool ota = otaInFlight();
         if (g_persistDue != 0 && !ota) persistDue();
         // nowMs is uptime, which is also the §12.3 gesture's clock.

@@ -223,6 +223,12 @@ public:
     bool begin(valence::Hub* hub, uint16_t port);
     // Hub task: performs the deferred attach/detach and sweeps stalls.
     void loop(uint32_t nowMs);
+    // Hub task, last act before a planned restart: one GOODBYE `code` frame on
+    // every attached socket, best-effort, written here because the library
+    // has no hub-wide GOODBYE yet. The hub's session table is not touched:
+    // the restart ends it.
+    // TODO(rfc-k75): Hub::goodbyeAll(code) replaces this.
+    void goodbyeAll(valence::NackCode code);
 
     httpd_handle_t handle() const { return _srv; }
     // Client sockets this instance currently holds. Cheap: a scan of the
