@@ -29,6 +29,7 @@
 #include <optional>
 
 #include "AimDrive.h"
+#include "PdSource.h"
 #include "Supervisor.h"
 
 namespace valence::selfcheck {
@@ -42,6 +43,7 @@ enum class Check : uint8_t {
     board_monitor,   // U12 answers on the private bus, image current
     rails,           // +12V, +5V, +5V_SYS, accessory rails in window (U12)
     power_monitor,   // U11 identified and its readings sane
+    pd_source,       // the PD contract carries the input ceilings, or no PD board
     bus_window,      // input stage and +BUS inside the supply profile (U12)
     motor_rail_off,  // MOTOR_V+ near 0 V with the switch commanded off
     switch_fault,    // motor switch controller reports no fault
@@ -60,9 +62,9 @@ inline constexpr size_t kCheckCount = size_t(Check::count_);
 inline constexpr size_t kReasonBytes = 72;
 
 inline constexpr std::array<const char*, kCheckCount> kNames = {
-    "board-monitor", "rails", "power-monitor", "bus-window", "motor-rail-off",
-    "switch-fault", "regen-clamp", "estop", "quadrature", "drive-link",
-    "host-link", "nvs", "trust-ledger", "catalog",
+    "board-monitor", "rails", "power-monitor", "pd-source", "bus-window",
+    "motor-rail-off", "switch-fault", "regen-clamp", "estop", "quadrature",
+    "drive-link", "host-link", "nvs", "trust-ledger", "catalog",
 };
 
 constexpr const char* name(Check c) {
@@ -144,10 +146,34 @@ inline constexpr float kIdleCurrentMaxA = 0.5f;
 // Die temperature a working part can report at all (datasheet range).
 inline constexpr float kDieMinC = -40.0f;
 inline constexpr float kDieMaxC = 125.0f;
-// +BUS window for the 24-36 V input ruling (Hardware SPEC.md 2026-09-23), 10 %
-// either side. TODO(val-091.31): narrow it to the profile the supply reports.
-inline constexpr uint16_t kBusMinMv = 21600;
-inline constexpr uint16_t kBusMaxMv = 39600;
+
+// ---- the supply: the PD source and the +BUS window it sets ------------------
+
+struct BusWindowMv {
+    uint16_t min_mv = 0;
+    uint16_t max_mv = 0;
+};
+
+// The 24-36 V input ruling (Hardware SPEC.md 2026-09-23), 10 % either side:
+// the window when no PD source reports a bus.
+inline constexpr BusWindowMv kDcBusWindow{21600, 39600};
+
+// A contract sets the bus (PdSource.h profileFor), 10 % either side. Every
+// other PD verdict leaves the DC window: those rows fail on their own.
+constexpr BusWindowMv busWindowFor(const pd::Assessment& a) {
+    if (a.verdict != pd::Verdict::carries && a.verdict != pd::Verdict::over_budget) return kDcBusWindow;
+    return {uint16_t(a.profile.bus_mv * 9u / 10u), uint16_t(a.profile.bus_mv * 11u / 10u)};
+}
+
+// No daughterboard is a DC-input build and PASSES with the absence named: the
+// gate holds every non-pass, and a board on a plain supply through the LTC4364
+// path has nothing to wait for. A fitted board passes only when its contract
+// carries the input ceilings' peak.
+inline void judgePdSource(Table& t, const pd::Assessment& a) {
+    std::array<char, kReasonBytes> text{};
+    pd::describe(text, a);
+    t.record(Check::pd_source, a.motorAllowed() ? Result::pass : Result::fail, "%s", text.data());
+}
 
 // ---- the board monitor's blocks (Supervisor.h) ------------------------------
 // The host reads IDENT, then STATUS, and hands the decode results here. Each
@@ -199,7 +225,7 @@ inline void judgeRails(Table& t, const SvStatus& s) {
              warn ? " (accessory rail warn)" : "");
 }
 
-inline void judgeBusWindow(Table& t, const SvStatus& s) {
+inline void judgeBusWindow(Table& t, const SvStatus& s, const BusWindowMv& w = kDcBusWindow) {
     if (!monitorReadingsTrusted(t, Check::bus_window, s)) return;
     const unsigned vin = s.mv[SV_CH_VIN_RAW];
     const unsigned bus = s.mv[SV_CH_BUS];
@@ -212,9 +238,9 @@ inline void judgeBusWindow(Table& t, const SvStatus& s) {
         t.record(Check::bus_window, Result::fail, "+BUS %u mV above the clamp's reach", bus);
         return;
     }
-    if (bus < kBusMinMv || bus > kBusMaxMv) {
+    if (bus < w.min_mv || bus > w.max_mv) {
         t.record(Check::bus_window, Result::fail, "+BUS %u mV outside %u-%u mV", bus,
-                 unsigned(kBusMinMv), unsigned(kBusMaxMv));
+                 unsigned(w.min_mv), unsigned(w.max_mv));
         return;
     }
     t.record(Check::bus_window, Result::pass, "+BUS %u mV, VIN_RAW %u mV%s", bus, vin,

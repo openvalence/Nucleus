@@ -47,6 +47,13 @@ bool motorSwitchBegin();
 // time); a fail holds motor power off for the life of the boot.
 void motorSwitchSetSelfCheck(bool passed);
 
+// Board only: the PD source's verdict (ValencePdSource.h), pushed on every
+// change; any task. false refuses every enable (Refusal::source) and cuts
+// motor power if it is precharging or on; true lifts the refusal and enables
+// nothing. Boots true: a DC-input board has no source to wait for, and the
+// boot self-check's pd-source row judges a fitted one before the first enable.
+void motorSwitchSetSourceOk(bool ok);
+
 motorswitch::Refusal motorSwitchRequestEnable();
 void motorSwitchCut();
 MotorSwitchStatus motorSwitchStatus();

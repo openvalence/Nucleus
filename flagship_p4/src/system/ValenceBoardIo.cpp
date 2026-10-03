@@ -15,6 +15,7 @@
 #include "system/ValenceEstopInput.h"
 #include "system/ValenceFan.h"
 #include "system/ValenceGlow.h"
+#include "system/ValencePdSource.h"
 
 namespace valence {
 
@@ -34,6 +35,7 @@ void taskMain(void*) {
         glowService(nowMs);
         fanService(nowMs);
         accessoryIoService(nowMs);
+        pdSourceService(nowMs);
     }
 }
 
@@ -45,6 +47,7 @@ bool boardIoBegin() {
     buttonsBegin();
     estopInputBegin();
     accessoryIoBegin();
+    pdSourceBegin();
     if (xTaskCreatePinnedToCore(&taskMain, "BoardIo", kBoardIoTaskStackBytes, nullptr, 3, &g_task, 0) !=
         pdPASS) {
         g_task = nullptr;

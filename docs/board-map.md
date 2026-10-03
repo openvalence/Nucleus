@@ -33,7 +33,11 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 - **Firm, wired, not on the wire:** the accessory headers (pump and EXT PWM,
   AUX1/AUX2, IO1-IO5; the Qwiic bus and the header UART open on first use),
   `system/ValenceAccessoryIo.cpp` on the BoardIo task; catalog val-091.71.
-- **Firm and unwired:** board monitor SWIO, PD_INT.
+  The PD daughterboard: PD_INT polled and the TPS26750 at 0x21 read,
+  `system/ValencePdSource.cpp` on the same task; its contract gates motor
+  power and reaches a client only as the self-check row and log lines
+  (catalog val-091.75).
+- **Firm and unwired:** board monitor SWIO.
 - **Provisional, wired, drive status not on the wire:** RS485 TX/RX/DE and
   DRV_ALM/DRV_RDY, `system/ValenceDriveLink.cpp` on its own task. A DRV_ALM
   alarm latches ESTOP, cause fault; the link's probe and poll reach a client
@@ -160,12 +164,22 @@ exit 0, `pio run -d flagship_p4` SUCCESS; bench owed, val-091.69].
 | Header UART RX, 220 R; J15 | `/ACC.GPIO_RX` | GPIO15 (LPG15), pad 1 | same; internal pull-up while open | same |
 | Header IO1..IO5, 220 R each; J15 | `/ACC.GPIO_IO1..5` | GPIO12/10/8/7/1, pads 3/5/7/8/9 | Inputs with pull-downs from boot, which is an output's released state. `accessoryGpioConfigure()` sets input, input with pull-up or output once per boot; an output starts released and `accessoryGpioSet()` drives it; an ESTOP releases every output (never a driven low, which an active-low load reads as on); `accessoryGpioGet()` reads the pad | val-091.71; bench val-091.69 |
 
-The PD daughterboard's pads, owed under val-091.31:
+The PD daughterboard's host is `system/ValencePdSource.cpp` on the BoardIo
+task; the register decode and the motor power profile are the hardware-free
+`system/PdSource.h` (register facts from TI SLVUCR7, the TPS26750 Technical
+Reference Manual, cross-checked against Linux `drivers/usb/typec/tipd`). The
+main board never negotiates: it reads the contract the daughterboard's EEPROM
+configuration negotiated and judges it against the input ceilings; the
+contract-watts against ceilings table and the peak model's three unmeasured
+knobs sit beside the model in `PdSource.h` [host-verified 2026-10-03 -- `pio
+test -e native` suites test_pd_source 20/103 and test_self_check, each binary
+run directly, exit 0; `pio run -d flagship_p4` SUCCESS; bench owed,
+val-091.69].
 
-| Function | Net | P4 pad |
-|---|---|---|
-| PD daughterboard interrupt through R1023 220 R to J16 pad 4 (J15.12 is NC) | `/ACC.GPIO_IO6` | GPIO0 (LPG0), pad 11 |
-| PD controller (TPS26750) on the Qwiic bus, I2C 0x21 | via J16 | owed under val-091.31 |
+| Function | Net | P4 pad | Firmware today | Owed |
+|---|---|---|---|---|
+| PD daughterboard interrupt: the TPS26750's I2Ct_IRQ (open drain, active low, R5 100k to its LDO) through R1023 220 R to J16 pad 4 (J15.12 is NC) | `/ACC.GPIO_IO6` | GPIO0 (LPG0), pad 11 | Input with the internal pull-up (`gpio_set_direction` / `gpio_set_pull_mode`, never `gpio_config`, val-091.72), polled every 10 ms on the BoardIo task: low is an armed INT_EVENT1 event (hard reset, plug, new contract, power status, cannot provide), read, cleared through INT_CLEAR1 and the contract re-read and logged (Warn, tag `pd`) on every renegotiation; a held line is serviced at most every 100 ms. If the INT_MASK1 write does not take, the contract is polled once a second instead | catalog val-091.75; bench val-091.69 |
+| PD controller (TPS26750) on the Qwiic bus, I2C 0x21 (ADCIN1 = ADCIN2 = GND) | via J16 | (GPIO11 / GPIO9) | Joins `qwiicI2cBus()` at boot at 100 kHz. A NACK is a DC-input build. MODE (0x03) 'APP ' is ready, 'BOOT' and 'PTCH' are not, anything else is a stranger never addressed again. In APP: INT_MASK1 armed read-modify-write, INT_EVENT1 cleared, then ACTIVE_CONTRACT_PDO (0x34) and _RDO (0x35) decoded per USB PD (fixed, variable, battery, PPS, AVS). The contract sets +BUS (36 V behind the 48 V build's buck) and a motion budget (90 % of its watts); the input ceilings' peak over that budget refuses motor power (`Refusal::source`) and cuts it if on (`motorSwitchSetSourceOk()`). The boot self-check's pd-source row names the contract or its absence (absent passes: a DC build has no source to wait for) and the bus-window row narrows to the contract's bus | catalog val-091.75; the peak model's knobs and bench val-091.69 |
 
 ## C6 host link, USB, power pins
 
@@ -182,5 +196,5 @@ The PD daughterboard's pads, owed under val-091.31:
 |---|---|---|---|
 | Private (G34/G36) | Motor current monitor U11 | 0x40 | A0/A1 to GND on the board; `ValencePower.cpp:26` |
 | Private | Board monitor U12 | 0x2C, not ruled | `SV_I2C_ADDR` in `system/Supervisor.h`; must stay outside 0x40-0x4F (val-091.19) |
-| Qwiic (LPG11/LPG9) | PD controller TPS26750 on the daughterboard | 0x21 | SPEC 2026-10-01 rev A row |
+| Qwiic (LPG11/LPG9) | PD controller TPS26750 on the daughterboard | 0x21 | SPEC 2026-09-30 rev A row (ADCIN1 = ADCIN2 = GND); identified by MODE 'APP ' (SLVUCR7 4.1), `system/PdSource.h` |
 | Qwiic | user accessories | any free address | n/a |

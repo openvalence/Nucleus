@@ -84,6 +84,10 @@ struct MotionCensus {
     float    win_min        = 0.0f;
     float    win_max        = 0.0f;
     float    rail_mm        = 0.0f;  // the stroke force_home asserted, 0 = none
+    // The input set's ceilings as the engine plans them, overrides applied:
+    // what the PD source's budget judges (PdSource.h).
+    float    input_vmax_mm_s  = 0.0f;
+    float    input_amax_mm_s2 = 0.0f;
 
     // ---- emitter ----
     uint32_t edges          = 0;

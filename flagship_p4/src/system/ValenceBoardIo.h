@@ -2,24 +2,28 @@
 
 // ValenceBoardIo -- the BoardIo task: the slow board I/O that shares one
 // 10 ms pass (the e-stop contacts, the status pixel, the fan and THERM
-// policy, the HOME and PAIR buttons, the accessory headers)
+// policy, the HOME and PAIR buttons, the accessory headers, the PD
+// daughterboard's PD_INT)
 // Constraints:
 // - Task "BoardIo": HP core 0, priority 3 (below the motor switch's 5 and
 //   the hub's 5), kBoardIoTaskStackBytes of internal RAM, vTaskDelayUntil at
 //   kBoardIoPeriodMs. It hosts ValenceEstopInput, ValenceGlow, ValenceFan,
-//   ValenceButtons and ValenceAccessoryIo and is the only caller of their
-//   begin and service functions. The e-stop is sampled first in every pass.
+//   ValenceButtons, ValenceAccessoryIo and ValencePdSource and is the only
+//   caller of their begin and service functions. The e-stop is sampled first
+//   in every pass.
 // - Nothing on it is on a motion path: the e-stop reading and the buttons'
 //   gestures are published for the hub task to act on, the fan is comfort,
 //   the pixel is display. A stall here freezes the pixel (logging-leds.md
 //   T7) and the e-stop reading; the hardware stop, the motor switch's EN-node
-//   watch and the hub delegate's fault latch do not depend on it. Its one
-//   direct safety act is the HOME hold's dead-hub fallback
-//   (ValenceButtons.h): the ESTOP cut and a restart.
+//   watch and the hub delegate's fault latch do not depend on it. Its direct
+//   safety acts are two: the HOME hold's dead-hub fallback (ValenceButtons.h),
+//   the ESTOP cut and a restart; and the PD source's verdict
+//   (ValencePdSource.h), a motor power cut when a contract cannot carry the
+//   input ceilings. A stall delays the second by its own length.
 // - The accessory outputs reach their pads only here: a stall also holds
 //   them where they are, an ESTOP's zeroing included (ValenceAccessoryIo.h).
 // See: ValenceEstopInput.h, ValenceGlow.h, ValenceFan.h, ValenceButtons.h,
-// ValenceAccessoryIo.h, bd val-091.23/.26/.27/.28/.30
+// ValenceAccessoryIo.h, ValencePdSource.h, bd val-091.23/.26/.27/.28/.30/.31
 
 #include <cstdint>
 

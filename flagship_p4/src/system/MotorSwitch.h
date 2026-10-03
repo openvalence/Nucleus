@@ -87,6 +87,7 @@ enum class Refusal : uint8_t {
     fault_line,   // MSW_FLT_N still low: the cause is not resolved
     en_node,      // a hardware kill still holds the EN node down
     host_down,    // the switch's host never started: nothing can run the window
+    source,       // the PD contract cannot carry the input ceilings (PdSource.h)
 };
 
 constexpr const char* stateName(State s) {
@@ -117,6 +118,7 @@ constexpr const char* refusalName(Refusal r) {
         case Refusal::fault_line: return "MSW_FLT_N still low";
         case Refusal::en_node:    return "a hardware kill holds the EN node down";
         case Refusal::host_down:  return "the motor switch host is not running";
+        case Refusal::source:     return "the PD contract cannot carry the ceilings";
     }
     return "?";
 }

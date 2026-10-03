@@ -21,6 +21,7 @@
 #include "system/ValenceDriveLink.h"
 #include "system/ValenceEstopInput.h"
 #include "system/ValenceMotorSwitch.h"
+#include "system/ValencePdSource.h"
 #include "system/ValencePower.h"
 
 namespace valence {
@@ -59,7 +60,7 @@ esp_err_t readMonitorBlock(uint8_t reg, uint8_t* out, size_t len) {
     return err;
 }
 
-void checkBoardMonitor() {
+void checkBoardMonitor(const selfcheck::BusWindowMv& busWindow) {
     std::array<uint8_t, SV_IDENT_LEN> ident{};
     esp_err_t err = readMonitorBlock(SV_REG_IDENT, ident.data(), ident.size());
     if (err != ESP_OK) {
@@ -87,7 +88,7 @@ void checkBoardMonitor() {
         return;
     }
     selfcheck::judgeRails(g_table, s);
-    selfcheck::judgeBusWindow(g_table, s);
+    selfcheck::judgeBusWindow(g_table, s, busWindow);
     selfcheck::judgeRegenClamp(g_table, s);
 }
 
@@ -275,11 +276,15 @@ void selfCheckHoldMotorOff() {
 
 bool selfCheckRun(const SelfCheckFacts& facts) {
     std::optional<PowerReading> reading;
+    // The supply first: its contract sets the bus window. A copy of the BoardIo
+    // task's reading, no I2C here.
+    const pd::Assessment pdSource = pdSourceAssessNow();
 
     // The monitor's read fills board-monitor, rails, bus-window and
     // regen-clamp; table order is still the report order.
-    checkBoardMonitor();
+    checkBoardMonitor(selfcheck::busWindowFor(pdSource));
     checkPowerMonitor(reading);
+    selfcheck::judgePdSource(g_table, pdSource);
     checkMotorRailOff(reading);
     checkSwitchFault();
     checkEStop();

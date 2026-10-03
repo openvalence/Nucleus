@@ -80,6 +80,7 @@ portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 motorswitch::Switch g_sw;
 Readings g_last;           // the task's latest, for the hub-side precheck
 bool g_allowed = false;    // the self-check's verdict
+bool g_sourceOk = true;    // the PD source's verdict (motorSwitchSetSourceOk)
 uint32_t g_cuts = 0;       // every cut, so an enable consumed before one is dropped
 
 // ---- state outside it ----------------------------------------------------------
@@ -235,6 +236,8 @@ void serviceEnable() {
     g_last = r;
     if (g_cuts != cutsAtRequest) {
         dropped = true;   // a cut landed after the request: the later command wins
+    } else if (g_allowed && !g_sourceOk) {
+        why = Refusal::source;   // a self-check hold still names itself below
     } else {
         const State was = g_sw.state();
         why = g_sw.requestEnable(g_allowed, r, now);
@@ -324,9 +327,18 @@ void motorSwitchSetSelfCheck(bool passed) {
     if (passed) motorSwitchRequestEnable();
 }
 
+void motorSwitchSetSourceOk(bool ok) {
+    portENTER_CRITICAL(&g_mux);
+    g_sourceOk = ok;
+    portEXIT_CRITICAL(&g_mux);
+    // From here no enable passes serviceEnable(); the cut stops one under way.
+    if (!ok) motorSwitchCut();
+}
+
 motorswitch::Refusal motorSwitchRequestEnable() {
     portENTER_CRITICAL(&g_mux);
-    const Refusal why = motorswitch::precheck(g_allowed, g_last.fault_line);
+    Refusal why = motorswitch::precheck(g_allowed, g_last.fault_line);
+    if (why == Refusal::none && !g_sourceOk) why = Refusal::source;
     portEXIT_CRITICAL(&g_mux);
     if (why != Refusal::none) return why;
     if (g_task == nullptr) return Refusal::host_down;
