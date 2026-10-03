@@ -2,13 +2,13 @@
 
 // ValenceBoardIo -- the BoardIo task: the slow board I/O that shares one
 // 10 ms pass (the e-stop contacts, the status pixel, the fan and THERM
-// policy, the HOME and PAIR buttons)
+// policy, the HOME and PAIR buttons, the accessory headers)
 // Constraints:
 // - Task "BoardIo": HP core 0, priority 3 (below the motor switch's 5 and
 //   the hub's 5), kBoardIoTaskStackBytes of internal RAM, vTaskDelayUntil at
-//   kBoardIoPeriodMs. It hosts ValenceEstopInput, ValenceGlow, ValenceFan and
-//   ValenceButtons and is the only caller of their begin and service
-//   functions. The e-stop is sampled first in every pass.
+//   kBoardIoPeriodMs. It hosts ValenceEstopInput, ValenceGlow, ValenceFan,
+//   ValenceButtons and ValenceAccessoryIo and is the only caller of their
+//   begin and service functions. The e-stop is sampled first in every pass.
 // - Nothing on it is on a motion path: the e-stop reading and the buttons'
 //   gestures are published for the hub task to act on, the fan is comfort,
 //   the pixel is display. A stall here freezes the pixel (logging-leds.md
@@ -16,8 +16,10 @@
 //   watch and the hub delegate's fault latch do not depend on it. Its one
 //   direct safety act is the HOME hold's dead-hub fallback
 //   (ValenceButtons.h): the ESTOP cut and a restart.
+// - The accessory outputs reach their pads only here: a stall also holds
+//   them where they are, an ESTOP's zeroing included (ValenceAccessoryIo.h).
 // See: ValenceEstopInput.h, ValenceGlow.h, ValenceFan.h, ValenceButtons.h,
-// bd val-091.23/.26/.27/.28
+// ValenceAccessoryIo.h, bd val-091.23/.26/.27/.28/.30
 
 #include <cstdint>
 
@@ -30,8 +32,8 @@ namespace valence {
 inline constexpr uint32_t kBoardIoTaskStackBytes = 4096;
 inline constexpr uint32_t kBoardIoPeriodMs = 10;
 
-// Brings up the pixel, the fan, the buttons and the e-stop pads, then starts
-// the task.
+// Brings up the pixel, the fan, the buttons, the e-stop pads and the
+// accessory headers (outputs off), then starts the task.
 // app_main, after motorSwitchBegin() (THERM rides its ADC poll). False when
 // the task did not start; each module's own failure is logged and non-fatal.
 bool boardIoBegin();

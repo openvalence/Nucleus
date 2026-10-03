@@ -2,7 +2,9 @@
 // the curve, the loop and the knobs.
 // Constraints:
 // - BoardIo task only, except fanStatus(). LEDC low-speed timer 0 and
-//   channel 0 belong to this file; nothing else in the firmware uses LEDC.
+//   channel 0 belong to this file; ValenceAccessoryIo.cpp holds timer 1.
+//   Every LEDC timer on the P4 runs from ONE global clock (kLedcClock):
+//   a timer asking for another fails "timer clock conflict".
 // - BSS: the policy and a few words. The PCNT driver allocates its unit and
 //   channel objects from the internal heap once, at fanBegin().
 
@@ -38,6 +40,9 @@ constexpr float kPulsesPerRev = 2.0f;
 // Tach edges closer than this are noise (a 10 krpm fan pulses every 3 ms).
 constexpr uint32_t kTachGlitchNs = 1000;
 
+// 50 kHz at 10 bits needs 51.2 MHz, past the 40 MHz XTAL: PLL_F80M, named
+// rather than left to LEDC_AUTO_CLK, which tries XTAL first.
+constexpr ledc_clk_cfg_t kLedcClock = LEDC_USE_PLL_DIV_CLK;
 constexpr ledc_mode_t kLedcMode = LEDC_LOW_SPEED_MODE;
 constexpr ledc_timer_t kLedcTimer = LEDC_TIMER_0;
 constexpr ledc_channel_t kLedcChannel = LEDC_CHANNEL_0;
@@ -77,7 +82,7 @@ bool ledcBegin() {
     t.duty_resolution = kDutyBits;
     t.timer_num = kLedcTimer;
     t.freq_hz = kPwmHz;
-    t.clk_cfg = LEDC_AUTO_CLK;
+    t.clk_cfg = kLedcClock;
     if (ledc_timer_config(&t) != ESP_OK) return false;
     ledc_channel_config_t c{};
     c.gpio_num = BOARD_GPIO_FAN_PWM;

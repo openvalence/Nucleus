@@ -30,8 +30,10 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
   sequence), MSW_FLT_N, MSW_IMON and EN_NODE (the switch task's watch); THERM
   (sampled on that same task); the HOME button (bound by the hub delegate:
   press homes, hold reboots, val-091.26).
-- **Firm and unwired:** board monitor SWIO, all thirteen
-  accessory LP pads, PD_INT.
+- **Firm, wired, not on the wire:** the accessory headers (pump and EXT PWM,
+  AUX1/AUX2, IO1-IO5; the Qwiic bus and the header UART open on first use),
+  `system/ValenceAccessoryIo.cpp` on the BoardIo task; catalog val-091.71.
+- **Firm and unwired:** board monitor SWIO, PD_INT.
 - **Provisional and unwired:** CLAMP_MON, SHUNT_TEMP, RS485 TX/RX/DE,
   DRV_ALM, DRV_RDY.
 - **ADC1 has ONE reader**, the motor switch task: every ADC1 pad (MSW_IMON,
@@ -118,21 +120,33 @@ into an unpowered drive and move position truth without the carriage.
 
 All on spare LP pads, driven by HP peripherals through the GPIO matrix, never
 the LP UART or LP I2C (SPEC 2026-09-23 LP rule restated; val-091.18 measures
-the cost to quadrature). All firm: SPEC 2026-09-23 accessory-breakouts row,
-2026-09-27 J15 row, 2026-09-30 PD row. All unwired; owed under val-091.30
-unless noted.
+the cost to quadrature), and never set up with `gpio_config()` or
+`gpio_reset_pin()` (BoardPins.h, val-091.72). All firm: SPEC 2026-09-23
+accessory-breakouts row, 2026-09-27 J15 row, 2026-09-30 PD row.
+
+The headers' host is `system/ValenceAccessoryIo.cpp` on the BoardIo task, its
+rules the hardware-free `system/AccessoryIo.h`. Every output is off at boot
+and after every ESTOP (`motionEstop()` calls `accessoryIoEstop()`; the pads
+follow within one 10 ms pass). Nothing here is on a catalog channel yet
+[host-verified 2026-10-02 -- `pio test -e native` suite test_accessory_io
+exit 0, `pio run -d flagship_p4` SUCCESS; bench owed, val-091.69].
+
+| Function | Net | P4 pad | Firmware today | Owed |
+|---|---|---|---|---|
+| Pump PWM, 220 R, 100k pull-down; J10 (12 V through the pump eFuse U14, whose FLT goes to the board monitor) | `/ACC.PUMP_PWM` | GPIO13 (LPG13), pad 29 | LEDC timer 1 / channel 1, 1 kHz, 10-bit (`kPwmHz`, its reasoning on the constant), duty 0 from boot. `accessoryPwmSet(Pwm::pump, duty)`, any task, clamped to 0..1, applied on the next BoardIo pass; an ESTOP zeroes it and only a new request turns it back on. No P4 pin enables U14: its EN/UVLO is a divider off +12V (on above ~9 V). PUMP_FLT reaches the P4 only as the board monitor's `SV_W_PUMP_FLT`, which nothing reads at runtime | catalog val-091.71; PUMP_FLT val-091.19; bench val-091.69 |
+| External PWM, 220 R, 100k pull-down; J11 | `/ACC.EXT_PWM` | GPIO2 (LPG2), pad 37 | LEDC timer 1 / channel 2: the pump's frequency, the same request and ESTOP rules (`Pwm::ext`) | val-091.71; bench val-091.69 |
+| AUX1 button input, 10k pull-up, 1k series; J13 | `/ACC.AUX1` | GPIO4 (LPG4), pad 16 | Input with the internal pull-up beside the board's; polled every 10 ms into `ButtonGesture.h` (the HOME timings); press and hold logged (Warn, tag `accessory`) and parked (`accessoryAuxTake()`), stuck logged only. No bindings | val-091.71; bench val-091.69 |
+| AUX2 button input, same; J13 | `/ACC.AUX2` | GPIO6 (LPG6), pad 18 | same | same |
+| Qwiic SDA, 2.2k pull-up; J14, and PD_SDA through R1024 33 R to J16 | `/ACC.QWIIC_SDA` | GPIO11 (LPG11), pad 4 | One HP I2C master, opened by the first `qwiicI2cBus()` call (any task) on a free HP port; joiners add their own devices, never a second master. The PD controller joins at 0x21 (`ValencePdSource.cpp`, below) | bench val-091.69 |
+| Qwiic SCL, 2.2k pull-up; J14, and PD_SCL through R1025 33 R | `/ACC.QWIIC_SCL` | GPIO9 (LPG9), pad 6 | same | same |
+| Header UART TX, 220 R; J15 | `/ACC.GPIO_TX` | GPIO14 (LPG14), pad 2 | Untouched until a consumer calls `accessoryUartOpen(baud)`: HP UART2 (`BOARD_UART_ACC`; the drive link holds UART1), 8N1, 512 B receive ring, the caller's task owns it from then on; one consumer per boot. No consumer yet | bench val-091.69 |
+| Header UART RX, 220 R; J15 | `/ACC.GPIO_RX` | GPIO15 (LPG15), pad 1 | same; internal pull-up while open | same |
+| Header IO1..IO5, 220 R each; J15 | `/ACC.GPIO_IO1..5` | GPIO12/10/8/7/1, pads 3/5/7/8/9 | Inputs with pull-downs from boot, which is an output's released state. `accessoryGpioConfigure()` sets input, input with pull-up or output once per boot; an output starts released and `accessoryGpioSet()` drives it; an ESTOP releases every output (never a driven low, which an active-low load reads as on); `accessoryGpioGet()` reads the pad | val-091.71; bench val-091.69 |
+
+The PD daughterboard's pads, owed under val-091.31:
 
 | Function | Net | P4 pad |
 |---|---|---|
-| Pump PWM, 220 R, 100k pull-down; J10 (12 V through the pump eFuse U14, whose FLT goes to the board monitor) | `/ACC.PUMP_PWM` | GPIO13 (LPG13), pad 29 |
-| External PWM, 220 R, 100k pull-down; J11 | `/ACC.EXT_PWM` | GPIO2 (LPG2), pad 37 |
-| AUX1 button input, 10k pull-up, 1k series; J13 | `/ACC.AUX1` | GPIO4 (LPG4), pad 16 |
-| AUX2 button input, same; J13 | `/ACC.AUX2` | GPIO6 (LPG6), pad 18 |
-| Qwiic SDA, 2.2k pull-up; J14, and PD_SDA through R1024 33 R to J16 | `/ACC.QWIIC_SDA` | GPIO11 (LPG11), pad 4 |
-| Qwiic SCL, 2.2k pull-up; J14, and PD_SCL through R1025 33 R | `/ACC.QWIIC_SCL` | GPIO9 (LPG9), pad 6 |
-| Header UART TX, 220 R; J15 | `/ACC.GPIO_TX` | GPIO14 (LPG14), pad 2 |
-| Header UART RX, 220 R; J15 | `/ACC.GPIO_RX` | GPIO15 (LPG15), pad 1 |
-| Header IO1..IO5, 220 R each; J15 | `/ACC.GPIO_IO1..5` | GPIO12/10/8/7/1, pads 3/5/7/8/9 |
 | PD daughterboard interrupt through R1023 220 R to J16 pad 4 (J15.12 is NC) | `/ACC.GPIO_IO6` | GPIO0 (LPG0), pad 11 |
 | PD controller (TPS26750) on the Qwiic bus, I2C 0x21 | via J16 | owed under val-091.31 |
 

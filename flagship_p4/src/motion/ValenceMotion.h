@@ -201,7 +201,8 @@ bool motionSubmit(const MotionIntent& intent);
 
 // Absolute, and the one gate no source bypasses. Parks the emitter on the
 // calling task before returning, so it does not wait for the motion tick; on
-// the board it also drops the motor switch first (SPEC 11.2, H1 path).
+// the board it also drops the motor switch first (SPEC 11.2, H1 path) and
+// last zeroes the accessory outputs (ValenceAccessoryIo.h).
 void motionEstop();
 // The RELEASE (SPEC 11.2): lands in PAUSE, never in motion.
 void motionEstopClear();

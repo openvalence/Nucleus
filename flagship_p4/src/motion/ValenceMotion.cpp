@@ -27,6 +27,7 @@
 
 #include "MotionArbiter.h"
 #include "geiger/geiger.h"
+#include "system/ValenceAccessoryIo.h"
 #include "system/ValenceMotorSwitch.h"
 #include "ulp_main.h"
 
@@ -244,9 +245,11 @@ bool motionBegin() { return g_motion.begin(); }
 bool motionSubmit(const MotionIntent& in) { return g_motion.submit(in); }
 void motionEstop() {
     // Power first: the cut is the stop on this board, the park only keeps the
-    // emitter from rendering into a dead drive.
+    // emitter from rendering into a dead drive. The accessory outputs come
+    // last: atomic stores only, so they cannot delay either.
     motorSwitchCut();
     g_motion.arbiter().estop(true);
+    accessoryIoEstop();
 }
 void motionEstopClear() { g_motion.arbiter().estop(false); }
 void motionSetMotorPowered(bool on) { g_motion.arbiter().setMotorPowered(on); }

@@ -10,6 +10,11 @@
 //   drives QUAD_A and QUAD_B and NOTHING ELSE; every other LP pad is optional
 //   accessory I/O for HP peripherals through the GPIO matrix, never the LP
 //   UART or LP I2C (Hardware SPEC.md 2026-09-23 LP rule, val-091.18).
+// - NEVER gpio_config() OR gpio_reset_pin() AN LP PAD (GPIO0..15). On IDF
+//   5.5 both run rtc_gpio_deinit(), which can gate off the LP GPIO clock the
+//   emitter's two pads run on (val-091.72). Set an LP pad up with
+//   gpio_set_direction() and gpio_set_pull_mode(), or through an HP
+//   peripheral driver's own pin setup.
 // - Analog nets must stay on ADC1 pads (GPIO16..23). Never move a function
 //   onto a strap: G35 BOOT, G36 mode select, G37 ROM log, G38 download sample.
 // - A TODO(hw-kzr) pin is from the SPEC's provisional map ("swap freely at
@@ -89,6 +94,9 @@
 #define BOARD_GPIO_QWIIC_SCL    9   // LPG9, J14 and J16
 #define BOARD_GPIO_ACC_UART_TX 14   // LPG14, J15
 #define BOARD_GPIO_ACC_UART_RX 15   // LPG15, J15
+// The HP UART behind those two pads, opened on a consumer's first ask
+// (ValenceAccessoryIo.cpp). Never UART0 (G37's ROM log) or the LP UART.
+#define BOARD_UART_ACC          2
 #define BOARD_GPIO_ACC_IO1     12   // LPG12, J15
 #define BOARD_GPIO_ACC_IO2     10   // LPG10, J15
 #define BOARD_GPIO_ACC_IO3      8   // LPG8, J15

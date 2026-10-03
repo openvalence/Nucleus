@@ -10,6 +10,7 @@
 #include <freertos/task.h>
 
 #include "geiger/geiger.h"
+#include "system/ValenceAccessoryIo.h"
 #include "system/ValenceButtons.h"
 #include "system/ValenceEstopInput.h"
 #include "system/ValenceFan.h"
@@ -32,6 +33,7 @@ void taskMain(void*) {
         buttonsService(nowMs);
         glowService(nowMs);
         fanService(nowMs);
+        accessoryIoService(nowMs);
     }
 }
 
@@ -42,6 +44,7 @@ bool boardIoBegin() {
     fanBegin();
     buttonsBegin();
     estopInputBegin();
+    accessoryIoBegin();
     if (xTaskCreatePinnedToCore(&taskMain, "BoardIo", kBoardIoTaskStackBytes, nullptr, 3, &g_task, 0) !=
         pdPASS) {
         g_task = nullptr;
