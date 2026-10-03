@@ -25,6 +25,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -62,6 +63,10 @@ ReturnStart g_returnAnswer = ReturnStart::queued;
 button::Gesture g_homeGesture = button::Gesture::none;
 button::Gesture g_pairGesture = button::Gesture::none;
 int g_forceHomes = 0;
+// Calls through the motion and generator doors: what a refused write must
+// never reach.
+int g_submits = 0;
+int g_patPushes = 0;
 // The fake e-stop reading: what the BoardIo task would have published.
 estop::Reading g_estop{};
 
@@ -73,7 +78,10 @@ uint64_t deviceNowUs() { return g_clock.nowUs(); }
 uint32_t deviceFreeHeapBytes() { return 0; }
 
 bool motionBegin() { return true; }
-bool motionSubmit(const MotionIntent&) { return true; }
+bool motionSubmit(const MotionIntent&) {
+    ++g_submits;
+    return true;
+}
 void motionEstop() { g_census.estop = true; }
 void motionEstopClear() { g_census.estop = false; }
 void motionSetMotorPowered(bool on) { g_census.motor_on = g_census.power_gate = on; }
@@ -104,7 +112,7 @@ MotionTuning motionDefaultTuning() { return MotionTuning{}; }
 void motionSetTuning(const MotionTuning&) {}
 
 bool patternBegin() { return true; }
-void patternSetSettings(const PatternSettings&) {}
+void patternSetSettings(const PatternSettings&) { ++g_patPushes; }
 bool patternActive() { return false; }
 uint32_t patternStackFree() { return 0; }
 
@@ -173,6 +181,7 @@ struct Rig {
         g_returnAnswer = ReturnStart::queued;
         g_homeGesture = g_pairGesture = button::Gesture::none;
         g_forceHomes = 0;
+        g_submits = g_patPushes = 0;
         g_switch = MotorSwitchStatus{};
         g_switch.state = motorswitch::State::on;
         g_estop = estop::Reading{};
@@ -181,7 +190,7 @@ struct Rig {
         device.setUnvouchedRole(AccessLevel::control);
         device.setSetupWritten(kSetupRequiredMask);
         hub.emplace(catalog, g_clock, hubRng, device);
-        device.attach(*hub);
+        device.attach(*hub, catalog);
         link.emplace(g_clock, hubRng);
         REQUIRE(hub->attachTransport(link->endpointA()));
         ClientIdentity id;
@@ -198,6 +207,10 @@ struct Rig {
         client->addSubscriptionWish(0x0003, 0.0f, Priority::critical);
         client->addSubscriptionWish(ch::pattern_advanced, 0.0f, Priority::normal);
         client->addSubscriptionWish(ch::pattern_adv_mod_crest, 0.0f, Priority::normal);
+        // The STATE every writer moves, so a refused write is seen to move none.
+        for (const uint16_t id : {ch::machine_config, ch::machine_modes, ch::kinetic_limits, ch::kinetic_chase,
+                                  ch::kinetic_waveform, ch::pattern_state, ch::pattern_presets_roster})
+            REQUIRE(client->addSubscriptionWish(id, 0.0f, Priority::normal));
         REQUIRE(client->connect());
         step(200);
         REQUIRE(client->state() == ClientSessionState::LIVE);
@@ -653,4 +666,131 @@ TEST_CASE("VD-21: any other switch fault latches at once") {
     rig->step(2);
     CHECK(rig->hub->estopLatched());
     CHECK(rig->snapshotCause() == safety_causes::fault);
+}
+
+// ---- bd val-gnw: a value that is not a finite number is refused whole ---------
+
+namespace {
+
+// What a refused write must leave as it was: the config blob (0x1000, the
+// modes and the tuning), cfg_gen, the preset store, every STATE the client
+// holds, the persist timers, and the motion, home and generator doors.
+struct Snapshot {
+    std::vector<std::byte> cfgBlob;
+    std::vector<std::byte> presetsBlob;
+    uint16_t cfgGen = 0;
+    std::map<uint16_t, std::vector<std::byte>> state;
+    uint8_t persist = 0;
+    int submits = 0;
+    int forceHomes = 0;
+    int patPushes = 0;
+    bool operator==(const Snapshot&) const = default;
+};
+
+// Disarms the persist timers it reads.
+Snapshot snapshot(Rig& rig) {
+    Snapshot s;
+    s.cfgBlob.resize(stored::kConfigBlobBytes);
+    REQUIRE(rig.device.encodeConfigBlob(s.cfgBlob, 0) == s.cfgBlob.size());
+    s.presetsBlob.resize(PatternPresetStore::kBlobBytes);
+    REQUIRE(rig.device.encodePresetsBlob(s.presetsBlob) == s.presetsBlob.size());
+    s.cfgGen = rig.hub->cfgGen();
+    s.state = rig.del.lastState;
+    s.persist = rig.device.takePendingPersist();
+    s.submits = g_submits;
+    s.forceHomes = g_forceHomes;
+    s.patPushes = g_patPushes;
+    return s;
+}
+
+// `m` with {key, v} added in ascending key order, which the CBOR writer
+// requires.
+IntentValueMap plus(IntentValueMap m, uint8_t key, IntentValue v) {
+    uint32_t i = m.count++;
+    for (; i > 0 && m.fields[i - 1].key > key; --i) m.fields[i] = m.fields[i - 1];
+    m.fields[i] = IntentValueField{key, v};
+    return m;
+}
+
+// NaN and both infinities on `key`, each over `base`: refused INVALID_VALUE
+// with `detail`, and nothing moves. Then `finite` on the same key applies, and
+// the snapshot sees it move.
+void expectNotANumberRefused(Rig& rig, uint16_t channel, const IntentValueMap& base, uint8_t key,
+                             IntentValue finite, const std::string& detail) {
+    rig.step();
+    const Snapshot before = snapshot(rig);
+    for (const uint16_t id : {ch::machine_config, ch::machine_modes, ch::kinetic_chase, ch::pattern_state,
+                              ch::pattern_advanced, ch::pattern_presets_roster})
+        REQUIRE(before.state.count(id) == 1);
+    const int echoes = rig.del.echoes;
+    const size_t nacks = rig.del.nacks.size();
+    for (const float bad : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+                            -std::numeric_limits<float>::infinity()}) {
+        CAPTURE(bad);
+        const size_t was = rig.del.nacks.size();
+        REQUIRE(rig.client->sendIntent(channel, plus(base, key, IntentValue::ofF32(bad))).has_value());
+        rig.step();
+        REQUIRE(rig.del.nacks.size() == was + 1);
+        CHECK(rig.del.nacks.back().code == NackCode::INVALID_VALUE);
+        CHECK(rig.del.nacks.back().detail == detail);
+        CHECK(rig.del.echoes == echoes);
+        CHECK(snapshot(rig) == before);
+    }
+    REQUIRE(rig.client->sendIntent(channel, plus(base, key, finite)).has_value());
+    rig.step();
+    CHECK(rig.del.nacks.size() == nacks + 3);
+    REQUIRE(rig.del.echoes == echoes + 1);
+    CHECK(echoed(rig.del.lastEcho, key) != nullptr);
+    CHECK_FALSE(snapshot(rig) == before);
+}
+
+}  // namespace
+
+TEST_CASE("VD-22: NaN and infinity are refused INVALID_VALUE naming the field, and nothing moves") {
+    auto rig = std::make_unique<Rig>();
+    IntentValueMap base{};
+    SUBCASE("config-set") {
+        expectNotANumberRefused(*rig, ch::config_set, base, 1, IntentValue::ofF32(12.5f),
+                                "window_min: not a number");
+    }
+    SUBCASE("modes-set") {
+        expectNotANumberRefused(*rig, ch::modes_set, base, 7, IntentValue::ofU64(1),
+                                "schedule_horizon: not a number");
+    }
+    SUBCASE("kinetic-set") {
+        expectNotANumberRefused(*rig, ch::kinetic_set, base, 8, IntentValue::ofF32(0.37f),
+                                "chase_gain: not a number");
+    }
+    SUBCASE("pattern-cmd number") {
+        expectNotANumberRefused(*rig, ch::pattern_cmd, base, 3, IntentValue::ofF32(37.0f), "speed: not a number");
+    }
+    SUBCASE("pattern-cmd bool") {
+        expectNotANumberRefused(*rig, ch::pattern_cmd, base, 1, IntentValue::ofBool(false),
+                                "running: not a number");
+    }
+    SUBCASE("pattern-advanced-cmd") {
+        expectNotANumberRefused(*rig, ch::pattern_advanced_cmd, base, 46, IntentValue::ofF32(0.75f),
+                                "dwell_crest: not a number");
+    }
+    SUBCASE("pattern-presets-cmd") {
+        base = plus(plus(base, 1, IntentValue::ofU64(store_ops::save)), 3, IntentValue::ofTstr("p"));
+        expectNotANumberRefused(*rig, ch::pattern_presets_cmd, base, 2, IntentValue::ofU64(3),
+                                "slot: not a number");
+    }
+    SUBCASE("move") {
+        expectNotANumberRefused(*rig, ch::move, base, 1, IntentValue::ofF32(10.0f), "position: not a number");
+    }
+    SUBCASE("home force_home stroke") {
+        base = plus(base, 1, IntentValue::ofU64(2));
+        expectNotANumberRefused(*rig, ch::home, base, 2, IntentValue::ofF32(300.0f), "stroke: not a number");
+    }
+}
+
+TEST_CASE("VD-23: a move with no position is refused, never read as position 0") {
+    auto rig = std::make_unique<Rig>();
+    REQUIRE(rig->client->sendIntent(ch::move, IntentValueMap{}).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
+    CHECK(g_submits == 0);
 }

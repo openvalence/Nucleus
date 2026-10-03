@@ -168,16 +168,6 @@ const IntentValueField* findField(const IntentValueMap& m, uint8_t key) {
     return nullptr;
 }
 
-float fieldF32(const IntentValueField* f, float dflt) {
-    if (!f) return dflt;
-    switch (f->value.kind) {
-        case IntentValue::Kind::F32:  return f->value.f32_val;
-        case IntentValue::Kind::U64:  return float(f->value.u64_val);
-        case IntentValue::Kind::I64:  return float(f->value.i64_val);
-        default:                      return dflt;
-    }
-}
-
 uint64_t fieldU64(const IntentValueField* f, uint64_t dflt) {
     if (!f) return dflt;
     switch (f->value.kind) {
@@ -515,27 +505,29 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     const auto* f6 = findField(requested, 6);  // input_accel
     const auto* f7 = findField(requested, 7);  // input_jerk
     const auto* f8 = findField(requested, 8);  // max_rail
+    const std::array<const IntentValueField*, 8> keys{f1, f2, f3, f4, f5, f6, f7, f8};
+    for (size_t k = 0; k < keys.size(); ++k)
+        if (keys[k] != nullptr && !numberOf(keys[k])) return refuseNotANumber(ch::config_set, uint8_t(k + 1));
 
     // The window arrives in the client frame (RFC-088) and is stored physical.
     const float rail = motionCensus().rail_mm;
     const Window was = clientWindow(rail);
-    const float cmin = f1 ? clampf(fieldF32(f1, was.lo), 0.0f, ceiling::rail_mm) : was.lo;
-    const float cmax = f2 ? clampf(fieldF32(f2, was.hi), 0.0f, ceiling::rail_mm) : was.hi;
+    const float cmin = f1 ? clampf(*numberOf(f1), 0.0f, ceiling::rail_mm) : was.lo;
+    const float cmax = f2 ? clampf(*numberOf(f2), 0.0f, ceiling::rail_mm) : was.hi;
     StoredConfig next = _cfg;
     if (f1 || f2) {
         next.window_min = _modes.flipped ? clampf(rail - cmax, 0.0f, ceiling::rail_mm) : cmin;
         next.window_max = _modes.flipped ? clampf(rail - cmin, 0.0f, ceiling::rail_mm) : cmax;
     }
-    if (f3) next.jog_speed  = clampf(fieldF32(f3, next.jog_speed),  ceiling::speed_min, ceiling::speed_max);
-    if (f4) next.jog_accel  = clampf(fieldF32(f4, next.jog_accel),  ceiling::accel_min, ceiling::accel_max);
-    if (f5) next.input_speed = clampf(fieldF32(f5, next.input_speed), ceiling::speed_min, ceiling::speed_max);
-    if (f6) next.input_accel = clampf(fieldF32(f6, next.input_accel), ceiling::accel_min, ceiling::accel_max);
-    if (f7) next.input_jerk  = clampf(fieldF32(f7, next.input_jerk),  ceiling::jerk_min, ceiling::jerk_max);
-    if (f8) next.max_rail    = clampf(fieldF32(f8, next.max_rail),    ceiling::rail_min, ceiling::rail_mm);
+    if (f3) next.jog_speed   = clampf(*numberOf(f3), ceiling::speed_min, ceiling::speed_max);
+    if (f4) next.jog_accel   = clampf(*numberOf(f4), ceiling::accel_min, ceiling::accel_max);
+    if (f5) next.input_speed = clampf(*numberOf(f5), ceiling::speed_min, ceiling::speed_max);
+    if (f6) next.input_accel = clampf(*numberOf(f6), ceiling::accel_min, ceiling::accel_max);
+    if (f7) next.input_jerk  = clampf(*numberOf(f7), ceiling::jerk_min, ceiling::jerk_max);
+    if (f8) next.max_rail    = clampf(*numberOf(f8), ceiling::rail_min, ceiling::rail_mm);
 
-    // The ONE refusal that is value VALIDATION, not a clamp: an inverted
-    // window has no legal nearest value, so it is rejected rather than
-    // silently reordered.
+    // The one refusal of finite values: an inverted window has no legal
+    // nearest value, so it is rejected rather than silently reordered.
     if (next.window_min >= next.window_max) return Ret::err(NackCode::INVALID_VALUE);
 
     // RFC-002 as tightened for v1.0: cfgChanged means CHANGED, never merely
@@ -547,7 +539,6 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     // The first-run record (RFC-079 setup): every key this accepted write
     // carried, changed or not, counts as written. A confirmed default is a
     // confirmation. Not a cfg_gen change; the dirty flag persists it.
-    const std::array<const IntentValueField*, 8> keys{f1, f2, f3, f4, f5, f6, f7, f8};
     uint8_t wrote = 0;
     for (size_t k = 0; k < keys.size(); ++k)
         if (keys[k] != nullptr) wrote |= uint8_t(1u << k);
@@ -590,9 +581,10 @@ std::string_view ValenceDevice::intentNackDetail(uint16_t channel_id, NackCode c
 // motion task before the next hub tick ends, so the engine plans its next
 // intent under it. A key outside the channel's schema is not applied and is
 // absent from the ECHO (§9.3); a write that applies no key at all NACKs
-// INVALID_VALUE, as does a non-numeric or non-finite value anywhere in it.
-// Clamp bounds are StoredState.h's tuning_bounds, the same ones a stored set
-// is validated against at boot; tick() persists a changed set with 0x1000.
+// INVALID_VALUE, as does a non-numeric or non-finite value anywhere in it
+// (refuseNotANumber()). Clamp bounds are StoredState.h's tuning_bounds, the
+// same ones a stored set is validated against at boot; tick() persists a
+// changed set with 0x1000.
 // Key 10 (chase_dense) is refused INTERLOCK while a samples grant is live: it
 // sets that grant's schedule_latency_us, a commitment for the grant's life
 // (SPEC 5.4, RFC-059), and the library has no publish re-GRANT to move it.
@@ -616,8 +608,9 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
     const auto* f7 = findField(requested, 7);   // schedule_horizon
     const auto* f8 = findField(requested, 8);   // flipped
     if (!f4 && !f7 && !f8) return Ret::err(NackCode::INVALID_VALUE);
-    if ((f4 && !numberOf(f4)) || (f7 && !numberOf(f7)) || (f8 && !boolOf(f8)))
-        return Ret::err(NackCode::INVALID_VALUE);
+    if (f4 && !numberOf(f4)) return refuseNotANumber(ch::modes_set, 4);
+    if (f7 && !numberOf(f7)) return refuseNotANumber(ch::modes_set, 7);
+    if (f8 && !boolOf(f8)) return refuseNotANumber(ch::modes_set, 8);
     StoredModes nextModes = _modes;
     if (f7) nextModes.horizon = uint8_t(wholeIn(*numberOf(f7), 0.0f, float(kHorizonMs.size() - 1)));
     if (nextModes.horizon != _modes.horizon && publishGrantLive(ch::motion_segment))
@@ -700,7 +693,7 @@ Ret ValenceDevice::applyTuning(const IntentValueMap& requested, bool& cfgChanged
         const auto* f = findField(requested, key);
         if (!f) continue;
         const std::optional<float> v = numberOf(f);
-        if (!v) return Ret::err(NackCode::INVALID_VALUE);
+        if (!v) return refuseNotANumber(ch::kinetic_set, key);
         // n cannot overrun: requested carries at most kIntentMaxValueFields
         // fields, and each key here consumes one of them at most once.
         IntentValue out;
@@ -767,9 +760,10 @@ Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
             if (const auto why = startRefusal(c, "classic start")) return Ret::err(*why);
         if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
     }
-    if ((f1 && !boolOf(f1)) || (f7 && !boolOf(f7))) return Ret::err(NackCode::INVALID_VALUE);
+    if (f1 && !boolOf(f1)) return refuseNotANumber(ch::pattern_cmd, 1);
+    if (f7 && !boolOf(f7)) return refuseNotANumber(ch::pattern_cmd, 7);
     for (const auto* f : {f2, f3, f4, f5, f6})
-        if (f && !numberOf(f)) return Ret::err(NackCode::INVALID_VALUE);
+        if (f && !numberOf(f)) return refuseNotANumber(ch::pattern_cmd, f->key);
 
     // RFC-093: a start takes the rail, refused while the advanced generator
     // holds it (the arbiter logs whose it is); a stop hands it back.
@@ -816,11 +810,11 @@ Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
         if (key == kApRunKey) continue;
         const auto* f = findField(requested, key);
         if (!f) continue;
-        if (!numberOf(f)) return Ret::err(NackCode::INVALID_VALUE);
+        if (!numberOf(f)) return refuseNotANumber(ch::pattern_advanced_cmd, key);
         any = true;
     }
     const auto* run = findField(requested, kApRunKey);
-    if (run && !boolOf(run)) return Ret::err(NackCode::INVALID_VALUE);
+    if (run && !boolOf(run)) return refuseNotANumber(ch::pattern_advanced_cmd, kApRunKey);
     if (!any && !run) return Ret::err(NackCode::INVALID_VALUE);
     const bool start = run && *boolOf(run);
     if (start) {
@@ -863,8 +857,12 @@ Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
 // advanced generator's knobs, starting nothing, and its truth arrives on the
 // ordinary pattern-plane STATE. The echoed name is the STORE's copy.
 Ret ValenceDevice::applyPresets(const IntentValueMap& requested) {
-    const auto op = numberOf(findField(requested, 1));
-    const auto slotV = numberOf(findField(requested, 2));
+    const auto* opF = findField(requested, 1);
+    const auto* slotF = findField(requested, 2);
+    if (opF && !numberOf(opF)) return refuseNotANumber(ch::pattern_presets_cmd, 1);
+    if (slotF && !numberOf(slotF)) return refuseNotANumber(ch::pattern_presets_cmd, 2);
+    const auto op = numberOf(opF);
+    const auto slotV = numberOf(slotF);
     if (!op || !slotV || *slotV < 0.0f || *slotV >= float(PatternPresetStore::kCapacity))
         return Ret::err(NackCode::INVALID_VALUE);
     const uint8_t slot = uint8_t(wholeIn(*slotV, 0.0f, float(PatternPresetStore::kCapacity - 1)));
@@ -1007,10 +1005,14 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     if (!overrideOn && railOwned()) return Ret::err(NackCode::SOURCE_CONFLICT);
     if (_returnPending) return refuse(NackCode::INTERLOCK, kDetailReturning);
 
+    // A jog with no position is refused, never read as 0: that is a move to
+    // the window's near end nobody asked for.
+    const auto* f1 = findField(requested, 1);   // position
+    if (f1 == nullptr) return Ret::err(NackCode::INVALID_VALUE);
+    if (!numberOf(f1)) return refuseNotANumber(ch::move, 1);
     MotionIntent in;
     in.source    = MotionSource::Manual;
-    in.target_mm = fieldF32(findField(requested, 1), 0.0f);
-    if (!std::isfinite(in.target_mm)) return Ret::err(NackCode::INVALID_VALUE);
+    in.target_mm = *numberOf(f1);
     if (!motionSubmit(in)) return refuse(NackCode::INTERLOCK, "motion path refused the intent");
 
     // Ground truth: echo the post-clamp position, against the SAME bounds the
@@ -1037,6 +1039,22 @@ Ret ValenceDevice::refuse(NackCode code, const char* detail) {
 
 void ValenceDevice::noteDetail(const char* detail) {
     std::snprintf(_nackDetail.data(), _nackDetail.size(), "%s", detail);
+}
+
+// A schema-field name is 1..24 bytes (catalog.cddl), so the detail fits
+// nack_detail_max_bytes (48). A key the catalog does not name is cited by
+// number.
+Ret ValenceDevice::refuseNotANumber(uint16_t channel_id, uint8_t key) {
+    std::string_view name;
+    if (const CatalogEntry* e = _catalog != nullptr ? _catalog->find(channel_id) : nullptr)
+        for (const SchemaField& f : _catalog->schemaFields(*e))
+            if (f.key == key) name = f.name;
+    if (name.empty())
+        std::snprintf(_nackDetail.data(), _nackDetail.size(), "key %u: not a number", unsigned(key));
+    else
+        std::snprintf(_nackDetail.data(), _nackDetail.size(), "%.*s: not a number", int(name.size()),
+                      name.data());
+    return Ret::err(NackCode::INVALID_VALUE);
 }
 
 Ret ValenceDevice::refuseUnpowered(const char* what) {
@@ -1179,7 +1197,11 @@ void ValenceDevice::haltGenerator() {
 
 // ---- 0x3101 home ---------------------------------------------------------------
 Ret ValenceDevice::applyHome(const IntentValueMap& requested) {
-    const uint64_t op = fieldU64(findField(requested, 1), 0);
+    const auto* f1 = findField(requested, 1);   // op
+    const auto* f2 = findField(requested, 2);   // stroke
+    if (f1 && !numberOf(f1)) return refuseNotANumber(ch::home, 1);
+    if (f2 && !numberOf(f2)) return refuseNotANumber(ch::home, 2);
+    const uint64_t op = fieldU64(f1, 0);
     IntentValueMap applied{};
     switch (op) {
         case 1:  // real homing
@@ -1198,7 +1220,7 @@ Ret ValenceDevice::applyHome(const IntentValueMap& requested) {
             // held ESTOP latch into PAUSE. Both are tick()'s, on the next hub
             // tick: releaseEstop() and setHomeRequired() publish and
             // broadcast, and this runs inside the hub's own intent dispatch.
-            const float asked = fieldF32(findField(requested, 2), 250.0f);
+            const float asked = numberOf(f2).value_or(250.0f);
             const float stroke = motionForceHome(asked);
             _clearLatch = true;
             _homeDone = true;
@@ -1514,8 +1536,9 @@ bool ValenceDevice::adoptPresetsBlob(std::span<const std::byte> blob) {
     return true;
 }
 
-void ValenceDevice::attach(Hub& hub) {
+void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     _hub = &hub;
+    _catalog = &catalog;
     // The declaration's one home is the composition's setEstopCutsPower().
     motionSetEstopCutsPower(hub.estopCutsPower());
     publishControlOwner(hub);

@@ -90,6 +90,20 @@ TEST_CASE("config blob: round trip carries config, tuning and cfg_gen") {
     CHECK(gen == 4242);
 }
 
+TEST_CASE("config blob: cfg_gen 65535 and 0, either side of the counter's wrap, decode whole") {
+    for (const uint16_t want : {uint16_t(65535), uint16_t(0)}) {
+        CAPTURE(want);
+        const auto b = encodedConfig(want);
+        StoredConfig c;
+        MotionTuning t;
+        uint16_t gen = 99;
+        REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, g_modes, gen));
+        CHECK(c == sampleConfig());
+        CHECK(t == sampleTuning());
+        CHECK(gen == want);
+    }
+}
+
 TEST_CASE("config blob: overshoot is stored as on/off and re-derived from the factory multiplier") {
     MotionTuning off = sampleTuning();
     off.overshoot_guard = 0.0f;
@@ -163,11 +177,6 @@ TEST_CASE("config blob: every rejection leaves the factory values standing") {
         auto b = encodedConfig();
         b[0] = std::byte{0};
         expectRejected(b, Reject::BadMagic);
-    }
-    SUBCASE("cfg_gen 0") {
-        std::array<std::byte, stored::kConfigBlobBytes> b{};
-        REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), valence::StoredModes{}, 0) == b.size());
-        expectRejected(b, Reject::NoGeneration);
     }
     SUBCASE("out-of-range tuning is rejected whole, never clamped") {
         MotionTuning t = sampleTuning();

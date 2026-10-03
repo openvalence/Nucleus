@@ -339,7 +339,7 @@ int main(int argc, char** argv) {
     log.logf('I', "valencesim: hub_instance_id %016llx",
              static_cast<unsigned long long>(hub.hubInstanceId()));
     hub.setEndpoint(opt.wsPort, 0x7F000001u);
-    box->device.attach(hub);
+    box->device.attach(hub, box->catalog);
     logChannel.bind(&hub);
 
     const auto etag = hub.catalogEtag();

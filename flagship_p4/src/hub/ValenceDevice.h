@@ -130,9 +130,11 @@ public:
     // The board never calls it: its record comes from the owner's writes.
     void setSetupWritten(uint8_t mask) { _modes.setup_written = mask; }
 
-    // Binds the hub and publishes every retained STATE at its truthful at-rest
-    // value. Call once, after the Hub is constructed over this delegate.
-    void attach(Hub& hub);
+    // Binds the hub and the catalog it was built over, then publishes every
+    // retained STATE at its truthful at-rest value. Call once, after the Hub
+    // is constructed over this delegate. The catalog outlives this object, as
+    // it outlives the hub; it is read for field names only.
+    void attach(Hub& hub, const Catalog32& catalog);
 
     // The device half of one hub tick. Call on the hub task right after
     // Hub::update(). Returns the kPersist* bits whose debounced write is due
@@ -197,6 +199,12 @@ private:
     // `code`, with `detail` as its SPEC 16.1 reason.
     Result<IntentValueMap, NackCode> refuse(NackCode code, const char* detail);
     void noteDetail(const char* detail);
+    // INVALID_VALUE for a present value that numberOf() or boolOf() refused:
+    // NaN, an infinity, or no number at all. The detail is "<field>: not a
+    // number", the field named as the catalog names `key` on `channel_id`.
+    // Every writer checks each key it reads BEFORE touching anything: clampf()
+    // passes NaN, so a clamp alone would store one.
+    Result<IntentValueMap, NackCode> refuseNotANumber(uint16_t channel_id, uint8_t key);
     // A generator start's machine gates, in 0x3200's order: unpowered,
     // uncommissioned, unhomed. nullopt admits; the rail is acquired after.
     std::optional<NackCode> startRefusal(const MotionCensus& c, const char* what);
@@ -223,6 +231,7 @@ private:
     bool flipOpen(const MotionCensus& c) const;
 
     Hub* _hub = nullptr;
+    const Catalog32* _catalog = nullptr;
     IUiTokenGate* _tokenGate = nullptr;
     AccessLevel _unvouchedRole = AccessLevel::watch;
 

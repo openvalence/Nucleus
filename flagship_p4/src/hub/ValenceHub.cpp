@@ -440,7 +440,7 @@ bool hubBegin() {
 
     // EVERY advertised STATE gets its truthful at-rest value before the first
     // client can subscribe (ValenceDevice.cpp's file header says why).
-    g_box->device.attach(*g_box->hub);
+    g_box->device.attach(*g_box->hub, g_box->catalog);
 
     // SPEC §12.3: the ledger before the WS port starts, so no HELLO is judged
     // against an empty one, and the boot's half of the power-cycle gesture.

@@ -147,7 +147,6 @@ enum class ConfigReject : uint8_t {
     RetiredVersion,   // older than kConfigOldestVersion
     NewerVersion,     // written by a newer firmware
     BadSize,          // shorter than the header, or not its version's length
-    NoGeneration,     // a stored cfg_gen of 0
     BadConfig,        // a 0x1000 value non-finite or outside its bounds
     BadTuning,        // a 0x1120-0x1122 value outside its bounds, or a flag byte not 0/1
     BadModes,         // a 0x1030 value outside its bounds, or the flip byte not 0/1
@@ -159,7 +158,6 @@ inline const char* configRejectName(ConfigReject r) {
         case ConfigReject::RetiredVersion: return "retired layout";
         case ConfigReject::NewerVersion:   return "newer firmware's layout";
         case ConfigReject::BadSize:        return "length does not match its version";
-        case ConfigReject::NoGeneration:   return "cfg_gen 0";
         case ConfigReject::BadConfig:      return "machine config out of range";
         case ConfigReject::BadTuning:      return "kinetic tuning out of range";
         case ConfigReject::BadModes:       return "machine modes out of range";
@@ -258,8 +256,9 @@ inline std::expected<void, ConfigReject> decodeConfig(std::span<const std::byte>
     if (version < kConfigOldestVersion) return Err(ConfigReject::RetiredVersion);
     if (version > kConfigVersion) return Err(ConfigReject::NewerVersion);
     if (in.size() != configBytesFor(version)) return Err(ConfigReject::BadSize);
+    // Every u16 is a generation, 0 included: the hub's counter wraps through
+    // it, and SPEC 4.2 reserves no value.
     const uint16_t gen = get<uint16_t>(in, n);
-    if (gen == 0) return Err(ConfigReject::NoGeneration);
 
     StoredConfig c;
     for (float* f : {&c.window_min, &c.window_max, &c.jog_speed, &c.jog_accel,
