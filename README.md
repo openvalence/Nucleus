@@ -47,3 +47,8 @@ delete `.pio`.** That trap and the rest are in
 - The dev board (`bd`, `val-` prefix) is the sole home for volatile truth:
   versions, deployment state, milestones, open bugs, pending rulings. Status
   never goes into prose.
+
+## Licensing
+
+Nucleus is licensed under CERN-OHL-S-2.0 (`LICENSE`). Third-party components keep
+their own licenses; `NOTICE.md` lists each with its origin and what uses it.
