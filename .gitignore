@@ -39,6 +39,10 @@ tools/*
 # way onto the board or into the archive (val-091.16/.17)
 !tools/ota.py
 !tools/diag.py
+# the offline planner (val-eff): its sources and check are tracked, its
+# kinetic.wasm build output never is (a consumer vendors a pinned build).
+!tools/kinetic-wasm/
+tools/kinetic-wasm/build/
 
 # Claude Code config is COMMITTED (hooks/rules survive a clone, like
 # canon_lint). Only host/session-local state stays out.

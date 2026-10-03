@@ -182,6 +182,10 @@ public:
     void noteStream(uint32_t bundles, uint32_t samples, uint32_t dropped);
 
     float positionMm() const { return float(_emitter.count() - _origin) * kMmPerStep; }
+    // Owning task. Read-only, for host tooling that evaluates the plan in
+    // double with no side effect (Engine::planView + evalPiece): the offline
+    // planner, tools/kinetic-wasm. Nothing on the board reads the engine here.
+    const kinetic::Engine& engine() const { return _engine; }
     float winMin() const { return _win_min; }
     float winMax() const { return _win_max; }
     float rail() const { return _rail; }

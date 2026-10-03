@@ -22,9 +22,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <optional>
 #include <string_view>
 
 #include "geiger/geiger.h"
+#include "motion/StreamIntent.h"
 #include "motion/ValenceMotion.h"
 #include "patterns/ValencePattern.h"
 #include "system/ValenceButtons.h"
@@ -1425,33 +1427,17 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
         if (delta > leadCapUs) { delta = leadCapUs; ++farClamped; }
         if (delta < 0) delta = 0;
 
+        // The field mapping is StreamIntent.h's, shared with the offline
+        // planner; a zero-duration segment decodes to nullopt and is dropped.
         const auto sample = bundle.sample(i);
-        const float norm = float(getU16(sample.subspan(0, 2))) / 10000.0f;
-
-        MotionIntent in;
-        in.source    = MotionSource::Stream;
-        in.target_mm = w.lo + norm * span;
-        in.anchor_us = uint64_t(now64 + int64_t(delta));
-
-        if (isSegment) {
-            const uint16_t durMs = getU16(sample.subspan(2, 2));
-            const int16_t endV = int16_t(getU16(sample.subspan(4, 2)));
-            if (durMs == 0) { ++dropped; continue; }  // durationless points belong on 0x2100
-            in.duration_us  = uint32_t(durMs) * 1000u;
-            in.curve_family = curveFamily;
-            // SPEC 5.4 `unspecified`: 0 is a real slope (a reversal ends AT
-            // rest), so absence is the registry's sentinel. Unspecified leaves
-            // has_end_vel false and the engine resolves it (SPEC 9.6).
-            if (endV != limits::segment_end_vel_unspecified) {
-                in.end_vel_mm_s = float(endV) / 1000.0f * span;
-                in.has_end_vel  = true;
-            }
-        } else {
-            const int16_t vel = int16_t(getU16(sample.subspan(2, 2)));
-            in.end_vel_mm_s = float(vel) / 1000.0f * span;
-            in.has_end_vel  = (vel != 0);
-        }
-        if (!motionSubmit(in)) ++dropped;
+        const uint16_t pos = getU16(sample.subspan(0, 2));
+        const uint64_t anchor = uint64_t(now64 + int64_t(delta));
+        const std::optional<MotionIntent> in =
+            isSegment ? segmentIntent(pos, getU16(sample.subspan(2, 2)),
+                                      int16_t(getU16(sample.subspan(4, 2))), w.lo, span,
+                                      curveFamily, anchor)
+                      : pointIntent(pos, int16_t(getU16(sample.subspan(2, 2))), w.lo, span, anchor);
+        if (!in || !motionSubmit(*in)) ++dropped;
     }
 
     motionNoteStream(1, n, dropped);
