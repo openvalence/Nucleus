@@ -6,13 +6,11 @@ paths:
 # Canon -- governance law (C-1..C-12)
 
 The rule system every agent, every commit, and every document in this repo
-answers to. Carried verbatim from the archived machine repo (SlopDrive-32
-`.claude/rules/governance.md`), where it was written because that project's
-knowledge rotted once: status was appended as prose across many files, facts
-had many homes, claims were never stamped with how they were verified, and
-agents resolved contradictions silently by picking whichever source they read
-first. A fleet audit in July 2026 un-rotted it. These rules make that a
-one-time event, and this repo starts with them rather than rediscovering them.
+answers to. They exist because knowledge rots: status appended as prose
+across many files, facts with many homes, claims never stamped with how they
+were verified, and agents resolving contradictions silently by picking
+whichever source they read first. These rules make the cure permanent, and
+this repo starts with them rather than rediscovering them.
 
 The model is the Valence registry: one source of truth, everything else
 derived, a check mode, and a ritual that fixes the doc BEFORE the code.
@@ -191,3 +189,4 @@ that file's header; it is the one home for which checks exist.
 | 2026-10-01 | MAP OF TRUTH pointer (val-091.21 board inventory): the PCB rationale row also points at `docs/board-map.md`, the P4 pin-by-function inventory, and names `flagship_p4/src/system/BoardPins.h` as where its pin numbers come from. BoardPins.h is the one board config header `architecture.md` section 1 already requires; this row only makes it findable. No law changed. RECORDED AS VETO-ABLE. | agent, operator veto pending |
 | 2026-10-02 | C-6 PRE-TAG RE-PIN WINDOW (operator ruling 2026-10-02 on Valence rfc-bmy, option (a); the ruling's own record is Valence `spec/SPEC.md` section 17.2, "Amendment (C-6 ...)"): before the first tag a frozen pin MAY be re-pinned by operator ruling, because nobody consumes the vectors yet and the RFC queue is the audit trail; from the v1.0 tag forward it may not. Exercised once, at Valence 968d0ae: the reference encoder emits key 18 size on every layout field, so K-01/K-02 moved 775 -> 805 B and the fixture etag F4A28FBB58CED16A -> 8C5D68F41AD0325E. The fixture SOURCES this repo hash-pins in `tools/canon_lint.py` (`mini_catalog.hpp`, `mini-catalog.yaml`) are byte-unchanged, so no pin here moved; this repo followed with `valence.pin` -> 715e21c (e09c50e). C-6's text gains the one sentence. Row written by the agent from the recorded ruling. | operator |
 | 2026-10-02 | RFC-085 TAXONOMY IN THE RULES TEXT (C-3 correction after the operator's RFC-085 ruling, landed e09c50e/b50022b): `transport.md` Auth now names `pause` and `estop` as the role-exempt ops (STOP is retired); `architecture.md` section 2's sole-caller rule names the jog set (was "user set") and PAUSE with its override/return mode among the arbiter's gates. No law changed. RECORDED AS VETO-ABLE. | agent, operator veto pending |
+| 2026-10-03 | THE PREDECESSOR IS FROZEN AND NEVER CITED (operator ruling 2026-10-03: "we break any symlinks to slopsync or slopdrive and never reference it again, it's frozen in time and the predecessor to this firmware"). No live repo references SlopSync, SlopDrive-32 or any slop-named identifier, path, URL, symlink or file, not even as history: a pointer to what exists now replaces each, or the sentence goes. The archive is read, never cited. This ends the 2026-09-21 ECOSYSTEM RENAME row's allowance of SlopDrive-32 as a marked archive citation. Vendored code names its upstream, never the copy it passed through. Records keep their wording: the amendment rows above this one, RFC bodies in Valence `spec/RFC-QUEUE.md`, commit history and bd's audit log (that carve-out is the agent's reading, RECORDED AS VETO-ABLE). Mirrored in the workspace `CLAUDE.md`, Phosphor `docs/DESIGN.md` and Valence `README.md`. No lint check: the operator declined one. | operator |

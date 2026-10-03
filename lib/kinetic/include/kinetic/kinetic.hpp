@@ -111,9 +111,7 @@
 // steady state (Ruckig's waypoint vectors stay empty in community mode).
 //
 // Hardware-free: std headers + vendored lib/ruckig only. Native-tested in
-// test/native/test_kinetic. The scenario-trace bench did not come across from
-// the archived SlopDrive-32 repo; regenerate it there if a waveform needs
-// eyes on it.
+// test/native/test_kinetic.
 #pragma once
 
 #include <cstdint>
@@ -2458,9 +2456,9 @@ private:
                 // predictive aim renders that over-read as stroke: 20 ms of
                 // jitter on a 20 ms cadence measured +17% amplitude on the P4
                 // (bd val-091.14). Difference against the LEARNED cadence
-                // instead; the gap still teaches it, one line down. Archived
-                // SlopDrive-32 repo, .claude/rules/webui.md T18: arrival time
-                // is a hint, never a timeline.
+                // instead; the gap still teaches it, one line down. Phosphor
+                // .claude/rules/webui.md T18: arrival time is a hint, never a
+                // timeline.
                 const double dt  = span > 0.0 ? span
                                  : (_est_ema_ok && _est_dt_ema > 0.0 ? _est_dt_ema : cad);
                 const double raw = span > 0.0

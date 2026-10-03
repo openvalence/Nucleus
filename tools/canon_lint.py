@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Canon mechanical floor -- judgment-free doctrine checks.
 
-PORT of the archived SlopDrive-32 repo's tools/canon_lint.py, curated for
-Nucleus. Defined by .claude/rules/governance.md SS5. Every hit is a
+Defined by .claude/rules/governance.md SS5. Every hit is a
 defect BY DEFINITION: these checks encode only hard rules (violation classes
 that have actually bitten this project family). If a check fires falsely, the
 fix is a C-7 amendment to the exemption lists in this file -- never ignoring

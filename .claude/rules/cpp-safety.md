@@ -5,9 +5,8 @@ paths:
 
 # Memory safety and lifetime (operator directive 2026-07-31 -- binding)
 
-Carried from the archived machine repo (SlopDrive-32
-`.claude/rules/cpp-safety.md`). Where this file and older doctrine disagree on
-a memory-safety question, this file wins.
+Where this file and any other doctrine disagree on a memory-safety question,
+this file wins.
 
 **Scope, and it is deliberate.** These rules bind `flagship_*/src/`,
 `flagship_*/ulp/`, and the first-party libraries `lib/geiger`, `lib/flux`,
@@ -133,9 +132,6 @@ redeclares a default silently overrides a subclass's different default.
 ### T29 -- legacy, not reachable here
 
 An async-TCP dispatch loop that destroyed its own caller's object. There is no
-AsyncTCP in this repo. The case file, including the `0xfefefefe` poison-read
-technique, is the archived SlopDrive-32 `.claude/rules/cpp-safety.md` T29;
-the reusable rule is: before a loop calls user code, ask whether that call can
-free the
-object the loop is iterating on, and if it can, keep the liveness check
-OUTSIDE the object.
+AsyncTCP in this repo. The reusable rule: before a loop calls user code, ask
+whether that call can free the object the loop is iterating on, and if it can,
+keep the liveness check OUTSIDE the object.

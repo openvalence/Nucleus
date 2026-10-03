@@ -146,7 +146,7 @@ TEST_CASE("blink: ON for period_ms, OFF for half of it (operator ruling)") {
         g.update(t);
         if (strip.px[0].r > 100) ++on;
     }
-    // 1200 of 1800 ms ON = 2/3 duty; allow slop for the sampled edges.
+    // 1200 of 1800 ms ON = 2/3 duty; allow tolerance for the sampled edges.
     CHECK(on > samples / 2);
     CHECK(on < samples);
 }

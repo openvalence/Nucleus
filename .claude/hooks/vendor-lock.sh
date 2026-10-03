@@ -7,9 +7,6 @@
 # the sibling's spec/RFC-QUEUE.md, which stays writable), then lands there
 # and comes back as a pin bump. Other sibling files (its .claude, docs,
 # clients) are governed by Valence's own hooks when working there.
-# PORT of the archived SlopDrive-32 repo's .claude/hooks/vendor-lock.sh; same
-# protected surface,
-# same one writable door (spec/RFC-QUEUE.md).
 set -u
 IN=$(cat)
 FILE=$(printf '%s' "$IN" | python -c "import json,sys;print(json.load(sys.stdin).get('tool_input',{}).get('file_path',''))" 2>/dev/null || true)

@@ -2026,9 +2026,7 @@ TEST_CASE("RFC-008 guard in the engine: lookahead arms it, absence changes nothi
     }
 
     SUBCASE("TAIL CASE: no known successor is accepted exactly as sent") {
-        // Deliberate -- see the ingress note in
-        // SlopSyncHubService::drainMotionStream (archived SlopDrive-32 repo).
-        // Guessing a chord we do not have would trim well-behaved senders for free. RFC-049c evaluated an
+        // Deliberate: guessing a chord we do not have would trim well-behaved senders for free. RFC-049c evaluated an
         // own-chord fallback for exactly this case and REJECTED it (see
         // commitWaveform's comment) as an unvalidated motion-quality change --
         // this stays the honest tail case.

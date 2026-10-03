@@ -94,8 +94,7 @@ not be cited as a reason to re-run a failed build.
 
 **OTA is the default path, and there is no bridge in it.** `POST /ota` on the
 board's own port 80, RAW body, `X-OTA-Token`, `esp_ota_ops` into the idle slot,
-reboot. The two-hop forwarder the archived S3 product needed was a consequence
-of a topology this board does not have: the sockets are on the P4.
+reboot. No forwarding hop exists: the sockets are on the P4.
 
 - `python tools/ota.py [--ip <ip>] [--image <bin>] [--expect <version>]`. It
   reads the running version off the hub, pushes the image, then waits for a

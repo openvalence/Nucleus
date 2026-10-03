@@ -5,12 +5,10 @@ paths:
 
 # Geiger and Flux (NON-NEGOTIABLE usage)
 
-Carried from the archived machine repo (SlopDrive-32
-`.claude/rules/logging-leds.md`). Self-contained ecosystem modules:
-hardware-free core plus thin platform glue. `lib/geiger` and `lib/flux` hold
-the cores, both header-only via an explicit include path. Geiger's IDF glue
-is live; Flux's is `flagship_p4/src/system/ValenceGlow.cpp`, the Flagship's
-status pixel.
+Self-contained ecosystem modules: hardware-free core plus thin platform glue.
+`lib/geiger` and `lib/flux` hold the cores, both header-only via an explicit
+include path. Geiger's IDF glue is live; Flux's is
+`flagship_p4/src/system/ValenceGlow.cpp`, the Flagship's status pixel.
 
 ## Logging goes through Geiger. Only.
 
@@ -158,6 +156,4 @@ a deep PSRAM archive read ONCE, after something goes wrong.
 - Filtering by GLOGx tag is what gives a new subsystem a route without a route
   table change.
 
-The relay half of that story -- pulling the archive through a second board --
-is legacy: the archived SlopDrive-32 `.claude/rules/logging-leds.md` is the
-case file. Here the P4 serves its own diagnostics.
+The P4 serves its own diagnostics; no second board relays them.

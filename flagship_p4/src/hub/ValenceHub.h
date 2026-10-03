@@ -79,7 +79,7 @@ HubCensus hubCensus();
 // 151,008 us on this board [verified 2026-09-20 -- boot log, first call timed
 // with esp_timer]. On a 5 ms tick that is a thirty-tick stall every second,
 // which is the instrument manufacturing the fault it is meant to observe
-// (archived SlopDrive-32 repo, memory-budget.md T27). The caller is main.cpp's
+// (.claude/rules/memory-budget.md T27). The caller is main.cpp's
 // 5 s liveness loop, a task with nothing to starve.
 void hubSetLinkRssi(int8_t rssi);
 

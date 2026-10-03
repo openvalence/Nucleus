@@ -1,8 +1,5 @@
 # Style gate body. Reads the hook JSON on stdin, inspects only the text the
 # tool call would ADD (new_string / content), exit 2 blocks the write.
-# PORT of the archived SlopDrive-32 repo's .claude/hooks/style_check.py; only
-# SKIP_PATHS changed
-# (this tree has different vendored directories).
 import json
 import os
 import re

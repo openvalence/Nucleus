@@ -4,7 +4,7 @@
  *   vendored pattern.h and PatternMath.h need, WITHOUT pulling in
  *   StrokeEngine.h (which owns motor/homing/task logic).
  *
- *   This file is SlopDrive-32 machinery. Upstream pattern code lives in
+ *   This file is Nucleus machinery. Upstream pattern code lives in
  *   pattern.h / PatternMath.h — those must remain byte-identical to OSSM-hardware.
  *
  *   Copyright (C) the respective upstream authors.
@@ -28,8 +28,8 @@
 /* --------------------------------------------------------------------------
  * motionParameter — the struct patterns return for every stroke target.
  * Copied verbatim from the upstream pattern.h.  The struct uses `int` for
- * stroke/speed/acceleration because OSSM works in stepper *steps*; SlopDrive
- * will reinterpret these at the PatternEngine layer.
+ * stroke/speed/acceleration because OSSM works in stepper *steps*; Nucleus
+ * reinterprets these at the PatternEngine layer.
  * -------------------------------------------------------------------------- */
 typedef struct {
     int stroke;         //!< Absolute target position in steps

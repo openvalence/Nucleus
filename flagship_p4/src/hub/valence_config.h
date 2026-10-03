@@ -11,11 +11,9 @@
 //   not include this file (it is library-only by contract), so ValenceHub.cpp
 //   sees both and static_asserts them together. Change a number here and the
 //   build fails until the catalog follows.
-// - Values carried verbatim from the archived SlopDrive-32 S3 product
-//   (include/system/config_api.h) so a client that knows one machine's limits
-//   is not surprised by the other. They describe the MOTION plane, which
-//   has_motion=false does not yet expose; they are still the stored
-//   configuration and are published truthfully on 0x1000.
+// - The values describe the MOTION plane, which has_motion=false does not
+//   yet expose; they are still the stored configuration and are published
+//   truthfully on 0x1000.
 // - NUCLEUS_BENCH_NO_MOTOR is a BUILD PROFILE, never a runtime switch: the
 //   CMake option of that name (flagship_p4/CMakeLists.txt, env
 //   flagship_p4_bench) defines it to 1. It makes the motion arbiter's

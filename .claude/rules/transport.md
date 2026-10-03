@@ -6,9 +6,7 @@ paths:
 # Transport and Valence boundary constraints
 
 SPEC §13/§14 and the headers own the protocol story; this file is this
-machine's half of the boundary plus the transport traps. Carried from the
-archived machine repo (SlopDrive-32 `.claude/rules/transport.md`), minus the
-UART bridge, which does not exist here.
+machine's half of the boundary plus the transport traps.
 
 ## Valence (NON-NEGOTIABLE)
 
@@ -113,19 +111,17 @@ server and every session live on the P4 (ruling 2026-09-20,
   buffers live on the C6. That number is the budget any queue-depth change is
   argued against (`memory-budget.md`).
 
-## Legacy: the C5 bridge
+## A second protocol terminator: none here
 
-The retired machine put the radio on a second ESP32 that TERMINATED the
-WebSocket session and forwarded frames over a 4 Mbaud UART. Everything that
-came with it -- COBS framing and the delimiter-resync property, the ESTOP
-raw-scan duty, RX ring sizing against the drain interval, the physical-layer
-common-ground and inversion footguns, and traps T31 (a gate must never disable
-the transport carrying what it gates), T32 (fix a two-ended link at both ends;
-pace retransmits on progress) and T33 (ARQ halves must match; a flash write
-mutes a flash-resident RX ISR) -- is the case file in the archived SlopDrive-32
-`.claude/rules/transport.md`. **None of it is reachable here:** the C6 is a
-NIC, there is no second protocol terminator, and the P4 owns the socket. Read
-that file before building any board-to-board link, and never re-derive it.
+**Not reachable today:** the C6 is a NIC, there is no second protocol
+terminator, and the P4 owns the socket. A link that ever terminates or
+forwards Valence frames on a second board starts from these rules: COBS
+framing and the delimiter-resync property, the ESTOP raw-scan duty, RX ring
+sizing against the drain interval, the physical-layer common-ground and
+inversion footguns, and traps T31 (a gate must never disable the transport
+carrying what it gates), T32 (fix a two-ended link at both ends; pace
+retransmits on progress) and T33 (ARQ halves must match; a flash write mutes
+a flash-resident RX ISR).
 
 ## T3 -- session teardown must be ONE funnel
 

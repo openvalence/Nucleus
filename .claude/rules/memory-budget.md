@@ -118,14 +118,8 @@ reproducible panic into a watchdog reset, destroying the evidence.
 **Fix:** probes live on per-SESSION paths only (connect, refuse, disconnect)
 and any hot-loop probe is rate-limited to 1 Hz.
 
-## The S3's heap case file is NOT re-derived here
+## Heap numbers do not cross chips
 
-The machine repo's `.claude/rules/memory-budget.md` holds a long record that
-this board does not inherit: split-plane starvation under WS load and its
-refusal floors (T19 and its three addenda), the twelve-trial hunt for a heap
-corruption whose culprit was never found and the seven things that did NOT
-find it (T28), and the six ways a diagnostic lies about itself (T30). Read it
-before building a load shedder, an A/B harness, or any heap detector; do not
-copy its numbers, which predate this silicon by a whole architecture. Two of
-its lessons are load-bearing enough to restate as rules and are above (T27,
-and "a detector reports, it never adjudicates").
+A load shedder, an A/B harness or a heap detector is sized from measurements
+on this board. A number measured on another chip predates this silicon by a
+whole architecture and is never copied.

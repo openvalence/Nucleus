@@ -21,7 +21,7 @@ Constraints:
   the clamp's, not the engine's.
 - Arrival time is a HINT, never a timeline: the network batches STATE frames,
   so `sent -> rx` is reported as a median and a p95, never interpolated
-  against (archived SlopDrive-32 repo, webui.md T18).
+  against (Phosphor `.claude/rules/webui.md` T18).
 
 See: bd val-091.11
 """

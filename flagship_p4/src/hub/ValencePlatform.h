@@ -9,8 +9,6 @@
 // - SPEC §7.2: hub time is u32 microseconds since boot and WRAPS every
 //   ~71.6 min BY SPEC. The truncation below is deliberate -- widening it would
 //   desync the hub's wrap-safe compares from the wire clock.
-// - Lifted verbatim in behavior from the S3's SlopSyncPlatform.h (archived
-//   SlopDrive-32 repo); only the namespace differs.
 // See: Valence SPEC.md §7.2, §17.2
 
 #include <cstddef>

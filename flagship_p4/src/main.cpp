@@ -349,7 +349,7 @@ extern "C" void app_main() {
         // maxblock, not free, is the number that decides anything: a serve or a
         // DMA descriptor needs ONE contiguous block, and a fragmented heap
         // reads healthy on free right up to the allocation that fails
-        // (archived SlopDrive-32 repo, .claude/rules/memory-budget.md T21).
+        // (.claude/rules/memory-budget.md T21).
         const valence::MotionCensus mo = valence::motionCensus();
         note_stack(0, census.stackFree);
         note_stack(1, mo.stack_free);

@@ -5,8 +5,7 @@ paths:
 
 # C++ style
 
-Carried from the archived machine repo (SlopDrive-32
-`.claude/rules/cpp-style.md`). Navigation doctrine is NOT restated here (C-1):
+Navigation doctrine is NOT restated here (C-1):
 `.claude/rules/navigation.md`
 is its home, and its rule -- grep to find, LSP to understand -- binds every
 C++ task in this repo.
