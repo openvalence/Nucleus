@@ -70,6 +70,7 @@
 #include "net/WsServerPort.h"
 #include "patterns/ValencePattern.h"
 #include "system/ValenceButtons.h"
+#include "system/ValenceDriveLink.h"
 #include "system/ValenceEstopInput.h"
 #include "system/ValenceMotorSwitch.h"
 
@@ -246,6 +247,8 @@ uint32_t deviceFreeHeapBytes() { return 0; }
 // reboot has no meaning for a desktop process.
 button::Gesture homeButtonTake() { return button::Gesture::none; }
 button::Gesture pairButtonTake() { return button::Gesture::none; }
+// The twin has no drive: DRV_ALM never asserts.
+bool driveAlarmTake() { return false; }
 // The twin has no e-stop wired: it reads present and released, always.
 estop::Reading estopInputRead() {
     estop::Reading r;

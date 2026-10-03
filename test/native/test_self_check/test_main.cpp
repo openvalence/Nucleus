@@ -4,7 +4,8 @@
 //   Supervisor.h blocks. The reads live in ValenceSelfCheck.cpp and are
 //   bench work (val-091.21); the E-stop decode is test_estop_input's.
 // - The gate under test is the ruling, not the code: motor power opens only
-//   when EVERY entry passed; skipped and pending hold it shut.
+//   when EVERY pre-enable entry passed; skipped and pending hold it shut.
+//   The post-enable drive-link row never gates (val-091.29).
 // See: flagship_p4/src/system/SelfCheck.h, bd val-091.21
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -267,4 +268,99 @@ TEST_CASE("trust ledger: loaded passes with its count, absent is factory fresh, 
     // its load is a failure, not an unknown.
     sc::judgeTrustLedger(t, sc::LedgerBoot{});
     CHECK(t.entry(Check::trust_ledger).result == Result::fail);
+}
+
+// ---- the drive link: the one post-enable row (val-091.29) ---------------------
+
+TEST_CASE("drive link is the one post-enable row: it never gates, either way") {
+    CHECK(sc::postEnable(Check::drive_link));
+    for (size_t i = 0; i < sc::kCheckCount; ++i)
+        if (Check(i) != Check::drive_link) CHECK_FALSE(sc::postEnable(Check(i)));
+    Table t;
+    passAll(t);
+    t.record(Check::drive_link, Result::pending, "probed after motor power");
+    CHECK(t.motorPowerAllowed());   // the drive answers only once powered
+    t.record(Check::drive_link, Result::fail, "no answer");
+    CHECK(t.motorPowerAllowed());   // reported, never adjudicated
+    CHECK(t.count(Result::fail) == 1);
+    t.record(Check::estop, Result::fail, "pressed");
+    REQUIRE(t.firstBlocking().has_value());
+    CHECK(*t.firstBlocking() == Check::estop);
+}
+
+namespace {
+
+std::string driveReason(const valence::aim::Probe& p, Result expect) {
+    Table t;
+    sc::judgeDriveLink(t, p);
+    CHECK(t.entry(Check::drive_link).result == expect);
+    return t.entry(Check::drive_link).reason.data();
+}
+
+bool has(const std::string& s, const char* part) { return s.find(part) != std::string::npos; }
+
+}  // namespace
+
+TEST_CASE("drive link row: every probe outcome names its cause") {
+    namespace aim = valence::aim;
+    using aim::ProbeOutcome;
+    aim::Probe p;
+    CHECK(has(driveReason(p, Result::pending), "after motor power"));
+
+    p.outcome = ProbeOutcome::no_answer;
+    CHECK(has(driveReason(p, Result::fail), "no answer at 19200, 115200, 38400 or 9600 baud"));
+
+    p = aim::Probe{};
+    p.outcome = ProbeOutcome::crc;
+    p.baud = 19200;
+    CHECK(has(driveReason(p, Result::fail), "frames at 19200 baud, none valid"));
+
+    p = aim::Probe{};
+    p.outcome = ProbeOutcome::wrong_model;
+    p.reg = aim::reg::device_address;
+    p.exception = 2;
+    CHECK(has(driveReason(p, Result::fail), "exception 2 reading 0x15 device-address"));
+    p.exception = 0;
+    p.value = 7;
+    CHECK(has(driveReason(p, Result::fail), "0x15 device-address reads 7"));
+
+    p = aim::Probe{};
+    p.outcome = ProbeOutcome::lost;
+    p.baud = 115200;
+    p.reg = aim::reg::standstill;
+    CHECK(has(driveReason(p, Result::fail), "answered at 115200 baud, then silent at 0x18 standstill"));
+
+    p = aim::Probe{};
+    p.outcome = ProbeOutcome::modbus_enabled;
+    p.modbusEnable = 1;
+    CHECK(has(driveReason(p, Result::fail), "ignores quadrature"));
+    p.outcome = ProbeOutcome::output_off;
+    CHECK(has(driveReason(p, Result::fail), "drive output disabled"));
+    p.outcome = ProbeOutcome::not_quadrature;
+    CHECK(has(driveReason(p, Result::fail), "not read as quadrature"));
+    p.outcome = ProbeOutcome::alarm_inverted;
+    p.positionKp = 3001;
+    CHECK(has(driveReason(p, Result::fail), "3001 is odd: WR normally closed"));
+}
+
+TEST_CASE("drive link row: a pass names baud, temperature, encoder, alarm and stall alarm, and fits") {
+    namespace aim = valence::aim;
+    aim::Probe p;
+    p.outcome = aim::ProbeOutcome::ok;
+    p.baud = 19200;
+    p.temperatureC = 31;
+    p.encoder = -123456;
+    p.standstill = 600;
+    CHECK(driveReason(p, Result::pass) == "AIM at 19200, 31 C, encoder -123456, alarm 0x00, stall alarm off");
+    p.standstill = 603;
+    CHECK(has(driveReason(p, Result::pass), "stall alarm 3"));
+    // The widest values still fit the reason buffer whole.
+    p.baud = 115200;
+    p.temperatureC = 100;
+    p.encoder = INT32_MIN;
+    p.alarmCode = aim::kAlarmOverVoltage;
+    p.standstill = 600;
+    const std::string wide = driveReason(p, Result::pass);
+    CHECK(has(wide, "stall alarm off"));
+    CHECK(wide.size() < sc::kReasonBytes - 1);
 }

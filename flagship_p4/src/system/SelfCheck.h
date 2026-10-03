@@ -5,9 +5,13 @@
 // Constraints:
 // - Hardware-free and allocation-free. ValenceSelfCheck.cpp does the reads
 //   and records them here; suite test_self_check drives this file directly.
-// - THE GATE IS "EVERY ENTRY PASSED". Skipped is not passed and pending is not
-//   passed: a check the firmware cannot run yet holds motor power off and
-//   says why (Hardware SPEC.md 2026-09-23 board-monitor ruling, val-091.21).
+// - THE GATE IS "EVERY PRE-ENABLE ENTRY PASSED". Skipped is not passed and
+//   pending is not passed: a check the firmware cannot run yet holds motor
+//   power off and says why (Hardware SPEC.md 2026-09-23 board-monitor ruling,
+//   val-091.21). The one POST-ENABLE entry, drive_link, never gates: the
+//   drive's logic rides the motor bus, so it can only be probed after the
+//   enable it would otherwise block (postEnable(), val-091.29). Its FAIL is
+//   reported, never adjudicated.
 // - Order is the ruling's order and the report order. The first entry that
 //   did not pass is the one a one-line summary names.
 // - kNames are log text, not catalog strings: renaming one changes no etag.
@@ -24,6 +28,7 @@
 #include <cstdio>
 #include <optional>
 
+#include "AimDrive.h"
 #include "Supervisor.h"
 
 namespace valence::selfcheck {
@@ -43,7 +48,7 @@ enum class Check : uint8_t {
     regen_clamp,     // clamp test pulse seen on CLAMP_MON (U12 command)
     estop,           // external E-stop present and released
     quadrature,      // LP emitter rendered edges since boot
-    drive_link,      // drive answers on Modbus (needs motor power)
+    drive_link,      // drive answers its map on Modbus; POST-ENABLE
     host_link,       // C6 up over SDIO and answering
     nvs,             // NVS partition initialized and readable
     trust_ledger,    // trust ledger loaded from NVS
@@ -74,6 +79,10 @@ constexpr const char* resultName(Result r) {
     return "?";
 }
 
+// The one check that runs AFTER motor power, so it never gates it (file
+// header).
+constexpr bool postEnable(Check c) { return c == Check::drive_link; }
+
 // ---- the table --------------------------------------------------------------
 
 struct Entry {
@@ -100,9 +109,11 @@ public:
         return _entries[size_t(c) < kCheckCount ? size_t(c) : 0];
     }
 
+    // The first pre-enable entry that did not pass: the gate, and the name a
+    // one-line summary gives.
     std::optional<Check> firstBlocking() const {
         for (size_t i = 0; i < kCheckCount; ++i)
-            if (_entries[i].result != Result::pass) return Check(i);
+            if (!postEnable(Check(i)) && _entries[i].result != Result::pass) return Check(i);
         return std::nullopt;
     }
 
@@ -251,6 +262,76 @@ inline void judgeTrustLedger(Table& t, const LedgerBoot& b) {
         return;
     }
     t.record(Check::trust_ledger, Result::pass, "factory fresh: no ledger stored");
+}
+
+// ---- the drive link (post-enable: AimDrive.h's probe) -------------------------
+// One entry per probe outcome, each naming its cause. The host records it
+// again whenever the outcome changes.
+
+inline void judgeDriveLink(Table& t, const aim::Probe& p) {
+    using aim::ProbeOutcome;
+    static_assert(aim::kBauds.size() == 4, "the no-answer reason names four bauds");
+    const unsigned long baud = p.baud;
+    const unsigned reg = p.reg;
+    const char* regName = aim::registerName(p.reg);
+    switch (p.outcome) {
+        case ProbeOutcome::pending:
+            t.record(Check::drive_link, Result::pending,
+                     "probed after motor power: the drive rides the motor bus");
+            return;
+        case ProbeOutcome::no_answer:
+            t.record(Check::drive_link, Result::fail, "no answer at %lu, %lu, %lu or %lu baud, address %u",
+                     static_cast<unsigned long>(aim::kBauds[0]), static_cast<unsigned long>(aim::kBauds[1]),
+                     static_cast<unsigned long>(aim::kBauds[2]), static_cast<unsigned long>(aim::kBauds[3]),
+                     unsigned(aim::kAddress));
+            return;
+        case ProbeOutcome::crc:
+            t.record(Check::drive_link, Result::fail,
+                     "frames at %lu baud, none valid: noise, A/B swapped, termination", baud);
+            return;
+        case ProbeOutcome::wrong_model:
+            if (p.exception != 0)
+                t.record(Check::drive_link, Result::fail, "not the AIM map: exception %u reading 0x%02x %s",
+                         unsigned(p.exception), reg, regName);
+            else
+                t.record(Check::drive_link, Result::fail, "not the AIM map: 0x%02x %s reads %u", reg, regName,
+                         unsigned(p.value));
+            return;
+        case ProbeOutcome::lost:
+            t.record(Check::drive_link, Result::fail, "answered at %lu baud, then silent at 0x%02x %s", baud,
+                     reg, regName);
+            return;
+        case ProbeOutcome::modbus_enabled:
+            t.record(Check::drive_link, Result::fail, "0x00 modbus-enable = %u: the drive ignores quadrature",
+                     unsigned(p.modbusEnable));
+            return;
+        case ProbeOutcome::output_off:
+            t.record(Check::drive_link, Result::fail, "0x01 output-enable = %u: drive output disabled",
+                     unsigned(p.outputEnable));
+            return;
+        case ProbeOutcome::not_quadrature:
+            t.record(Check::drive_link, Result::fail,
+                     "0x19 special-function = %u, not 2: A/B not read as quadrature",
+                     unsigned(p.specialFunction));
+            return;
+        case ProbeOutcome::alarm_inverted:
+            t.record(Check::drive_link, Result::fail,
+                     "0x07 position-kp = %u is odd: WR normally closed, DRV_ALM inverted",
+                     unsigned(p.positionKp));
+            return;
+        case ProbeOutcome::ok: {
+            const unsigned stall = aim::stallAlarmDigit(p.standstill);
+            if (stall == 0)
+                t.record(Check::drive_link, Result::pass,
+                         "AIM at %lu, %u C, encoder %ld, alarm 0x%02x, stall alarm off", baud,
+                         unsigned(p.temperatureC), long(p.encoder), unsigned(p.alarmCode));
+            else
+                t.record(Check::drive_link, Result::pass,
+                         "AIM at %lu, %u C, encoder %ld, alarm 0x%02x, stall alarm %u", baud,
+                         unsigned(p.temperatureC), long(p.encoder), unsigned(p.alarmCode), stall);
+            return;
+        }
+    }
 }
 
 }  // namespace valence::selfcheck

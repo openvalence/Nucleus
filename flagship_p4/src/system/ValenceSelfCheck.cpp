@@ -18,6 +18,7 @@
 #include "system/BoardPins.h"
 #include "system/SelfCheck.h"
 #include "system/Supervisor.h"
+#include "system/ValenceDriveLink.h"
 #include "system/ValenceEstopInput.h"
 #include "system/ValenceMotorSwitch.h"
 #include "system/ValencePower.h"
@@ -36,6 +37,8 @@ constexpr gpio_num_t pin(int n) { return static_cast<gpio_num_t>(n); }
 // BSS, ~1 KB, app_main's alone.
 selfcheck::Table g_table;
 bool g_ran = false;
+// The drive-link outcome the table last recorded.
+aim::ProbeOutcome g_driveOutcome = aim::ProbeOutcome::pending;
 
 // ---- the reads ---------------------------------------------------------------
 
@@ -204,6 +207,20 @@ void checkCatalog() {
                    unsigned(h->catalogEncodedBytes()));
 }
 
+// The post-enable row (SelfCheck.h): pending at boot, then the verdict of the
+// probe motor power lets the drive answer.
+void recordDriveLink(const DriveLinkStatus& s) {
+    if (!s.built) {
+        g_table.record(Check::drive_link, Verdict::skipped,
+                       "Modbus link not in this build (CONFIG_NUCLEUS_DRIVE_LINK)");
+    } else if (!s.uart) {
+        g_table.record(Check::drive_link, Verdict::fail, "UART%d RS485 setup failed: no drive link",
+                       BOARD_UART_RS485);
+    } else {
+        selfcheck::judgeDriveLink(g_table, s.link.probe);
+    }
+}
+
 // ---- the report --------------------------------------------------------------
 
 void logEntry(Check c) {
@@ -221,8 +238,7 @@ void logEntry(Check c) {
 void logSummary() {
     const SelfCheckSummary s = selfCheckSummary();
     if (s.allowed) {
-        GLOGI(kTag, "motor power ALLOWED: all %u passed, the enable sequence runs",
-              unsigned(selfcheck::kCheckCount));
+        GLOGI(kTag, "motor power ALLOWED: every pre-enable check passed, the enable sequence runs");
     } else if (s.failed > 0) {
         GLOGE(kTag, "motor power held OFF: %u failed, %u skipped; first: %s",
               unsigned(s.failed), unsigned(s.skipped), s.first);
@@ -274,8 +290,7 @@ bool selfCheckRun(const SelfCheckFacts& facts) {
     } else {
         g_table.record(Check::quadrature, Verdict::fail, "LP core rendered no edges since boot");
     }
-    g_table.record(Check::drive_link, Verdict::skipped,
-                   "no Modbus driver; drive unpowered until motor power (val-091.29)");
+    recordDriveLink(driveLinkStatus());
     if (facts.hostLink) {
         g_table.record(Check::host_link, Verdict::pass, "esp_hosted up, C6 reported its version");
     } else {
@@ -305,6 +320,16 @@ SelfCheckSummary selfCheckSummary() {
 
 void selfCheckRemind() {
     if (g_ran) logSummary();
+}
+
+void selfCheckDriveLink() {
+    if (!g_ran) return;
+    const DriveLinkStatus s = driveLinkStatus();
+    if (!s.built || !s.uart) return;   // the boot record stands
+    if (s.link.probes == 0 || s.link.probe.outcome == g_driveOutcome) return;
+    g_driveOutcome = s.link.probe.outcome;
+    recordDriveLink(s);
+    logEntry(Check::drive_link);
 }
 
 }  // namespace valence

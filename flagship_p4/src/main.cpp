@@ -36,6 +36,7 @@
 #include "system/BoardPins.h"
 #include "system/ValenceBoardIo.h"
 #include "system/ValenceDbg.h"   // compiled here so the build checks it; called from nowhere by default
+#include "system/ValenceDriveLink.h"
 #include "system/ValenceFan.h"
 #include "system/ValenceGlow.h"
 #include "system/ValenceLogBridge.h"
@@ -206,6 +207,7 @@ StackWatch g_stacks[] = {
     {"app_main", uint32_t(CONFIG_ESP_MAIN_TASK_STACK_SIZE)},
     {"MotorSw",  valence::kMotorSwitchTaskStackBytes},
     {"BoardIo",  valence::kBoardIoTaskStackBytes},
+    {"DriveLnk", valence::kDriveLinkTaskStackBytes},
 };
 void note_stack(size_t i, uint32_t free_bytes) {
     if (free_bytes == 0 || free_bytes >= g_stacks[i].worst_free) return;
@@ -225,6 +227,9 @@ extern "C" void app_main() {
     // self-check proves the board (val-091.21). The 100k pull-downs hold the
     // switch off through reset; this makes it an actively driven low.
     valence::selfCheckHoldMotorOff();
+    // RS485 DE and /RE float near 1.65 V until driven (Hardware hw-3jk): DE
+    // low before anything else, so the transceiver never drives the bus unasked.
+    valence::driveLinkHoldIdle();
 
     // USB-Serial/JTAG needs a moment to re-enumerate after flash; print into
     // the void otherwise. Same courtesy the IDF LP example extends.
@@ -250,6 +255,10 @@ extern "C" void app_main() {
     // rainbow covers the rest of the boot. AFTER the motor switch: THERM is
     // sampled on its ADC poll.
     if (!valence::boardIoBegin()) printf("--- BoardIo task FAILED: no status pixel, fan off ---\n");
+
+    // DRV_ALM and DRV_RDY from here on, the drive's Modbus probe once motor
+    // power settles. AFTER the motor switch: its task reads the switch.
+    if (!valence::driveLinkBegin()) printf("--- drive-link task FAILED: DRV_ALM unwatched ---\n");
 
     const bool lp_ok = start_lp_core();
     if (lp_ok) report_lp();
@@ -314,6 +323,7 @@ extern "C" void app_main() {
         vTaskDelay(pdMS_TO_TICKS(5000));
         ++n;
         if (n % 12 == 0) valence::selfCheckRemind();   // once a minute
+        valence::selfCheckDriveLink();
         const valence::SelfCheckSummary sc = valence::selfCheckSummary();
         const valence::HubCensus census = valence::hubCensus();
         // THE BUY (val-091.16). THREE conditions, and the third is the one that
@@ -347,13 +357,16 @@ extern "C" void app_main() {
         note_stack(3, uint32_t(uxTaskGetStackHighWaterMark(nullptr)));
         note_stack(4, valence::motorSwitchStackFree());
         note_stack(5, valence::boardIoStackFree());
+        note_stack(6, valence::driveLinkStackFree());
         const valence::MotorSwitchStatus msw = valence::motorSwitchStatus();
+        const valence::DriveLinkStatus drv = valence::driveLinkStatus();
         const valence::FanStatus fan = valence::fanStatus();
         printf("[flagship_p4] %lus  int_free=%u int_max=%u  psram_free=%u psram_max=%u  "
                "lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
                "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu  "
                "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu "
-               "faults=%lu  selfcheck=%s:%u/%u %s  msw=%s  therm=%.1fC fan=%.0f%%/%.0frpm\n",
+               "faults=%lu  selfcheck=%s:%u/%u %s  msw=%s  drv=%s alm=%u rdy=%u  "
+               "therm=%.1fC fan=%.0f%%/%.0frpm\n",
                static_cast<unsigned long>(n * 5),
                unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
@@ -382,6 +395,8 @@ extern "C" void app_main() {
                static_cast<unsigned long>(mo.emitter_faults),
                sc.allowed ? "pass" : "held", unsigned(sc.failed), unsigned(sc.skipped), sc.first,
                valence::motorswitch::stateName(msw.state),
+               drv.built ? valence::aim::linkStateName(drv.link.state) : "absent",
+               unsigned(drv.alarm), unsigned(drv.ready),
                double(fan.celsius), double(fan.duty * 100.0f), double(fan.rpm));
     }
 }

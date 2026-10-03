@@ -28,6 +28,7 @@
 #include "motion/ValenceMotion.h"
 #include "patterns/ValencePattern.h"
 #include "system/ValenceButtons.h"
+#include "system/ValenceDriveLink.h"
 #include "system/ValenceEstopInput.h"
 #include "system/ValenceMotorSwitch.h"
 
@@ -1675,6 +1676,13 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
                 _hub->latchEstop(safety_causes::fault, uint8_t(AccessLevel::configure));
             }
         }
+    }
+    // DRV_ALM (val-091.29): the drive halted itself on an alarm. Latched like
+    // the motor switch fault above: cause fault, the hub its own initiator at
+    // its highest tier. A latch already held keeps its own cause.
+    if (driveAlarmTake() && !_hub->estopLatched()) {
+        GLOGE(kTag, "drive alarm (DRV_ALM): latching ESTOP, cause fault");
+        _hub->latchEstop(safety_causes::fault, uint8_t(AccessLevel::configure));
     }
     // The motion plane, from ONE census so no two channels disagree about the
     // same instant. 0x1100 publishes at rate under its 60 Hz ceiling; 0x1110 is

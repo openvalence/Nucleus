@@ -63,6 +63,8 @@ ReturnStart g_returnAnswer = ReturnStart::queued;
 button::Gesture g_homeGesture = button::Gesture::none;
 button::Gesture g_pairGesture = button::Gesture::none;
 int g_forceHomes = 0;
+// The fake DRV_ALM handoff: what the drive-link task would have raised.
+bool g_driveAlarm = false;
 // Calls through the motion and generator doors: what a refused write must
 // never reach.
 int g_submits = 0;
@@ -127,6 +129,7 @@ std::optional<float> motorSwitchThermVolts() { return std::nullopt; }
 
 button::Gesture homeButtonTake() { return std::exchange(g_homeGesture, button::Gesture::none); }
 button::Gesture pairButtonTake() { return std::exchange(g_pairGesture, button::Gesture::none); }
+bool driveAlarmTake() { return std::exchange(g_driveAlarm, false); }
 
 estop::Reading estopInputRead() { return g_estop; }
 
@@ -181,6 +184,7 @@ struct Rig {
         g_returnAnswer = ReturnStart::queued;
         g_homeGesture = g_pairGesture = button::Gesture::none;
         g_forceHomes = 0;
+        g_driveAlarm = false;
         g_submits = g_patPushes = 0;
         g_switch = MotorSwitchStatus{};
         g_switch.state = motorswitch::State::on;
@@ -793,4 +797,36 @@ TEST_CASE("VD-23: a move with no position is refused, never read as position 0")
     REQUIRE(rig->del.nacks.size() == 1);
     CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
     CHECK(g_submits == 0);
+}
+
+// ---- DRV_ALM: the drive's own alarm reaches the hub as a fault latch (val-091.29) --
+
+TEST_CASE("VD-DRV-1: a drive alarm latches ESTOP, cause fault, through onEstop") {
+    auto rig = std::make_unique<Rig>();
+    REQUIRE_FALSE(rig->hub->estopLatched());
+    g_driveAlarm = true;
+    rig->step();
+    REQUIRE(rig->hub->estopLatched());
+    CHECK(g_census.estop);   // onEstop() reached the motion path first
+    CHECK_FALSE(g_driveAlarm);
+    const auto it = rig->del.lastState.find(0x0003);
+    REQUIRE(it != rig->del.lastState.end());
+    REQUIRE(it->second.size() >= 2);
+    CHECK(std::to_integer<uint8_t>(it->second[1]) == safety_causes::fault);
+}
+
+TEST_CASE("VD-DRV-2: a drive alarm under a held ESTOP keeps that latch's cause and seq") {
+    auto rig = std::make_unique<Rig>();
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::estop)).has_value());
+    rig->step();
+    REQUIRE(rig->hub->estopLatched());
+    const uint16_t seq = rig->hub->estopSeq();
+    g_driveAlarm = true;
+    rig->step();
+    CHECK(rig->hub->estopSeq() == seq);
+    CHECK_FALSE(g_driveAlarm);   // taken: it cannot latch later, after a release
+    const auto it = rig->del.lastState.find(0x0003);
+    REQUIRE(it != rig->del.lastState.end());
+    REQUIRE(it->second.size() >= 2);
+    CHECK(std::to_integer<uint8_t>(it->second[1]) == safety_causes::user);
 }

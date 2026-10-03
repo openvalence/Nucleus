@@ -6,8 +6,9 @@
 // Constraints:
 // - Owner: app_main, and only app_main. selfCheckHoldMotorOff() is its FIRST
 //   call; selfCheckRun() runs once, after hubBegin() and logBridgeBegin();
-//   selfCheckSummary() and selfCheckRemind() run from the liveness loop. No
-//   other task touches the table (cpp-safety.md concurrency).
+//   selfCheckSummary(), selfCheckRemind() and selfCheckDriveLink() run from
+//   the liveness loop. No other task touches the table (cpp-safety.md
+//   concurrency).
 // - MOTOR_EN, PRECHARGE_EN and ESTOP_BYP are driven LOW here and never high
 //   here. Raising the first two is the motor switch module's alone
 //   (ValenceMotorSwitch.h), and app_main hands it this table's verdict: a
@@ -51,5 +52,9 @@ SelfCheckSummary selfCheckSummary();
 // Re-logs the one-line summary at Warn while motor power is held off, so a
 // client that connects long after boot still finds it in the replay ring.
 void selfCheckRemind();
+
+// The post-enable drive-link row (SelfCheck.h postEnable()): records and logs
+// the drive link's probe verdict whenever it changes. Never moves the gate.
+void selfCheckDriveLink();
 
 }  // namespace valence

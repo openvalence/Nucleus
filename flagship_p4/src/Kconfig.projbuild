@@ -1,0 +1,15 @@
+menu "Nucleus"
+
+config NUCLEUS_DRIVE_LINK
+    bool "RS485 Modbus link to the drive"
+    default y
+    help
+        The drive link (system/ValenceDriveLink.cpp): the post-enable probe of
+        the drive's identity and configuration, and the alarm-code and encoder
+        poll. architecture.md section 1: the Modbus bus is for configuration
+        and the encoder audit only, and a production build may omit it. Off,
+        the UART is never installed, RS485_DE stays a GPIO held low, DRV_ALM
+        and DRV_RDY are still watched and still latch ESTOP, and the
+        self-check's drive-link row reads SKIPPED.
+
+endmenu

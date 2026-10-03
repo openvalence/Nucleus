@@ -34,8 +34,11 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
   AUX1/AUX2, IO1-IO5; the Qwiic bus and the header UART open on first use),
   `system/ValenceAccessoryIo.cpp` on the BoardIo task; catalog val-091.71.
 - **Firm and unwired:** board monitor SWIO, PD_INT.
-- **Provisional and unwired:** CLAMP_MON, SHUNT_TEMP, RS485 TX/RX/DE,
-  DRV_ALM, DRV_RDY.
+- **Provisional, wired, drive status not on the wire:** RS485 TX/RX/DE and
+  DRV_ALM/DRV_RDY, `system/ValenceDriveLink.cpp` on its own task. A DRV_ALM
+  alarm latches ESTOP, cause fault; the link's probe and poll reach a client
+  only as the self-check's drive-link row and log lines (catalog val-091.73).
+- **Provisional and unwired:** CLAMP_MON, SHUNT_TEMP.
 - **ADC1 has ONE reader**, the motor switch task: every ADC1 pad (MSW_IMON,
   EN_NODE, THERM, and CLAMP_MON / SHUNT_TEMP when they land) joins its poll.
   A second reader's collision reads the EN node as NaN, which cuts motor
@@ -95,12 +98,26 @@ into an unpowered drive and move position truth without the carriage.
 
 | Function | Net | P4 pad | Firmware today | Firmness | Owed |
 |---|---|---|---|---|---|
-| RS485 transmit data into the transceiver (U9, THVD1450) D | `/DRV.RS485_TX` | GPIO33, pad 50 | nothing | Provisional | val-091.29; test pads hw-kcu |
-| RS485 receive from U9 R | `/DRV.RS485_RX` | GPIO32, pad 46 | nothing | Provisional | val-091.29 |
-| RS485 direction: U9 DE and /RE tied, HIGH transmits | `/DRV.RS485_DE` | GPIO41, pad 49 | nothing | Provisional | val-091.29 |
-| Drive alarm (WR, opto NPN to COM), 10k pull-up + 1k R20 | `/DRV.DRV_ALM` | GPIO31, pad 51 | nothing | Provisional | val-091.29 |
-| Drive ready / following error (RDY), 10k pull-up + 1k R21 | `/DRV.DRV_RDY` | GPIO28, pad 52 | nothing | Provisional | val-091.29 |
-| Encoder index ZO | not brought out | none | n/a: absolute position comes over Modbus (SPEC 2026-09-23 drive-connector row) | Firm | none |
+| RS485 transmit data into the transceiver (U9, THVD1450) D | `/DRV.RS485_TX` | GPIO33, pad 50 | HP UART1 (`BOARD_UART_RS485`) in RS485 half-duplex mode, 8N1 (`system/ValenceDriveLink.cpp`); a Modbus RTU master on the DriveLnk task (`system/ModbusRtu.h`: FC 0x03/0x06/0x10, CRC, three attempts, a reply deadline, the 3.5-character gap) that only ever reads (`system/AimDrive.h`) | Provisional | bench val-091.69; test pads hw-kcu |
+| RS485 receive from U9 R | `/DRV.RS485_RX` | GPIO32, pad 46 | UART1 RX with the internal pull-up: U9's R is high-impedance while DE (tied to /RE) is high | Provisional | bench val-091.69 |
+| RS485 direction: U9 DE and /RE tied, HIGH transmits | `/DRV.RS485_DE` | GPIO41, pad 49 | Driven LOW from `app_main`'s second line (`driveLinkHoldIdle()`; hw-3jk: the tied pins float near 1.65 V until driven). Then UART1's RTS, routed only after RS485 half-duplex mode has set it low: high for our frames, low again at TX_DONE. Built without `CONFIG_NUCLEUS_DRIVE_LINK` it stays a GPIO held low | Provisional | pull-down hw-3jk; bench val-091.69 |
+| Drive alarm (WR, opto NPN to COM), 10k pull-up + 1k R20 | `/DRV.DRV_ALM` | GPIO31, pad 51 | Input, internal pull-up beside the board's; sampled every 5 ms on the DriveLnk task, 20 ms debounce (`aim::StatusLines`). Acted on only once the motor switch has been `on` for `aim::kSettleMs` (1 s): an assertion then, or one already there, hands the hub delegate one alarm, which latches ESTOP, cause fault (`ValenceDevice.cpp` `tick`). Read normally open (0x07 even); the probe fails a drive set otherwise | Provisional | bench val-091.69; channel val-091.73 |
+| Drive ready / following error (RDY), 10k pull-up + 1k R21 | `/DRV.DRV_RDY` | GPIO28, pad 52 | Input, internal pull-up; debounced like DRV_ALM and reported (`driveLinkStatus().ready`, the liveness line), never acted on: it opens whenever the following error passes 0.5 degrees (manual p. 5), which motion can do | Provisional | channel val-091.73; bench val-091.69 |
+| Encoder index ZO | not brought out | none | n/a: absolute position comes over Modbus (SPEC 2026-09-23 drive-connector row), the 0x16/0x17 pair polled while the link is up | Firm | audit val-091.74 |
+
+The drive link probes once motor power has held `aim::kSettleMs`: the
+identity register (0x15 reads address 1) across 19200, 115200, 38400 and
+9600 baud, then what the LP core's quadrature needs (0x00 = 0, 0x01 = 1,
+0x19 = 2, 0x07 even), the stall-alarm digit (0x18; the factory 600 has it
+off), the alarm code (0x0E), the temperature (0x12) and the encoder pair. The
+boot self-check's drive-link row is the one POST-ENABLE row: pending at boot,
+recorded when a probe's verdict changes, and never a gate on motor power
+(`SelfCheck.h` `postEnable()`). After a probe that read the whole map the
+alarm code and the encoder are polled, one read every 50 ms, and a DRV_ALM
+edge reads the alarm code next [host-verified 2026-10-02 -- `pio test -e
+native` suites test_drive_link 35/291, test_self_check 22/147,
+test_valence_device 25/901, each binary run directly, exit 0; `pio run -d
+flagship_p4` SUCCESS; bench owed, val-091.69].
 
 ## E-stop, buttons, LED, debug
 

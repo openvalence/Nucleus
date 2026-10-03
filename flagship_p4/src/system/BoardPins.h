@@ -60,6 +60,9 @@
 #define BOARD_GPIO_RS485_DE 41   // DE and /RE tied: HIGH transmits
 #define BOARD_GPIO_DRV_ALM  31   // drive WR alarm: opto NPN to COM, 10k pull-up
 #define BOARD_GPIO_DRV_RDY  28   // drive RDY / following error, same stage
+// The HP UART the drive link owns (ValenceDriveLink.cpp), in RS485
+// half-duplex mode: its RTS is DE. Never UART0, whose TX is G37's ROM log.
+#define BOARD_UART_RS485    1
 
 // ---- external E-stop (J9) ---------------------------------------------------
 // (NC, NO): 0/1 normal, 1/0 pressed, 1/1 unplugged, 0/0 wiring fault. The stop
