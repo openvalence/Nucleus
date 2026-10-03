@@ -37,6 +37,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string_view>
 
 #include "valence/channel/catalog.hpp"
 #include "valence/channel/log_channel.hpp"
@@ -185,6 +186,13 @@ inline constexpr uint8_t kPlanStyleHold = 4;
 // indexed by source id: control-owner's option labels. Same rule and the
 // same static_assert home as the preset mirror above.
 inline constexpr std::array<const char*, 4> kSourceLabels{"Jog", "Stream", "Classic", "Advanced"};
+
+// Subgroups the folded categories became (RFC-094, RENDERING §3): every drawn
+// field of a `motion` entry that was `tuning`, and of a `system` entry that
+// was `library`, carries one. Masks and retired padding are never drawn and
+// stay ungrouped.
+inline constexpr std::string_view kTuningGroup = "Tuning";
+inline constexpr std::string_view kLibraryGroup = "Library";
 
 // ---- motion-anomaly EVENT: the `body` (40) sub-map keys ---------------------
 // These are the CHANNEL'S OWN schema keys, exactly as valence::safety_body is
@@ -698,7 +706,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // PatternEngine live snapshot.  [1+1+4+4+4+4+1+1 = 20 B]. Append-only:
     // enabled_mask (field 7) and background_run (field 8, settingKey 7 on the
     // paired 0x3200 pattern-cmd intent) keep bytes 0..18 at their offsets.
-    // category = user; settingChannel = 0x0102 pattern-cmd.
+    // category = generator; settingChannel = ch::pattern_cmd.
     //
     // `pattern` option labels are PatternEngine::patternName()'s own strings,
     // index-aligned with the wire value exactly as setPattern(idx) consumes
@@ -720,7 +728,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = valence::ui_categories::control,
+                .hasCategory = true, .category = valence::ui_categories::generator,
                 .hasSettingChannel = true, .settingChannel = ch::pattern_cmd,
                 .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "running",   .type = PackedFieldType::u8,  .unit = "",  .scale = 1.0f,
@@ -876,8 +884,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STREAM, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 333.0f,
                 .defaultPriority = Priority::elevated,
-                // ui_categories::control's own note names "streams" explicitly.
-                .hasCategory = true, .category = valence::ui_categories::control,
+                // ui_categories::generator's own note names "streams" explicitly.
+                .hasCategory = true, .category = valence::ui_categories::generator,
                 .hasRank = true, .rank = valence::ui_ranks::control});
     // input.* (RFC-071): how a client finds the motion input without a name.
     c.addLayoutField({.name = "target_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
@@ -922,7 +930,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STREAM, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 50.0f,
                 .defaultPriority = Priority::elevated,
-                .hasCategory = true, .category = valence::ui_categories::control,
+                .hasCategory = true, .category = valence::ui_categories::generator,
                 .streamKind = valence::stream_kinds::segments,
                 .hasRank = true, .rank = valence::ui_ranks::control});
     c.addLayoutField({.name = "target_norm",  .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
@@ -957,11 +965,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 45.0f,
                 .defaultPriority = Priority::elevated,
-                .hasCategory = true, .category = valence::ui_categories::tuning,
+                .hasCategory = true, .category = valence::ui_categories::motion,
                 .hasRank = true, .rank = valence::ui_ranks::diagnostic});
     c.addBitfieldField({.name = "flags", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
-                        .group = "Active plan",
+                        .group = kTuningGroup,
                         .desc = "Active plan and planner mode bits"},
                        {"active", "live_mode", "grad_mode"});
     // RFC-035: the plan.* role family — a generic plan-strip widget finds this
@@ -969,28 +977,28 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // documented /plan/i entry-name regex (which silently fails on a hub that
     // names the concept differently).
     c.addSelectField({.name = "style", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .group = "Active plan",
+                      .group = kTuningGroup,
                       .desc = "Planning mode of the motion core",
                       .role = roles::plan_style},
                      {"idle", "waveform", "chase", "settle", "hold"});
     c.addLayoutField({.name = "start_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = "Active plan", .desc = "Start of the current plan",
+                      .group = kTuningGroup, .desc = "Start of the current plan",
                       .role = roles::plan_start});
     c.addLayoutField({.name = "end_norm",   .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = "Active plan", .desc = "End of the current plan",
+                      .group = kTuningGroup, .desc = "End of the current plan",
                       .role = roles::plan_end});
     c.addLayoutField({.name = "cur_norm",   .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = "Active plan", .desc = "Setpoint the plan is producing now",
+                      .group = kTuningGroup, .desc = "Setpoint the plan is producing now",
                       .role = roles::plan_current});
     c.addLayoutField({.name = "cur_vel",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f,
-                      .group = "Active plan", .desc = "Plan velocity right now, signed",
+                      .group = kTuningGroup, .desc = "Plan velocity right now, signed",
                       .role = roles::plan_velocity});
     c.addLayoutField({.name = "duration_us", .type = PackedFieldType::u32, .unit = "us",    .scale = 1.0f,
-                      .group = "Active plan", .desc = "Total duration of the current plan",
+                      .group = kTuningGroup, .desc = "Total duration of the current plan",
                       .role = roles::plan_duration,
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "elapsed_us",  .type = PackedFieldType::u32, .unit = "us",    .scale = 1.0f,
-                      .group = "Active plan", .desc = "Time elapsed in the current plan",
+                      .group = kTuningGroup, .desc = "Time elapsed in the current plan",
                       .role = roles::plan_elapsed,
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     };
@@ -1068,81 +1076,81 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = valence::ui_categories::tuning,
+                .hasCategory = true, .category = valence::ui_categories::motion,
                 .hasRank = true, .rank = valence::ui_ranks::diagnostic,
                 .role = valence::channel_roles::anomaly_summary});
     c.addLayoutField({.name = "plans",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Planner", .desc = "Motion plans computed successfully"});
+                      .group = kTuningGroup, .desc = "Motion plans computed successfully"});
     // On a rejection the previous plan keeps running.
     c.addLayoutField({.name = "failures", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Planner", .desc = "Commands the planner rejected"});
+                      .group = kTuningGroup, .desc = "Commands the planner rejected"});
     c.addLayoutField({.name = "anomalies", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Planner", .desc = "Planner anomalies of every kind"});
+                      .group = kTuningGroup, .desc = "Planner anomalies of every kind"});
     c.addSelectField({.name = "mode",      .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .group = "Planner", .desc = "Planning mode of the motion core"},
+                      .group = kTuningGroup, .desc = "Planning mode of the motion core"},
                      {"idle", "waveform", "chase", "settle"});
     // Options are indexed by kinetic::PlanKind and the enum is APPEND-ONLY.
     // "cubic" (=3) arrived with curve_policy/ForceC1: a C1 cubic and a C2 quintic
     // are different curves and the client must be able to tell them apart, so
     // this list grows rather than collapsing both into "hermite".
     c.addSelectField({.name = "plan_kind", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .group = "Planner", .desc = "Curve type of the active plan"},
+                      .group = kTuningGroup, .desc = "Curve type of the active plan"},
                      {"none", "quintic", "ruckig", "cubic"});
     // Per-kind breakdown — names are kinetic::AnomalyType's, index 0 is
     // the engine's own "none" placeholder and is never counted, so it is
     // rank hidden: a permanent zero is padding, not a gauge.
     c.addLayoutField({.name = "anom_none",        .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "Placeholder slot, never counts",
+                      .group = kTuningGroup, .desc = "Placeholder slot, never counts",
                       .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "anom_plan_failed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "Commands that could not be planned"});
+                      .group = kTuningGroup, .desc = "Commands that could not be planned"});
     c.addLayoutField({.name = "anom_settle",      .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "Moves braked to rest after the stream stopped"});
+                      .group = kTuningGroup, .desc = "Moves braked to rest after the stream stopped"});
     c.addLayoutField({.name = "anom_endvel_clamped", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "Handoff speed cut to stay inside the window"});
+                      .group = kTuningGroup, .desc = "Handoff speed cut to stay inside the window"});
     c.addLayoutField({.name = "anom_deadline_stretched", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "Moves stretched past their given time"});
+                      .group = kTuningGroup, .desc = "Moves stretched past their given time"});
     c.addLayoutField({.name = "anom_waveform_fallback",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "Sender curves reshaped for breaking a limit"});
+                      .group = kTuningGroup, .desc = "Sender curves reshaped for breaking a limit"});
     c.addLayoutField({.name = "anom_waveform_scaled",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "Strokes shortened to finish on time"});
+                      .group = kTuningGroup, .desc = "Strokes shortened to finish on time"});
     // Retired kind (centering left the engine 2026-09-03); the counter stays
     // in the layout so the per-kind table keeps its positions, and hidden so
     // no renderer draws a permanent zero (sd-djg).
     c.addLayoutField({.name = "anom_waveform_centered",   .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "Shortened strokes re-centered on their midpoint",
+                      .group = kTuningGroup, .desc = "Shortened strokes re-centered on their midpoint",
                       .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "anom_handoff_bounded",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies",
+                      .group = kTuningGroup,
                       .desc = "Arrival speeds bounded for the next segment"});
     c.addLayoutField({.name = "anom_waveform_smoothed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies",
+                      .group = kTuningGroup,
                       .desc = "Curves flattened to keep timing and stroke"});
     c.addLayoutField({.name = "anom_dwell_zeroed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies",
+                      .group = kTuningGroup,
                       .desc = "Stale arrival speeds ignored on held positions"});
     c.addLayoutField({.name = "plan_us_last", .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
-                      .group = "Plan time", .desc = "Compute time of the latest plan",
+                      .group = kTuningGroup, .desc = "Compute time of the latest plan",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "plan_us_max",  .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
-                      .group = "Plan time", .desc = "Worst plan compute time since reset",
+                      .group = kTuningGroup, .desc = "Worst plan compute time since reset",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "plan_us_avg",  .type = PackedFieldType::f32, .unit = "us", .scale = 1.0f,
-                      .group = "Plan time", .desc = "Smoothed average plan compute time",
+                      .group = kTuningGroup, .desc = "Smoothed average plan compute time",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     c.addLayoutField({.name = "sync_bundles",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Stream ingress", .desc = "Motion bundles accepted over Valence"});
+                      .group = kTuningGroup, .desc = "Motion bundles accepted over Valence"});
     c.addLayoutField({.name = "sync_samples",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Stream ingress", .desc = "Motion samples decoded from bundles"});
+                      .group = kTuningGroup, .desc = "Motion samples decoded from bundles"});
     c.addLayoutField({.name = "sync_enqueued", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Stream ingress", .desc = "Samples that reached the motion core"});
+                      .group = kTuningGroup, .desc = "Samples that reached the motion core"});
     c.addLayoutField({.name = "sync_dropped",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Stream ingress",
+                      .group = kTuningGroup,
                       .desc = "Samples dropped as late, unusable or refused"});
     c.addLayoutField({.name = "sync_seg_bundles", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Stream ingress", .desc = "Bundles that carried timed segments"});
+                      .group = kTuningGroup, .desc = "Bundles that carried timed segments"});
     c.addLayoutField({.name = "reset_gen", .type = PackedFieldType::u16, .unit = "", .scale = 1.0f,
-                      .group = "Planner",
+                      .group = kTuningGroup,
                       .desc = "Increments on every counter reset",
                       .role = roles::meta_reset_gen});
     };
@@ -1172,26 +1180,26 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::EVENT, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = valence::ui_categories::tuning,
+                .hasCategory = true, .category = valence::ui_categories::motion,
                 .hasRank = true, .rank = valence::ui_ranks::diagnostic,
                 .role = valence::channel_roles::events_anomaly});
     c.setEventKinds({"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
                      "waveform_fallback", "waveform_scaled", "waveform_centered",
                      "handoff_bounded", "waveform_smoothed", "dwell_zeroed"});
     c.addSchemaField({.key = anom_body::kind, .name = "kind", .type = CborFieldType::uint_t, .unit = "",
-                      .desc = "Anomaly kind, same as the event kind"});
+                      .group = kTuningGroup, .desc = "Anomaly kind, same as the event kind"});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",
-                      .desc = "Rolling event id, wraps"});
+                      .group = kTuningGroup, .desc = "Rolling event id, wraps"});
     c.addSchemaField({.key = anom_body::target, .name = "target", .type = CborFieldType::f32_t,
-                      .unit = "norm",
+                      .unit = "norm", .group = kTuningGroup,
                       .desc = "Commanded position, 0 to 1 across the window"});
     c.addSchemaField({.key = anom_body::detail, .name = "detail", .type = CborFieldType::f32_t, .unit = "",
-                      .desc = "Speed, duration or stroke fraction, per kind"});
+                      .group = kTuningGroup, .desc = "Speed, duration or stroke fraction, per kind"});
     // unit_ids us, not hub_s: a schema field carries no scale and the registry
     // has no microsecond hub-time unit (RFC-086), so the wire states this
     // stamp's magnitude only, never which clock it was read from.
     c.addSchemaField({.key = anom_body::t_us, .name = "t_us", .type = CborFieldType::uint_t, .unit = "us",
-                      .desc = "Motion core time of the event",
+                      .group = kTuningGroup, .desc = "Motion core time of the event",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
     };
 
@@ -1238,7 +1246,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::elevated,
-                .hasCategory = true, .category = valence::ui_categories::tuning,
+                .hasCategory = true, .category = valence::ui_categories::motion,
                 .hasSettingChannel = true, .settingChannel = ch::modes_set,
                 .hasRank = true, .rank = valence::ui_ranks::advanced});
     // RETIRED padding, see the entry comment above. Rank hidden and no
@@ -1254,7 +1262,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // Trades a little smoothness for no overshoot micromotion.
     c.addSelectField({.name = "overshoot_clamp", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(factory::overshoot_clamp),
-                      .group = "Motion behavior",
+                      .group = kTuningGroup,
                       .desc = "Keep smoothed curves from overshooting their points",
                       .settingKey = 4, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true,
@@ -1285,7 +1293,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // wire value is its index, so re-pointing 0 or 1 would silently re-label a
     // value another machine in this ecosystem already publishes.
     c.addSelectField({.name = "motion_backend", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .group = "Motion behavior",
+                      .group = kTuningGroup,
                       .desc = "Signal path that drives the motor",
                       .flags = valence::setting_flags::advanced,
                       .hasRank = true, .rank = valence::ui_ranks::advanced},
@@ -1295,7 +1303,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     if (feat.has_drive) {
         c.addSelectField({.name = "home_style", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .dflt = SettingDefault::ofInt(0),
-                          .group = "Motion behavior",
+                          .group = kTuningGroup,
                           .desc = "How the machine finds home",
                           .settingKey = 6, .flags = valence::setting_flags::advanced,
                           .hasSettingKey = true,
@@ -1308,7 +1316,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // it while a grant is live.
     c.addSelectField({.name = "schedule_horizon", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0),
-                      .group = "Streaming",
+                      .group = kTuningGroup,
                       .desc = "How far ahead segment players may schedule",
                       .settingKey = 7, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true,
@@ -1319,7 +1327,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // gated to a homed rail at rest with no source and no override.
     c.addSelectField({.name = "flipped", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0),
-                      .group = "Motion behavior",
+                      .group = kTuningGroup,
                       .desc = "Rail mounted reversed, position 0 at the far end",
                       .role = roles::axis_flipped,
                       .settingKey = 8, .hasSettingKey = true,
@@ -1327,17 +1335,18 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                      {"off", "on"});
     };
 
-    // ---- "kinetic-*" — STATE, tuning -------------------------------------
+    // ---- "kinetic-*" — STATE, motion, subgroup Tuning ---------------------
     // The motion engine's live-tune surface. No controls outside Valence.
     //
     // THREE CHANNELS, TWO TABS. A settings channel is capped at 8 settings
     // because its enabled_mask is a bitfield8 and bit i gates the i-th
     // setting of ITS layout, a WIRE limit the user never sees: SPEC §8.8
     // ("a category spans channels; two channels in the same category merge
-    // into one tab") lets the chase and waveform cards share category tuning
-    // and differ only by `group`. kinetic-limits holds the planner CEILINGS,
-    // which are commissioning (RFC-079), so it alone carries category setup;
-    // it shares no channel with tuning, so nothing had to split.
+    // into one tab") lets the chase and waveform cards share category motion
+    // and subgroup Tuning (RFC-094). kinetic-limits holds the planner
+    // CEILINGS, which are commissioning (RFC-079), so it alone carries
+    // category setup; it shares no channel with the Tuning cards, so nothing
+    // had to split.
     //
     // ONE SHARED WRITER (0x0105). `settingChannel` is per-entry and
     // `setting_key` is a key WITHIN that writer, so several STATE channels
@@ -1399,49 +1408,49 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = valence::ui_categories::tuning,
+                .hasCategory = true, .category = valence::ui_categories::motion,
                 .hasSettingChannel = true, .settingChannel = ch::kinetic_set,
                 .hasRank = true, .rank = valence::ui_ranks::advanced});
     c.addSelectField({.name = "chase_ff", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(1), .group = "Sample streams",
+                      .dflt = SettingDefault::ofInt(1), .group = kTuningGroup,
                       .desc = "Aim where the sender is heading",
                       .settingKey = 6, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addSelectField({.name = "chase_accel_ff", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(1), .group = "Sample streams",
+                      .dflt = SettingDefault::ofInt(1), .group = kTuningGroup,
                       .desc = "Also follow the sender's acceleration",
                       .settingKey = 7, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addLayoutField({.name = "chase_gain", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.5f,
-                      .dflt = SettingDefault::ofFloat(0.9f), .group = "Sample streams",
+                      .dflt = SettingDefault::ofFloat(0.9f), .group = kTuningGroup,
                       .desc = "Speed estimate damping, lower is steadier",
                       .step = 0.05f, .settingKey = 8, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     // Too far overshoots at turns.
     c.addLayoutField({.name = "chase_lookahead", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f,
-                      .dflt = SettingDefault::ofFloat(1.3f), .group = "Sample streams",
+                      .dflt = SettingDefault::ofFloat(1.3f), .group = kTuningGroup,
                       .desc = "Aim-ahead distance in stream intervals",
                       .step = 0.5f, .settingKey = 9, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "chase_dense_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 10.0f, .max = 500.0f,
-                      .dflt = SettingDefault::ofFloat(60.0f), .group = "Sample streams",
+                      .dflt = SettingDefault::ofFloat(60.0f), .group = kTuningGroup,
                       .desc = "Streams faster than this get predictive aiming",
                       .settingKey = 10, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true});
     c.addSelectField({.name = "chase_aim_extrap", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(1), .group = "Sample streams",
+                      .dflt = SettingDefault::ofInt(1), .group = kTuningGroup,
                       .desc = "Second-order aiming, sharper but can overshoot",
                       .settingKey = 11, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true},
                      {"off", "on"});
     c.addLayoutField({.name = "handoff_k", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f,
-                      .dflt = SettingDefault::ofFloat(1.5f), .group = "Sample streams",
+                      .dflt = SettingDefault::ofFloat(1.5f), .group = kTuningGroup,
                       .desc = "Handoff speed bound, as a multiple of the chord",
                       .step = 0.1f, .settingKey = 12, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
@@ -1459,14 +1468,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = valence::ui_categories::tuning,
+                .hasCategory = true, .category = valence::ui_categories::motion,
                 .hasSettingChannel = true, .settingChannel = ch::kinetic_set,
                 // Unlike its kinetic_limits/kinetic_chase siblings, none of these fields carry
                 // setting_flags::advanced in code — rank matches that: control, not
                 // advanced, so it stays visible without an advanced-affordance gate.
                 .hasRank = true, .rank = valence::ui_ranks::control});
     c.addSelectField({.name = "curve_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(0), .group = "Curve",
+                      .dflt = SettingDefault::ofInt(0), .group = kTuningGroup,
                       .desc = "Keep the sender's curve or force a smoothness class",
                       .settingKey = 13, .hasSettingKey = true},
                      {"follow client", "force C1", "force C2"});
@@ -1476,24 +1485,24 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // (include/motion/EngineConfigMap.h), which is also what runs the four
     // ordinals of policies deleted 2026-09-02 as blend.
     c.addSelectField({.name = "infeasible_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(1), .group = "Infeasible moves",
+                      .dflt = SettingDefault::ofInt(1), .group = kTuningGroup,
                       .desc = "Handling for moves that cannot finish in time",
                       .settingKey = 14, .hasSettingKey = true},
                      {"stretch", "blend"});
     c.addLayoutField({.name = "smooth_budget", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
-                      .dflt = SettingDefault::ofFloat(0.5f), .group = "Infeasible moves",
+                      .dflt = SettingDefault::ofFloat(0.5f), .group = kTuningGroup,
                       .desc = "Smoothness spent before amplitude is touched",
                       .step = 0.05f, .settingKey = 16, .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "amplitude_budget", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
-                      .dflt = SettingDefault::ofFloat(0.5f), .group = "Infeasible moves",
+                      .dflt = SettingDefault::ofFloat(0.5f), .group = kTuningGroup,
                       .desc = "Stroke length spent before smoothness is touched",
                       .step = 0.05f, .settingKey = 17, .hasSettingKey = true, .hasStep = true});
     // More steps: smoother, slower to settle.
     c.addLayoutField({.name = "blend_steps", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 10.0f,
-                      .dflt = SettingDefault::ofInt(6), .group = "Infeasible moves",
+                      .dflt = SettingDefault::ofInt(6), .group = kTuningGroup,
                       .desc = "How gradually a budget is spent",
                       .settingKey = 18, .hasSettingKey = true});
     // TODO(sd-6b2.4): `infeasible_blend` (SystemState::sm_tune_infeas_blend,
@@ -1504,7 +1513,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // keys stay released.
     c.addLayoutField({.name = "settle_grace_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 200.0f,
-                      .dflt = SettingDefault::ofFloat(30.0f), .group = "Settling",
+                      .dflt = SettingDefault::ofFloat(30.0f), .group = kTuningGroup,
                       .desc = "Wait after a stream stops before braking",
                       .settingKey = 20, .hasSettingKey = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
@@ -1516,7 +1525,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "drive-tune" -- STATE, the AIM drive's own registers ---------------
-    // Category `hardware`, not `tuning`: this writes the DRIVE, and its unit is
+    // Category `hardware`, not motion's Tuning: this writes the DRIVE, its unit is
     // the drive's ((r/min)/s), not the machine's mm/s2. Filing it beside the
     // planner knobs would invite reading one as the other. Rank `control` and
     // no advanced flag, so it is reachable without an advanced affordance.
@@ -1578,7 +1587,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = valence::ui_categories::control,
+                .hasCategory = true, .category = valence::ui_categories::generator,
                 .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd,
                 .hasRank = true, .rank = valence::ui_ranks::control});
     // RETIRED padding (RFC-093). Rank hidden and no setting_key: never
@@ -1721,7 +1730,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // apBaseLayoutIndex(base), and the shared writer ch::pattern_advanced_cmd
     // keys this entry's six fields apModKeyBase(base) onward in field order,
     // the arithmetic ValenceDevice::applyPatternAdvanced runs in reverse.
-    // Category control, so all nine advanced-pattern cards merge into one
+    // Category generator, so all nine advanced-pattern cards merge into one
     // tab; `advanced`-flagged, the deep-customization layer under the base
     // controls.
     //   [1*6 fields + 1 mask = 7 B, x8 channels]
@@ -1732,7 +1741,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
                     .access = AccessLevel::watch, .maxRateHz = 0.0f,
                     .defaultPriority = Priority::background,
-                    .hasCategory = true, .category = valence::ui_categories::control,
+                    .hasCategory = true, .category = valence::ui_categories::generator,
                     .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd,
                     .hasRank = true, .rank = valence::ui_ranks::advanced,
                     .hasModTarget = true, .modTargetChannel = ch::pattern_advanced,
@@ -1829,7 +1838,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STORE, .dir = Direction::h2c,
                 .access = AccessLevel::control, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = valence::ui_categories::library,
+                .hasCategory = true, .category = valence::ui_categories::system,
                 .hasRank = true, .rank = valence::ui_ranks::detail});
     c.addStoreDescriptor({.storeId = kPresetStoreId, .kind = kPresetKind,
                           .capacity = kPresetCapacity,
@@ -1855,13 +1864,16 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = valence::ui_categories::library,
+                .hasCategory = true, .category = valence::ui_categories::system,
                 .hasSettingChannel = true, .settingChannel = ch::pattern_presets_cmd,
                 .hasRank = true, .rank = valence::ui_ranks::detail,
                 .hasStoreId = true, .storeId = kPresetStoreId});
-    c.addLayoutField({.name = "generation", .type = PackedFieldType::u16, .unit = "count", .scale = 1.0f});
-    c.addLayoutField({.name = "count",      .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
-    c.addLayoutField({.name = "capacity",   .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
+    c.addLayoutField({.name = "generation", .type = PackedFieldType::u16, .unit = "count", .scale = 1.0f,
+                      .group = kLibraryGroup});
+    c.addLayoutField({.name = "count",      .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f,
+                      .group = kLibraryGroup});
+    c.addLayoutField({.name = "capacity",   .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f,
+                      .group = kLibraryGroup});
     };
 
     // ---- "move" — INTENT, control, 20 Hz, critical --------------------------
@@ -1884,7 +1896,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .defaultPriority = Priority::critical,
                 // THE primary positional command — the machine's face, same rank
                 // as motion's own hero fields it commands.
-                .hasCategory = true, .category = valence::ui_categories::control,
+                .hasCategory = true, .category = valence::ui_categories::generator,
                 .hasRank = true, .rank = valence::ui_ranks::hero});
     c.addSchemaField({.key = 1, .name = "position", .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2000.0f,
@@ -1939,7 +1951,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 20.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = valence::ui_categories::control,
+                .hasCategory = true, .category = valence::ui_categories::generator,
                 .hasRank = true, .rank = valence::ui_ranks::control});
     // Bounds mirror the 0x0082 twin (see the config-set note above for why the
     // prose lives only on the STATE side).

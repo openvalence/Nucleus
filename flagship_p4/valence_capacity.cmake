@@ -9,7 +9,7 @@
 # the machine budget is 48 / 216 / 160 / 192. Layout rose from 200 with the
 # RFC-095 dwells (val-091.67: 17 layout fields), which would otherwise have
 # cost an accessory. Machine use is 44 entries, 210 layout, 123 schema and
-# 25,659 B encoded [verified 2026-10-02 -- valencesim headroom line]. Each
+# 25,471 B encoded [verified 2026-10-02 -- valencesim headroom line, RFC-094]. Each
 # accessory gets the per-accessory budget below. The accessory count is
 # the most that keeps the total entries at or under catalog_max_entries (256),
 # the floor every client is built to handle: (256 - 48) / 31 = 6.
