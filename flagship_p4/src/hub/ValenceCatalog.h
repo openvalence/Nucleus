@@ -29,11 +29,7 @@
 //   there is no packed struct to static_assert against.
 // See: Valence spec/AUTHORING.md ("you want X on screen -> you author Y" —
 // read it BEFORE editing annotations here), SPEC.md and registry.yaml
-// (Valence repo), docs/valence/CHANNEL-MAP.md (channel id grid /
-// renumber history).
-// Every SlopSyncHubService.cpp and SlopDriveHubDelegate reference below is a
-// citation of the ARCHIVED S3-era reference repo (SlopDrive-32), never a file
-// in this tree; this board's twin of that code is ValenceHub.cpp.
+// (Valence repo).
 
 #include <array>
 #include <cstdint>
@@ -48,15 +44,15 @@ namespace valence {
 
 // Device-catalog channel ids. The reserved 0x0001-0x0007 range is owned by
 // the registry (valence::channels::); everything >=0x0080 is this device's
-// own allocation. Named here so buildValenceCatalog() AND the telemetry
-// publisher in SlopSyncHubService reference ONE definition — a literal in
-// only one of the two would be a silent wire mismatch.
+// own allocation. Named here so buildValenceCatalog() AND the publishers in
+// ValenceDevice.cpp reference ONE definition — a literal in only one of the
+// two would be a silent wire mismatch.
 // Device ids follow the 0xCDSS grid: C=class (1 STATE/2 STREAM/3 INTENT/
 // 4 EVENT/5 STORE), D=domain (0 machine/1 motion/2 pattern), S=family,
 // S=member (member 0 = family master; a twin channel across class bands
 // sharing domain+family+member is a MIRROR; family 0xF = admin/meta).
-// Per-line `(was 0xXXXX)` names the immediately preceding id — full renumber
-// history lives in docs/valence/CHANNEL-MAP.md's generated table, not here.
+// Per-line `(was 0xXXXX)` names the immediately preceding id; older history
+// lives in git, not here.
 // A renumber moves the etag, which is the designed re-fetch mechanism, not a
 // break; 0x0080-0x7FFF is device-allocated space per the registry.
 namespace ch {
@@ -213,16 +209,15 @@ inline constexpr uint8_t t_us   = 5;  // engine time at record, µs (low 32 bits
 // RFC-016 in practice: "capability discovery IS catalog introspection". A hub
 // with no INA228 must not advertise a power channel that would publish zeros
 // forever — a client cannot tell "0.0 A" from "no sensor", and a UI that shows
-// a dead gauge is the same ground-truth violation as the WebUI's dead anomaly
-// panel this milestone exists to kill. So the channel is ABSENT, and its
-// absence IS the answer to "does this machine measure current?".
+// a dead gauge violates the ground-truth doctrine. So the channel is ABSENT,
+// and its absence IS the answer to "does this machine measure current?".
 //
 // Defaults are all-false so the HOST tests and any future non-motorized build
-// get the minimal catalog unless they say otherwise; the firmware fills these
-// in from MotorDriver::hasCurrentSensor()/hasPowerMonitor() at construction.
+// get the minimal catalog unless they say otherwise; the board's values come
+// from boardFeatures() (ValenceDevice.h).
 struct DeviceFeatures {
-    bool has_current_sensor = false;  // MotorDriver::hasCurrentSensor()
-    bool has_power_monitor  = false;  // MotorDriver::hasPowerMonitor() (die temp)
+    bool has_current_sensor = false;  // bus current measured
+    bool has_power_monitor  = false;  // power monitor die temperature
     // Gates the MOTION PLANE: the motion/plan/diag/tuning STATE channels, both
     // c2h motion streams, move/home, the anomaly event, and the two
     // machine-domain channels whose content is motion (odometer 0x1020,
@@ -244,15 +239,13 @@ struct DeviceFeatures {
 };
 
 // ---- Factory DEFAULTS advertised as RFC-009 `default` annotations -----------
-// MIRROR of getDefaultConfig() in include/system/config_api.h, which cannot be
-// included here: it pulls in <Arduino.h>, and this header must stay hardware-
-// free (the native test suite and the sim both build it with nothing but the
-// library). Duplication is forced so drift is caught, not tolerated:
-// SlopSyncHubService.cpp, which DOES include config_api.h, carries a
-// static_assert per constant below — change a factory default there and the
-// FIRMWARE fails to compile until this table follows.
+// MIRROR of the DEFAULT_* constants in valence_config.h, which this header
+// does not include: it must stay hardware-free (the native suites and the sim
+// build it with nothing but the library). ValenceHub.cpp static_asserts each
+// mirrored constant against its source, so a drifted default fails the
+// firmware build until this table follows.
 namespace factory {
-inline constexpr float window_min  = 0.0f;        // getDefaultConfig().min_position_mm
+inline constexpr float window_min  = 0.0f;
 inline constexpr float window_max  = 500.0f;      // DEFAULT_MAX_RAIL_MM
 inline constexpr float jog_speed  = 50.0f;       // DEFAULT_JOG_MAX_SPEED_MM_S
 inline constexpr float jog_accel  = 200.0f;      // DEFAULT_JOG_ACCEL_MM_S2
@@ -262,11 +255,10 @@ inline constexpr float input_jerk  = 2000000.0f;  // DEFAULT_INPUT_MAX_JERK_MM_S
 // max_rail is a real savable setting, not derived truth — see the field
 // comment on 0x0081 below. Same mirror rule as its siblings above.
 inline constexpr float max_rail    = 500.0f;      // DEFAULT_MAX_RAIL_MM
-// Mode defaults (0x008A). Same forced-duplication rule as above — each one
-// is static_assert'd against its real source in SlopSyncHubService.cpp.
-// `blend_mode` and `stream_speed_mode` have no `.dflt` here: the settings they
-// defaulted were retired from 0x008A (see the field comments there). Do not
-// re-add either without re-adding the field's setting_key first.
+// Mode defaults (ch::machine_modes). `blend_mode` and `stream_speed_mode`
+// have no `.dflt` here: their settings are retired bytes (see the field
+// comments there). Do not re-add either without re-adding the field's
+// setting_key first.
 // kinetic::Config::overshoot_guard defaults ARMED (1.0), so the toggle that
 // drives it defaults on.
 inline constexpr uint8_t overshoot_clamp   = 1;
@@ -279,13 +271,13 @@ inline constexpr std::array<uint16_t, 3> kHorizonMs{
     uint16_t(limits::max_future_schedule_ms), 500, uint16_t(limits::schedule_horizon_max_ms)};
 
 // ---- Hard firmware ceilings advertised as `min`/`max` -----------------------
-// The bounds WebUI::applySettings actually clamps to (src/ui/WebUI.cpp), NOT
-// the NORMAL/EXPERT UI guardrails — those are a client-side affordance and a
-// static catalog must advertise what the hub will really accept. Same
-// static_assert treatment as `factory` above.
+// The bounds the hub enforces (StoredState.h configValid, ValenceDevice.cpp's
+// window clamp), never a client's guardrails: a static catalog advertises what
+// the hub will really accept. ValenceHub.cpp static_asserts the speed, accel
+// and jerk maxima against valence_config.h.
 namespace ceiling {
-inline constexpr float rail_mm    = 2000.0f;      // applySettings' max_rail sanity bound
-inline constexpr float rail_min   = 10.0f;        // applySettings' max_rail sanity floor
+inline constexpr float rail_mm    = 2000.0f;      // configValid's max_rail bound
+inline constexpr float rail_min   = 10.0f;        // configValid's max_rail floor
 inline constexpr float speed_min  = 1.0f;
 inline constexpr float speed_max  = 10000.0f;     // MAX_SPEED_MM_S
 inline constexpr float accel_min  = 10.0f;
@@ -518,9 +510,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .defaultPriority = Priority::elevated,
                 .hasCategory = true, .category = valence::ui_categories::motion,
                 .hasRank = true, .rank = valence::ui_ranks::hero});
-    // PLANNED, not actual, since the RP2350 took the plan (sd-4k1.4): this is
-    // the coprocessor's RENDERED position, which IS the machine's position
-    // truth (docs/rp-motion-port.md). The drive encoder is its AUDITOR and
+    // PLANNED, not actual: the LP core's RENDERED position, which IS the
+    // machine's position truth (.claude/rules/architecture.md section 2).
+    // The drive encoder is its AUDITOR and
     // reaches clients through the encoder-deviation channel, not this field.
     c.addLayoutField({.name = "pos_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
                       .desc = "Carriage position as rendered",
@@ -548,8 +540,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       // No registry role fits a demand-provenance position on a
                       // STATE channel (command.position is an INTENT role), so
                       // this desc's LEADING CLAUSE is the field's human label:
-                      // clients read it instead of the wire name (webui
-                      // model/format.js labelFor).
+                      // clients read it instead of the wire name (Phosphor
+                      // src/model/format.js labelFor).
                       .desc = "Asked position, mapped into the window, before planning",
                       .hasRank = true, .rank = valence::ui_ranks::diagnostic,
                       .hasProvenance = true, .provenance = valence::value_provenance::demand,
@@ -578,7 +570,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // `max_rail` is a REAL SAVABLE SETTING, not derived truth: the
     // user-configured ceiling that bounds the sensorless-homing search sweep
     // and serves as the position ceiling before homing has measured the real
-    // stroke (see config_api.h's DEFAULT_MAX_RAIL_MM doc) — on a 2 m rail,
+    // stroke (valence_config.h DEFAULT_MAX_RAIL_MM) — on a 2 m rail,
     // set it above 2000 mm so homing's search reaches both hard stops.
     // `measured_stroke` (field 10, below) is the SEPARATE, read-only quantity
     // — what homing actually measured. The two must never be conflated: a
@@ -689,11 +681,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // distinct from max_rail (the configured ceiling above). 0 until the
     // first successful home this boot; then the usable stroke sensorless
     // homing actually felt out between the two hard stops. No setting_key —
-    // derived machine truth. The publisher (SlopSyncHubService.cpp) clamps
-    // the PRE-HOME value to max_rail (a stale NVS-restored measurement from a
-    // prior boot must never overstate the configured ceiling), but a
-    // measurement earned by a fresh home this session is trusted even past
-    // max_rail — the search sweep bounds hunting, not the result.
+    // derived machine truth, never an assertion: force_home's stroke is not a
+    // measurement. This board cannot measure a stroke and publishes 0
+    // (ValenceDevice.cpp, the machine-config publisher).
     // Append-only: added after enabled_mask, bytes 0..32 keep their offsets.
     c.addLayoutField({.name = "measured_stroke", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
                       .desc = "Stroke measured by homing, 0 until homed",
@@ -1214,23 +1204,18 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // `transport` (WS_OP_MODE) is a PERMANENT GAP at INTENT key 2 — see
     // ch::modes_set's note.
     //
-    // `blend_mode` is RETIRED: MotionArbiter::setBlendMode() aliases every
-    // mode to "allow", and the driver-level stream dispatch
-    // (AIMServoDriver::streamTo/streamToSteps) never reads _blend_mode —
-    // there is no live motion behavior behind this control. The BYTE STAYS
-    // (renamed `blend_mode_reserved`, still occupies byte 0 so bytes 1..3
+    // `blend_mode` is RETIRED: no motion behavior on this board reads it. The
+    // BYTE STAYS (renamed `blend_mode_reserved`, still byte 0 so bytes 1..3
     // keep their offsets — packed layouts are append-only, deleting the byte
     // would be a wire break) but carries NO setting_key and rank hidden
     // (RENDERING section 4: hidden never renders), so no client offers it as a
-    // setting or shows it at all. The paired INTENT key (0x0104 key 1)
-    // is retired too — see the modes_set case in SlopSyncHubService.cpp —
-    // a SECOND permanent gap alongside key 2's `transport`.
+    // setting or shows it at all. Its INTENT key (ch::modes_set key 1) is a
+    // permanent gap alongside key 2's `transport`; ValenceDevice::applyModes
+    // never reads it.
     //
-    // `stream_speed_mode` is RETIRED the same way and for the same reason:
-    // the S3-side stream speed feed it chose between went with the motion
-    // port (docs/rp-motion-port.md), so nothing reads it to make a decision.
-    // BYTE STAYS as `stream_speed_reserved` at byte 1 so bytes 2..3 keep
-    // their offsets; INTENT key 3 is retired with a permanent gap.
+    // `stream_speed_mode` is RETIRED the same way: nothing reads it to make a
+    // decision. BYTE STAYS as `stream_speed_reserved` at byte 1 so bytes 2..3
+    // keep their offsets; INTENT key 3 is retired with a permanent gap.
     //
     // They are MODES, not limits: each one changes what the machine DOES
     // with a command rather than how far or how fast it may go — their own
@@ -1984,8 +1969,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // bucket, and why they are `control` and rate-capped like every other op
     // here. Op 2 declares the machine homed WITHOUT a homing cycle, so the
     // stroke window it hands the arbiter is an ASSERTION, not a measurement —
-    // on a machine with a motor attached that is a real collision hazard, and
-    // the call site in SlopSyncHubService says so again.
+    // on a machine with a motor attached that is a real collision hazard; the
+    // hazard note's one home is motionForceHome() in ValenceMotion.h.
     //
     // Op values are DEVICE-defined: 0x3101 is in this device's own >=0x0080
     // allocation, so unlike 0x0005's registry-governed `safety_ops` these
@@ -2024,13 +2009,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
                 .defaultPriority = Priority::normal});
-    // KEY 1 IS DELIBERATELY UNUSED. It held "blend_mode" until
-    // MotionArbiter's alias-everything-to-"allow" behavior (see
-    // setBlendMode()) made clear there was no live setting left to write —
-    // see the field comment on 0x008A's `blend_mode_reserved`.
-    // SlopSyncHubService.cpp's modes_set case no longer recognizes this key;
-    // a client that still sends it gets NACK(INVALID_VALUE) same as any
-    // other unrecognized key would.
+    // KEY 1 IS DELIBERATELY UNUSED. It held "blend_mode"; see the field
+    // comment on machine-modes' `blend_mode_reserved`. ValenceDevice::
+    // applyModes reads only keys 4, 7 and 8, and refuses a request carrying
+    // none of them with NACK(INVALID_VALUE).
     //
     // KEY 2 IS ALSO DELIBERATELY UNUSED. It briefly held "transport" (the WS/
     // SER/BT/DONGLE/OSSM input-source selector) before that setting was
@@ -2038,11 +2020,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // and BLE by default, and OSSM-BLE is gone. The C5 dongle may return one
     // day, but as a transport the hub simply HAS, not a mode an operator picks.
     //
-    // KEY 3 IS NOW A PERMANENT GAP TOO. It held "stream_speed_mode" until the
-    // motion port took the S3-side speed feed it chose between; see the field
-    // comment on 0x008A's `stream_speed_reserved`. The modes_set case in
-    // SlopSyncHubService.cpp no longer recognizes it, so a client that still
-    // sends it gets NACK(INVALID_VALUE).
+    // KEY 3 IS NOW A PERMANENT GAP TOO. It held "stream_speed_mode"; see the
+    // field comment on machine-modes' `stream_speed_reserved`. applyModes
+    // never reads it.
     //
     // KEY 5 IS RELEASED on this board: motion_backend is read-only here (see
     // 0x1030), so there is nothing for it to write.
@@ -2233,8 +2213,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // `slot` addresses directly — the client picks it (normally the roster's
     // first free entry), there is no name-keyed dedup the way the retired
     // HTTP handler had. `name` is required for save/rename, ignored for
-    // load/delete. See SlopDriveHubDelegate::applyIntent's 0x0108 case for
-    // exactly what each op does and PatternPresetStore.h for the backend.
+    // load/delete. See ValenceDevice::applyPresets for exactly what each op
+    // does and PatternPresetStore.h for the backend.
     auto addPatternPresetsCmd = [&]() {
     c.addEntry({.id = ch::pattern_presets_cmd, .name = "pattern-presets-cmd",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
