@@ -1,7 +1,7 @@
 # Notice
 
 Nucleus
-Copyright 2026 the Nucleus authors
+Copyright 2026 AtlanticTM
 
 This file is the NOTICE file of Apache License 2.0 section 4(d): a
 redistribution of Nucleus or of a work derived from it carries the
