@@ -38,6 +38,7 @@
 #include "valence/channel/catalog.hpp"
 #include "valence/channel/log_channel.hpp"
 #include "valence/channel/safety_events_channel.hpp"
+#include "valence/channel/settings_trial_channel.hpp"
 #include "valence/channel/trust_channels.hpp"
 
 namespace valence {
@@ -501,6 +502,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // nobody may be denied and nobody's may be shed.
     if (!valence::addSafetyEventsChannel(c)) return false;
 
+    // ---- "settings-trial" -- INTENT, control (RFC-099) ----------------------
+    // Declaring it is what tells a client this hub keeps a `trial` write
+    // unpersisted; the hub answers commit and revert itself. Each settings
+    // card below carries a trial_mask (meta.trial_pending), bit i the i-th
+    // setting of its layout, as enabled_mask indexes it.
+    if (!valence::addSettingsTrialChannel(c)) return false;
+
     // ---- "motion" — STATE, elevated, 60 Hz ----------------------------------
     // The live carriage snapshot. scale 100 on positions = 10µm wire units;
     // scale 10 on speed = 0.1 mm/s wire units.  [2+2+2+1+2 = 9 B]
@@ -705,6 +713,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .role = roles::geometry_measured_travel,
                       .hasRank = true, .rank = valence::ui_ranks::detail,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
+    // RFC-099, append-only (byte 37): bits as enabled_mask's.
+    c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f, .desc = "Settings on trial, not stored yet",
+                        .role = roles::meta_trial_pending,
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
+                       {"window_min", "window_max", "jog_speed", "jog_accel",
+                        "input_speed", "input_accel", "max_rail", "input_jerk"});
     };
 
     // ---- "pattern-state" — STATE, normal, on-change -------------------------
@@ -1333,6 +1348,21 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .settingKey = 8, .hasSettingKey = true,
                       .hasRank = true, .rank = valence::ui_ranks::control},
                      {"off", "on"});
+    // RFC-099, append-only: bits as enabled_mask's. Only overshoot_clamp is
+    // trialable; the others are gated on live state (ValenceDevice.cpp).
+    if (feat.has_drive) {
+    c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f, .desc = "Settings on trial, not stored yet",
+                        .role = roles::meta_trial_pending,
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
+                       {"overshoot_clamp", "home_style", "schedule_horizon", "flipped"});
+    } else {
+    c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f, .desc = "Settings on trial, not stored yet",
+                        .role = roles::meta_trial_pending,
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
+                       {"overshoot_clamp", "schedule_horizon", "flipped"});
+    }
     };
 
     // ---- "kinetic-*" — STATE, motion, section Tuning ----------------------
@@ -1388,6 +1418,12 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Settings the machine accepts right now",
                         .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
+                       {"jmax_ovr", "vmax_ovr", "amax_ovr"});
+    // RFC-099, append-only.
+    c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f, .desc = "Settings on trial, not stored yet",
+                        .role = roles::meta_trial_pending,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"jmax_ovr", "vmax_ovr", "amax_ovr"});
     };
@@ -1460,6 +1496,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"chase_ff", "chase_accel_ff", "chase_gain", "chase_lookahead",
                         "chase_dense_ms", "chase_aim_extrap", "handoff_k"});
+    // RFC-099, append-only. chase_dense_ms is never trialable (ValenceDevice.cpp).
+    c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f, .desc = "Settings on trial, not stored yet",
+                        .role = roles::meta_trial_pending,
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
+                       {"chase_ff", "chase_accel_ff", "chase_gain", "chase_lookahead",
+                        "chase_dense_ms", "chase_aim_extrap", "handoff_k"});
     };
 
     // The WAVEFORM path (timed segments — MFP's Segments mode). Equally live.
@@ -1519,6 +1562,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Settings the machine accepts right now",
                         .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
+                       {"curve_policy", "infeasible_policy", "smooth_budget",
+                        "amplitude_budget", "blend_steps", "settle_grace_ms"});
+    // RFC-099, append-only.
+    c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f, .desc = "Settings on trial, not stored yet",
+                        .role = roles::meta_trial_pending,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"curve_policy", "infeasible_policy", "smooth_budget",
                         "amplitude_budget", "blend_steps", "settle_grace_ms"});

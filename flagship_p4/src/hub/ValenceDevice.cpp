@@ -211,6 +211,99 @@ std::optional<bool> boolOf(const IntentValueField* f) {
 // generator's own setters clamp again to each control's live bounds.
 int knobOf(float v) { return int(wholeIn(v, 0.0f, 100.0f)); }
 
+// One 0x3000 key into `c`, clamped. The window arrives in the client frame
+// (RFC-088) and is stored physical: on a flipped rail the client's low bound
+// is the physical high one.
+void setConfigKey(StoredConfig& c, uint8_t key, float v, float rail, bool flipped) {
+    switch (key) {
+        case 1: {
+            const float lo = clampf(v, 0.0f, ceiling::rail_mm);
+            if (flipped) c.window_max = clampf(rail - lo, 0.0f, ceiling::rail_mm);
+            else c.window_min = lo;
+            break;
+        }
+        case 2: {
+            const float hi = clampf(v, 0.0f, ceiling::rail_mm);
+            if (flipped) c.window_min = clampf(rail - hi, 0.0f, ceiling::rail_mm);
+            else c.window_max = hi;
+            break;
+        }
+        case 3: c.jog_speed   = clampf(v, ceiling::speed_min, ceiling::speed_max); break;
+        case 4: c.jog_accel   = clampf(v, ceiling::accel_min, ceiling::accel_max); break;
+        case 5: c.input_speed = clampf(v, ceiling::speed_min, ceiling::speed_max); break;
+        case 6: c.input_accel = clampf(v, ceiling::accel_min, ceiling::accel_max); break;
+        case 7: c.input_jerk  = clampf(v, ceiling::jerk_min, ceiling::jerk_max); break;
+        case 8: c.max_rail    = clampf(v, ceiling::rail_min, ceiling::rail_mm); break;
+        default: break;
+    }
+}
+
+// The 0x3120 schema's keys in wire order; 4, 5, 15 and 19 are released.
+constexpr std::array<uint8_t, 16> kTuningKeys{1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 20};
+// chase_dense: a live samples grant commits to it (applyTuning()).
+constexpr uint8_t kChaseDenseKey = 10;
+
+// One 0x3120 key into `t`, clamped into tuning_bounds; the value as the ECHO
+// carries it. nullopt for a key outside the schema.
+std::optional<IntentValue> setTuningKey(MotionTuning& t, uint8_t key, float v) {
+    namespace b = tuning_bounds;
+    switch (key) {
+        case 1:  t.jmax_ovr = clampf(v, 0.0f, b::jmax_ovr_max);  return IntentValue::ofF32(t.jmax_ovr);
+        case 2:  t.vmax_ovr = clampf(v, 0.0f, b::vmax_ovr_max);  return IntentValue::ofF32(t.vmax_ovr);
+        case 3:  t.amax_ovr = clampf(v, 0.0f, b::amax_ovr_max);  return IntentValue::ofF32(t.amax_ovr);
+        case 6:  t.chase_ff = wholeIn(v, 0.0f, 1.0f) != 0;         return IntentValue::ofU64(t.chase_ff);
+        case 7:  t.chase_accel_ff = wholeIn(v, 0.0f, 1.0f) != 0;   return IntentValue::ofU64(t.chase_accel_ff);
+        case 8:  t.chase_gain = clampf(v, 0.0f, b::chase_gain_max);     return IntentValue::ofF32(t.chase_gain);
+        case 9:  t.chase_lookahead = clampf(v, 0.0f, b::lookahead_max); return IntentValue::ofF32(t.chase_lookahead);
+        case 10:  // ms on the wire, us in the engine
+            t.chase_dense_us = uint32_t(clampf(v, b::dense_ms_min, b::dense_ms_max) * 1000.0f + 0.5f);
+            return IntentValue::ofF32(float(t.chase_dense_us) / 1000.0f);
+        case 11: t.chase_aim_extrap = wholeIn(v, 0.0f, 1.0f) != 0; return IntentValue::ofU64(t.chase_aim_extrap);
+        case 12: t.handoff_k = clampf(v, 0.0f, b::handoff_k_max);   return IntentValue::ofF32(t.handoff_k);
+        case 13: t.curve_policy = uint8_t(wholeIn(v, 0.0f, float(b::curve_policy_max)));
+                 return IntentValue::ofU64(t.curve_policy);
+        case 14: t.infeasible_policy = uint8_t(wholeIn(v, 0.0f, float(b::infeasible_max)));
+                 return IntentValue::ofU64(t.infeasible_policy);
+        case 16: t.smooth_budget = clampf(v, 0.0f, b::budget_max);    return IntentValue::ofF32(t.smooth_budget);
+        case 17: t.amplitude_budget = clampf(v, 0.0f, b::budget_max); return IntentValue::ofF32(t.amplitude_budget);
+        case 18: t.blend_steps = uint8_t(wholeIn(v, float(b::blend_steps_min), float(b::blend_steps_max)));
+                 return IntentValue::ofU64(t.blend_steps);
+        case 20:  // ms on the wire, us in the engine
+            t.settle_grace_us = uint32_t(clampf(v, 0.0f, b::settle_ms_max) * 1000.0f + 0.5f);
+            return IntentValue::ofF32(float(t.settle_grace_us) / 1000.0f);
+        default: return std::nullopt;
+    }
+}
+
+// The current value of one 0x3120 key, exactly as setTuningKey() echoes it.
+std::optional<IntentValue> tuningKeyValue(const MotionTuning& t, uint8_t key) {
+    switch (key) {
+        case 1:  return IntentValue::ofF32(t.jmax_ovr);
+        case 2:  return IntentValue::ofF32(t.vmax_ovr);
+        case 3:  return IntentValue::ofF32(t.amax_ovr);
+        case 6:  return IntentValue::ofU64(t.chase_ff);
+        case 7:  return IntentValue::ofU64(t.chase_accel_ff);
+        case 8:  return IntentValue::ofF32(t.chase_gain);
+        case 9:  return IntentValue::ofF32(t.chase_lookahead);
+        case 10: return IntentValue::ofF32(float(t.chase_dense_us) / 1000.0f);
+        case 11: return IntentValue::ofU64(t.chase_aim_extrap);
+        case 12: return IntentValue::ofF32(t.handoff_k);
+        case 13: return IntentValue::ofU64(t.curve_policy);
+        case 14: return IntentValue::ofU64(t.infeasible_policy);
+        case 16: return IntentValue::ofF32(t.smooth_budget);
+        case 17: return IntentValue::ofF32(t.amplitude_budget);
+        case 18: return IntentValue::ofU64(t.blend_steps);
+        case 20: return IntentValue::ofF32(float(t.settle_grace_us) / 1000.0f);
+        default: return std::nullopt;
+    }
+}
+
+// A trial baseline as a number. Baselines are only ever F32 or U64 here.
+float baselineNumber(uint8_t key, const IntentValue& v) {
+    const IntentValueField f{key, v};
+    return numberOf(&f).value_or(0.0f);
+}
+
 // The four tuning cards, one bit each in ValenceDevice::_tuneDirty.
 constexpr uint8_t kCardModes    = 0x01;  // 0x1030
 constexpr uint8_t kCardLimits   = 0x02;  // 0x1120
@@ -357,9 +450,9 @@ void publishOdometer(Hub& hub, const MotionCensus& m) {
 // only where has_drive put it in the catalog.
 void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, bool horizonOpen,
                          bool flipOpen) {
-    std::array<std::byte, 8> buf{};
+    std::array<std::byte, 9> buf{};
     const bool drive = boardFeatures().has_drive;
-    const size_t len = drive ? 8 : 7;
+    const size_t len = drive ? 9 : 8;
     size_t n = 0;
     packU8(buf, n, 0);   // blend_mode_reserved
     packU8(buf, n, 0);   // stream_speed_reserved
@@ -375,6 +468,7 @@ void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, 
     if (drive) packU8(buf, n, 0);   // home_style
     packU8(buf, n, m.horizon);      // schedule_horizon
     packU8(buf, n, m.flipped ? 1 : 0);   // flipped
+    packU8(buf, n, uint8_t(hub.trialMask(ch::machine_modes)));   // trial_mask (RFC-099)
     publishPacked(hub, ch::machine_modes, std::span<const std::byte>(buf).first(len), n);
 }
 
@@ -382,16 +476,17 @@ void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, 
 // them is applied (0x3120), so every enabled_mask bit is high.
 void publishKineticCards(Hub& hub, const MotionTuning& t, uint8_t cards) {
     if (cards & kCardLimits) {
-        std::array<std::byte, 13> buf{};
+        std::array<std::byte, 14> buf{};
         size_t n = 0;
         packF32(buf, n, t.jmax_ovr);
         packF32(buf, n, t.vmax_ovr);
         packF32(buf, n, t.amax_ovr);
         packU8(buf, n, 0x07);    // enabled_mask
+        packU8(buf, n, uint8_t(hub.trialMask(ch::kinetic_limits)));
         publishPacked(hub, ch::kinetic_limits, buf, n);
     }
     if (cards & kCardChase) {
-        std::array<std::byte, 20> buf{};
+        std::array<std::byte, 21> buf{};
         size_t n = 0;
         packU8(buf, n, t.chase_ff ? 1 : 0);
         packU8(buf, n, t.chase_accel_ff ? 1 : 0);
@@ -401,10 +496,11 @@ void publishKineticCards(Hub& hub, const MotionTuning& t, uint8_t cards) {
         packU8(buf, n, t.chase_aim_extrap ? 1 : 0);
         packF32(buf, n, t.handoff_k);
         packU8(buf, n, 0x7F);                  // enabled_mask
+        packU8(buf, n, uint8_t(hub.trialMask(ch::kinetic_chase)));
         publishPacked(hub, ch::kinetic_chase, buf, n);
     }
     if (cards & kCardWaveform) {
-        std::array<std::byte, 16> buf{};
+        std::array<std::byte, 17> buf{};
         size_t n = 0;
         packU8(buf, n, t.curve_policy);
         packU8(buf, n, t.infeasible_policy);
@@ -413,6 +509,7 @@ void publishKineticCards(Hub& hub, const MotionTuning& t, uint8_t cards) {
         packU8(buf, n, t.blend_steps);
         packU32(buf, n, t.settle_grace_us);    // scale 1000, unit ms: the wire carries us
         packU8(buf, n, 0x3F);                  // enabled_mask
+        packU8(buf, n, uint8_t(hub.trialMask(ch::kinetic_waveform)));
         publishPacked(hub, ch::kinetic_waveform, buf, n);
     }
 }
@@ -487,8 +584,8 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     _nackDetail[0] = '\0';
     if (channel_id == ch::move) return applyMove(requested);
     if (channel_id == ch::home) return applyHome(requested);
-    if (channel_id == ch::modes_set) return applyModes(requested, cfgChanged);
-    if (channel_id == ch::kinetic_set) return applyTuning(requested, cfgChanged);
+    if (channel_id == ch::modes_set) return durable(applyModes(requested, cfgChanged));
+    if (channel_id == ch::kinetic_set) return durable(applyTuning(requested, cfgChanged));
     // None of the three moves cfg_gen (cfgChanged stays false). The presets
     // persist, but on their own blob, and their change signal is the roster
     // generation.
@@ -497,7 +594,15 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     if (channel_id == ch::pattern_presets_cmd) return applyPresets(requested);
     if (channel_id == channels::safety_intents) return applySafety(requested);
     if (channel_id != ch::config_set) return Ret::err(NackCode::UNSUPPORTED_OP);
+    return durable(applyConfig(requested, cfgChanged));
+}
 
+Ret ValenceDevice::durable(Ret r) {
+    if (r && !_trialApply) _durableDirty = true;
+    return r;
+}
+
+Ret ValenceDevice::applyConfig(const IntentValueMap& requested, bool& cfgChanged) {
     const auto* f1 = findField(requested, 1);  // window_min
     const auto* f2 = findField(requested, 2);  // window_max
     const auto* f3 = findField(requested, 3);  // jog_speed
@@ -512,20 +617,9 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
 
     // The window arrives in the client frame (RFC-088) and is stored physical.
     const float rail = motionCensus().rail_mm;
-    const Window was = clientWindow(rail);
-    const float cmin = f1 ? clampf(*numberOf(f1), 0.0f, ceiling::rail_mm) : was.lo;
-    const float cmax = f2 ? clampf(*numberOf(f2), 0.0f, ceiling::rail_mm) : was.hi;
     StoredConfig next = _cfg;
-    if (f1 || f2) {
-        next.window_min = _modes.flipped ? clampf(rail - cmax, 0.0f, ceiling::rail_mm) : cmin;
-        next.window_max = _modes.flipped ? clampf(rail - cmin, 0.0f, ceiling::rail_mm) : cmax;
-    }
-    if (f3) next.jog_speed   = clampf(*numberOf(f3), ceiling::speed_min, ceiling::speed_max);
-    if (f4) next.jog_accel   = clampf(*numberOf(f4), ceiling::accel_min, ceiling::accel_max);
-    if (f5) next.input_speed = clampf(*numberOf(f5), ceiling::speed_min, ceiling::speed_max);
-    if (f6) next.input_accel = clampf(*numberOf(f6), ceiling::accel_min, ceiling::accel_max);
-    if (f7) next.input_jerk  = clampf(*numberOf(f7), ceiling::jerk_min, ceiling::jerk_max);
-    if (f8) next.max_rail    = clampf(*numberOf(f8), ceiling::rail_min, ceiling::rail_mm);
+    for (size_t k = 0; k < keys.size(); ++k)
+        if (keys[k] != nullptr) setConfigKey(next, uint8_t(k + 1), *numberOf(keys[k]), rail, _modes.flipped);
 
     // The one refusal of finite values: an inverted window has no legal
     // nearest value, so it is rejected rather than silently reordered.
@@ -539,16 +633,12 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
 
     // The first-run record (RFC-079 setup): every key this accepted write
     // carried, changed or not, counts as written. A confirmed default is a
-    // confirmation. Not a cfg_gen change; the dirty flag persists it.
+    // confirmation. Not a cfg_gen change; the dirty flag persists it. A trial
+    // is not a confirmation until its commit (onTrialCommit()).
     uint8_t wrote = 0;
     for (size_t k = 0; k < keys.size(); ++k)
         if (keys[k] != nullptr) wrote |= uint8_t(1u << k);
-    if ((_modes.setup_written | wrote) != _modes.setup_written) {
-        const bool was = commissioned(_modes);
-        _modes.setup_written |= wrote;
-        _cfgDirty = true;
-        if (!was && commissioned(_modes)) GLOGI(kTag, "commissioned: every setup field written");
-    }
+    if (!_trialApply) noteSetupWritten(wrote);
 
     // Key-complete ECHO: every key the client sent comes back with the
     // value the hub actually holds (SPEC §9.3).
@@ -565,6 +655,14 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     if (f8) applied.fields[n++] = {8, IntentValue::ofF32(_cfg.max_rail)};
     applied.count = n;
     return Ret::ok(applied);
+}
+
+void ValenceDevice::noteSetupWritten(uint8_t wrote) {
+    if ((_modes.setup_written | wrote) == _modes.setup_written) return;
+    const bool was = commissioned(_modes);
+    _modes.setup_written |= wrote;
+    _cfgDirty = true;
+    if (!was && commissioned(_modes)) GLOGI(kTag, "commissioned: every setup field written");
 }
 
 // SPEC 16.1: asked by the hub right after applyIntent() refused, on the same
@@ -621,6 +719,7 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
         const MotionCensus c = motionCensus();
         if (railOwned()) return Ret::err(NackCode::SOURCE_CONFLICT);
         if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
+        if (windowOnTrial()) return refuse(NackCode::INTERLOCK, "window on trial: commit or revert first");
         if (!flipOpen(c)) return Ret::err(NackCode::INTERLOCK);
     }
 
@@ -683,50 +782,21 @@ uint32_t ValenceDevice::scheduleLatencyUs(uint16_t channel_id) {
 }
 
 Ret ValenceDevice::applyTuning(const IntentValueMap& requested, bool& cfgChanged) {
-    // The schema's keys in wire order; 4, 5, 15 and 19 are released.
-    static constexpr std::array<uint8_t, 16> kKeys{1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 20};
-    namespace b = tuning_bounds;
-
     MotionTuning t = _tune;
     IntentValueMap applied{};
     uint32_t n = 0;
-    for (const uint8_t key : kKeys) {
+    for (const uint8_t key : kTuningKeys) {
         const auto* f = findField(requested, key);
         if (!f) continue;
         const std::optional<float> v = numberOf(f);
         if (!v) return refuseNotANumber(ch::kinetic_set, key);
         // n cannot overrun: requested carries at most kIntentMaxValueFields
         // fields, and each key here consumes one of them at most once.
-        IntentValue out;
-        switch (key) {
-            case 1:  t.jmax_ovr = clampf(*v, 0.0f, b::jmax_ovr_max);  out = IntentValue::ofF32(t.jmax_ovr); break;
-            case 2:  t.vmax_ovr = clampf(*v, 0.0f, b::vmax_ovr_max);  out = IntentValue::ofF32(t.vmax_ovr); break;
-            case 3:  t.amax_ovr = clampf(*v, 0.0f, b::amax_ovr_max);  out = IntentValue::ofF32(t.amax_ovr); break;
-            case 6:  t.chase_ff = wholeIn(*v, 0.0f, 1.0f) != 0;         out = IntentValue::ofU64(t.chase_ff); break;
-            case 7:  t.chase_accel_ff = wholeIn(*v, 0.0f, 1.0f) != 0;   out = IntentValue::ofU64(t.chase_accel_ff); break;
-            case 8:  t.chase_gain = clampf(*v, 0.0f, b::chase_gain_max);     out = IntentValue::ofF32(t.chase_gain); break;
-            case 9:  t.chase_lookahead = clampf(*v, 0.0f, b::lookahead_max); out = IntentValue::ofF32(t.chase_lookahead); break;
-            case 10:  // ms on the wire, us in the engine
-                t.chase_dense_us = uint32_t(clampf(*v, b::dense_ms_min, b::dense_ms_max) * 1000.0f + 0.5f);
-                if (t.chase_dense_us != _tune.chase_dense_us && publishGrantLive(ch::motion_input))
-                    return Ret::err(NackCode::INTERLOCK);
-                out = IntentValue::ofF32(float(t.chase_dense_us) / 1000.0f);
-                break;
-            case 11: t.chase_aim_extrap = wholeIn(*v, 0.0f, 1.0f) != 0; out = IntentValue::ofU64(t.chase_aim_extrap); break;
-            case 12: t.handoff_k = clampf(*v, 0.0f, b::handoff_k_max);   out = IntentValue::ofF32(t.handoff_k); break;
-            case 13: t.curve_policy = uint8_t(wholeIn(*v, 0.0f, float(b::curve_policy_max)));    out = IntentValue::ofU64(t.curve_policy); break;
-            case 14: t.infeasible_policy = uint8_t(wholeIn(*v, 0.0f, float(b::infeasible_max))); out = IntentValue::ofU64(t.infeasible_policy); break;
-            case 16: t.smooth_budget = clampf(*v, 0.0f, b::budget_max);    out = IntentValue::ofF32(t.smooth_budget); break;
-            case 17: t.amplitude_budget = clampf(*v, 0.0f, b::budget_max); out = IntentValue::ofF32(t.amplitude_budget); break;
-            case 18: t.blend_steps = uint8_t(wholeIn(*v, float(b::blend_steps_min), float(b::blend_steps_max)));
-                     out = IntentValue::ofU64(t.blend_steps); break;
-            case 20:  // ms on the wire, us in the engine
-                t.settle_grace_us = uint32_t(clampf(*v, 0.0f, b::settle_ms_max) * 1000.0f + 0.5f);
-                out = IntentValue::ofF32(float(t.settle_grace_us) / 1000.0f);
-                break;
-            default: continue;
-        }
-        applied.fields[n++] = {key, out};
+        const std::optional<IntentValue> out = setTuningKey(t, key, *v);
+        if (!out) continue;
+        if (key == kChaseDenseKey && t.chase_dense_us != _tune.chase_dense_us && publishGrantLive(ch::motion_input))
+            return Ret::err(NackCode::INTERLOCK);
+        applied.fields[n++] = {key, *out};
     }
     if (n == 0) return Ret::err(NackCode::INVALID_VALUE);
     applied.count = n;
@@ -1474,15 +1544,19 @@ bool ValenceDevice::flipOpen(const MotionCensus& c) const {
     const bool overrideOn = _hub != nullptr &&
                             (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
     return c.homed && !c.estop && !railOwned() && !overrideOn && !c.override_mode &&
-           !c.busy && c.step_q8 == 0;
+           !c.busy && c.step_q8 == 0 && !windowOnTrial();
+}
+
+bool ValenceDevice::windowOnTrial() const {
+    return _hub != nullptr && (_hub->trialBaselineOf(ch::config_set, 1) || _hub->trialBaselineOf(ch::config_set, 2));
 }
 
 void ValenceDevice::publishMachineConfig() {
-    // 37 B, matching the 0x1000 layout in ValenceCatalog.h. The window is the
+    // 38 B, matching the 0x1000 layout in ValenceCatalog.h. The window is the
     // client frame's (RFC-088).
     const StoredConfig& c = _cfg;
     const Window w = clientWindow(motionCensus().rail_mm);
-    std::array<std::byte, 37> buf{};
+    std::array<std::byte, 38> buf{};
     std::span<std::byte> s(buf);
     putF32(s.subspan(0, 4), w.lo);
     putF32(s.subspan(4, 4), w.hi);
@@ -1502,6 +1576,7 @@ void ValenceDevice::publishMachineConfig() {
     // reporting it here would dress an assertion as a measurement. This board
     // has no way to measure a stroke, so the field is 0 forever.
     putF32(s.subspan(33, 4), 0.0f);
+    putU8(s.subspan(37, 1), uint8_t(_hub->trialMask(ch::machine_config)));   // trial_mask (RFC-099)
     _hub->publishState(ch::machine_config, s);
     _lastPublishedCfg = c;
     _sentWindow = w;
@@ -1529,6 +1604,97 @@ std::expected<void, stored::ConfigReject> ValenceDevice::adoptConfigBlob(std::sp
     // The engine adopts through the live write's own door, never a side path.
     motionSetTuning(_tune);
     return {};
+}
+
+// The stored values are the live ones with every trialed key put back to its
+// pre-trial value (SPEC 9.3: a trial value is never persisted before its
+// commit). The window baseline is in the client frame, mapped by the flip and
+// rail of now; the flip is refused while a window key is on trial.
+size_t ValenceDevice::encodeConfigBlob(std::span<std::byte> out, uint16_t cfgGen) const {
+    StoredConfig c = _cfg;
+    MotionTuning t = _tune;
+    if (_hub != nullptr && _hub->trialCount() > 0) {
+        const float rail = motionCensus().rail_mm;
+        for (uint8_t k = 1; k <= 8; ++k)
+            if (const auto b = _hub->trialBaselineOf(ch::config_set, k))
+                setConfigKey(c, k, baselineNumber(k, *b), rail, _modes.flipped);
+        if (const auto b = _hub->trialBaselineOf(ch::modes_set, 4))
+            t.overshoot_guard = overshootGuardFor(baselineNumber(4, *b) != 0.0f, motionDefaultTuning().overshoot_guard);
+        for (const uint8_t k : kTuningKeys)
+            if (const auto b = _hub->trialBaselineOf(ch::kinetic_set, k)) (void)setTuningKey(t, k, baselineNumber(k, *b));
+    }
+    return stored::encodeConfig(out, c, t, _modes, cfgGen);
+}
+
+// ---- RFC-099 trial writes ---------------------------------------------------
+
+std::optional<IntentValue> ValenceDevice::trialBaseline(uint16_t channel_id, uint8_t key) {
+    if (channel_id == ch::config_set) {
+        const Window w = clientWindow(motionCensus().rail_mm);
+        switch (key) {
+            case 1: return IntentValue::ofF32(w.lo);
+            case 2: return IntentValue::ofF32(w.hi);
+            case 3: return IntentValue::ofF32(_cfg.jog_speed);
+            case 4: return IntentValue::ofF32(_cfg.jog_accel);
+            case 5: return IntentValue::ofF32(_cfg.input_speed);
+            case 6: return IntentValue::ofF32(_cfg.input_accel);
+            case 7: return IntentValue::ofF32(_cfg.input_jerk);
+            case 8: return IntentValue::ofF32(_cfg.max_rail);
+            default: return std::nullopt;
+        }
+    }
+    if (channel_id == ch::modes_set && key == 4) return IntentValue::ofU64(_tune.overshoot_guard > 0.0f ? 1 : 0);
+    if (channel_id == ch::kinetic_set && key != kChaseDenseKey) return tuningKeyValue(_tune, key);
+    return std::nullopt;
+}
+
+Ret ValenceDevice::applyTrialIntent(uint16_t channel_id, const IntentValueMap& requested, AccessLevel role,
+                                    bool& cfgChanged) {
+    _trialApply = true;
+    Ret r = applyIntent(channel_id, requested, role, cfgChanged);
+    _trialApply = false;
+    return r;
+}
+
+// Through the writers, so the clamps, the ECHO-side copies and the republish
+// are the live write's own. Revert MUST NOT refuse: a window bound the other
+// bound no longer admits lands one step inside it.
+void ValenceDevice::restoreTrial(uint16_t channel_id, const IntentValueMap& baselines, bool& cfgChanged) {
+    IntentValueMap m = baselines;
+    if (channel_id == ch::config_set) {
+        const Window now = clientWindow(motionCensus().rail_mm);
+        IntentValueField* lo = nullptr;
+        IntentValueField* hi = nullptr;
+        for (uint32_t i = 0; i < m.count; ++i) {
+            if (m.fields[i].key == 1) lo = &m.fields[i];
+            if (m.fields[i].key == 2) hi = &m.fields[i];
+        }
+        const float hiV = hi ? baselineNumber(2, hi->value) : now.hi;
+        if (lo && baselineNumber(1, lo->value) >= hiV) lo->value = IntentValue::ofF32(std::max(0.0f, hiV - 1.0f));
+        const float loV = lo ? baselineNumber(1, lo->value) : now.lo;
+        if (hi && baselineNumber(2, hi->value) <= loV) hi->value = IntentValue::ofF32(loV + 1.0f);
+    }
+    _trialApply = true;
+    const Ret r = channel_id == ch::config_set ? applyConfig(m, cfgChanged)
+                : channel_id == ch::modes_set  ? applyModes(m, cfgChanged)
+                : channel_id == ch::kinetic_set ? applyTuning(m, cfgChanged)
+                                                : Ret::err(NackCode::UNSUPPORTED_OP);
+    _trialApply = false;
+    if (!r) GLOGW(kTag, "trial revert on %04x refused 0x%04x", unsigned(channel_id), unsigned(r.error()));
+}
+
+// Commit, or a durable write by the trial's own session: the live value is
+// now the stored one. Armed even when nothing moved, since the stored blob
+// held the baseline until now.
+void ValenceDevice::onTrialCommit(uint16_t channel_id, const IntentValueMap& keys) {
+    if (channel_id == ch::config_set) {
+        uint8_t wrote = 0;
+        for (uint32_t i = 0; i < keys.count; ++i)
+            if (keys.fields[i].key >= 1 && keys.fields[i].key <= 8) wrote |= uint8_t(1u << (keys.fields[i].key - 1));
+        noteSetupWritten(wrote);
+    }
+    _durableDirty = true;
+    _cfgDirty = true;
 }
 
 bool ValenceDevice::adoptPresetsBlob(std::span<const std::byte> blob) {
@@ -1736,8 +1902,10 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         publishKineticCards(*_hub, _tune, _tuneDirty);
         _tuneDirty = 0;
         // Same blob as 0x1000: the tuning write bumped cfg_gen too.
-        _persistArmed = true;
-        _persistDueMs = nowMs + kCfgPersistDebounceMs;
+        if (_durableDirty) {
+            _persistArmed = true;
+            _persistDueMs = nowMs + kCfgPersistDebounceMs;
+        }
     }
     if (_presets.generation() != _presetsGenSeen) {
         _presetsGenSeen = _presets.generation();
@@ -1766,9 +1934,19 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _patDirty = true;   // the stroke frame is this config's window
         // Re-armed, not accumulated: the write lands only after the changes
         // stop. cfg_gen is read at write time, by which point Hub::update() has
-        // already applied this tick's bump (§4.2).
-        _persistArmed = true;
-        _persistDueMs = nowMs + kCfgPersistDebounceMs;
+        // already applied this tick's bump (§4.2). A trial alone arms nothing.
+        if (_durableDirty) {
+            _persistArmed = true;
+            _persistDueMs = nowMs + kCfgPersistDebounceMs;
+        }
+    }
+    _durableDirty = false;
+    // RFC-099: the trial_mask on every settings card follows the hub's sets.
+    if (_hub->trialGen() != _trialGenSent) {
+        _trialGenSent = _hub->trialGen();
+        publishMachineConfig();
+        publishMachineModes(*_hub, _tune, _modes, _horizonOpenSent, _flipOpenSent);
+        publishKineticCards(*_hub, _tune, kCardLimits | kCardChase | kCardWaveform);
     }
 
     // 1 Hz, and at once when the motor switch moved: a client watching a

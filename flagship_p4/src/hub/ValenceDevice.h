@@ -112,10 +112,9 @@ public:
     std::expected<void, stored::ConfigReject> adoptConfigBlob(std::span<const std::byte> blob,
                                                               uint16_t& cfgGen);
     bool adoptPresetsBlob(std::span<const std::byte> blob);
-    // Bytes written, 0 when `out` is too small.
-    size_t encodeConfigBlob(std::span<std::byte> out, uint16_t cfgGen) const {
-        return stored::encodeConfig(out, _cfg, _tune, _modes, cfgGen);
-    }
+    // Bytes written, 0 when `out` is too small. A key on trial (RFC-099)
+    // contributes its pre-trial value, never the live one.
+    size_t encodeConfigBlob(std::span<std::byte> out, uint16_t cfgGen) const;
     size_t encodePresetsBlob(std::span<std::byte> out) const { return _presets.encode(out); }
 
     const StoredConfig& config() const { return _cfg; }
@@ -184,8 +183,24 @@ public:
     void onSessionLeft(uint32_t session_id) override;
     void onSourceOwnership(uint8_t source_id, uint32_t owner_session, uint8_t reason) override;
     std::optional<BlobView> readBlob(uint8_t ns, uint8_t store_id, uint8_t slot) override;
+    // RFC-099 trial writes. Trialable: 0x3000 keys 1-8, 0x3030 key 4
+    // (overshoot_clamp), 0x3120 every key but 10. Never chase_dense, the
+    // horizon or the flip: each is refused on live state, so a revert could
+    // be refused too.
+    std::optional<IntentValue> trialBaseline(uint16_t channel_id, uint8_t key) override;
+    Result<IntentValueMap, NackCode> applyTrialIntent(uint16_t channel_id, const IntentValueMap& requested,
+                                                      AccessLevel role, bool& cfgChanged) override;
+    void restoreTrial(uint16_t channel_id, const IntentValueMap& baselines, bool& cfgChanged) override;
+    void onTrialCommit(uint16_t channel_id, const IntentValueMap& keys) override;
 
 private:
+    Result<IntentValueMap, NackCode> applyConfig(const IntentValueMap& requested, bool& cfgChanged);
+    // `r`, marking a durable change when it applied outside a trial.
+    Result<IntentValueMap, NackCode> durable(Result<IntentValueMap, NackCode> r);
+    void noteSetupWritten(uint8_t wrote);
+    // A window key (0x3000 key 1 or 2) is on trial: the flip is refused, its
+    // baseline is in the client frame the flip would mirror.
+    bool windowOnTrial() const;
     Result<IntentValueMap, NackCode> applyMove(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applyHome(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applyModes(const IntentValueMap& requested, bool& cfgChanged);
@@ -237,6 +252,13 @@ private:
 
     StoredConfig _cfg{};
     bool _cfgDirty = false;
+    // RFC-099: set while a trial write or a revert runs. Neither persists nor
+    // counts toward the first-run record.
+    bool _trialApply = false;
+    // A durable change since the last tick: only it arms the config persist.
+    bool _durableDirty = false;
+    // The hub's trialGen() the trial_mask fields last carried.
+    uint32_t _trialGenSent = 0;
     // The live tuning set behind 0x1030 and 0x1120-0x1122: the engine's
     // factory set until a stored one is adopted. This copy IS the setting; the
     // engine holds whatever motionSetTuning() last carried from it.

@@ -830,3 +830,136 @@ TEST_CASE("VD-DRV-2: a drive alarm under a held ESTOP keeps that latch's cause a
     REQUIRE(it->second.size() >= 2);
     CHECK(std::to_integer<uint8_t>(it->second[1]) == safety_causes::user);
 }
+
+// ---- RFC-099: trial writes on the delegate ------------------------------------
+
+namespace {
+
+IntentValueMap oneKey(uint8_t key, IntentValue v) {
+    IntentValueMap m{};
+    m.count = 1;
+    m.fields[0] = IntentValueField{key, v};
+    return m;
+}
+
+// One f32 of the config blob the persist would write now. Read raw: the fake
+// engine's tuning is all zeros, which decodeConfig() rightly refuses.
+// Offsets per StoredState.h: header 7 B, then the eight 0x1000 values, then
+// jmax, vmax, amax, chase_gain.
+constexpr size_t kBlobJogSpeed = 7 + 2 * 4;
+constexpr size_t kBlobChaseGain = 7 + 8 * 4 + 3 * 4;
+float storedF32(Rig& rig, size_t offset) {
+    std::array<std::byte, stored::kConfigBlobBytes> blob{};
+    REQUIRE(rig.device.encodeConfigBlob(blob, rig.hub->cfgGen()) == blob.size());
+    return getF32(std::span<const std::byte>(blob).subspan(offset, 4));
+}
+
+// Steps past the persist debounce, returning every kPersist* bit tick() raised.
+uint8_t persistBitsOver(Rig& rig, int ms) {
+    uint8_t due = 0;
+    for (int i = 0; i < ms; ++i) {
+        g_clock.advanceUs(1000);
+        rig.hub->update(g_clock.nowUs());
+        due |= rig.device.tick(g_clock.nowUs() / 1000);
+        rig.client->update(g_clock.nowUs());
+    }
+    return due;
+}
+
+float stateF32(Rig& rig, uint16_t channel, size_t offset) {
+    const auto it = rig.del.lastState.find(channel);
+    REQUIRE(it != rig.del.lastState.end());
+    REQUIRE(it->second.size() >= offset + 4);
+    return getF32(std::span<const std::byte>(it->second).subspan(offset, 4));
+}
+
+uint8_t stateU8(Rig& rig, uint16_t channel, size_t offset) {
+    const auto it = rig.del.lastState.find(channel);
+    REQUIRE(it != rig.del.lastState.end());
+    REQUIRE(it->second.size() > offset);
+    return std::to_integer<uint8_t>(it->second[offset]);
+}
+
+}  // namespace
+
+TEST_CASE("VD-TR-1: a trial jog speed is live, marked, never stored, and commit stores it") {
+    auto rig = std::make_unique<Rig>();
+    persistBitsOver(*rig, 2500);   // drain the boot's own writes
+    const float before = rig->device.config().jog_speed;
+    const float trial = before + 7.0f;
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(3, IntentValue::ofF32(trial)), std::nullopt, false,
+                                    true).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(rig->device.config().jog_speed == doctest::Approx(trial));
+    CHECK(stateF32(*rig, ch::machine_config, 8) == doctest::Approx(trial));
+    CHECK(stateU8(*rig, ch::machine_config, 37) == 0x04);   // bit 2: jog_speed
+    CHECK(storedF32(*rig, kBlobJogSpeed) == doctest::Approx(before));
+    CHECK((persistBitsOver(*rig, 2500) & kPersistConfig) == 0);
+
+    REQUIRE(rig->client->sendIntent(channels::settings_trial, oneKey(1, IntentValue::ofU64(trial_ops::commit)))
+                .has_value());
+    rig->step();
+    CHECK(rig->hub->trialCount() == 0);
+    CHECK(stateU8(*rig, ch::machine_config, 37) == 0x00);
+    CHECK(storedF32(*rig, kBlobJogSpeed) == doctest::Approx(trial));
+    CHECK((persistBitsOver(*rig, 2500) & kPersistConfig) != 0);
+}
+
+TEST_CASE("VD-TR-2: revert and a session's end restore the kinetic and modes baselines") {
+    auto rig = std::make_unique<Rig>();
+    const float gain0 = storedF32(*rig, kBlobChaseGain);
+    REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(8, IntentValue::ofF32(0.25f)), std::nullopt, false,
+                                    true).has_value());
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(4, IntentValue::ofU64(0)), std::nullopt, false, true)
+                .has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(rig->hub->trialCount() == 2);
+    CHECK(stateU8(*rig, ch::kinetic_chase, 20) == 0x04);   // bit 2: chase_gain
+    CHECK(stateU8(*rig, ch::machine_modes, 7) == 0x01);    // bit 0: overshoot_clamp
+    CHECK(storedF32(*rig, kBlobChaseGain) == doctest::Approx(gain0));
+    CHECK(getF32(std::span<const std::byte>(rig->del.lastState[ch::kinetic_chase]).subspan(2, 4)) ==
+          doctest::Approx(0.25f));
+
+    REQUIRE(rig->client->sendIntent(channels::settings_trial, oneKey(1, IntentValue::ofU64(trial_ops::revert)))
+                .has_value());
+    rig->step();
+    CHECK(rig->hub->trialCount() == 0);
+    CHECK(getF32(std::span<const std::byte>(rig->del.lastState[ch::kinetic_chase]).subspan(2, 4)) ==
+          doctest::Approx(gain0));
+    CHECK(stateU8(*rig, ch::kinetic_chase, 20) == 0x00);
+
+    // A session that goes away takes its trial with it.
+    REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(8, IntentValue::ofF32(0.5f)), std::nullopt, false,
+                                    true).has_value());
+    rig->step();
+    CHECK(rig->hub->trialCount() == 1);
+    rig->client->disconnect();
+    rig->step(50);
+    CHECK(rig->hub->trialCount() == 0);
+    // The client is gone, so the live value is read where a baseline is.
+    CHECK(rig->device.trialBaseline(ch::kinetic_set, 8)->f32_val == doctest::Approx(gain0));
+}
+
+TEST_CASE("VD-TR-3: keys gated on live state refuse a trial; the flip waits for a window trial") {
+    auto rig = std::make_unique<Rig>();
+    REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(10, IntentValue::ofF32(40.0f)), std::nullopt, false,
+                                    true).has_value());
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(8, IntentValue::ofU64(1)), std::nullopt, false, true)
+                .has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 2);
+    CHECK(rig->del.nacks[0].code == NackCode::UNSUPPORTED_OP);
+    CHECK(rig->del.nacks[1].code == NackCode::UNSUPPORTED_OP);
+    CHECK(rig->hub->trialCount() == 0);
+
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(2, IntentValue::ofF32(200.0f)), std::nullopt, false,
+                                    true).has_value());
+    rig->step();
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(8, IntentValue::ofU64(1))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 3);
+    CHECK(rig->del.nacks[2].code == NackCode::INTERLOCK);
+    CHECK(rig->del.nacks[2].detail == "window on trial: commit or revert first");
+}
