@@ -351,10 +351,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
 
     // ---- "control-owner" — STATE, critical, on-change -----------------------
     // Matches Hub::buildControlOwnerPayload(): 4 × {source u8, owner u32}, in
-    // ascending source order, 20 bytes total. Each pair is one arbiter source
-    // and the session id that owns it (0 = unowned). The src options name
-    // each source id, so a client reads the owner's name from here; index 0
-    // is the jog, a real source, not a none label.  [20 B]
+    // ascending source order. Each pair is one arbiter source and the session
+    // id that owns it (0 = unowned). The src options name each source id;
+    // index 0 is the jog, a real source, not a none label. Then per slot
+    // (RFC-098) the source_kinds value and the owner's HELLO client_kind and
+    // client_name, zero-filled when unowned.  [216 B]
     c.addEntry({.id = valence::channels::control_owner, .name = "control-owner",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
@@ -371,6 +372,18 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectField({.name = "src3",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f},
                      {kSourceLabels[0], kSourceLabels[1], kSourceLabels[2], kSourceLabels[3]});
     c.addLayoutField({.name = "owner3", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "kind0", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "client_kind0", .type = PackedFieldType::str16, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "client_name0", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "kind1", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "client_kind1", .type = PackedFieldType::str16, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "client_name1", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "kind2", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "client_kind2", .type = PackedFieldType::str16, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "client_name2", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "kind3", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "client_kind3", .type = PackedFieldType::str16, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "client_name3", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
 
     // ---- "safety-intents" — INTENT, critical, modest rate -------------------
     // The client sends {1:"op"} where op is a safety_ops:: value (estop=6 and

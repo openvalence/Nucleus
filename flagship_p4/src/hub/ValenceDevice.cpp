@@ -343,20 +343,6 @@ void publishPacked(Hub& hub, uint16_t id, std::span<const std::byte> buf, size_t
     hub.publishState(id, buf);
 }
 
-void publishControlOwner(Hub& hub) {
-    // 4 x {source u8, owner u32} ascending, exactly Hub::buildControlOwnerPayload.
-    // Every source unowned at boot, which is the truth. The hub republishes
-    // this channel itself on every ownership transition; this call is the SEED
-    // that keeps a subscriber from holding "no idea" before the first one.
-    std::array<std::byte, 20> buf{};
-    std::span<std::byte> s(buf);
-    for (uint8_t i = 0; i < 4; ++i) {
-        putU8(s.subspan(size_t(i) * 5, 1), i);
-        putU32(s.subspan(size_t(i) * 5 + 1, 4), 0);
-    }
-    hub.publishState(channels::control_owner, s);
-}
-
 // ---- the motion plane's retained STATE ---------------------------------------
 // Every channel below reads ONE motionCensus(), so no two of them can disagree
 // about the same instant. The byte layouts mirror ValenceCatalog.h's field
@@ -1086,6 +1072,7 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     MotionIntent in;
     in.source    = MotionSource::Manual;
     in.target_mm = *numberOf(f1);
+    _jogMark = c.intents + c.rejected;
     if (!motionSubmit(in)) return refuse(NackCode::INTERLOCK, "motion path refused the intent");
 
     // Ground truth: echo the post-clamp position, against the SAME bounds the
@@ -1460,7 +1447,8 @@ void ValenceDevice::onSessionLeft(uint32_t session_id) {
 
 // §11.4: every transition lands in _owner, the jog's SOURCE_CONFLICT answer.
 // A release (owner 0) comes on a session's way out, whether it went STALE or
-// was torn down; the reason is deliberately not consulted. The generators
+// was torn down, or when the source went quiet (RFC-098, a stopped generator
+// is already off); the reason is deliberately not consulted. The generators
 // are the hub-autonomous sources, and background_run is the operator's one
 // standing answer, for both, to "keep going with nobody attached?".
 void ValenceDevice::onSourceOwnership(uint8_t source_id, uint32_t owner_session, uint8_t reason) {
@@ -1480,6 +1468,35 @@ void ValenceDevice::onSourceOwnership(uint8_t source_id, uint32_t owner_session,
     }
     (void)reason;
     (void)name;
+}
+
+// RFC-098 (SPEC 11.4): each source's source_kinds value on control-owner. The
+// hub releases the stream on its own bundle clock.
+uint8_t ValenceDevice::sourceKind(uint8_t source_id) {
+    switch (MotionSource(source_id)) {
+        case MotionSource::Manual:   return source_kinds::jog;
+        case MotionSource::Stream:   return source_kinds::stream;
+        case MotionSource::Pattern:  return source_kinds::classic;
+        case MotionSource::Advanced: return source_kinds::advanced;
+    }
+    return source_kinds::reserved;
+}
+
+// RFC-098: a generator is quiet once stopped and no longer driving (its stop's
+// brake done); the jog once the motion task took the move and the plan is at
+// rest. A refused jog submitted nothing, so its slot is quiet at rest.
+bool ValenceDevice::sourceQuiet(uint8_t source_id) {
+    switch (MotionSource(source_id)) {
+        case MotionSource::Manual: {
+            const MotionCensus c = motionCensus();
+            const bool taken = !_jogMark || c.intents + c.rejected != *_jogMark;
+            return taken && !c.busy && c.step_q8 == 0;
+        }
+        case MotionSource::Pattern:  return !_pat.running && !patternActive();
+        case MotionSource::Advanced: return !_pat.adv_running && !patternActive();
+        case MotionSource::Stream:   return false;
+    }
+    return false;
 }
 
 // §8.7 store items over BLOB_REQ ns=1, each carrying its RFC-073 digest
@@ -1694,7 +1711,7 @@ void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     _catalog = &catalog;
     // The declaration's one home is the composition's setEstopCutsPower().
     motionSetEstopCutsPower(hub.estopCutsPower());
-    publishControlOwner(hub);
+    hub.publishControlOwnerStateIfPresent();
     publishMachineConfig();
     publishHubStatus();
     // _tune is the factory set or the adopted one, and the engine already holds

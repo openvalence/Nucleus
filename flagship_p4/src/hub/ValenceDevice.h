@@ -182,6 +182,8 @@ public:
     void onSessionJoined(uint32_t session_id) override;
     void onSessionLeft(uint32_t session_id) override;
     void onSourceOwnership(uint8_t source_id, uint32_t owner_session, uint8_t reason) override;
+    uint8_t sourceKind(uint8_t source_id) override;
+    bool sourceQuiet(uint8_t source_id) override;
     std::optional<BlobView> readBlob(uint8_t ns, uint8_t store_id, uint8_t slot) override;
     // RFC-099 trial writes. Trialable: 0x3000 keys 1-8, 0x3030 key 4
     // (overshoot_clamp), 0x3120 every key but 10. Never chase_dense, the
@@ -285,6 +287,10 @@ private:
     // SPEC 11.4 ownership as the hub reported it, indexed by MotionSource:
     // the session id that owns each source, 0 = unowned.
     std::array<uint32_t, 4> _owner{};
+    // RFC-098: the motion task's intent count (accepted plus rejected) when
+    // the last jog was submitted. The jog's slot stays held until the count
+    // moves past it, so a jog admitted this tick is never quiet.
+    std::optional<uint32_t> _jogMark;
     // A `return` is running: set on its acceptance, cleared when the
     // arbiter's census.returns moves past _returnsAtRequest, or by ESTOP.
     bool _returnPending = false;
