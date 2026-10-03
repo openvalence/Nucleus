@@ -385,6 +385,12 @@ void ValenceWsPort::loop(uint32_t nowMs) {
             }
         }
 
+        // A close that lands right behind its own frames (GOODBYE, then the
+        // socket) is held while the ring still has them: this tick's
+        // Hub::update() reads them first, so a GOODBYE ends the session
+        // instead of a detach parking it (RFC-042). Nothing can refill the
+        // ring after close_fn, so the hold lasts one tick (bd val-9wa).
+        if (_wantDetach[i].load(std::memory_order_acquire) && _attached[i] && s.rxPending()) continue;
         if (_wantDetach[i].exchange(false, std::memory_order_acq_rel)) {
             if (_attached[i]) {
                 _hub->detachTransport(s);

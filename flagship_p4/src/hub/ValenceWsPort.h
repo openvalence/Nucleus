@@ -166,6 +166,10 @@ public:
     bool stalledOut(uint32_t nowMs) const;
     // True once nothing at all has arrived for kIdleReapMs.
     bool idleOut(uint32_t nowMs) const;
+    // Frames in the RX ring the hub has not read yet.
+    bool rxPending() const {
+        return _rxHead.load(std::memory_order_relaxed) != _rxTail.load(std::memory_order_acquire);
+    }
 
     // ---- diagnostics (either task, relaxed) ---------------------------------
     int fd() const { return _fd.load(std::memory_order_relaxed); }
