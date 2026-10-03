@@ -956,7 +956,7 @@ void ValenceDevice::publishPatternPlane(const MotionCensus& mo) {
 Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     const MotionCensus c = motionCensus();
     if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
-    if (!c.motor_on) return refuseUnpowered("move");
+    if (!c.power_gate) return refuseUnpowered("move");
     if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
     const bool overrideOn = _hub != nullptr &&
                             (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
@@ -1000,7 +1000,7 @@ Ret ValenceDevice::refuseUnpowered(const char* what) {
 }
 
 std::optional<NackCode> ValenceDevice::startRefusal(const MotionCensus& c, const char* what) {
-    if (!c.motor_on) return refuseUnpowered(what).error();
+    if (!c.power_gate) return refuseUnpowered(what).error();
     if (!commissioned(_modes)) {
         GLOGW_EVERY_MS(1000, kTag, "%s refused INTERLOCK: not commissioned "
                        "(setup fields written 0x%02x of 0x%02x)",
@@ -1061,15 +1061,25 @@ Ret ValenceDevice::applySafety(const IntentValueMap& requested) {
             GLOGW(kTag, "OVERRIDE: PAUSE held, the rail is the operator's, jog enabled");
             break;
         case safety_ops::return_op: {
-            if (motionCensus().estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+            const MotionCensus c = motionCensus();
+            if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
             // No override, or a return already running: nothing to start, and
             // the ECHO says what is true (no further gate, SPEC 11.1).
             const bool overrideOn = (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
             if (overrideOn && !_returnPending) {
-                _returnsAtRequest = motionCensus().returns;
-                _returnPending = true;
-                motionReturn();
-                GLOGI(kTag, "RETURN: back to the paused position at the jog set");
+                // An arrival on the spot (unpowered, nothing to travel) counts
+                // in the arbiter before this returns, and the census shows it
+                // within a publish interval: tick() drops the hub's override
+                // bit on that count exactly as for a rendered return.
+                const ReturnStart r = motionReturn();
+                if (r == ReturnStart::unpowered) return refuseUnpowered("return");
+                if (r != ReturnStart::none) {
+                    _returnsAtRequest = c.returns;
+                    _returnPending = true;
+                    GLOGI(kTag, r == ReturnStart::arrived
+                                    ? "RETURN: already at the paused position, override drops"
+                                    : "RETURN: back to the paused position at the jog set");
+                }
             }
             break;
         }

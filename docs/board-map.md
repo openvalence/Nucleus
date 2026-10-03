@@ -51,6 +51,21 @@ ratification, and BoardPins.h marks each one `TODO(hw-kzr)`.
 | Motor switch current monitor: U2 IMON (8.25k), ADC1 | `/MSW.MSW_IMON` | GPIO19, pad 24 | ADC1 oneshot, calibrated, 4-sample mean, 0.15 V/A; judged at the end of the pre-charge window against `kInrushCeilingA` (`MotorSwitch.h`) | Provisional (ADC1-bound) | bench val-091.56 |
 | EN/UVLO wired-OR node of U2: pulled low by the INA ALERT, the bus overvoltage trip (Q405), the E-stop (Q901) and the board monitor's FAULT_N; ADC1, ~1.8 V running, ~0 V tripped | `/MSW.EN_NODE` | GPIO23, pad 20 | ADC1 oneshot, every 5 ms: under `kEnNodeMinV` while pre-charging or on latches faulted (`en_node`); read fresh after the INA ALERT re-arm on every enable | Provisional (ADC1-bound) | cause naming val-091.57; bench val-091.56 |
 
+**The bench profile** (operator ruling 2026-10-02, val-091.58). A bare
+devkit has no motor switch, so the self-check never passes and the arbiter's
+motor-power gate would refuse every intent. The build profile
+`NUCLEUS_BENCH_NO_MOTOR` (env `flagship_p4_bench`: `pio run -d flagship_p4 -e
+flagship_p4_bench`) makes that one gate advisory: motion is admitted with the
+switch reporting off, the first admission logs `BENCH: motor power gate
+bypassed` once per boot, and every other gate (e-stop, PAUSE, homed,
+commissioned, the window) is unchanged. Nothing else moves: MOTOR_EN still
+follows the self-check, hub-status and the census still report the switch as
+it is, WELCOME still declares `estop_cuts_power`, and FIRMWARE_VERSION carries
+`-bench`, so the image cannot pass for a release. It is a compile-time
+profile, never a runtime switch; the release env never sets it. Never flash it
+at a Flagship that carries a motor: with the gate advisory, a plan can render
+into an unpowered drive and move position truth without the carriage.
+
 ## Private I2C bus and the board monitor
 
 | Function | Net | P4 pad | Firmware today | Firmness | Owed |

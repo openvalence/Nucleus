@@ -168,7 +168,7 @@ bool motionAcquireRail(MotionSource g) { return g_sim.arbiter().acquireRail(g); 
 void motionReleaseRail(MotionSource g) { g_sim.arbiter().releaseRail(g); }
 void motionSetEstopCutsPower(bool cuts) { g_sim.arbiter().setEstopCutsPower(cuts); }
 void motionOverride() { g_sim.arbiter().override(); }
-void motionReturn() { g_sim.arbiter().returnToPause(); }
+ReturnStart motionReturn() { return g_sim.arbiter().returnToPause(); }
 void motionSetFlipped(bool on) { g_sim.arbiter().setFlipped(on); }
 void motionSetJogLimits(float v, float a) { g_sim.arbiter().setJogLimits(v, a); }
 void motionSetInputLimits(float v, float a, float j) { g_sim.arbiter().setInputLimits(v, a, j); }

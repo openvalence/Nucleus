@@ -102,7 +102,9 @@ struct MotionCensus {
     uint32_t stack_free     = 0;   // motion task stack high-water headroom, bytes
     bool     homed          = false;
     bool     estop          = false;
-    bool     motor_on       = false;  // the motor switch is `on`: the arbiter's power gate
+    bool     motor_on       = false;  // the motor switch is `on`, as the switch reports it
+    bool     power_gate     = false;  // the power gate admits motion: motor_on, or
+                                      // always in the bench profile (valence_config.h)
     bool     paused         = false;
     bool     override_mode  = false;  // SPEC 11.1 override: the rail is the operator's
     bool     returning      = false;  // the `return` move is running
@@ -223,10 +225,19 @@ void motionReleaseRail(MotionSource generator);
 // unhomed. The composition declares it once on the Hub; the delegate hands
 // the Hub's answer here at attach.
 void motionSetEstopCutsPower(bool cuts);
+// What a `return` request did (MotionArbiter::returnToPause()).
+enum class ReturnStart : uint8_t {
+    none,        // no override latched: nothing to return from
+    queued,      // the jog-set move back is planned on the motion task
+    arrived,     // unpowered, already at the paused position: override dropped
+                 // and returns counted on the spot
+    unpowered,   // unpowered and away from the paused position: refused,
+                 // override still latched
+};
 // SPEC 11.1 override / return. Any task, never blocks. override latches PAUSE
-// first; return is a no-op without override (MotionArbiter::returnToPause()).
+// first; return answers what it did (ReturnStart).
 void motionOverride();
-void motionReturn();
+ReturnStart motionReturn();
 // RFC-088: the direction flip (MotionArbiter::setFlipped()). Any task; the
 // delegate gates it to a homed rail at rest with no source and no override.
 void motionSetFlipped(bool on);

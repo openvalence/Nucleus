@@ -125,6 +125,26 @@ void MotionArbiter::override() {
     _override.store(true);
 }
 
+ReturnStart MotionArbiter::returnToPause() {
+    if (!_override.load()) return ReturnStart::none;
+    if (powerGateOpen()) {
+        _return_req.store(true);
+        return ReturnStart::queued;
+    }
+    // Nothing renders while the gate is shut, so there is no plan to wait
+    // for: the emitter count is still (any task), and so is the paused
+    // position, which evaluate() records at rest even while unpowered.
+    const float dist = std::fabs(positionMm() - _pause_pos_mm.load());
+    if (dist > kMmPerStep) {
+        GLOGW(kTag, "RETURN refused: motor power off, %.2f mm from the paused position", double(dist));
+        return ReturnStart::unpowered;
+    }
+    _override.store(false);
+    _returns.fetch_add(1);
+    GLOGI(kTag, "RETURN: already at the paused position, override off, PAUSE holds");
+    return ReturnStart::arrived;
+}
+
 void MotionArbiter::setWindow(float lo, float hi, float rail) {
     if (!(std::isfinite(lo) && std::isfinite(hi) && std::isfinite(rail))) return;
     if (!(hi > lo)) return;
@@ -188,11 +208,18 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
         return false;
     }
     // Neither does motor power: a plan rendered into an unpowered drive moves
-    // position truth and not the carriage.
+    // position truth and not the carriage. The bench profile renders it
+    // anyway, on purpose: a devkit has no drive to desync.
     if (!_powered.load()) {
-        ++_rejected;
-        GLOGW_EVERY_MS(1000, kTag, "REJECT: motor power off");
-        return false;
+        if (!powerGateOpen()) {
+            ++_rejected;
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: motor power off");
+            return false;
+        }
+        if (!_bench_noted) {
+            _bench_noted = true;
+            GLOGW(kTag, "BENCH: motor power gate bypassed");
+        }
     }
     // PAUSE suspends every source (SPEC 11.1). Under override the operator's
     // jog is the one motion accepted, except while the return runs.
@@ -347,11 +374,11 @@ void MotionArbiter::brakeToRest(uint64_t now_us) {
     _engine.setLimits(limitsFor(false));
     [[maybe_unused]] const float v = _engine.velocityAt(now_us) * span();   // log only
     if (!_engine.brake(now_us)) {
-        _pause_pos_mm = positionMm();
+        _pause_pos_mm.store(positionMm());
         return;
     }
     _demand_mm = toMm(_engine.snapshot(now_us).target);   // where it comes to rest
-    _pause_pos_mm = _demand_mm;
+    _pause_pos_mm.store(_demand_mm);
     GLOGI(kTag, "PAUSE: braking from %.1f mm/s", double(v));
 }
 
@@ -398,9 +425,11 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     }
 
     // Unpowered: parked, and the abandoned plan reset ONCE per loss on this
-    // task, for the same reason as the e-stop branch above.
-    if (!_powered.load()) {
-        _brake_req.store(false);
+    // task, for the same reason as the e-stop branch above. A pause landing
+    // here brakes nothing, but its rest point is still recorded: the parked
+    // carriage is where a `return` goes back to (returnToPause()).
+    if (!powerGateOpen()) {
+        if (_brake_req.exchange(false)) _pause_pos_mm.store(positionMm());
         _returning = false;
         _emitter.park();
         if (!_power_settled.exchange(true)) {
@@ -434,7 +463,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     if (_return_req.exchange(false) && _override.load()) {
         MotionIntent back;
         back.source = MotionSource::Manual;
-        float target = _pause_pos_mm;
+        float target = _pause_pos_mm.load();
         if (target < 0.0f) target = 0.0f;
         if (target > _rail) target = _rail;
         back.target_mm = target;
@@ -451,7 +480,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     if (_returning && !_engine.isBusy(now_us)) {
         _returning = false;
         _override.store(false);
-        ++_returns;
+        _returns.fetch_add(1);
         GLOGI(kTag, "RETURN: arrived, override off, PAUSE holds");
     }
     // Override gone (return, resume or ESTOP): back to the window frame, at rest.
@@ -541,10 +570,11 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.homed          = _homed;
     c.estop          = _estop;
     c.motor_on       = _powered.load();
+    c.power_gate     = powerGateOpen();
     c.paused         = _paused.load();
     c.override_mode  = _override.load();
     c.returning      = _returning;
-    c.returns        = _returns;
+    c.returns        = _returns.load();
     c.busy           = _engine.isBusy(now_us);
     c.mode           = s.mode;
     c.plan_kind      = s.plan_kind;

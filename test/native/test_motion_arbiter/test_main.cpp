@@ -219,6 +219,9 @@ TEST_CASE("motor power off: boots refusing every source, the jog under override 
     r->arb.forceHome(500.0f);
     r->run(1000);
     CHECK_FALSE(r->census().motor_on);
+    // Not the bench profile: the gate is shut with the switch, not advisory.
+    REQUIRE_FALSE(valence::kBenchNoMotor);
+    CHECK_FALSE(r->census().power_gate);
     CHECK_FALSE(r->submit(MotionSource::Manual, 100.0f));
     CHECK_FALSE(r->submit(MotionSource::Stream, 100.0f));
     CHECK_FALSE(r->submit(MotionSource::Pattern, 100.0f));
@@ -639,6 +642,69 @@ TEST_CASE("ESTOP drops override and a running return; release lands in plain PAU
     CHECK(r->census().paused);
     CHECK_FALSE(r->census().override_mode);
     CHECK_FALSE(r->submit(MotionSource::Manual, 50.0f));
+}
+
+TEST_CASE("return with the power gate shut: at the paused position it arrives on the spot") {
+    // bd val-96m: nothing renders unpowered, so a return that waited for a
+    // planner arrival held override forever.
+    auto r = std::make_unique<Rig>(false);
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    r->arb.pause(true);
+    r->run(1000);
+    r->arb.override();
+    r->run(1000);
+    const uint32_t before = r->census().returns;
+    CHECK(r->arb.returnToPause() == valence::ReturnStart::arrived);
+    const MotionCensus c = r->census();
+    CHECK(c.returns == before + 1);
+    CHECK_FALSE(c.override_mode);
+    CHECK_FALSE(c.returning);
+    CHECK(c.paused);
+    // Nothing left to return from.
+    CHECK(r->arb.returnToPause() == valence::ReturnStart::none);
+}
+
+TEST_CASE("return with the power gate shut: away from the paused position it is refused, override holds") {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 60.0f));
+    r->run(4'000'000);
+    REQUIRE(r->census().position_mm == doctest::Approx(60.0f).epsilon(0.01));
+    r->arb.pause(true);
+    r->run(1000);
+    r->arb.override();
+    REQUIRE(r->submit(MotionSource::Manual, 30.0f));
+    r->run(3'000'000);
+    REQUIRE(r->census().position_mm == doctest::Approx(30.0f).epsilon(0.02));
+    r->arb.setMotorPowered(false);
+    r->run(1000);
+    const uint32_t before = r->census().returns;
+    CHECK(r->arb.returnToPause() == valence::ReturnStart::unpowered);
+    r->run(100'000);
+    const MotionCensus c = r->census();
+    CHECK(c.returns == before);
+    CHECK(c.override_mode);
+    CHECK_FALSE(c.returning);
+}
+
+TEST_CASE("a pause landing with the power gate shut records the parked carriage as the paused position") {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 80.0f));
+    r->run(4'000'000);
+    REQUIRE(r->census().position_mm == doctest::Approx(80.0f).epsilon(0.01));
+    r->arb.setMotorPowered(false);
+    r->run(1000);
+    r->arb.pause(true);
+    r->run(1000);
+    r->arb.override();
+    // The return target is where the carriage parked, not a stale earlier
+    // pause, so there is nothing to travel.
+    CHECK(r->arb.returnToPause() == valence::ReturnStart::arrived);
+    CHECK_FALSE(r->census().override_mode);
 }
 
 TEST_CASE("a 32-segment bundle spanning the 1000 ms schedule horizon parks whole (RFC-087)") {

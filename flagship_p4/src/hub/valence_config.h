@@ -16,9 +16,24 @@
 //   is not surprised by the other. They describe the MOTION plane, which
 //   has_motion=false does not yet expose; they are still the stored
 //   configuration and are published truthfully on 0x1000.
-// See: .claude/rules/governance.md (C-1), ValenceCatalog.h
+// - NUCLEUS_BENCH_NO_MOTOR is a BUILD PROFILE, never a runtime switch: the
+//   CMake option of that name (flagship_p4/CMakeLists.txt, env
+//   flagship_p4_bench) defines it to 1. It makes the motion arbiter's
+//   motor-power gate advisory so the devkit can run patterns with the switch
+//   off, and it suffixes FIRMWARE_VERSION with "-bench" so that image can
+//   never pass for a release in WELCOME identity. Nothing else may read it.
+// See: .claude/rules/governance.md (C-1), ValenceCatalog.h, MotionArbiter.h
+// (the gate), bd val-091.58
 
+#ifndef NUCLEUS_BENCH_NO_MOTOR
+#define NUCLEUS_BENCH_NO_MOTOR 0
+#endif
+
+#if NUCLEUS_BENCH_NO_MOTOR
+#define FIRMWARE_VERSION "0.1.5-p4hub-bench"
+#else
 #define FIRMWARE_VERSION "0.1.5-p4hub"
+#endif
 
 // Identity strings for WELCOME key 37 (RFC-016a). Static storage, so the views
 // the hub holds outlive it.
@@ -37,3 +52,10 @@
 #define MAX_ACCEL_MM_S2             100000.0f
 #define DEFAULT_INPUT_MAX_JERK_MM_S3 2000000.0f
 #define MAX_JERK_MM_S3              50000000.0f
+
+#ifdef __cplusplus
+namespace valence {
+// The bench profile as C++ reads it. True only in a NUCLEUS_BENCH_NO_MOTOR build.
+inline constexpr bool kBenchNoMotor = NUCLEUS_BENCH_NO_MOTOR != 0;
+}  // namespace valence
+#endif

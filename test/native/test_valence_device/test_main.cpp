@@ -53,6 +53,9 @@ namespace {
 ManualClock g_clock{};
 MotionCensus g_census{};
 MotorSwitchStatus g_switch{};
+// What the fake arbiter answers a `return` with; an arrival counts at once,
+// as MotionArbiter::returnToPause() does.
+ReturnStart g_returnAnswer = ReturnStart::queued;
 
 }  // namespace
 
@@ -65,14 +68,20 @@ bool motionBegin() { return true; }
 bool motionSubmit(const MotionIntent&) { return true; }
 void motionEstop() { g_census.estop = true; }
 void motionEstopClear() { g_census.estop = false; }
-void motionSetMotorPowered(bool on) { g_census.motor_on = on; }
+void motionSetMotorPowered(bool on) { g_census.motor_on = g_census.power_gate = on; }
 void motionSetCommissioned(bool) {}
 void motionPause(bool on) { g_census.paused = on; }
 bool motionAcquireRail(MotionSource) { return true; }
 void motionReleaseRail(MotionSource) {}
 void motionSetEstopCutsPower(bool) {}
 void motionOverride() {}
-void motionReturn() {}
+ReturnStart motionReturn() {
+    if (g_returnAnswer == ReturnStart::arrived) {
+        ++g_census.returns;
+        g_census.override_mode = false;
+    }
+    return g_returnAnswer;
+}
 void motionSetFlipped(bool) {}
 void motionSetJogLimits(float, float) {}
 void motionSetInputLimits(float, float, float) {}
@@ -144,6 +153,8 @@ struct Rig {
         g_census = MotionCensus{};
         g_census.homed = true;
         g_census.motor_on = true;
+        g_census.power_gate = true;
+        g_returnAnswer = ReturnStart::queued;
         g_switch = MotorSwitchStatus{};
         g_switch.state = motorswitch::State::on;
         REQUIRE(buildValenceCatalog(catalog, boardFeatures()));
@@ -243,7 +254,7 @@ TEST_CASE("VD-01: a motor switch fault after a client estop latches seq N+1") {
 TEST_CASE("VD-02: a move refused for motor power carries the reason on the NACK") {
     auto rig = std::make_unique<Rig>();
 
-    g_census.motor_on = false;
+    g_census.motor_on = g_census.power_gate = false;
     g_switch.state = motorswitch::State::off;
     REQUIRE(rig->client->sendIntent(ch::move, moveTo(10.0f)).has_value());
     rig->step();
@@ -261,7 +272,7 @@ TEST_CASE("VD-02: a move refused for motor power carries the reason on the NACK"
     CHECK(rig->del.nacks[1].detail.size() <= limits::nack_detail_max_bytes);
 
     // A later refusal that gives no reason must not carry the stale one.
-    g_census.motor_on = true;
+    g_census.motor_on = g_census.power_gate = true;
     g_census.homed = false;
     REQUIRE(rig->client->sendIntent(ch::move, moveTo(10.0f)).has_value());
     rig->step();
@@ -318,4 +329,58 @@ TEST_CASE("VD-03: the dwells write on keys 46 and 47 and publish at the tail of 
     REQUIRE(mod != rig->del.lastState.end());
     REQUIRE(mod->second.size() == 7);
     CHECK(mod->second[0] == std::byte{70});
+}
+
+// ---- bd val-96m: a return with the power gate shut ------------------------------
+
+namespace {
+
+bool overrideLatched(const Rig& rig) {
+    return (rig.hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
+}
+
+}  // namespace
+
+TEST_CASE("VD-04: unpowered, a return with nothing to travel clears override and resume runs") {
+    auto rig = std::make_unique<Rig>();
+    g_census.motor_on = g_census.power_gate = false;
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::override)).has_value());
+    rig->step();
+    REQUIRE(overrideLatched(*rig));
+
+    g_returnAnswer = ReturnStart::arrived;
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::return_op)).has_value());
+    rig->step();
+    CHECK(rig->del.nacks.empty());
+    CHECK_FALSE(overrideLatched(*rig));
+    REQUIRE(rig->hub->pauseLatched());
+
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::resume)).has_value());
+    rig->step();
+    CHECK(rig->del.nacks.empty());
+    CHECK_FALSE(rig->hub->pauseLatched());
+}
+
+TEST_CASE("VD-05: unpowered, a return with travel left is refused with the motor-power detail") {
+    auto rig = std::make_unique<Rig>();
+    g_census.motor_on = g_census.power_gate = false;
+    g_switch.state = motorswitch::State::off;
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::override)).has_value());
+    rig->step();
+    REQUIRE(overrideLatched(*rig));
+
+    g_returnAnswer = ReturnStart::unpowered;
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::return_op)).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INTERLOCK);
+    CHECK(rig->del.nacks[0].detail == "motor power off (switch off)");
+    // Not accepted into limbo: override is still the operator's to resolve,
+    // and nothing waits on an arrival that cannot happen.
+    CHECK(overrideLatched(*rig));
+    g_returnAnswer = ReturnStart::arrived;
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::return_op)).has_value());
+    rig->step();
+    CHECK(rig->del.nacks.size() == 1);
+    CHECK_FALSE(overrideLatched(*rig));
 }

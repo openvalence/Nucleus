@@ -137,9 +137,12 @@ public:
     void override();
     // SPEC 11.1 RETURN: the owning task plans a jog-set move back to where the
     // pause brought the machine to rest; on arrival override drops and
-    // returns() counts once. Manual intents are refused while it runs. A no-op
-    // without override.
-    void returnToPause() { if (_override.load()) _return_req.store(true); }
+    // returns() counts once. Manual intents are refused while it runs. `none`
+    // without override. With the power gate shut nothing can render, so it is
+    // decided here, on the calling task: a carriage already within one step
+    // of the paused position has arrived (override drops, returns() counts);
+    // one further away is refused `unpowered` and override holds.
+    ReturnStart returnToPause();
     // SPEC 11.4, RFC-093: the classic and advanced generators are two sources
     // that never share the rail. A generator's start acquires it: true when
     // the rail is free, closed by e-stop, or already this generator's; false
@@ -157,6 +160,9 @@ public:
     // under override included, like the e-stop gate. Losing power parks the
     // emitter on the CALLING task and drops homed: a limp carriage keeps no
     // position reference. Boots off: nothing moves before the switch says on.
+    // The bench profile (kBenchNoMotor, valence_config.h) makes the gate
+    // ADVISORY: off still reads off in the census, but admits motion, and the
+    // first intent it admits logs "BENCH: motor power gate bypassed" once.
     void setMotorPowered(bool on);
     // The hub's first-run record (RFC-079 setup, StoredState.h): false until
     // the owner has written every required setup field once. False refuses
@@ -204,6 +210,8 @@ private:
     void setRailFrame(bool on, uint64_t now_us);
     kinetic::Limits limitsFor(bool manual) const;
     void brakeToRest(uint64_t now_us);
+    // The power gate as accept(), evaluate() and returnToPause() apply it.
+    bool powerGateOpen() const { return kBenchNoMotor || _powered.load(); }
     // Plans `target` (already clamped, mm) from the machine's actual state.
     // Owning task; counts the plan cost and a failure as a rejection.
     bool plan(float target, const MotionIntent& in, bool manual, uint64_t now_us);
@@ -253,12 +261,17 @@ private:
     static constexpr uint8_t kRailFree   = 0xFF;
     static constexpr uint8_t kRailClosed = 0xFE;
     std::atomic<uint8_t> _rail_gen{kRailFree};
-    // Owning task only. _pause_pos_mm is where the last pause brought the
-    // machine to rest (the return target); _returns counts completed returns.
+    // Owning task only.
     bool     _rail_frame  = false;
     bool     _returning   = false;
-    float    _pause_pos_mm = 0.0f;
-    uint32_t _returns     = 0;
+    // Where the last pause brought the machine to rest (the return target),
+    // and the completed returns. Written by the owning task and, for an
+    // unpowered arrival, by returnToPause() on the hub task: atomics, so the
+    // two never tear a value or lose an increment.
+    std::atomic<float>    _pause_pos_mm{0.0f};
+    std::atomic<uint32_t> _returns{0};
+    // The bench bypass has been logged this boot. Owning task only.
+    bool     _bench_noted = false;
     // Set by setWindow()/forceHome() on any task, consumed by evaluate() on
     // the owning task: the mm FRAME moved, the carriage did not.
     volatile bool _frame_moved = false;
