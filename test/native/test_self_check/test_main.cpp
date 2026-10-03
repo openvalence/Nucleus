@@ -250,3 +250,29 @@ TEST_CASE("regen clamp: a live clamp fault fails") {
     sc::judgeRegenClamp(t, s);
     CHECK(t.entry(Check::regen_clamp).result == Result::fail);
 }
+
+TEST_CASE("trust ledger: loaded passes with its count, absent is factory fresh, rejected fails") {
+    Table t;
+    sc::LedgerBoot b;
+    b.hubUp = true;
+    b.loaded = true;
+    b.paired = 3;
+    sc::judgeTrustLedger(t, b);
+    CHECK(t.entry(Check::trust_ledger).result == Result::pass);
+    CHECK(std::string(t.entry(Check::trust_ledger).reason.data()) == "3 paired");
+
+    b = sc::LedgerBoot{};
+    b.hubUp = true;
+    sc::judgeTrustLedger(t, b);
+    CHECK(t.entry(Check::trust_ledger).result == Result::pass);
+    CHECK(std::string(t.entry(Check::trust_ledger).reason.data()) == "factory fresh: no ledger stored");
+
+    b.rejected = true;
+    sc::judgeTrustLedger(t, b);
+    CHECK(t.entry(Check::trust_ledger).result == Result::fail);
+
+    // Never a skip: the row is a real check now, and a hub that never ran
+    // its load is a failure, not an unknown.
+    sc::judgeTrustLedger(t, sc::LedgerBoot{});
+    CHECK(t.entry(Check::trust_ledger).result == Result::fail);
+}

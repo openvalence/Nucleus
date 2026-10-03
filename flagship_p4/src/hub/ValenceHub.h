@@ -83,4 +83,11 @@ HubCensus hubCensus();
 // 5 s liveness loop, a task with nothing to starve.
 void hubSetLinkRssi(int8_t rssi);
 
+namespace selfcheck { struct LedgerBoot; }
+// The trust ledger as hubBegin() loaded it, for the boot self-check
+// (SelfCheck.h judgeTrustLedger). app_main only, after hubBegin(): written
+// once there, on the same task, so it needs no lock. hubUp false until the
+// load ran.
+selfcheck::LedgerBoot hubLedgerBoot();
+
 }  // namespace valence

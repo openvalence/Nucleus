@@ -60,6 +60,7 @@
 #include "ValenceUiToken.h"
 #include "ValenceWsPort.h"
 #include "system/ValenceHttp.h"
+#include "system/SelfCheck.h"
 #include "system/ValenceOta.h"
 #include "valence_config.h"
 
@@ -193,6 +194,8 @@ uint32_t g_endpointIpv4 = 0;
 // kPersist* bits tick() reported due that no write has landed for yet. Hub
 // task only.
 uint8_t g_persistDue = 0;
+// Written once by hubBegin(), read by the self-check: app_main, one task.
+selfcheck::LedgerBoot g_ledgerBoot{};
 
 // Hub task only. cfg_gen is read HERE, at write time, by which point
 // Hub::update() has already applied this tick's bump (SPEC 4.2).
@@ -309,6 +312,8 @@ uint32_t deviceFreeHeapBytes() { return uint32_t(heap_caps_get_free_size(MALLOC_
 
 valence::Hub* hub() { return (g_box && g_box->hub) ? &*g_box->hub : nullptr; }
 
+selfcheck::LedgerBoot hubLedgerBoot() { return g_ledgerBoot; }
+
 void hubSetLinkRssi(int8_t rssi) {
     if (g_box) g_box->device.setLinkRssi(rssi);
 }
@@ -405,6 +410,10 @@ bool hubBegin() {
     // against an empty one, and the boot's half of the power-cycle gesture.
     const TrustBoot tb = g_box->trust.boot(g_box->hub->pairing(), g_nvs,
                                            esp_reset_reason() == ESP_RST_POWERON);
+    g_ledgerBoot.hubUp = true;
+    g_ledgerBoot.loaded = tb.ledgerLoaded;
+    g_ledgerBoot.rejected = tb.ledgerRejected;
+    g_ledgerBoot.paired = unsigned(tb.paired);
     if (tb.ledgerRejected)
         GLOGE(kTag, "stored trust ledger unreadable or rejected: no pairings; "
                     "the power-cycle gesture opens pairing");

@@ -233,4 +233,33 @@ inline void judgeRegenClamp(Table& t, const SvStatus& s) {
              "clamp test pulse not sequenced yet (val-091.21)");
 }
 
+// ---- the trust ledger (TrustStore.h's boot result) --------------------------
+// hubUp: the hub built, so its ledger load ran. A stored ledger that did not
+// load is a FAIL: NVS holds pairings the hub cannot read, and the hub runs
+// with none. No ledger stored at all is a factory-fresh hub and passes.
+
+struct LedgerBoot {
+    bool hubUp = false;
+    bool loaded = false;     // a stored ledger was read and decoded
+    bool rejected = false;   // one was stored and did not load
+    unsigned paired = 0;     // ledger entries after the load
+};
+
+inline void judgeTrustLedger(Table& t, const LedgerBoot& b) {
+    if (!b.hubUp) {
+        t.record(Check::trust_ledger, Result::fail, "hub did not start: no ledger loaded");
+        return;
+    }
+    if (b.rejected) {
+        t.record(Check::trust_ledger, Result::fail,
+                 "stored ledger unreadable or rejected: running with no pairings");
+        return;
+    }
+    if (b.loaded) {
+        t.record(Check::trust_ledger, Result::pass, "%u paired", b.paired);
+        return;
+    }
+    t.record(Check::trust_ledger, Result::pass, "factory fresh: no ledger stored");
+}
+
 }  // namespace valence::selfcheck

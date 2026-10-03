@@ -273,8 +273,7 @@ bool selfCheckRun(const SelfCheckFacts& facts) {
         g_table.record(Check::host_link, Verdict::fail, "esp_hosted did not reach the C6");
     }
     checkNvs();
-    g_table.record(Check::trust_ledger, Verdict::skipped,
-                   "the trust ledger is not persisted yet (val-fvn)");
+    selfcheck::judgeTrustLedger(g_table, hubLedgerBoot());
     checkCatalog();
 
     g_ran = true;
