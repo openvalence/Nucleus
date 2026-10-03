@@ -79,6 +79,12 @@ using Ret = Result<IntentValueMap, NackCode>;
 
 constexpr const char* kTag = "hub";
 
+// SPEC 16.1 NACK details shared by more than one refusal. Each stays under
+// nack_detail_max_bytes (48), so the hub never cuts one.
+constexpr const char* kDetailEstop = "e-stop latched";
+constexpr const char* kDetailPaused = "paused";
+constexpr const char* kDetailReturning = "returning to the paused position";
+
 // Quiet time after the last applied change before a blob's persist is due,
 // the same for both blobs. It coalesces a burst (a slider drag streams
 // 0x3120 writes; a rename follows a save) into ONE flash write after the
@@ -717,7 +723,7 @@ Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
     if (!live && !f7) return Ret::err(NackCode::INVALID_VALUE);
     if (live) {
         const MotionCensus c = motionCensus();
-        if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+        if (c.estop) return refuse(NackCode::ESTOP_ACTIVE, kDetailEstop);
         // Only a start is motion; a knob turned with the switch off is not.
         if (f1 && boolOf(f1).value_or(false))
             if (const auto why = startRefusal(c, "classic start")) return Ret::err(*why);
@@ -766,7 +772,7 @@ Ret ValenceDevice::applyPattern(const IntentValueMap& requested) {
 // the depth pair, and the echo reads back AFTER all of them.
 Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
     const MotionCensus c = motionCensus();
-    if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+    if (c.estop) return refuse(NackCode::ESTOP_ACTIVE, kDetailEstop);
     bool any = false;
     for (uint8_t key = 2; key <= kApLastKey; ++key) {
         if (key == kApRunKey) continue;
@@ -835,7 +841,7 @@ Ret ValenceDevice::applyPresets(const IntentValueMap& requested) {
             GLOGI(kTag, "preset saved: slot %u", unsigned(slot));
             break;
         case store_ops::load: {
-            if (motionCensus().estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+            if (motionCensus().estop) return refuse(NackCode::ESTOP_ACTIVE, kDetailEstop);
             const PatternPresetStore::Slot* s = _presets.slot(slot);
             if (s == nullptr) return Ret::err(NackCode::INVALID_VALUE);
             _pat.applyPreset(s->payload);
@@ -955,19 +961,19 @@ void ValenceDevice::publishPatternPlane(const MotionCensus& mo) {
 // hub has already admitted it under PAUSE only with override latched.
 Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     const MotionCensus c = motionCensus();
-    if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+    if (c.estop) return refuse(NackCode::ESTOP_ACTIVE, kDetailEstop);
     if (!c.power_gate) return refuseUnpowered("move");
     if (!c.homed) return Ret::err(NackCode::NOT_HOMED);
     const bool overrideOn = _hub != nullptr &&
                             (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
     if (!overrideOn && railOwned()) return Ret::err(NackCode::SOURCE_CONFLICT);
-    if (_returnPending) return Ret::err(NackCode::INTERLOCK);
+    if (_returnPending) return refuse(NackCode::INTERLOCK, kDetailReturning);
 
     MotionIntent in;
     in.source    = MotionSource::Manual;
     in.target_mm = fieldF32(findField(requested, 1), 0.0f);
     if (!std::isfinite(in.target_mm)) return Ret::err(NackCode::INVALID_VALUE);
-    if (!motionSubmit(in)) return Ret::err(NackCode::INTERLOCK);
+    if (!motionSubmit(in)) return refuse(NackCode::INTERLOCK, "motion path refused the intent");
 
     // Ground truth: echo the post-clamp position, against the SAME bounds the
     // arbiter clamps a Manual intent to: the whole rail under override, the
@@ -986,6 +992,15 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
 // detail (SPEC 16.1) for the client; the throttled log line is the bench's.
 // Both detail shapes stay under nack_detail_max_bytes (48) at the longest
 // state and fault names, so the hub never has to cut one.
+Ret ValenceDevice::refuse(NackCode code, const char* detail) {
+    noteDetail(detail);
+    return Ret::err(code);
+}
+
+void ValenceDevice::noteDetail(const char* detail) {
+    std::snprintf(_nackDetail.data(), _nackDetail.size(), "%s", detail);
+}
+
 Ret ValenceDevice::refuseUnpowered(const char* what) {
     const MotorSwitchStatus sw = motorSwitchStatus();
     GLOGW_EVERY_MS(1000, kTag, "%s refused INTERLOCK: motor power is off (switch %s, last fault: %s)",
@@ -1026,19 +1041,27 @@ bool ValenceDevice::railOwned() const {
 // jog only under override and never while the return runs; a generator
 // writer that starts nothing (a knob or a stop is not a motion intent). Every
 // stream bundle is the hub's to drop and never reaches this.
+// A refusal names its reason for intentNackDetail() (SPEC 16.1); an admission
+// clears it, so a stale reason never rides a later NACK.
 bool ValenceDevice::admitsUnderPause(uint16_t channel_id, const IntentValueMap& value,
                                      bool overrideLatched) {
-    if (channel_id == ch::home) return true;
-    if (channel_id == ch::move) return overrideLatched && !_returnPending;
-    if (channel_id == ch::pattern_cmd) {
-        const std::optional<bool> running = boolOf(findField(value, 1));
-        return !(running && *running);
+    _nackDetail[0] = '\0';
+    bool admit = false;
+    const char* why = kDetailPaused;
+    if (channel_id == ch::home) {
+        admit = true;
+    } else if (channel_id == ch::move) {
+        admit = overrideLatched && !_returnPending;
+        if (overrideLatched) why = kDetailReturning;
+        else why = "paused: override to jog";
+    } else if (channel_id == ch::pattern_cmd || channel_id == ch::pattern_advanced_cmd) {
+        const uint8_t key = channel_id == ch::pattern_cmd ? 1 : kApRunKey;
+        const std::optional<bool> running = boolOf(findField(value, key));
+        admit = !(running && *running);
+        why = "paused: resume to start";
     }
-    if (channel_id == ch::pattern_advanced_cmd) {
-        const std::optional<bool> running = boolOf(findField(value, 45));
-        return !(running && *running);
-    }
-    return false;
+    if (!admit) noteDetail(why);
+    return admit;
 }
 
 // ---- 0x0005 safety-intents ------------------------------------------------------
@@ -1056,13 +1079,13 @@ Ret ValenceDevice::applySafety(const IntentValueMap& requested) {
             // The rail is the operator's from here; the suspended source stays
             // suspended, so hand and stream never command position at once.
             // ESTOP drops override, so it is never latched under one.
-            if (motionCensus().estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+            if (motionCensus().estop) return refuse(NackCode::ESTOP_ACTIVE, kDetailEstop);
             motionOverride();
             GLOGW(kTag, "OVERRIDE: PAUSE held, the rail is the operator's, jog enabled");
             break;
         case safety_ops::return_op: {
             const MotionCensus c = motionCensus();
-            if (c.estop) return Ret::err(NackCode::ESTOP_ACTIVE);
+            if (c.estop) return refuse(NackCode::ESTOP_ACTIVE, kDetailEstop);
             // No override, or a return already running: nothing to start, and
             // the ECHO says what is true (no further gate, SPEC 11.1).
             const bool overrideOn = (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
@@ -1181,11 +1204,16 @@ std::optional<uint8_t> ValenceDevice::sourceForChannel(uint16_t channel_id) {
 // release lands in PAUSE with the switch off, and the arbiter's power gate
 // refuses motion until it is on.
 bool ValenceDevice::canClearEstop() {
+    _nackDetail[0] = '\0';
     const MotionCensus c = motionCensus();
-    if (c.busy || c.step_q8 != 0) return false;
+    if (c.busy || c.step_q8 != 0) {
+        noteDetail("motion not at rest");
+        return false;
+    }
     const motorswitch::Refusal why = motorSwitchRequestEnable();
     if (why == motorswitch::Refusal::fault_line) {
         GLOGW(kTag, "release refused CLEAR_REFUSED: %s", motorswitch::refusalName(why));
+        noteDetail(motorswitch::refusalName(why));
         return false;
     }
     if (why != motorswitch::Refusal::none)

@@ -384,3 +384,47 @@ TEST_CASE("VD-05: unpowered, a return with travel left is refused with the motor
     CHECK(rig->del.nacks.size() == 1);
     CHECK_FALSE(overrideLatched(*rig));
 }
+
+// ---- bd val-urd: every refusal names its reason ---------------------------------
+
+TEST_CASE("VD-06: a move under a latched e-stop carries 'e-stop latched'") {
+    auto rig = std::make_unique<Rig>();
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::estop)).has_value());
+    rig->step();
+    REQUIRE(rig->hub->estopLatched());
+    rig->del.nacks.clear();
+    REQUIRE(rig->client->sendIntent(ch::move, moveTo(10.0f)).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::ESTOP_ACTIVE);
+    CHECK(rig->del.nacks[0].detail == "e-stop latched");
+}
+
+TEST_CASE("VD-07: a PAUSE refusal names itself for intentNackDetail; an admission clears it") {
+    auto rig = std::make_unique<Rig>();
+    ValenceDevice& d = rig->device;
+    CHECK_FALSE(d.admitsUnderPause(ch::move, moveTo(10.0f), false));
+    CHECK(d.intentNackDetail(ch::move, NackCode::INTERLOCK) == "paused: override to jog");
+
+    IntentValueMap start{};
+    start.count = 1;
+    start.fields[0] = IntentValueField{1, IntentValue::ofBool(true)};
+    CHECK_FALSE(d.admitsUnderPause(ch::pattern_cmd, start, false));
+    CHECK(d.intentNackDetail(ch::pattern_cmd, NackCode::INTERLOCK) == "paused: resume to start");
+
+    CHECK(d.admitsUnderPause(ch::home, IntentValueMap{}, false));
+    CHECK(d.intentNackDetail(ch::home, NackCode::INTERLOCK).empty());
+    CHECK(d.admitsUnderPause(ch::move, moveTo(10.0f), true));
+    CHECK(d.intentNackDetail(ch::move, NackCode::INTERLOCK).empty());
+}
+
+TEST_CASE("VD-08: a refused release names why for intentNackDetail") {
+    auto rig = std::make_unique<Rig>();
+    g_census.busy = true;
+    CHECK_FALSE(rig->device.canClearEstop());
+    CHECK(rig->device.intentNackDetail(channels::safety_intents, NackCode::CLEAR_REFUSED) ==
+          "motion not at rest");
+    g_census.busy = false;
+    CHECK(rig->device.canClearEstop());
+    CHECK(rig->device.intentNackDetail(channels::safety_intents, NackCode::CLEAR_REFUSED).empty());
+}

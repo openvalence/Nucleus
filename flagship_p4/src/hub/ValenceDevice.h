@@ -174,6 +174,9 @@ private:
     Result<IntentValueMap, NackCode> applyPresets(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applySafety(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> refuseUnpowered(const char* what);
+    // `code`, with `detail` as its SPEC 16.1 reason.
+    Result<IntentValueMap, NackCode> refuse(NackCode code, const char* detail);
+    void noteDetail(const char* detail);
     // A generator start's machine gates, in 0x3200's order: unpowered,
     // uncommissioned, unhomed. nullopt admits; the rail is acquired after.
     std::optional<NackCode> startRefusal(const MotionCensus& c, const char* what);
@@ -233,10 +236,12 @@ private:
     uint32_t _returnsAtRequest = 0;
     // The motor switch's fault count as tick() last acted on it.
     uint16_t _mswFaultsSeen = 0;
-    // SPEC 16.1 NACK detail for the refusal applyIntent() last returned, NUL
-    // terminated; empty when that call gave no reason. Cleared on every
-    // applyIntent() entry, so intentNackDetail() never answers a stale one.
-    // Hub task only. Text over nack_detail_max_bytes is cut by the hub.
+    // SPEC 16.1 NACK detail for the refusal this delegate last made, NUL
+    // terminated; empty when it gave no reason. Three callers refuse and the
+    // hub may ask after each: applyIntent(), admitsUnderPause() and
+    // canClearEstop(). Each clears it on entry, so intentNackDetail() never
+    // answers a stale one. Hub task only. Text over nack_detail_max_bytes is
+    // cut by the hub.
     std::array<char, limits::nack_detail_max_bytes + 1> _nackDetail{};
     // The switch status hub-status last carried, so a change publishes now.
     MotorSwitchStatus _mswSent{};
