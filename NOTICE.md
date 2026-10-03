@@ -41,7 +41,7 @@ Section numbers are the license's own.
 | IXWebSocket 11.4.6 | https://github.com/machinezone/IXWebSocket | BSD-3-Clause, Copyright (c) 2018 Machine Zone, Inc. | WebSocket server of the host simulator `sim/valencesim` only; fetched by CMake, not in the firmware |
 | doctest 2.4.12 | https://github.com/doctest/doctest | MIT (per its `library.json`; no LICENSE file in the fetched package) | Native test runner only (`pio test -e native`); not in any shipped image |
 | ch32fun (PlatformIO `ch32v003fun` framework) | https://github.com/cnlohr/ch32fun | unknown (not fetched on this host) | The `flagship_ch32v003` monitor firmware build |
-| Valence protocol (`spec/`) | https://github.com/openvalence/Valence | no license terms, see the Valence repository | The wire protocol Nucleus speaks; consumed by pinned sha in `valence.pin` |
+| Valence protocol (`spec/`) | https://github.com/openvalence/Valence | CC BY 4.0 (Valence/LICENSE-SPEC) | The wire protocol Nucleus speaks; consumed by pinned sha in `valence.pin` |
 | Valence library and JS client (`lib/valence`) | https://github.com/openvalence/Valence | MIT, per `Valence/LICENSE` | `lib/valence`, the Valence library, pinned by sha in `valence.pin` |
 | Flux, Geiger, Kinetic | this repository | first-party, CERN-OHL-S-2.0 | `lib/flux` (LED grammar), `lib/geiger` (logging), `lib/kinetic` (motion planner) |
 
