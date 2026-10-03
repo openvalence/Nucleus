@@ -45,7 +45,7 @@
 #include "valence/wire/estop_frame.hpp"
 
 #include "../../../flagship_p4/src/hub/ValenceDevice.cpp"
-#include "../../../flagship_p4/src/patterns/AdvancedPattern.cpp"
+#include "../../../flagship_p4/src/patterns/advanced/AdvancedPattern.cpp"
 
 using namespace valence;
 

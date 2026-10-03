@@ -27,7 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "AdvancedPattern.h"
+#include "advanced/AdvancedPattern.h"
 
 namespace valence {
 

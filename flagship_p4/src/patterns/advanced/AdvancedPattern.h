@@ -15,8 +15,11 @@
 //   the input ceiling, accel knob = accel %. Do not ease them: a client
 //   predicts the stroke from the percent (the advgen.master registry note,
 //   Phosphor's master x k / half / k link).
-// See: https://github.com/fray-d/OSSM-Lite (CERN-OHL-S v2, the algorithm's
-// origin), ValenceCatalog.h (pattern-advanced, pattern-adv-mod-*)
+// - CERN-OHL-S-2.0 CARVE-OUT: every line derived from fray-d's OSSM-Lite lives
+//   in this directory and nowhere else in Nucleus (Apache-2.0). Code outside
+//   calls in; it never restates the math (NOTICE.md here).
+// See: https://github.com/fray-d/OSSM-Lite (the algorithm's origin),
+// ValenceCatalog.h (pattern-advanced, pattern-adv-mod-*)
 
 #include <cstdint>
 
@@ -100,6 +103,11 @@ struct StrokePlan {
     // their own speed and acceleration.
     float dwell_strokes = 0.0f;
 };
+
+// The half-stroke's duration in seconds: cruise at speed_frac of the input
+// ceiling, accel 1x..10x the least that reaches that speed over the distance
+// (knob 0 a triangle, 1 nearly all cruise). distance_mm must be > 0.
+float halfStrokeSeconds(const StrokePlan& plan, float input_speed_mm_s, float distance_mm);
 
 // ---- settings ---------------------------------------------------------------
 

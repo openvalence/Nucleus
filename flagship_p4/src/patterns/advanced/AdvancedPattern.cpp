@@ -77,6 +77,13 @@ void Settings::setBase(uint8_t id, int v) {
     if (id == DEPTH_MAX || id == DEPTH_MIN) coupleDepths();
 }
 
+float halfStrokeSeconds(const StrokePlan& plan, float input_speed_mm_s, float distance_mm) {
+    float v = plan.speed_frac * input_speed_mm_s;
+    if (v < 1.0f) v = 1.0f;
+    const float a = (v * v / distance_mm) * (1.0f + 9.0f * plan.accel_knob);
+    return distance_mm / v + v / a;
+}
+
 StrokePlan Settings::planStroke(uint32_t stroke_count) const {
     StrokePlan p{};
     const float master_frac = float(master.value) / 100.0f;

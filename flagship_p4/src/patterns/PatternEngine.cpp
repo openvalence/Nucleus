@@ -213,13 +213,7 @@ std::optional<PatternEngine::Stroke> AdvancedGenerator::next(uint64_t, const Pat
         return Stroke{false, target, kRestUs};
     }
 
-    // fray-d: cruise at speed_frac of the input ceiling; accel spans 1x..10x
-    // the least that reaches that speed over this distance (1x a triangle,
-    // 10x nearly all cruise). The duration is that trapezoid's own.
-    float v = sp.speed_frac * f.input_speed;
-    if (v < 1.0f) v = 1.0f;
-    const float a = (v * v / d) * (1.0f + 9.0f * sp.accel_knob);
-    const uint32_t half_us = strokeUs(d / v + v / a);
+    const uint32_t half_us = strokeUs(advpat::halfStrokeSeconds(sp, f.input_speed, d));
 
     // RFC-095: the dwell's clock is one stroke, this half plus the one before
     // it; the first half of a run has no partner and counts twice.

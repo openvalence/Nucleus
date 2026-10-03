@@ -36,7 +36,7 @@ add_executable(valencesim
     "${NUCLEUS_ROOT}/flagship_p4/src/motion/MotionArbiter.cpp"
     src/SimPattern.cpp
     "${NUCLEUS_ROOT}/flagship_p4/src/patterns/PatternEngine.cpp"
-    "${NUCLEUS_ROOT}/flagship_p4/src/patterns/AdvancedPattern.cpp"
+    "${NUCLEUS_ROOT}/flagship_p4/src/patterns/advanced/AdvancedPattern.cpp"
     src/SimUiToken.cpp
     "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceDevice.cpp"
     "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceDiscovery.cpp"

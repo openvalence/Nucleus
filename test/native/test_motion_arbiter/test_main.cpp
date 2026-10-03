@@ -21,7 +21,7 @@
 #include "valence/generated/registry_constants.hpp"
 
 #include "../../../flagship_p4/src/motion/MotionArbiter.cpp"
-#include "../../../flagship_p4/src/patterns/AdvancedPattern.cpp"
+#include "../../../flagship_p4/src/patterns/advanced/AdvancedPattern.cpp"
 #include "../../../flagship_p4/src/patterns/PatternEngine.cpp"
 
 using valence::MotionArbiter;

@@ -2,7 +2,7 @@
 // Constraints:
 // - Hardware-free and deterministic: a synthetic microsecond clock and a
 //   synthetic motion plane. No IDF, no FreeRTOS, no arbiter.
-// - Compiles flagship_p4/src/patterns/{PatternEngine,AdvancedPattern}.cpp
+// - Compiles flagship_p4/src/patterns/{PatternEngine,advanced/AdvancedPattern}.cpp
 //   themselves, the one copy the board and the sim both link.
 // See: flagship_p4/src/patterns/PatternEngine.h, bd val-091.12
 
@@ -22,7 +22,7 @@
 // PatternPresetStore.h reaches for its store-item encoder.
 #include "valence/wire/messages/store_item.hpp"
 
-#include "../../../flagship_p4/src/patterns/AdvancedPattern.cpp"
+#include "../../../flagship_p4/src/patterns/advanced/AdvancedPattern.cpp"
 #include "../../../flagship_p4/src/patterns/PatternEngine.cpp"
 #include "../../../flagship_p4/src/patterns/PatternPresetStore.h"
 

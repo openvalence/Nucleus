@@ -148,7 +148,7 @@ inline constexpr uint8_t kPresetStoreId = 2;
 inline constexpr const char* kPresetKind = "pattern.frayd";
 
 // MIRROR of advpat::BASE_COUNT and advpat::PERCENT_BASE_COUNT
-// (flagship_p4/src/patterns/AdvancedPattern.h), same rule and the same
+// (flagship_p4/src/patterns/advanced/AdvancedPattern.h), same rule and the same
 // static_assert home as the preset mirror above.
 inline constexpr uint8_t kApBaseCount = 8;
 inline constexpr uint8_t kApPercentBaseCount = 6;
