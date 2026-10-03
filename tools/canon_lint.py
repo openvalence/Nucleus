@@ -117,6 +117,7 @@ _CAMEL_BOUNDARY_RX = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z]
 # wordlist for the same reason, legal texts are verbatim by law, and .beads/ is
 # a generated append-only log that QUOTES issue text.
 BRITISH_SPELLING_SCAN_EXEMPT = ("THIRD_PARTY_LICENSES.md", "LICENSE", "NOTICE",
+                                "flagship_p4/src/patterns/advanced/LICENSE",
                                 "tools/canon_lint.py",
                                 ".claude/hooks/style_check.py")
 BRITISH_SPELLING_SCAN_EXEMPT_PREFIXES = (".beads/",)
