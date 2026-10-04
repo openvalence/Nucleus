@@ -1394,7 +1394,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .desc = "Approach speed for homing",
                       .step = 1.0f,
                       .settingKey = 9, .hasSettingKey = true, .hasStep = true,
-                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasRank = true, .rank = valence::ui_ranks::advanced,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
     };
 
