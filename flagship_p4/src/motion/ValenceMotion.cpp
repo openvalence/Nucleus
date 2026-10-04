@@ -97,6 +97,7 @@ public:
     void setTuning(const MotionTuning& t);   // any task: overwrite the one slot
     MotionCensus census() const;
     MotionArbiter& arbiter() { return _arb; }
+    void wakeFromIsr();                      // the home sense's rise
 
 private:
     static void taskTrampoline(void* self) { static_cast<MotionTask*>(self)->run(); }
@@ -124,13 +125,22 @@ private:
 
 MotionTask g_motion;
 
+void wakeMotionFromIsr() { g_motion.wakeFromIsr(); }
+
+// Before begin() has created the task the handle is null and nothing wakes.
+void MotionTask::wakeFromIsr() {
+    BaseType_t woken = pdFALSE;
+    if (_task != nullptr) vTaskNotifyGiveFromISR(_task, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+
 bool MotionTask::begin() {
     _queue = xQueueCreate(kIntentQueueDepth, sizeof(MotionIntent));
     if (_queue == nullptr) return false;
     _tuneQueue = xQueueCreate(1, sizeof(MotionTuning));
     if (_tuneQueue == nullptr) return false;
     // The task does not exist yet, so this caller is the arbiter's one owner.
-    _arb.setHomeSense(homeSenseBegin());
+    _arb.setHomeSense(homeSenseBegin(&wakeMotionFromIsr));
     _arb.begin(espNowUs());
     refreshSnapshot(espNowUs());
     // Core 1 with the hub, at a higher priority than it: the tick is a

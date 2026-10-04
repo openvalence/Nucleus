@@ -411,6 +411,7 @@ bool MotionArbiter::plan(float target, const MotionIntent& in, const kinetic::Li
 
 void MotionArbiter::setRailFrame(bool on, uint64_t now_us) {
     _rail_frame = on;
+    _rail_margin = 0.0f;
     _engine.resetAt(toNorm(positionMm()), now_us);
     _p_cmd_mm = positionMm();
 }
@@ -558,9 +559,11 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         GLOGI(kTag, "RETURN: arrived, override off, PAUSE holds");
     }
     // Override gone (return, resume or ESTOP) and no home cycle: back to the
-    // window frame, at rest.
-    if (_rail_frame && !_override.load() && _home == HomePhase::idle && !_engine.isBusy(now_us))
-        setRailFrame(false, now_us);
+    // window frame, at rest. ANY END of a cycle drops its margin the same way,
+    // into the rail frame while override holds.
+    const bool jogging = _override.load();
+    if (_rail_frame && (!jogging || _rail_margin > 0.0f) && _home == HomePhase::idle && !_engine.isBusy(now_us))
+        setRailFrame(jogging, now_us);
 
     // Feedforward: the plan's OWN mean velocity across the interval that just
     // elapsed. Summed over a move this telescopes to exactly the plan's
@@ -600,12 +603,14 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
 
 // ---- homing -----------------------------------------------------------------
 // Owning task only. The cycle plans through plan() at the jog accel with the
-// speed held to the phase's own, in the rail frame, and the window clamp never
-// sees it: an approach has to reach a stop the window may exclude. The cycle
-// frame is [0, _home_span] with each stall point declared kHomeSearchMarginMm
-// inside its end, so every target past a stop is inside the frame the engine
-// clamps to. Under the flip the home end is the physical far end (SPEC 9.6):
-// the legs swap direction and the physical frame keeps 0 at the low end.
+// speed held to the phase's own, in the rail frame widened by
+// kHomeFrameMarginMm at each end, and the window clamp never sees it: an
+// approach has to reach a stop the window may exclude. Positions are the
+// physical frame's throughout (MotionArbiter.h, homing): the start is declared
+// max_rail from the home stop, the home end's stalls take its label, and only
+// the measured rail relabels after that. Under the flip the home end is the
+// physical far end (SPEC 9.6): the legs swap direction and the physical frame
+// keeps 0 at the low end.
 
 void MotionArbiter::homeOrigin(int32_t count, float at_mm, uint64_t now_us) {
     _origin = count - int32_t(std::lround(at_mm * kStepsPerMm));
@@ -624,9 +629,8 @@ bool MotionArbiter::homePlan(float target_mm, float v_mm_s, uint64_t now_us) {
 
 void MotionArbiter::homeSeek(bool touch, bool armed, uint64_t now_us) {
     _sense_armed = armed;
-    _sense_seen = false;
-    _sense->high();   // a rise latched before this move is not this move's
-    if (!homePlan(homePast(_home_leg), touch ? _touch_v : _home_v, now_us))
+    const float target = touch ? homeAway(_home_leg, _home_at_mm, -kHomeSearchMarginMm) : homePast(_home_leg);
+    if (!homePlan(target, touch ? _touch_v : _home_v, now_us))
         return homeEnd(touch ? "the re-touch did not plan" : "the approach did not plan");
     _home = touch ? HomePhase::touch : HomePhase::approach;
 }
@@ -641,15 +645,15 @@ void MotionArbiter::homeStart(uint64_t now_us) {
     _homed = false;
     _home_v = _jog_v < _home_speed ? _jog_v : _home_speed;
     _touch_v = homeTouchMmS(_home_v);
-    _home_span = _max_rail + 2.0f * kHomeSearchMarginMm;
-    _rail = _home_span;
+    _rail = _max_rail;
+    _rail_margin = kHomeFrameMarginMm;
     _rail_frame = true;
     _home_deadline_us = now_us + uint64_t(homeCycleS(_max_rail, _home_v, _jog_a) * 1e6f) + kHomeTimeoutMarginUs;
     // The carriage is declared max_rail from the home stop: the approach
     // searches that far plus the margin.
-    homeOrigin(_emitter.count(), homeAway(0, _max_rail), now_us);
+    homeOrigin(_emitter.count(), homeAway(0, homeStopAt(0), _max_rail), now_us);
     GLOGI(kTag, "HOME: approaching the home end at %.1f mm/s (re-touch %.1f mm/s), searching %.0f mm",
-          double(_home_v), double(_touch_v), double(_max_rail + kHomeSearchMarginMm));
+          double(_home_v), double(_touch_v), double(_max_rail + kHomeFrameMarginMm));
     homeSeek(false, true, now_us);   // home() probed the line LOW
 }
 
@@ -667,11 +671,6 @@ void MotionArbiter::homeStep(uint64_t now_us) {
             const bool touch = _home == HomePhase::touch;
             if (_sense->high()) {
                 if (_sense_armed) {
-                    if (!_sense_seen) {
-                        _sense_seen = true;
-                        _sense_since_us = now_us;
-                    }
-                    if (now_us - _sense_since_us < kHomeSenseDebounceUs) return;
                     // The stop profile: PAUSE's brake at the input decel.
                     _home_hit = _emitter.count();
                     _engine.setLimits(limitsFor(false));
@@ -681,7 +680,6 @@ void MotionArbiter::homeStep(uint64_t now_us) {
                 }
             } else {
                 _sense_armed = true;
-                _sense_seen = false;
             }
             if (!_engine.isBusy(now_us))
                 return homeEnd(touch ? "no stall on the slow re-touch" : "no stall across max_rail");
@@ -689,31 +687,38 @@ void MotionArbiter::homeStep(uint64_t now_us) {
         }
         case HomePhase::approach_stop:
             if (_engine.isBusy(now_us)) return;
-            homeOrigin(_home_hit, homeStopAt(_home_leg), now_us);
-            if (!homePlan(homeAway(_home_leg, kHomeRetouchBackoffMm), _home_v, now_us))
+            // The home end's stall takes its label at once, so a cycle that
+            // ends from here on leaves positions measured from the home stop.
+            // A far stall is only read: the home datum keeps its label.
+            if (_home_leg == 0) homeOrigin(_home_hit, homeStopAt(0), now_us);
+            _home_at_mm = float(_home_hit - _origin) * kMmPerStep;
+            if (!homePlan(homeAway(_home_leg, _home_at_mm, kHomeRetouchBackoffMm), _home_v, now_us))
                 return homeEnd("the backoff did not plan");
             _home = HomePhase::clear;
             return;
         case HomePhase::clear: {
-            // Read every tick, so at rest the answer is the level and a rise
-            // in the last tick, never a bounce latched on the way off.
-            const bool high = _sense->high();
+            // The level at rest decides.
             if (_engine.isBusy(now_us)) return;
-            if (high) return homeEnd("still on the stop after the backoff (lower home_speed)");
+            if (_sense->high()) return homeEnd("still on the stop after the backoff (lower home_speed)");
             return homeSeek(true, true, now_us);
         }
-        case HomePhase::touch_stop:
+        case HomePhase::touch_stop: {
             if (_engine.isBusy(now_us)) return;
-            _home_datum[_home_leg] = _home_hit;
+            // The contact came kHomeSenseLatencyUs of re-touch travel before
+            // the sense did: the datum is moved back along the leg by it.
+            const int32_t lag = int32_t(std::lround(_touch_v * float(kHomeSenseLatencyUs) * 1e-6f * kStepsPerMm));
+            _home_datum[_home_leg] = _home_hit + (homeTowardLow(_home_leg) ? lag : -lag);
             if (_home_leg == 1) return homeMeasure(now_us);
-            homeOrigin(_home_hit, homeStopAt(0), now_us);
+            homeOrigin(_home_datum[0], homeStopAt(0), now_us);
             _home_leg = 1;
             GLOGI(kTag, "HOME: home datum taken, approaching the far end");
             return homeSeek(false, false, now_us);   // still pressed on the home stop
+        }
         case HomePhase::finish: {
-            const bool high = _sense->high();
-            if (_engine.isBusy(now_us)) return;
-            if (high) return homeEnd("still on the far stop after the final backoff (lower home_speed)");
+            // The count arrives too, not only the plan: the frame change after
+            // the cycle reseeds at the count and would keep its tracking lag.
+            if (_engine.isBusy(now_us) || std::fabs(_p_cmd_mm - positionMm()) > kMmPerStep) return;
+            if (_sense->high()) return homeEnd("still on the far stop after the final backoff (lower home_speed)");
             _homed = true;
             _max_rail = _rail;
             _home_rail_mm = _rail;

@@ -962,18 +962,77 @@ TEST_CASE("home: two legs, the home datum is 0.0 mm, the far datum the rail; it 
     CHECK(c.homed);
     CHECK(c.homes == 1);
     CHECK(c.home_fails == 0);
-    // Each datum lies one debounce plus a tick of re-touch travel past its stop.
-    const float touch = valence::homeTouchMmS(DEFAULT_HOME_SPEED_MM_S);
-    CHECK(c.home_rail_mm >= 200.0f);
-    CHECK(c.home_rail_mm <= 200.0f + 2.0f * touch * 0.006f);
+    // Each datum lies within a tick of re-touch travel and the one-step latency
+    // correction of its stop: this sense has no latency of its own.
+    const float tol = valence::homeTouchMmS(DEFAULT_HOME_SPEED_MM_S) * 0.001f + valence::kMmPerStep;
+    CHECK(std::fabs(c.home_rail_mm - 200.0f) <= 2.0f * tol);
     CHECK(c.rail_mm == c.home_rail_mm);
     CHECK(r->arb.rail() == c.home_rail_mm);
-    CHECK(c.position_mm == doctest::Approx(c.home_rail_mm - valence::kHomeBackoffMm).epsilon(0.001));
+    CHECK(std::fabs(c.position_mm - (c.home_rail_mm - valence::kHomeBackoffMm)) <= valence::kMmPerStep);
     const float homeDatumBoot = s.bootMm() - c.position_mm;
-    CHECK(homeDatumBoot <= -30.0f + 0.01f);
-    CHECK(homeDatumBoot >= -30.0f - touch * 0.006f);
+    CHECK(std::fabs(homeDatumBoot + 30.0f) <= tol);
     CHECK_FALSE(s.level());   // backed off the far stop
     CHECK(r->submit(MotionSource::Stream, 50.0f));   // homed: the input set moves
+}
+
+// bd val-tib: the operator saw the zero off the stall and moving between homes.
+// Every cycle, wherever it starts and after the hub's max_rail write-through,
+// puts 0.0 mm on the same emitter count, measures the same rail, and ends with
+// the count, not only the plan, kHomeBackoffMm off the far datum.
+TEST_CASE("home: consecutive cycles land the same datums and end on the backoff") {
+    auto r = rig();
+    FakeSense s{r->emitter, -30.0f, 170.0f};
+    r->arb.setHomeSense(s);
+    const float tol = valence::homeTouchMmS(DEFAULT_HOME_SPEED_MM_S) * 0.001f + valence::kMmPerStep;
+    std::optional<float> zero0, rail0;
+    for (int i = 0; i < 3; ++i) {
+        CAPTURE(i);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        r->run(20'000'000);
+        const MotionCensus c = r->census();
+        REQUIRE(c.homed);
+        REQUIRE(c.homes == uint32_t(i + 1));
+        CHECK(std::fabs(c.position_mm - (c.home_rail_mm - valence::kHomeBackoffMm)) <= valence::kMmPerStep);
+        const float zeroBoot = s.bootMm() - c.position_mm;
+        CHECK(std::fabs(zeroBoot + 30.0f) <= tol);
+        if (!zero0) zero0 = zeroBoot;
+        if (!rail0) rail0 = c.home_rail_mm;
+        CHECK(std::fabs(zeroBoot - *zero0) <= 2.0f * valence::kMmPerStep);
+        CHECK(std::fabs(c.home_rail_mm - *rail0) <= 2.0f * valence::kMmPerStep);
+        // The hub's adoption (ValenceDevice::adoptMeasuredRail), then a move
+        // so the next cycle starts somewhere else.
+        r->arb.setWindow(0.0f, 150.0f, c.home_rail_mm);
+        r->run(2000);
+        CHECK(r->census().position_mm == doctest::Approx(c.position_mm));   // a relabel is not motion
+        REQUIRE(r->submit(MotionSource::Manual, 40.0f * float(i + 1)));
+        r->run(8'000'000);
+        CHECK(std::fabs(r->census().position_mm - 40.0f * float(i + 1)) <= valence::kMmPerStep);
+        CHECK(std::fabs(s.bootMm() - (*zero0 + 40.0f * float(i + 1))) <= 3.0f * valence::kMmPerStep);
+    }
+}
+
+// The bench failure (bd val-tib): the far leg ran its whole search without a
+// stall. The cycle frame used to label the home stop kHomeSearchMarginMm and
+// leave the rail at max_rail plus two margins; it is the physical frame now.
+TEST_CASE("home: a far-leg failure leaves positions measured from the home stop and the rail at max_rail") {
+    auto r = rig();
+    r->arb.setWindow(0.0f, 100.0f, 100.0f);
+    r->run(1000);
+    FakeSense s{r->emitter, -30.0f, 500.0f};
+    r->arb.setHomeSense(s);
+    const float tol = valence::homeTouchMmS(DEFAULT_HOME_SPEED_MM_S) * 0.001f + valence::kMmPerStep;
+    for (int i = 0; i < 2; ++i) {
+        CAPTURE(i);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        r->run(15'000'000);
+        const MotionCensus c = r->census();
+        REQUIRE(c.home_fails == uint32_t(i + 1));
+        REQUIRE(c.home_fail_leg == 1);
+        CHECK_FALSE(c.homed);
+        CHECK(c.rail_mm == 100.0f);
+        CHECK(std::fabs(c.position_mm - (100.0f + valence::kHomeSearchMarginMm)) <= tol + valence::kMmPerStep);
+        CHECK(std::fabs((s.bootMm() - c.position_mm) + 30.0f) <= tol);
+    }
 }
 
 TEST_CASE("home: approach at home_speed held to the jog speed, re-touch at a quarter of it, floored") {
@@ -1026,14 +1085,14 @@ TEST_CASE("home: under the flip the home leg runs to the far end, 0.0 mm is ther
     REQUIRE(c.homed);
     CHECK(c.home_rail_mm == doctest::Approx(200.0f).epsilon(0.002));
     // Client frame: 0 at the physical high stop, the carriage 2 mm off the low one.
-    CHECK(c.position_mm == doctest::Approx(c.home_rail_mm - valence::kHomeBackoffMm).epsilon(0.001));
+    CHECK(std::fabs(c.position_mm - (c.home_rail_mm - valence::kHomeBackoffMm)) <= valence::kMmPerStep);
     CHECK(s.bootMm() == doctest::Approx(-160.0f + valence::kHomeBackoffMm).epsilon(0.002));
 }
 
 TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores no rail") {
     SUBCASE("home end: no stall across max_rail") {
         auto r = rig();
-        r->arb.setWindow(0.0f, 30.0f, 30.0f);   // max_rail 30: a 40 mm search
+        r->arb.setWindow(0.0f, 30.0f, 30.0f);   // max_rail 30: a 50 mm search
         r->run(1000);
         FakeSense s{r->emitter, -1000.0f};
         r->arb.setHomeSense(s);
@@ -1047,7 +1106,7 @@ TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores
         CHECK(c.home_fail_leg == 0);
         CHECK(std::string(c.home_fail_why) == "no stall across max_rail");
         CHECK_FALSE(c.busy);
-        CHECK(s.bootMm() == doctest::Approx(-30.0f - valence::kHomeSearchMarginMm).epsilon(0.01));
+        CHECK(s.bootMm() == doctest::Approx(-30.0f - valence::kHomeFrameMarginMm).epsilon(0.01));
         CHECK(r->submit(MotionSource::Manual, 10.0f));   // the rail is free again
     }
     SUBCASE("far end: no stall across max_rail from the home datum") {
@@ -1100,9 +1159,9 @@ TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores
 }
 
 TEST_CASE("home: the deadline covers both legs at home_speed, both re-touches and 2 s, and ends a late cycle") {
-    // max_rail 500 at the factory speeds: (2 x 510 + 2 x 5 + 2) mm at 40 mm/s,
+    // max_rail 500 at the factory speeds: (520 + 510 + 2 x 5 + 2) mm at 40 mm/s,
     // 2 x 15 mm at 10 mm/s, and seven 0.2 s ramps at 200 mm/s2.
-    CHECK(valence::homeCycleS(500.0f, 40.0f, 200.0f) == doctest::Approx(25.8f + 3.0f + 1.4f));
+    CHECK(valence::homeCycleS(500.0f, 40.0f, 200.0f) == doctest::Approx(26.05f + 3.0f + 1.4f));
 
     auto r = rig();
     r->arb.setWindow(0.0f, 200.0f, 200.0f);

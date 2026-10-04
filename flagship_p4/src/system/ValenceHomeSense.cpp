@@ -1,10 +1,15 @@
-// ValenceHomeSense -- the board host of the home sense: pad setup, the edge
-// latch, the level read and the pull-up probe
+// ValenceHomeSense -- the board host of the home sense: pad setup, the rise
+// stamp and wake, the confirmed level read and the pull-up probe
 // Constraints:
 // - Pad setup is gpio_set_direction() and gpio_set_pull_mode(), never
 //   gpio_config() (BoardPins.h: the same door for every pad, LP or not).
-// - g_rose is the one word the ISR writes; high() on the motion task is its
-//   one reader and clears it. A lock-free atomic store, no log, no allocation.
+// - g_rose_us and g_rose are the two words the ISR writes, stamp first;
+//   high() on the motion task is their one reader and clears g_rose.
+//   Lock-free atomic stores and the wake, no log, no allocation.
+// - high() busy-waits at most kHomeSenseDebounceUs on the motion task, once
+//   per rise: the second read of a rise that young. The source drives the
+//   line push-pull, so two reads that far apart reject a coupled spike and
+//   cost a real stall nothing it can measure.
 // - probe() busy-waits 2 x kProbeSettleUs on the calling task: the internal
 //   ~45 kOhm pull against the bench lead's ~100 pF is a 4.5 us time constant,
 //   so 50 us is past ten of them.
@@ -17,6 +22,7 @@
 #include <driver/gpio.h>
 #include <esp_err.h>
 #include <esp_rom_sys.h>
+#include <esp_timer.h>
 
 #include "geiger/geiger.h"
 #include "system/BoardPins.h"
@@ -30,9 +36,17 @@ constexpr uint32_t kProbeSettleUs = 50;
 
 gpio_num_t pad() { return static_cast<gpio_num_t>(BOARD_GPIO_HOME_SENSE); }
 
+std::atomic<uint32_t> g_rose_us{0};   // esp_timer's low word at the last rise
 std::atomic<bool> g_rose{false};
+std::atomic<HomeSenseWake> g_wake{nullptr};
 
-void onRise(void*) { g_rose.store(true, std::memory_order_relaxed); }
+uint32_t nowUs32() { return static_cast<uint32_t>(esp_timer_get_time()); }
+
+void onRise(void*) {
+    g_rose_us.store(nowUs32(), std::memory_order_relaxed);
+    g_rose.store(true, std::memory_order_release);
+    if (const HomeSenseWake wake = g_wake.load(std::memory_order_relaxed)) wake();
+}
 
 class BoardHomeSense final : public HomeSense {
 public:
@@ -51,12 +65,16 @@ public:
     }
 
     bool high() override {
-        if (!present()) return false;
-        const bool rose = g_rose.exchange(false, std::memory_order_relaxed);
-        return rose || gpio_get_level(pad()) != 0;
+        if (!present() || gpio_get_level(pad()) == 0) return false;
+        if (!g_rose.exchange(false, std::memory_order_acquire)) return true;
+        const uint32_t age = nowUs32() - g_rose_us.load(std::memory_order_relaxed);
+        if (age >= kHomeSenseDebounceUs) return true;
+        esp_rom_delay_us(kHomeSenseDebounceUs - age);
+        return gpio_get_level(pad()) != 0;
     }
 
-    void begin() {
+    void begin(HomeSenseWake wake) {
+        g_wake.store(wake, std::memory_order_relaxed);
         if constexpr (kHasPin) {
             gpio_set_direction(pad(), GPIO_MODE_INPUT);
             gpio_set_pull_mode(pad(), GPIO_PULLDOWN_ONLY);
@@ -74,8 +92,9 @@ public:
                 return;
             }
             _ready = true;
-            GLOGI(kTag, "home sense on G%d: active high, pull-down, rising edge latched (reads %d)",
-                  BOARD_GPIO_HOME_SENSE, gpio_get_level(pad()));
+            GLOGI(kTag, "home sense on G%d: active high, pull-down, a rise confirmed %lu us on (reads %d)",
+                  BOARD_GPIO_HOME_SENSE, static_cast<unsigned long>(kHomeSenseDebounceUs),
+                  gpio_get_level(pad()));
         } else {
             GLOGI(kTag, "no home sense on this board: home op 1 refuses");
         }
@@ -89,8 +108,8 @@ BoardHomeSense g_sense;
 
 }  // namespace
 
-HomeSense& homeSenseBegin() {
-    g_sense.begin();
+HomeSense& homeSenseBegin(HomeSenseWake wake) {
+    g_sense.begin(wake);
     return g_sense;
 }
 

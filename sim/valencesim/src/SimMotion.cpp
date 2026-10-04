@@ -11,8 +11,8 @@
 // - THE EMITTER IS IDEAL (IdealEmitter.h).
 // - THE HOME SENSE IS A STAND-IN: two stops at fixed emitter counts, the home
 //   end and the rail's far end, HIGH from the instant the ideal carriage
-//   reaches either. No current, no S3 debounce: the arbiter's own debounce is
-//   the only delay.
+//   reaches either. No current, no S3 detect, no confirming read: the motion
+//   tick is the only delay.
 // See: SimMotion.h, flagship_p4/src/motion/MotionArbiter.h, bd val-sf7.2
 
 #include "SimMotion.h"
