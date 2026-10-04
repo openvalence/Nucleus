@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 
 // Named here so the dependency finder builds them; the .cpp below needs all three.
 #include "geiger/geiger.h"
@@ -886,4 +887,141 @@ TEST_CASE("RFC-100: plan_flags name how the last plan was bent, and read 0 with 
     CHECK(stretch->census().plan_flags == (pf::fallback | pf::stretched));
     stretch->run(10'000'000);
     CHECK(stretch->census().plan_flags == 0);
+}
+
+// ---- homing (bd val-dbo) ------------------------------------------------------
+
+namespace {
+
+using valence::HomeSense;
+using valence::HomeStart;
+
+// A hard stop at stop_mm in the emitter's boot frame: HIGH at or past it, on
+// the side away from 0. `forced` overrides the pre-cycle probe.
+class FakeSense final : public HomeSense {
+public:
+    FakeSense(const TestEmitter& e, float stop) : emitter(e), stop_mm(stop) {}
+    bool present() const override { return true; }
+    Probe probe() override {
+        if (forced) return *forced;
+        return level() ? Probe::high : Probe::low;
+    }
+    bool high() override { return level(); }
+    bool level() const {
+        const float p = float(emitter.n) * valence::kMmPerStep;
+        return stop_mm < 0.0f ? p <= stop_mm : p >= stop_mm;
+    }
+    float bootMm() const { return float(emitter.n) * valence::kMmPerStep; }
+
+    const TestEmitter& emitter;
+    float stop_mm;
+    std::optional<Probe> forced;
+};
+
+}  // namespace
+
+TEST_CASE("home: the stall zeroes the stall point, backs off, homes; intents wait for it") {
+    auto r = rig();
+    FakeSense s{r->emitter, -30.0f};
+    r->arb.setHomeSense(s);
+    REQUIRE(r->arb.home() == HomeStart::started);
+    CHECK(r->arb.home() == HomeStart::started);   // one cycle; a repeat changes nothing
+    r->run(1000);
+    CHECK(r->census().homing);
+    CHECK_FALSE(r->census().homed);
+    CHECK_FALSE(r->submit(MotionSource::Manual, 100.0f));   // the cycle owns the rail
+    r->run(5'000'000);
+    const MotionCensus c = r->census();
+    CHECK_FALSE(c.homing);
+    CHECK(c.homed);
+    CHECK(c.homes == 1);
+    CHECK(c.position_mm == doctest::Approx(valence::kHomeBackoffMm).epsilon(0.02));
+    // 0.0 mm sits within one debounce of travel past the stop.
+    CHECK(s.bootMm() - c.position_mm <= -30.0f + 0.01f);
+    CHECK(s.bootMm() - c.position_mm >= -30.0f - valence::kHomeSeekMmS * 0.005f);
+    CHECK_FALSE(s.level());
+    CHECK(r->submit(MotionSource::Stream, 50.0f));   // homed: the input set moves
+}
+
+TEST_CASE("home: under the flip the seek runs to the far end and 0.0 mm is there") {
+    auto r = rig();
+    r->arb.setFlipped(true);
+    FakeSense s{r->emitter, 40.0f};
+    r->arb.setHomeSense(s);
+    REQUIRE(r->arb.home() == HomeStart::started);
+    r->run(6'000'000);
+    const MotionCensus c = r->census();
+    CHECK(c.homed);
+    CHECK(c.position_mm == doctest::Approx(valence::kHomeBackoffMm).epsilon(0.02));
+    CHECK(s.bootMm() < 40.0f);
+    CHECK(s.bootMm() > 37.0f);
+}
+
+TEST_CASE("home: no stall across the search distance ends unhomed") {
+    auto r = rig();
+    r->arb.setWindow(0.0f, 30.0f, 30.0f);   // a 30 mm search, 2.5 s at the seek speed
+    r->run(1000);
+    FakeSense s{r->emitter, -1000.0f};
+    r->arb.setHomeSense(s);
+    REQUIRE(r->arb.home() == HomeStart::started);
+    r->run(6'000'000);
+    const MotionCensus c = r->census();
+    CHECK_FALSE(c.homing);
+    CHECK_FALSE(c.homed);
+    CHECK(c.homes == 0);
+    CHECK_FALSE(c.busy);
+    CHECK(s.bootMm() == doctest::Approx(-30.0f).epsilon(0.01));   // searched exactly max_rail
+    CHECK(r->submit(MotionSource::Manual, 10.0f));   // the rail is free again
+}
+
+TEST_CASE("home: ESTOP and PAUSE abort the cycle unhomed") {
+    SUBCASE("ESTOP") {
+        auto r = rig();
+        FakeSense s{r->emitter, -30.0f};
+        r->arb.setHomeSense(s);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        r->run(1'000'000);
+        r->arb.estop(true);
+        r->run(10'000);
+        const MotionCensus c = r->census();
+        CHECK_FALSE(c.homing);
+        CHECK_FALSE(c.homed);
+        CHECK(r->emitter.q8 == 0);
+        CHECK(r->arb.home() == HomeStart::estop);
+    }
+    SUBCASE("PAUSE, latched before the cycle and asked again during it") {
+        auto r = rig();
+        r->arb.pause(true);   // SPEC 11.1: the home verb runs under PAUSE
+        r->run(1000);
+        FakeSense s{r->emitter, -30.0f};
+        r->arb.setHomeSense(s);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        r->run(1'000'000);
+        CHECK(r->census().homing);
+        const float moved = s.bootMm();
+        CHECK(moved < -5.0f);   // the seek ran under the latch
+        r->arb.pause(true);
+        r->run(500'000);
+        const MotionCensus c = r->census();
+        CHECK_FALSE(c.homing);
+        CHECK_FALSE(c.homed);
+        CHECK_FALSE(c.busy);
+        CHECK(s.bootMm() > -30.0f);   // stopped short of the stop
+    }
+}
+
+TEST_CASE("home: refused without a sense, with an undriven line, or with a stall already read") {
+    auto r = rig();
+    CHECK(r->arb.home() == HomeStart::no_sense);   // the absent default
+    FakeSense s{r->emitter, -30.0f};
+    r->arb.setHomeSense(s);
+    s.forced = HomeSense::Probe::undriven;
+    CHECK(r->arb.home() == HomeStart::undriven);
+    s.forced = HomeSense::Probe::high;
+    CHECK(r->arb.home() == HomeStart::sense_high);
+    r->run(10'000);
+    CHECK_FALSE(r->census().homing);
+    CHECK(r->census().intents == 0);   // nothing moved
+    s.forced.reset();
+    CHECK(r->arb.home() == HomeStart::started);
 }

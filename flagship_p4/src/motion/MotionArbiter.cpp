@@ -37,6 +37,15 @@ bool isGenerator(MotionSource s) { return s == MotionSource::Pattern || s == Mot
 
 static_assert(kAnomalyKinds <= 32, "drainAnomalies() reports the kinds as one word");
 
+class AbsentHomeSense final : public HomeSense {
+public:
+    bool present() const override { return false; }
+    Probe probe() override { return Probe::undriven; }
+    bool high() override { return false; }
+};
+
+AbsentHomeSense g_absent_sense;
+
 // RFC-100: the registry plan_flags bits one plan earned, from the anomaly
 // kinds its commit recorded and whether the window clamp moved its target.
 uint8_t planFlags(uint32_t kinds, bool window_clamped) {
@@ -51,6 +60,8 @@ uint8_t planFlags(uint32_t kinds, bool window_clamped) {
 }
 
 }  // namespace
+
+HomeSense& noHomeSense() { return g_absent_sense; }
 
 // ---- the steering word ------------------------------------------------------
 
@@ -132,7 +143,11 @@ void MotionArbiter::pause(bool on) {
         _paused.store(false);
         return;
     }
-    if (!_paused.exchange(true)) _brake_req.store(true);
+    // A home cycle runs under a latched PAUSE (SPEC 11.1 admits the home
+    // verb), so a pause asked for during one brakes it whatever the latch.
+    const bool homing = _homing.load();
+    if (homing) _home_abort.store(true);
+    if (!_paused.exchange(true) || homing) _brake_req.store(true);
 }
 
 void MotionArbiter::override() {
@@ -166,7 +181,26 @@ void MotionArbiter::setWindow(float lo, float hi, float rail) {
     _win_min = lo;
     _win_max = hi;
     _rail    = rail > 0.0f ? rail : DEFAULT_MAX_RAIL_MM;
+    _max_rail = _rail;
     _frame_moved = true;   // normalized units now mean different millimeters
+}
+
+HomeStart MotionArbiter::home() {
+    if (!_sense->present()) return HomeStart::no_sense;
+    if (_estop) return HomeStart::estop;
+    if (!powerGateOpen()) return HomeStart::unpowered;
+    if (_homing.exchange(true)) return HomeStart::started;
+    // Probed with _homing held, so the owning task never reads the line
+    // while the probe drives its pull.
+    const HomeSense::Probe p = _sense->probe();
+    if (p != HomeSense::Probe::low) {
+        _homing.store(false);
+        GLOGW(kTag, "HOME refused: the home sense %s", p == HomeSense::Probe::high
+                        ? "already reads a stall" : "is not driven (sensor unwired or down)");
+        return p == HomeSense::Probe::high ? HomeStart::sense_high : HomeStart::undriven;
+    }
+    _home_req.store(true);
+    return HomeStart::started;
 }
 
 float MotionArbiter::forceHome(float stroke_mm) {
@@ -220,6 +254,12 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
     if (_estop) {
         ++_rejected;
         GLOGW_EVERY_MS(1000, kTag, "REJECT: e-stop");
+        return false;
+    }
+    // A home cycle owns the rail from its request to its end.
+    if (_homing.load()) {
+        ++_rejected;
+        GLOGW_EVERY_MS(1000, kTag, "REJECT: homing");
         return false;
     }
     // Neither does motor power: a plan rendered into an unpowered drive moves
@@ -311,16 +351,16 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
         GLOGW_EVERY_MS(1000, kTag, "WINDOW CLAMP: %.2f -> %.2f mm",
                        double(in.target_mm), double(target));
 
-    return plan(target, in, manual, now_us);
-}
-
-bool MotionArbiter::plan(float target, const MotionIntent& in, bool manual, uint64_t now_us) {
     // Limit-set selection. Ceilings are clamps, never targets; a deadline-less
     // Manual point move is the ratified exception and plans AT the jog set.
     // TODO(val-091.4): the soft-start cap, which shapes the INPUT set only and
     // has no source to shape yet.
+    return plan(target, in, limitsFor(manual), now_us);
+}
+
+bool MotionArbiter::plan(float target, const MotionIntent& in, const kinetic::Limits& lim, uint64_t now_us) {
     const float s  = span();
-    _engine.setLimits(limitsFor(manual));
+    _engine.setLimits(lim);
 
     // Plan from the machine's ACTUAL state. At rest that state is the emitter's
     // count and nothing else: an engine that re-seeds from its own idea of
@@ -435,6 +475,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         _brake_req.store(false);   // park already stopped it
         _returning = false;        // estop() dropped override with it
         _emitter.park();
+        if (_homing.load()) homeEnd("ESTOP");
         // ONCE per latch, and on the task that owns the engine: without it the
         // abandoned plan keeps reading busy and canClearEstop() -- which asks
         // exactly that -- would never let the latch drop (SPEC 11.2).
@@ -454,6 +495,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         if (_brake_req.exchange(false)) _pause_pos_mm.store(positionMm());
         _returning = false;
         _emitter.park();
+        if (_homing.load()) homeEnd("motor power off");
         if (!_power_settled.exchange(true)) {
             _engine.resetAt(toNorm(positionMm()), now_us);
             _p_cmd_mm = positionMm();
@@ -472,13 +514,21 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     // intent plans from the new frame's rest.
     if (_frame_moved) {
         _frame_moved = false;
+        // A cycle planned in the old frame: its seek or backoff is void.
+        if (_homing.load()) homeEnd("the travel window changed");
         _engine.resetAt(toNorm(positionMm()), now_us);
         _p_cmd_mm = positionMm();
         _emitter.steer(0.0f);
         return;
     }
 
+    // A pause ends a cycle before its brake runs, so the brake is PAUSE's.
+    if (_home_abort.exchange(false) && _homing.load()) homeEnd("paused");
     if (_brake_req.exchange(false)) brakeToRest(now_us);
+    // Before the tick's one sample: a cycle step may re-origin the count and
+    // reseed the engine, and the feedforward below must see only the new frame.
+    if (_home_req.exchange(false)) homeStart(now_us);
+    if (_home != HomePhase::idle) homeStep(now_us);
 
     // RETURN (SPEC 11.1): an ordinary Manual plan at the jog set, planned here
     // because the engine is this task's. The rail clamp still applies.
@@ -489,7 +539,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         if (target < 0.0f) target = 0.0f;
         if (target > _rail) target = _rail;
         back.target_mm = target;
-        _returning = plan(target, back, true, now_us);
+        _returning = plan(target, back, limitsFor(true), now_us);
         if (!_returning) GLOGW(kTag, "RETURN: plan failed, override held");
         else GLOGI(kTag, "RETURN: to the paused position %.2f mm", double(target));
     }
@@ -505,8 +555,10 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         _returns.fetch_add(1);
         GLOGI(kTag, "RETURN: arrived, override off, PAUSE holds");
     }
-    // Override gone (return, resume or ESTOP): back to the window frame, at rest.
-    if (_rail_frame && !_override.load() && !_engine.isBusy(now_us)) setRailFrame(false, now_us);
+    // Override gone (return, resume or ESTOP) and no home cycle: back to the
+    // window frame, at rest.
+    if (_rail_frame && !_override.load() && _home == HomePhase::idle && !_engine.isBusy(now_us))
+        setRailFrame(false, now_us);
 
     // Feedforward: the plan's OWN mean velocity across the interval that just
     // elapsed. Summed over a move this telescopes to exactly the plan's
@@ -542,6 +594,102 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     if (v < -v_cap) v = -v_cap;
 
     _emitter.steer(v);
+}
+
+// ---- homing -----------------------------------------------------------------
+// Owning task only. The cycle plans through plan() at the jog accel with the
+// speed held to _home_v, in the rail frame, and the window clamp never sees
+// it: the seek has to reach a stop the window may exclude. Under the flip the
+// home end is the physical far end (SPEC 9.6), so the seek runs the other way
+// and the sense point is the rail's far end in the physical frame.
+
+void MotionArbiter::homeOrigin(int32_t count, float at_mm, uint64_t now_us) {
+    _origin = count - int32_t(std::lround(at_mm * kStepsPerMm));
+    _engine.resetAt(toNorm(positionMm()), now_us);
+    _p_cmd_mm = positionMm();
+}
+
+bool MotionArbiter::homePlan(float target_mm, uint64_t now_us) {
+    kinetic::Limits lim = limitsFor(true);
+    lim.vmax = _home_v / span();
+    MotionIntent in;
+    in.source = MotionSource::Manual;
+    in.target_mm = target_mm;
+    return plan(target_mm, in, lim, now_us);
+}
+
+void MotionArbiter::homeStart(uint64_t now_us) {
+    if (!_homing.load()) return;   // ended between the request and this tick
+    if (_engine.isBusy(now_us)) return homeEnd("the machine is moving");
+    const bool flip = _flipped.load();
+    // The position reference is replaced from here: a cycle that does not
+    // finish leaves the machine unhomed, never homed at a stale origin.
+    _homed = false;
+    _rail = _max_rail;
+    _rail_frame = true;
+    // The carriage is declared the whole search distance from the home end,
+    // so the seek to that end spans max_rail and no further.
+    homeOrigin(_emitter.count(), flip ? 0.0f : _rail, now_us);
+    _home_v = _jog_v < kHomeSeekMmS ? _jog_v : kHomeSeekMmS;
+    const float seek_s = _rail / _home_v + _home_v / _jog_a;
+    _home_deadline_us = now_us + uint64_t(seek_s * 1e6f) + kHomeTimeoutMarginUs;
+    _sense_seen = false;
+    _sense->high();   // a rise latched before the cycle is not this cycle's
+    if (!homePlan(flip ? _rail : 0.0f, now_us)) return homeEnd("the seek did not plan");
+    _home = HomePhase::seek;
+    GLOGW(kTag, "HOME: seeking the home stop at %.1f mm/s across %.0f mm", double(_home_v), double(_rail));
+}
+
+void MotionArbiter::homeStep(uint64_t now_us) {
+    const bool flip = _flipped.load();
+    switch (_home) {
+        case HomePhase::seek:
+            if (_sense->high()) {
+                if (!_sense_seen) {
+                    _sense_seen = true;
+                    _sense_since_us = now_us;
+                }
+                if (now_us - _sense_since_us < kHomeSenseDebounceUs) return;
+                // The stop profile: PAUSE's brake at the input decel.
+                _home_hit = _emitter.count();
+                _engine.setLimits(limitsFor(false));
+                _engine.brake(now_us);
+                _home = HomePhase::stop;
+                GLOGI(kTag, "HOME: stall sensed, stopping");
+                return;
+            }
+            _sense_seen = false;
+            if (!_engine.isBusy(now_us)) return homeEnd("no stall across the search distance (max_rail)");
+            if (now_us >= _home_deadline_us) {
+                _engine.setLimits(limitsFor(false));
+                _engine.brake(now_us);
+                return homeEnd("timed out seeking the stop");
+            }
+            return;
+        case HomePhase::stop:
+            if (_engine.isBusy(now_us)) return;
+            homeOrigin(_home_hit, flip ? _rail : 0.0f, now_us);
+            if (!homePlan(flip ? _rail - kHomeBackoffMm : kHomeBackoffMm, now_us))
+                return homeEnd("the backoff did not plan");
+            _home = HomePhase::backoff;
+            return;
+        case HomePhase::backoff:
+            if (_engine.isBusy(now_us)) return;
+            _homed = true;
+            ++_homes;
+            homeEnd(nullptr);
+            GLOGW(kTag, "HOME: homed, 0.0 mm at the stall point, backed off %.1f mm", double(kHomeBackoffMm));
+            return;
+        case HomePhase::idle:
+            return;
+    }
+}
+
+void MotionArbiter::homeEnd(const char* why) {
+    if (why != nullptr) GLOGW(kTag, "HOME failed: %s, unhomed", why);
+    _home = HomePhase::idle;
+    _home_req.store(false);
+    _homing.store(false);
 }
 
 // Drains the engine's anomaly ring into the per-kind table 0x1111 publishes.
@@ -604,6 +752,8 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.override_mode  = _override.load();
     c.returning      = _returning;
     c.returns        = _returns.load();
+    c.homing         = _homing.load();
+    c.homes          = _homes;
     c.busy           = _engine.isBusy(now_us);
     c.mode           = s.mode;
     c.plan_kind      = s.plan_kind;

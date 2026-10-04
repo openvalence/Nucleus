@@ -15,4 +15,11 @@ namespace valence {
 // deviceNowUs() reads. Call every loop pass; dt is measured, not assumed.
 void simMotionTick(uint64_t now_us);
 
+// --home-sense-at: a hard stop at `at_mm` in the emitter's boot frame (0.0 mm
+// is where the carriage booted). The sense reads HIGH while the carriage is at
+// or past it, on the side away from 0, so a negative value puts the stop
+// behind the boot position. Without a call the sim has no sense line and home
+// op 1 refuses, as a board without one does. Before motionBegin().
+void simMotionSetHomeSenseAt(float at_mm);
+
 }  // namespace valence

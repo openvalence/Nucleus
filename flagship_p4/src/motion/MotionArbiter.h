@@ -17,7 +17,7 @@
 //   task's stack (T1, memory-budget.md T21).
 // - CROSS-TASK methods (estop, pause, override, returnToPause, acquireRail,
 //   releaseRail, setEstopCutsPower, setMotorPowered, setCommissioned, the limit and window setters,
-//   forceHome, noteStream) never touch the engine.
+//   forceHome, home, noteStream) never touch the engine.
 //   They write flags and scalars the owning task reads on its next pass;
 //   estop() and a power loss also park the emitter on the CALLING task,
 //   because an e-stop that waits for a tick is not one.
@@ -68,6 +68,29 @@ inline constexpr uint32_t kMinCyclesPerEdge = 40;
 // ceiling to live.
 inline constexpr uint32_t kIntentQueueDepth = 40;
 
+// ---- homing -----------------------------------------------------------------
+// Home op 1 seeks position 0 across the configured max_rail (the search
+// distance) at kHomeSeekMmS, until the home sense reads HIGH for
+// kHomeSenseDebounceUs; then the stop profile (PAUSE's brake), 0.0 mm at the
+// sense point, a backoff of kHomeBackoffMm, homed. No sense by the end of the
+// search, or by its time plus kHomeTimeoutMarginUs, fails it unhomed.
+//
+// THE STALL IS THE SENSE SOURCE'S DECISION. The input contract: one level,
+// active HIGH, push-pull, HIGH while the motor is pressed against a stop. On
+// the bench the source is an external current-sense board, whose stall is
+// |I| >= kStallOnA (1.0 A) held for kStallDebounceUs (24 ms) on samples every
+// kSamplePeriodUs (280 us), released at the first sample under kStallOffA
+// (0.5 A). This side adds kHomeSenseDebounceUs as a glitch filter and nothing
+// else. kHomeSenseLatencyUs is the two ends' contact-to-stop budget; a change
+// to the source's numbers moves it here.
+inline constexpr float    kHomeSeekMmS         = 12.0f;     // clamped by the jog speed
+inline constexpr float    kHomeBackoffMm       = 2.0f;      // from the sense point
+inline constexpr uint32_t kHomeSenseDebounceUs = 3000;
+inline constexpr uint32_t kHomeTimeoutMarginUs = 2000000;
+inline constexpr uint32_t kHomeSenseLatencyUs  = 24000 + 280 + kHomeSenseDebounceUs + kMotionTickUs;
+static_assert(kHomeSeekMmS * float(kHomeSenseLatencyUs) * 1e-6f < 0.5f * kHomeBackoffMm,
+              "the seek's overrun past contact must stay inside half the backoff");
+
 // ---- the steering word ------------------------------------------------------
 
 // What the emitter's two shared words must hold for a velocity. step_q8 == 0
@@ -97,6 +120,30 @@ public:
 protected:
     ~MotionEmitter() = default;
 };
+
+// ---- the home sense seam -----------------------------------------------------
+
+// Whatever reports the carriage pressed against the home end's hard stop: a
+// level, HIGH while pressed.
+class HomeSense {
+public:
+    enum class Probe : uint8_t { low, high, undriven };
+    // This build has a sense line. Any task; constant for the build.
+    virtual bool present() const = 0;
+    // The line's state before a cycle. undriven: nothing holds it, so a seek
+    // would never see a stall. The calling task, never while a cycle runs.
+    virtual Probe probe() = 0;
+    // Owning task, during a cycle: HIGH now, or a rising edge since the
+    // previous call.
+    virtual bool high() = 0;
+
+protected:
+    ~HomeSense() = default;
+};
+
+// The sense of a build without a line: absent, so home() refuses no_sense
+// rather than seeking open-loop into the stop.
+HomeSense& noHomeSense();
 
 // ---- the arbiter ------------------------------------------------------------
 
@@ -180,6 +227,14 @@ public:
     void setInputLimits(float v, float a, float j) { _in_v = v; _in_a = a; _in_j = j; }
     void setWindow(float lo, float hi, float rail);
     float forceHome(float stroke_mm);
+    // Before the owning task runs. Until then, and on a build without one,
+    // the sense is absent and home() answers no_sense.
+    void setHomeSense(HomeSense& sense) { _sense = &sense; }
+    // Home op 1 (ValenceMotion.h motionHome()): refused here on what the
+    // calling task can see, the sense probed last; started queues the cycle
+    // for the owning task. One cycle at a time: a request while one runs
+    // answers started and changes nothing.
+    HomeStart home();
     void noteStream(uint32_t bundles, uint32_t samples, uint32_t dropped);
 
     float positionMm() const { return float(_emitter.count() - _origin) * kMmPerStep; }
@@ -217,9 +272,20 @@ private:
     void brakeToRest(uint64_t now_us);
     // The power gate as accept(), evaluate() and returnToPause() apply it.
     bool powerGateOpen() const { return kBenchNoMotor || _powered.load(); }
-    // Plans `target` (already clamped, mm) from the machine's actual state.
-    // Owning task; counts the plan cost and a failure as a rejection.
-    bool plan(float target, const MotionIntent& in, bool manual, uint64_t now_us);
+    // Plans `target` (already clamped, mm) from the machine's actual state
+    // under `lim`. Owning task; counts the plan cost and a failure as a
+    // rejection.
+    bool plan(float target, const MotionIntent& in, const kinetic::Limits& lim, uint64_t now_us);
+    // The home cycle, owning task only (MotionArbiter.cpp, homing).
+    enum class HomePhase : uint8_t { idle, seek, stop, backoff };
+    void homeStart(uint64_t now_us);
+    void homeStep(uint64_t now_us);
+    // Re-origins the count so the carriage reads `at_mm` and reseeds the
+    // engine there: a relabeling, never motion.
+    void homeOrigin(int32_t count, float at_mm, uint64_t now_us);
+    // Ends the cycle; a failure is logged with `why` and counted nowhere else.
+    void homeEnd(const char* why);
+    bool homePlan(float target_mm, uint64_t now_us);
 
     MotionEmitter& _emitter;
     Clock          _now_us;
@@ -229,6 +295,9 @@ private:
     float _win_min = 0.0f;
     float _win_max = DEFAULT_MAX_RAIL_MM;
     float _rail    = DEFAULT_MAX_RAIL_MM;
+    // The configured max_rail, which force_home's stroke never shrinks: the
+    // home cycle's search distance.
+    float _max_rail = DEFAULT_MAX_RAIL_MM;
 
     float _jog_v = DEFAULT_JOG_MAX_SPEED_MM_S;
     float _jog_a = DEFAULT_JOG_ACCEL_MM_S2;
@@ -280,6 +349,21 @@ private:
     // Set by setWindow()/forceHome() on any task, consumed by evaluate() on
     // the owning task: the mm FRAME moved, the carriage did not.
     volatile bool _frame_moved = false;
+
+    // The home cycle. _homing is set by home() and cleared only by the owning
+    // task when the cycle ends; _home_req hands the start across; pause()
+    // sets _home_abort. The rest is the owning task's.
+    HomeSense* _sense = &noHomeSense();
+    std::atomic<bool> _homing{false};
+    std::atomic<bool> _home_req{false};
+    std::atomic<bool> _home_abort{false};
+    HomePhase _home = HomePhase::idle;
+    uint64_t  _home_deadline_us = 0;
+    uint64_t  _sense_since_us = 0;
+    bool      _sense_seen = false;
+    int32_t   _home_hit = 0;      // the emitter count where the sense fired
+    float     _home_v = 0.0f;     // the seek speed, mm/s
+    uint32_t  _homes = 0;
 
     // Odometer state, owning task only.
     int32_t _odo_steps = 0;       // emitter count at the previous snapshot

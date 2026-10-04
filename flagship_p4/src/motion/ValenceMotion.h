@@ -114,6 +114,9 @@ struct MotionCensus {
     bool     returning      = false;  // the `return` move is running
     uint32_t returns        = 0;      // completed returns since boot; each one
                                       // is the hub's cue to drop its override bit
+    bool     homing         = false;  // a home cycle is asked for or running
+    uint32_t homes          = 0;      // completed home cycles since boot; each
+                                      // one is the hub's cue to clear home_required
     bool     busy           = false;
     bool     stream         = false;  // a Stream intent is the live source
 
@@ -244,6 +247,21 @@ enum class ReturnStart : uint8_t {
     unpowered,   // unpowered and away from the paused position: refused,
                  // override still latched
 };
+// What a home request did (MotionArbiter::home()).
+enum class HomeStart : uint8_t {
+    started,     // the cycle is queued on the motion task, or already running
+    no_sense,    // this build has no home sense line (BoardPins.h)
+    undriven,    // nothing drives the sense line: its source is unwired or down
+    sense_high,  // the sense already reads a stall: no seek can find the stop
+    estop,       // ESTOP latched
+    unpowered,   // the motor power gate is shut
+};
+// Home op 1: seek the home end until the home sense, zero there, back off
+// (MotionArbiter.h, the homing constants). Any task, never blocks. The
+// outcome is the census: homing falls, and homes counts a completed cycle.
+// ESTOP, PAUSE, a power loss or a window change aborts it, unhomed.
+HomeStart motionHome();
+
 // SPEC 11.1 override / return. Any task, never blocks. override latches PAUSE
 // first; return answers what it did (ReturnStart).
 void motionOverride();

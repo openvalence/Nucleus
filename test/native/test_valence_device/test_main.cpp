@@ -63,6 +63,9 @@ ReturnStart g_returnAnswer = ReturnStart::queued;
 button::Gesture g_homeGesture = button::Gesture::none;
 button::Gesture g_pairGesture = button::Gesture::none;
 int g_forceHomes = 0;
+// What the fake arbiter answers home op 1 with, and how often it was asked.
+HomeStart g_homeAnswer = HomeStart::started;
+int g_homeCalls = 0;
 // The fake DRV_ALM handoff: what the drive-link task would have raised.
 bool g_driveAlarm = false;
 // Calls through the motion and generator doors: what a refused write must
@@ -108,6 +111,10 @@ void motionNoteStream(uint32_t, uint32_t, uint32_t) {}
 float motionForceHome(float stroke_mm) {
     ++g_forceHomes;
     return stroke_mm;
+}
+HomeStart motionHome() {
+    ++g_homeCalls;
+    return g_homeAnswer;
 }
 MotionCensus motionCensus() { return g_census; }
 MotionTuning motionDefaultTuning() { return MotionTuning{}; }
@@ -184,6 +191,8 @@ struct Rig {
         g_returnAnswer = ReturnStart::queued;
         g_homeGesture = g_pairGesture = button::Gesture::none;
         g_forceHomes = 0;
+        g_homeAnswer = HomeStart::started;
+        g_homeCalls = 0;
         g_driveAlarm = false;
         g_submits = g_patPushes = 0;
         g_switch = MotorSwitchStatus{};
@@ -480,6 +489,7 @@ TEST_CASE("VD-09: HOME press runs home op 1 through applyHome; force_home is nev
     g_homeGesture = button::Gesture::press;
     rig->step();
     CHECK(g_homeGesture == button::Gesture::none);   // taken
+    CHECK(g_homeCalls == 1);
     CHECK(g_forceHomes == 0);
     CHECK_FALSE(rig->hub->estopLatched());
     CHECK_FALSE(rig->device.rebootDue());
@@ -962,4 +972,78 @@ TEST_CASE("VD-TR-3: keys gated on live state refuse a trial; the flip waits for 
     REQUIRE(rig->del.nacks.size() == 3);
     CHECK(rig->del.nacks[2].code == NackCode::INTERLOCK);
     CHECK(rig->del.nacks[2].detail == "window on trial: commit or revert first");
+}
+
+// ---- bd val-dbo: home op 1, the real cycle ------------------------------------
+
+namespace {
+
+IntentValueMap homeOp1() {
+    IntentValueMap m{};
+    m.count = 1;
+    m.fields[0] = IntentValueField{1, IntentValue::ofU64(1)};
+    return m;
+}
+
+}  // namespace
+
+TEST_CASE("VD-HOME-1: home op 1 refusals carry the arbiter's reason; a sense-less board is UNSUPPORTED_OP") {
+    struct Row {
+        HomeStart answer;
+        NackCode code;
+        const char* detail;
+    };
+    for (const Row row : {Row{HomeStart::no_sense, NackCode::UNSUPPORTED_OP, "no home sense on this board"},
+                          Row{HomeStart::undriven, NackCode::INTERLOCK, "home sense not driven: sensor unwired or down"},
+                          Row{HomeStart::sense_high, NackCode::INTERLOCK, "home sense already reads a stall"}}) {
+        auto rig = std::make_unique<Rig>();
+        g_homeAnswer = row.answer;
+        REQUIRE(rig->client->sendIntent(ch::home, homeOp1()).has_value());
+        rig->step();
+        REQUIRE(rig->del.nacks.size() == 1);
+        CHECK(rig->del.nacks[0].code == row.code);
+        CHECK(rig->del.nacks[0].detail == row.detail);
+        CHECK(g_homeCalls == 1);
+    }
+}
+
+TEST_CASE("VD-HOME-2: a moving machine is refused before the arbiter is asked") {
+    auto rig = std::make_unique<Rig>();
+    g_census.busy = true;
+    REQUIRE(rig->client->sendIntent(ch::home, homeOp1()).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INTERLOCK);
+    CHECK(g_homeCalls == 0);
+}
+
+TEST_CASE("VD-HOME-3: a started cycle ECHOes; its completion clears home_required, force_home waits") {
+    auto rig = std::make_unique<Rig>();
+    rig->hub->setHomeRequired(true);
+    rig->step();
+    const int echoes = rig->del.echoes;
+    REQUIRE(rig->client->sendIntent(ch::home, homeOp1()).has_value());
+    rig->step();
+    CHECK(rig->del.nacks.empty());
+    CHECK(rig->del.echoes == echoes + 1);
+    CHECK(g_homeCalls == 1);
+
+    // While the cycle runs, force_home is refused and nothing clears.
+    g_census.homing = true;
+    g_census.homed = false;
+    IntentValueMap force{};
+    force.count = 1;
+    force.fields[0] = IntentValueField{1, IntentValue::ofU64(2)};
+    REQUIRE(rig->client->sendIntent(ch::home, force).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INTERLOCK);
+    CHECK(g_forceHomes == 0);
+    CHECK((rig->hub->safetyModes() & safety_mode_bits::HOME_REQUIRED) != 0);
+
+    g_census.homing = false;
+    g_census.homed = true;
+    ++g_census.homes;
+    rig->step();
+    CHECK((rig->hub->safetyModes() & safety_mode_bits::HOME_REQUIRED) == 0);
 }

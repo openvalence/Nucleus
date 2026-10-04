@@ -7,7 +7,9 @@
 //   raises them: only a lock makes "no cut since the step, then raise" one
 //   step. Inside it: the machine's methods and two gpio_set_level calls. No
 //   log, no ADC, no I2C, no allocation, no function-local static (T4).
-// - The switch task is ADC1's ONE READER: G19, G23 and THERM (G16).
+// - The switch task is ADC1's ONE READER: G19, G23 and THERM (G16). An absent
+//   EN node (BOARD_GPIO_EN_NODE -1, the duct-tape bench) is never configured
+//   and reads NaN, so its pad stays digital for whoever owns it there.
 //   adc_oneshot_read only try-locks its unit, so a read from a second task
 //   fails instead of waiting, and a failed EN-node read is NaN, which trips
 //   en_node and cuts motor power. Another ADC1 pin joins this task's poll,
@@ -131,10 +133,15 @@ bool caliFor(adc_unit_t unit, adc_channel_t ch, adc_cali_handle_t* out) {
 }
 
 bool adcBegin() {
+    constexpr bool kHasEnNode = BOARD_GPIO_EN_NODE >= 0;
     adc_unit_t unitImon{};
     adc_unit_t unitEn{};
-    if (adc_oneshot_io_to_channel(BOARD_GPIO_MSW_IMON, &unitImon, &g_chImon) != ESP_OK ||
-        adc_oneshot_io_to_channel(BOARD_GPIO_EN_NODE, &unitEn, &g_chEn) != ESP_OK || unitImon != unitEn) {
+    if (adc_oneshot_io_to_channel(BOARD_GPIO_MSW_IMON, &unitImon, &g_chImon) != ESP_OK) {
+        GLOGE(kTag, "G%d is not an ADC pad: motor power can never enable", BOARD_GPIO_MSW_IMON);
+        return false;
+    }
+    if (kHasEnNode && (adc_oneshot_io_to_channel(BOARD_GPIO_EN_NODE, &unitEn, &g_chEn) != ESP_OK ||
+                       unitImon != unitEn)) {
         GLOGE(kTag, "G%d/G%d are not one ADC unit: motor power can never enable",
               BOARD_GPIO_MSW_IMON, BOARD_GPIO_EN_NODE);
         return false;
@@ -150,8 +157,8 @@ bool adcBegin() {
     chan.atten = ADC_ATTEN_DB_12;
     chan.bitwidth = ADC_BITWIDTH_DEFAULT;
     if (adc_oneshot_config_channel(g_adc, g_chImon, &chan) != ESP_OK ||
-        adc_oneshot_config_channel(g_adc, g_chEn, &chan) != ESP_OK ||
-        !caliFor(unitImon, g_chImon, &g_caliImon) || !caliFor(unitImon, g_chEn, &g_caliEn)) {
+        (kHasEnNode && adc_oneshot_config_channel(g_adc, g_chEn, &chan) != ESP_OK) ||
+        !caliFor(unitImon, g_chImon, &g_caliImon) || (kHasEnNode && !caliFor(unitImon, g_chEn, &g_caliEn))) {
         GLOGE(kTag, "ADC channel or calibration setup failed: motor power can never enable");
         return false;
     }

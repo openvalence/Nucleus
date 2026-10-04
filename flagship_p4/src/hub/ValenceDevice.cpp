@@ -360,10 +360,9 @@ void publishMotion(Hub& hub, const MotionCensus& m, bool genRunning) {
     packU16(buf, n, wireU16(m.target_mm, 100.0f));     // tgt_10um
     packI16(buf, n, wireI16(m.velocity_mm_s, 10.0f));  // speed
     // flags: homed, homing, gen_running, paused, override, estop, stream.
-    // homing is permanently 0 and that is the truth, not a stub: there is no
-    // homing cycle on this board. gen_running is the generator DRIVING, not
-    // merely switched on (patternActive()).
-    packU8(buf, n, uint8_t((m.homed ? 0x01u : 0u) | (genRunning ? 0x04u : 0u) |
+    // homing is a home op 1 cycle asked for or running. gen_running is the
+    // generator DRIVING, not merely switched on (patternActive()).
+    packU8(buf, n, uint8_t((m.homed ? 0x01u : 0u) | (m.homing ? 0x02u : 0u) | (genRunning ? 0x04u : 0u) |
                  (m.paused ? 0x08u : 0u) | (m.override_mode ? 0x10u : 0u) |
                  (m.estop ? 0x20u : 0u) | (m.stream ? 0x40u : 0u)));
     packU16(buf, n, wireU16(m.demand_mm, 100.0f));     // raw_10um: the asked position
@@ -1265,14 +1264,39 @@ Ret ValenceDevice::applyHome(const IntentValueMap& requested) {
     const uint64_t op = fieldU64(f1, 0);
     IntentValueMap applied{};
     switch (op) {
-        case 1:  // real homing
-            // There is no motor and no encoder on this board, so a homing
-            // cycle has nothing to feel for. Saying so once is the whole
-            // handling; op 2 is how this machine becomes homed.
-            GLOGW_EVERY_MS(60000, kTag,
-                           "home op 1 refused: no drive and no encoder on this board, "
-                           "nothing to home against -- use force_home (op 2)");
-            return Ret::err(NackCode::UNSUPPORTED_OP);
+        case 1: {  // home: a real cycle against the home sense (MotionArbiter.h, homing)
+            // The ECHO answers the start. The outcome is the 0x1100 homing
+            // and homed bits and the motion log; a failed cycle cannot NACK
+            // an intent already answered (RFC-101 drafts the deferred answer).
+            const MotionCensus c = motionCensus();
+            if (c.estop) return refuse(NackCode::ESTOP_ACTIVE, kDetailEstop);
+            // Under PAUSE an owning source is suspended (SPEC 11.1 admits the
+            // home verb there); outside it, an owner is driving the rail.
+            if (railOwned() && !c.paused) return refuse(NackCode::SOURCE_CONFLICT, "a source owns the rail");
+            const bool overrideOn = _hub != nullptr &&
+                                    (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
+            if (overrideOn || _returnPending) return refuse(NackCode::INTERLOCK, "override latched: return first");
+            if (c.busy && !c.homing) return refuse(NackCode::INTERLOCK, "moving: pause first");
+            switch (motionHome()) {
+                case HomeStart::started:
+                    break;
+                case HomeStart::no_sense:
+                    GLOGW_EVERY_MS(60000, kTag, "home op 1 refused: no home sense on this board "
+                                   "-- force_home (op 2) on a motorless rig");
+                    return refuse(NackCode::UNSUPPORTED_OP, "no home sense on this board");
+                case HomeStart::undriven:
+                    return refuse(NackCode::INTERLOCK, "home sense not driven: sensor unwired or down");
+                case HomeStart::sense_high:
+                    return refuse(NackCode::INTERLOCK, "home sense already reads a stall");
+                case HomeStart::estop:
+                    return refuse(NackCode::ESTOP_ACTIVE, kDetailEstop);
+                case HomeStart::unpowered:
+                    return refuseUnpowered("home");
+            }
+            applied.count = 1;
+            applied.fields[0] = {1, IntentValue::ofU64(1)};
+            return Ret::ok(applied);
+        }
 
         case 2: {  // force_home {stroke}
             // *** HAZARD, RFC-025. The hazard note lives on motionForceHome()
@@ -1281,6 +1305,7 @@ Ret ValenceDevice::applyHome(const IntentValueMap& requested) {
             // held ESTOP latch into PAUSE. Both are tick()'s, on the next hub
             // tick: releaseEstop() and setHomeRequired() publish and
             // broadcast, and this runs inside the hub's own intent dispatch.
+            if (motionCensus().homing) return refuse(NackCode::INTERLOCK, "homing");
             const float asked = numberOf(f2).value_or(250.0f);
             const float stroke = motionForceHome(asked);
             _clearLatch = true;
@@ -1768,8 +1793,7 @@ void ValenceDevice::homeFromButton() {
     m.fields[0] = IntentValueField{1, IntentValue::ofU64(1)};
     const Ret r = applyHome(m);
     if (r) GLOGW(kTag, "HOME press: homing");
-    else GLOGW(kTag, "HOME press: home refused, NACK 0x%04x (no homing cycle on this board yet)",
-               unsigned(r.error()));
+    else GLOGW(kTag, "HOME press: home refused, NACK 0x%04x: %s", unsigned(r.error()), _nackDetail.data());
 }
 
 // PAUSE's brake without PAUSE's latch: the hub's safety word moves once,
@@ -1884,6 +1908,13 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     if (_returnPending && mo.returns != _returnsAtRequest) {
         _returnPending = false;
         _hub->setOverride(false);
+    }
+    // A completed home cycle clears home_required (SPEC 11.2). A counter for
+    // the same reason as the return's; an ESTOP since it left the machine
+    // unhomed, and that latch's home_required stands.
+    if (mo.homes != _homesSeen) {
+        _homesSeen = mo.homes;
+        if (mo.homed && !mo.estop) _hub->setHomeRequired(false);
     }
     if (uint32_t(nowMs - _lastMotionMs) >= 33u) {
         _lastMotionMs = nowMs;

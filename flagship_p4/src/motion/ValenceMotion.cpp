@@ -28,6 +28,7 @@
 #include "MotionArbiter.h"
 #include "geiger/geiger.h"
 #include "system/ValenceAccessoryIo.h"
+#include "system/ValenceHomeSense.h"
 #include "system/ValenceMotorSwitch.h"
 #include "ulp_main.h"
 
@@ -92,6 +93,7 @@ public:
     void pause(bool on);                     // any task: gate, brake request, wake
     void override();                         // any task: pause, then the mode, wake
     ReturnStart returnToPause();             // any task: request, wake
+    HomeStart home();                        // any task: request, wake
     void setTuning(const MotionTuning& t);   // any task: overwrite the one slot
     MotionCensus census() const;
     MotionArbiter& arbiter() { return _arb; }
@@ -128,6 +130,7 @@ bool MotionTask::begin() {
     _tuneQueue = xQueueCreate(1, sizeof(MotionTuning));
     if (_tuneQueue == nullptr) return false;
     // The task does not exist yet, so this caller is the arbiter's one owner.
+    _arb.setHomeSense(homeSenseBegin());
     _arb.begin(espNowUs());
     refreshSnapshot(espNowUs());
     // Core 1 with the hub, at a higher priority than it: the tick is a
@@ -174,6 +177,12 @@ void MotionTask::override() {
 ReturnStart MotionTask::returnToPause() {
     const ReturnStart r = _arb.returnToPause();
     if (r == ReturnStart::queued && _task != nullptr) xTaskNotifyGive(_task);
+    return r;
+}
+
+HomeStart MotionTask::home() {
+    const HomeStart r = _arb.home();
+    if (r == HomeStart::started && _task != nullptr) xTaskNotifyGive(_task);
     return r;
 }
 
@@ -260,6 +269,7 @@ void motionReleaseRail(MotionSource g) { g_motion.arbiter().releaseRail(g); }
 void motionSetEstopCutsPower(bool cuts) { g_motion.arbiter().setEstopCutsPower(cuts); }
 void motionOverride() { g_motion.override(); }
 ReturnStart motionReturn() { return g_motion.returnToPause(); }
+HomeStart motionHome() { return g_motion.home(); }
 void motionSetFlipped(bool on) { g_motion.arbiter().setFlipped(on); }
 void motionSetJogLimits(float v, float a) { g_motion.arbiter().setJogLimits(v, a); }
 void motionSetInputLimits(float v, float a, float j) { g_motion.arbiter().setInputLimits(v, a, j); }

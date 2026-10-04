@@ -4,7 +4,7 @@
 //
 //   valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
 //              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
-//              [--no-estop-udp]
+//              [--no-estop-udp] [--home-sense-at MM]
 //              [--uncommissioned] [--no-discovery] [--discovery-port N]
 //              [--headless] [--no-mdns] [--enforce]
 //
@@ -132,6 +132,7 @@ struct Options {
     bool motorSwitch = false;
     int mswFaultS = -1;   // --msw-fault: seconds after boot, -1 = none
     bool noEstopUdp = false;   // --no-estop-udp: RFC-053 datagrams never latch
+    std::optional<float> homeSenseAtMm;   // --home-sense-at: the home stop, boot frame
     std::string statePrefix;   // empty = valencesim-state beside the exe
     bool discovery = true;
     uint16_t discoveryPort = uint16_t(valence::udp_discovery::port);
@@ -152,6 +153,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (!std::strcmp(a, "--motor-switch")) o.motorSwitch = true;
         else if (!std::strcmp(a, "--msw-fault") && hasNext) o.mswFaultS = std::atoi(argv[++i]);
         else if (!std::strcmp(a, "--no-estop-udp")) o.noEstopUdp = true;
+        else if (!std::strcmp(a, "--home-sense-at") && hasNext) o.homeSenseAtMm = float(std::atof(argv[++i]));
         else if (!std::strcmp(a, "--state") && hasNext) o.statePrefix = argv[++i];
         else if (!std::strcmp(a, "--no-discovery")) o.discovery = false;
         else if (!std::strcmp(a, "--discovery-port") && hasNext) o.discoveryPort = uint16_t(std::atoi(argv[++i]));
@@ -269,7 +271,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "usage: valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]\n"
                      "                  [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]\n"
-                     "                  [--no-estop-udp]\n"
+                     "                  [--no-estop-udp] [--home-sense-at MM]\n"
                      "                  [--uncommissioned] [--no-discovery] [--discovery-port N]\n"
                      "                  [--headless] [--no-mdns] [--enforce]\n");
         return 2;
@@ -299,6 +301,11 @@ int main(int argc, char** argv) {
         log.logf('W', "valencesim: log channel bridge not registered: Geiger sink table full");
 
     auto box = std::make_unique<SimBox>();
+    if (opt.homeSenseAtMm) {
+        valence::simMotionSetHomeSenseAt(*opt.homeSenseAtMm);
+        log.logf('W', "valencesim: --home-sense-at: home stop at %.1f mm from the boot position",
+                 double(*opt.homeSenseAtMm));
+    }
     valence::motionBegin();
     if (opt.motorSwitch) valence::simMotorSwitchModel();
     valence::motorSwitchBegin();

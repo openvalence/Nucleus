@@ -19,6 +19,7 @@ policy, and the sockets. Its LP core renders quadrature edges and its signed
 edge count is the machine's position; the HP core evaluates the plan and runs
 the hub. The **ESP32-C6** is a WiFi NIC over SDIO, running Espressif's stock
 `esp_hosted` slave image. There is no bridge and no second firmware of ours.
+On the bench, homing's trigger is an external current-sense board.
 
 ## Build and flash
 

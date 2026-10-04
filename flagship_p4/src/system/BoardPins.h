@@ -45,8 +45,27 @@
 #define BOARD_GPIO_MSW_FLT_N    20  // FLT_T and FLT_I tied, active low (hw-3qf)
 #define BOARD_GPIO_MSW_IMON     19  // ADC1: switch current monitor
 // ADC1: the EN/UVLO wired-OR every hardware kill pulls (INA ALERT, bus OVP
-// trip, E-stop, board monitor FAULT_N). ~1.8 V running, ~0 V tripped.
+// trip, E-stop, board monitor FAULT_N). ~1.8 V running, ~0 V tripped. Absent
+// on the duct-tape bench: G23 is HOME_SENSE there, and an absent EN_NODE reads
+// NaN, which refuses every motor enable (MotorSwitch.h enNodeUp).
+#ifdef CONFIG_NUCLEUS_BENCH_QUAD_LP10_12
+#define BOARD_GPIO_EN_NODE      -1
+#else
 #define BOARD_GPIO_EN_NODE      23
+#endif
+
+// ---- home sense: the stall level that ends a homing seek --------------------
+// HIGH while the motor is pressed against a hard stop. Push-pull from its
+// source; the P4 holds a pull-down and probes with its pull-up before a seek,
+// so an undriven line refuses the home instead of seeking open-loop
+// (system/ValenceHomeSense.cpp). -1: home op 1 refuses UNSUPPORTED_OP.
+// Bench only: the devkit's through-hole G23 takes an external current-sense
+// board's stall output; the flagship owns G23 for EN_NODE.
+#ifdef CONFIG_NUCLEUS_BENCH_QUAD_LP10_12
+#define BOARD_GPIO_HOME_SENSE   23
+#else
+#define BOARD_GPIO_HOME_SENSE   -1  // TODO(hw-6r6): no flagship pin ruled yet
+#endif
 
 // ---- private I2C: motor current monitor (U11 at 0x40) + board monitor (U12) -
 #define BOARD_GPIO_INA_SDA 34   // JTAG strap, ignored at default eFuses

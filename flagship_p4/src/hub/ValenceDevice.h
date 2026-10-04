@@ -295,6 +295,9 @@ private:
     // arbiter's census.returns moves past _returnsAtRequest, or by ESTOP.
     bool _returnPending = false;
     uint32_t _returnsAtRequest = 0;
+    // census.homes as tick() last acted on it: a move past it is a completed
+    // home cycle, which clears home_required.
+    uint32_t _homesSeen = 0;
     // The motor switch's fault count as tick() last acted on it.
     uint16_t _mswFaultsSeen = 0;
     // A switch fault not yet acted on, and the tick it was first seen: an
