@@ -69,11 +69,18 @@ inline constexpr uint32_t kMinCyclesPerEdge = 40;
 inline constexpr uint32_t kIntentQueueDepth = 40;
 
 // ---- homing -----------------------------------------------------------------
-// Home op 1 seeks position 0 across the configured max_rail (the search
-// distance) at kHomeSeekMmS, until the home sense reads HIGH for
-// kHomeSenseDebounceUs; then the stop profile (PAUSE's brake), 0.0 mm at the
-// sense point, a backoff of kHomeBackoffMm, homed. No sense by the end of the
-// search, or by its time plus kHomeTimeoutMarginUs, fails it unhomed.
+// Home op 1 runs two legs, the home end first, then the far end. Each leg:
+// approach at the home speed (the home_speed tuning, held to the jog speed)
+// until the home sense reads HIGH for kHomeSenseDebounceUs; the stop profile
+// (PAUSE's brake); back off kHomeRetouchBackoffMm at the home speed, where the
+// line must read LOW; re-approach at homeTouchMmS(), and that stall is the
+// leg's datum. The home end's datum is 0.0 mm and the far end's, minus it, is
+// the measured rail length, which becomes the rail. Then kHomeBackoffMm off
+// the far end, where the line must read LOW again, and homed. An approach
+// searches max_rail plus kHomeSearchMarginMm; a re-touch reaches
+// kHomeSearchMarginMm past the stall it backed off from. No stall within
+// either, a rail under MIN_RAIL_MM, or no end by homeCycleS() plus
+// kHomeTimeoutMarginUs fails it unhomed.
 //
 // THE STALL IS THE SENSE SOURCE'S DECISION. The input contract: one level,
 // active HIGH, push-pull, HIGH while the motor is pressed against a stop. On
@@ -82,14 +89,44 @@ inline constexpr uint32_t kIntentQueueDepth = 40;
 // kSamplePeriodUs (280 us), released at the first sample under kStallOffA
 // (0.5 A). This side adds kHomeSenseDebounceUs as a glitch filter and nothing
 // else. kHomeSenseLatencyUs is the two ends' contact-to-stop budget; a change
-// to the source's numbers moves it here.
-inline constexpr float    kHomeSeekMmS         = 12.0f;     // clamped by the jog speed
-inline constexpr float    kHomeBackoffMm       = 2.0f;      // from the sense point
-inline constexpr uint32_t kHomeSenseDebounceUs = 3000;
-inline constexpr uint32_t kHomeTimeoutMarginUs = 2000000;
-inline constexpr uint32_t kHomeSenseLatencyUs  = 24000 + 280 + kHomeSenseDebounceUs + kMotionTickUs;
-static_assert(kHomeSeekMmS * float(kHomeSenseLatencyUs) * 1e-6f < 0.5f * kHomeBackoffMm,
-              "the seek's overrun past contact must stay inside half the backoff");
+// to the source's numbers moves it here. Each datum lies the touch speed times
+// that budget past its contact, so the measured rail reads long by twice it
+// (0.57 mm at the factory touch speed).
+inline constexpr float    kHomeRetouchBackoffMm = 5.0f;   // from an approach's stall
+inline constexpr float    kHomeBackoffMm        = 2.0f;   // final, from the far datum
+inline constexpr float    kHomeSearchMarginMm   = 10.0f;
+inline constexpr float    kHomeTouchDivisor     = 4.0f;
+inline constexpr float    kHomeTouchFloorMmS    = 8.0f;
+inline constexpr uint32_t kHomeSenseDebounceUs  = 3000;
+inline constexpr uint32_t kHomeTimeoutMarginUs  = 2000000;
+inline constexpr uint32_t kHomeSenseLatencyUs   = 24000 + 280 + kHomeSenseDebounceUs + kMotionTickUs;
+
+// The re-touch speed for an approach speed: a quarter of it, floored, never
+// above the approach itself.
+constexpr float homeTouchMmS(float home_mm_s) {
+    const float quarter = home_mm_s / kHomeTouchDivisor;
+    const float floored = quarter > kHomeTouchFloorMmS ? quarter : kHomeTouchFloorMmS;
+    return floored < home_mm_s ? floored : home_mm_s;
+}
+
+// The cycle's own time, before kHomeTimeoutMarginUs: both approaches across
+// their whole search and the three backoffs at the home speed, both re-touches
+// across their whole reach at the touch speed, and an accel and a decel ramp
+// on each of the seven moves.
+constexpr float homeCycleS(float max_rail_mm, float home_mm_s, float accel_mm_s2) {
+    const float fast = 2.0f * (max_rail_mm + kHomeSearchMarginMm) + 2.0f * kHomeRetouchBackoffMm + kHomeBackoffMm;
+    const float slow = 2.0f * (kHomeRetouchBackoffMm + kHomeSearchMarginMm);
+    return fast / home_mm_s + slow / homeTouchMmS(home_mm_s) + 7.0f * home_mm_s / accel_mm_s2;
+}
+
+// At the factory speeds. A faster home speed is checked where it runs: the
+// line must read LOW after each backoff, or the cycle fails.
+static_assert(DEFAULT_HOME_SPEED_MM_S * float(kHomeSenseLatencyUs) * 1e-6f < 0.5f * kHomeRetouchBackoffMm,
+              "the approach's overrun past contact must stay inside half the re-touch backoff");
+static_assert(homeTouchMmS(DEFAULT_HOME_SPEED_MM_S) * float(kHomeSenseLatencyUs) * 1e-6f < 0.5f * kHomeBackoffMm,
+              "the re-touch's overrun past contact must stay inside half the final backoff");
+static_assert(kHomeSearchMarginMm > kHomeRetouchBackoffMm,
+              "a re-touch must reach past the stall it backed off from");
 
 // ---- the steering word ------------------------------------------------------
 
@@ -123,7 +160,7 @@ protected:
 
 // ---- the home sense seam -----------------------------------------------------
 
-// Whatever reports the carriage pressed against the home end's hard stop: a
+// Whatever reports the carriage pressed against a hard stop, either end: a
 // level, HIGH while pressed.
 class HomeSense {
 public:
@@ -276,16 +313,31 @@ private:
     // under `lim`. Owning task; counts the plan cost and a failure as a
     // rejection.
     bool plan(float target, const MotionIntent& in, const kinetic::Limits& lim, uint64_t now_us);
-    // The home cycle, owning task only (MotionArbiter.cpp, homing).
-    enum class HomePhase : uint8_t { idle, seek, stop, backoff };
+    // The home cycle, owning task only (MotionArbiter.cpp, homing). A leg:
+    // approach, approach_stop, clear (the backoff), touch, touch_stop; then
+    // the far leg, or finish (the final backoff).
+    enum class HomePhase : uint8_t { idle, approach, approach_stop, clear, touch, touch_stop, finish };
     void homeStart(uint64_t now_us);
     void homeStep(uint64_t now_us);
+    // The far datum is in: the rail is measured, the frame becomes it, and
+    // the final backoff is planned.
+    void homeMeasure(uint64_t now_us);
+    // Plans the leg's approach (`touch` false) or re-touch at its speed, and
+    // arms the sense: at once when the line is known LOW, else on its first
+    // LOW read (the far approach starts pressed against the home stop).
+    void homeSeek(bool touch, bool armed, uint64_t now_us);
+    // Leg geometry in the cycle frame, [0, _home_span] mm: where a leg's
+    // stall point is declared, `d` back from it, and the target past it.
+    bool  homeTowardLow(uint8_t leg) const { return (leg == 0) != _home_flip; }
+    float homeStopAt(uint8_t leg) const { return homeTowardLow(leg) ? kHomeSearchMarginMm : _home_span - kHomeSearchMarginMm; }
+    float homeAway(uint8_t leg, float d) const { return homeTowardLow(leg) ? homeStopAt(leg) + d : homeStopAt(leg) - d; }
+    float homePast(uint8_t leg) const { return homeTowardLow(leg) ? 0.0f : _home_span; }
     // Re-origins the count so the carriage reads `at_mm` and reseeds the
     // engine there: a relabeling, never motion.
     void homeOrigin(int32_t count, float at_mm, uint64_t now_us);
-    // Ends the cycle; a failure is logged with `why` and counted nowhere else.
+    // Ends the cycle; a failure records `why` and the leg for the census.
     void homeEnd(const char* why);
-    bool homePlan(float target_mm, uint64_t now_us);
+    bool homePlan(float target_mm, float v_mm_s, uint64_t now_us);
 
     MotionEmitter& _emitter;
     Clock          _now_us;
@@ -358,12 +410,23 @@ private:
     std::atomic<bool> _home_req{false};
     std::atomic<bool> _home_abort{false};
     HomePhase _home = HomePhase::idle;
+    uint8_t   _home_leg = 0;      // 0 the home end, 1 the far end
+    bool      _home_flip = false; // the flip as the cycle started
     uint64_t  _home_deadline_us = 0;
     uint64_t  _sense_since_us = 0;
     bool      _sense_seen = false;
+    bool      _sense_armed = false;
     int32_t   _home_hit = 0;      // the emitter count where the sense fired
-    float     _home_v = 0.0f;     // the seek speed, mm/s
+    std::array<int32_t, 2> _home_datum{};   // each leg's re-touch stall, emitter counts
+    float     _home_span = 0.0f;  // the cycle frame, mm: max_rail plus two margins
+    float     _home_speed = DEFAULT_HOME_SPEED_MM_S;   // the tuning, applyTuning()
+    float     _home_v = 0.0f;     // this cycle's approach speed, mm/s
+    float     _touch_v = 0.0f;    // this cycle's re-touch speed, mm/s
     uint32_t  _homes = 0;
+    float     _home_rail_mm = 0.0f;
+    uint32_t  _home_fails = 0;
+    uint8_t   _home_fail_leg = 0;
+    const char* _home_fail_why = nullptr;   // a string literal
 
     // Odometer state, owning task only.
     int32_t _odo_steps = 0;       // emitter count at the previous snapshot

@@ -18,8 +18,9 @@
 //   checks run on the extended values. A firmware update never orphans a
 //   stored setting; the next write is the current version. A NEWER version is
 //   refused whole, never read as the prefix this firmware knows.
-// - A TUNING FIELD APPENDED LATER takes the engine's factory value, passed in
-//   as factoryGuard is, never MotionTuning{}'s zero.
+// - A TUNING FIELD APPENDED LATER takes its factory value when an older blob
+//   lacks it: the engine's (passed in, as factoryGuard is) or the catalog's
+//   (factory::home_speed), never a zero.
 // - THE FIRST-RUN RECORD SURVIVES MIGRATION: every layout from v5 on carries
 //   setup_written and decode keeps it, because losing it re-gates content
 //   motion on an upgraded machine (RFC-079). Older blobs have no record and
@@ -103,6 +104,8 @@ inline constexpr float    budget_max        = 1.0f;
 inline constexpr uint8_t  blend_steps_min   = 1;
 inline constexpr uint8_t  blend_steps_max   = 10;
 inline constexpr float    settle_ms_max     = 200.0f;
+inline constexpr float    home_speed_min    = ceiling::home_speed_min;
+inline constexpr float    home_speed_max    = ceiling::speed_max;
 }  // namespace tuning_bounds
 
 // "on" is the engine's factory multiplier, never a number chosen here.
@@ -115,24 +118,26 @@ inline float overshootGuardFor(bool on, float factoryGuard) {
 namespace stored {
 
 inline constexpr uint32_t kConfigMagic   = 0x56434647u;  // "VCFG"
-inline constexpr uint8_t  kConfigVersion = 5;            // bump on ANY layout change
+inline constexpr uint8_t  kConfigVersion = 6;            // bump on ANY layout change
 // v1, the 40 B struct dump this codec replaced (u16 version), is retired:
 // refused, never migrated.
 inline constexpr uint8_t  kConfigOldestVersion = 2;
 // v2: magic 4, version 1, cfg_gen 2, config 8 x f32, tuning 8 x f32 + 2 x u32 + 7 x u8
 inline constexpr size_t   kConfigV2Bytes = 4 + 1 + 2 + 32 + 32 + 8 + 7;
 // v3 appends the schedule_horizon ordinal (u8), v4 the flip (u8, 0/1), v5
-// the setup_written mask (u8).
+// the setup_written mask (u8), v6 the home speed (f32, mm/s).
 inline constexpr size_t   kConfigV3Bytes = kConfigV2Bytes + 1;
 inline constexpr size_t   kConfigV4Bytes = kConfigV3Bytes + 1;
-inline constexpr size_t   kConfigBlobBytes = kConfigV4Bytes + 1;
+inline constexpr size_t   kConfigV5Bytes = kConfigV4Bytes + 1;
+inline constexpr size_t   kConfigBlobBytes = kConfigV5Bytes + 4;
 
 // 0 for a version this firmware cannot read.
 inline constexpr size_t configBytesFor(uint8_t version) {
     return version == 2 ? kConfigV2Bytes
          : version == 3 ? kConfigV3Bytes
          : version == 4 ? kConfigV4Bytes
-         : version == 5 ? kConfigBlobBytes : 0;
+         : version == 5 ? kConfigV5Bytes
+         : version == 6 ? kConfigBlobBytes : 0;
 }
 
 static_assert([] {
@@ -209,7 +214,8 @@ inline bool tuningValid(const MotionTuning& t) {
         && in(t.smooth_budget, 0.0f, b::budget_max)
         && in(t.amplitude_budget, 0.0f, b::budget_max)
         && t.blend_steps >= b::blend_steps_min && t.blend_steps <= b::blend_steps_max
-        && in(float(t.settle_grace_us) / 1000.0f, 0.0f, b::settle_ms_max);
+        && in(float(t.settle_grace_us) / 1000.0f, 0.0f, b::settle_ms_max)
+        && in(t.home_speed, b::home_speed_min, b::home_speed_max);
 }
 
 inline bool modesValid(const StoredModes& m) { return m.horizon < kHorizonMs.size(); }
@@ -238,6 +244,7 @@ inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
     put(out, n, m.horizon);
     put(out, n, uint8_t(m.flipped));
     put(out, n, m.setup_written);
+    put(out, n, t.home_speed);
     return n;
 }
 
@@ -291,6 +298,7 @@ inline std::expected<void, ConfigReject> decodeConfig(std::span<const std::byte>
         m.flipped = f != 0;
     }
     if (version >= 5) m.setup_written = get<uint8_t>(in, n);
+    t.home_speed = version >= 6 ? get<float>(in, n) : factory::home_speed;
 
     if (!configValid(c)) return Err(ConfigReject::BadConfig);
     if (!tuningValid(t)) return Err(ConfigReject::BadTuning);

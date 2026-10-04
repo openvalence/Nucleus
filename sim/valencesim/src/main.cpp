@@ -4,7 +4,7 @@
 //
 //   valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
 //              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
-//              [--no-estop-udp] [--home-sense-at MM]
+//              [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]]
 //              [--uncommissioned] [--no-discovery] [--discovery-port N]
 //              [--headless] [--no-mdns] [--enforce]
 //
@@ -34,6 +34,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -133,6 +134,7 @@ struct Options {
     int mswFaultS = -1;   // --msw-fault: seconds after boot, -1 = none
     bool noEstopUdp = false;   // --no-estop-udp: RFC-053 datagrams never latch
     std::optional<float> homeSenseAtMm;   // --home-sense-at: the home stop, boot frame
+    std::optional<float> railEndAtMm;     // --rail-end-at: the far stop, boot frame
     std::string statePrefix;   // empty = valencesim-state beside the exe
     bool discovery = true;
     uint16_t discoveryPort = uint16_t(valence::udp_discovery::port);
@@ -154,6 +156,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (!std::strcmp(a, "--msw-fault") && hasNext) o.mswFaultS = std::atoi(argv[++i]);
         else if (!std::strcmp(a, "--no-estop-udp")) o.noEstopUdp = true;
         else if (!std::strcmp(a, "--home-sense-at") && hasNext) o.homeSenseAtMm = float(std::atof(argv[++i]));
+        else if (!std::strcmp(a, "--rail-end-at") && hasNext) o.railEndAtMm = float(std::atof(argv[++i]));
         else if (!std::strcmp(a, "--state") && hasNext) o.statePrefix = argv[++i];
         else if (!std::strcmp(a, "--no-discovery")) o.discovery = false;
         else if (!std::strcmp(a, "--discovery-port") && hasNext) o.discoveryPort = uint16_t(std::atoi(argv[++i]));
@@ -271,7 +274,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "usage: valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]\n"
                      "                  [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]\n"
-                     "                  [--no-estop-udp] [--home-sense-at MM]\n"
+                     "                  [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]]\n"
                      "                  [--uncommissioned] [--no-discovery] [--discovery-port N]\n"
                      "                  [--headless] [--no-mdns] [--enforce]\n");
         return 2;
@@ -340,6 +343,16 @@ int main(int argc, char** argv) {
     // writes have carried all eight keys.
     box->device.setSetupWritten(opt.uncommissioned ? 0 : valence::kSetupRequiredMask);
     if (opt.uncommissioned) log.logf('W', "valencesim: --uncommissioned: first-run hub, setup record cleared");
+    // The far stop defaults to the stored max_rail from the home stop, on the
+    // other side of the boot position: a rail exactly as long as the setting.
+    if (opt.homeSenseAtMm) {
+        const float maxRail = box->device.config().max_rail;
+        const float farAt = opt.railEndAtMm.value_or(*opt.homeSenseAtMm < 0.0f ? *opt.homeSenseAtMm + maxRail
+                                                                               : *opt.homeSenseAtMm - maxRail);
+        valence::simMotionSetRailEndAt(farAt);
+        log.logf('W', "valencesim: --rail-end-at: far stop at %.1f mm from the boot position, rail %.1f mm",
+                 double(farAt), double(std::fabs(farAt - *opt.homeSenseAtMm)));
+    }
     box->device.pushConfigToMotion();
 
     box->hub.emplace(box->catalog, g_clock, box->rng, box->device);

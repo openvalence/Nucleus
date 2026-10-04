@@ -22,4 +22,9 @@ void simMotionTick(uint64_t now_us);
 // op 1 refuses, as a board without one does. Before motionBegin().
 void simMotionSetHomeSenseAt(float at_mm);
 
+// --rail-end-at: the far stop the cycle's second leg stalls on, same frame,
+// on the other side of the boot position from the home stop; the sense reads
+// HIGH at or past it too. After simMotionSetHomeSenseAt().
+void simMotionSetRailEndAt(float at_mm);
+
 }  // namespace valence

@@ -15,6 +15,8 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 // Named here so the dependency finder builds them; the .cpp below needs all three.
 #include "geiger/geiger.h"
@@ -889,40 +891,64 @@ TEST_CASE("RFC-100: plan_flags name how the last plan was bent, and read 0 with 
     CHECK(stretch->census().plan_flags == 0);
 }
 
-// ---- homing (bd val-dbo) ------------------------------------------------------
+// ---- homing (bd val-dbo, val-zsr) ---------------------------------------------
 
 namespace {
 
 using valence::HomeSense;
 using valence::HomeStart;
 
-// A hard stop at stop_mm in the emitter's boot frame: HIGH at or past it, on
-// the side away from 0. `forced` overrides the pre-cycle probe.
+// Hard stops in the emitter's boot frame, each HIGH at or past it on its side
+// of 0: the home stop and, when given, the far stop. `forced` overrides the
+// pre-cycle probe; `sticky` holds the line HIGH once it has risen.
 class FakeSense final : public HomeSense {
 public:
-    FakeSense(const TestEmitter& e, float stop) : emitter(e), stop_mm(stop) {}
+    FakeSense(const TestEmitter& e, float stop, std::optional<float> far_stop = std::nullopt)
+        : emitter(e), stop_mm(stop), far_mm(far_stop) {}
     bool present() const override { return true; }
     Probe probe() override {
         if (forced) return *forced;
         return level() ? Probe::high : Probe::low;
     }
-    bool high() override { return level(); }
+    bool high() override {
+        const bool h = level();
+        risen = risen || h;
+        return h || (sticky && risen);
+    }
+    static bool past(float p, float stop) { return stop < 0.0f ? p <= stop : p >= stop; }
     bool level() const {
-        const float p = float(emitter.n) * valence::kMmPerStep;
-        return stop_mm < 0.0f ? p <= stop_mm : p >= stop_mm;
+        const float p = bootMm();
+        return past(p, stop_mm) || (far_mm && past(p, *far_mm));
     }
     float bootMm() const { return float(emitter.n) * valence::kMmPerStep; }
 
     const TestEmitter& emitter;
     float stop_mm;
+    std::optional<float> far_mm;
     std::optional<Probe> forced;
+    bool sticky = false;
+    bool risen = false;
 };
+
+// Runs `us` in 1 ms ticks and records the commanded speed at every rising
+// edge of the stop line: one per contact, approach or re-touch.
+std::vector<float> contactSpeeds(Rig& r, const FakeSense& s, uint64_t us) {
+    std::vector<float> v;
+    bool was = s.level();
+    for (uint64_t t = 0; t < us; t += 1000) {
+        r.run(1000);
+        const bool now = s.level();
+        if (now && !was) v.push_back(std::fabs(r.census().velocity_mm_s));
+        was = now;
+    }
+    return v;
+}
 
 }  // namespace
 
-TEST_CASE("home: the stall zeroes the stall point, backs off, homes; intents wait for it") {
+TEST_CASE("home: two legs, the home datum is 0.0 mm, the far datum the rail; it ends off the far end") {
     auto r = rig();
-    FakeSense s{r->emitter, -30.0f};
+    FakeSense s{r->emitter, -30.0f, 170.0f};
     r->arb.setHomeSense(s);
     REQUIRE(r->arb.home() == HomeStart::started);
     CHECK(r->arb.home() == HomeStart::started);   // one cycle; a repeat changes nothing
@@ -930,54 +956,182 @@ TEST_CASE("home: the stall zeroes the stall point, backs off, homes; intents wai
     CHECK(r->census().homing);
     CHECK_FALSE(r->census().homed);
     CHECK_FALSE(r->submit(MotionSource::Manual, 100.0f));   // the cycle owns the rail
-    r->run(5'000'000);
+    r->run(20'000'000);
     const MotionCensus c = r->census();
     CHECK_FALSE(c.homing);
     CHECK(c.homed);
     CHECK(c.homes == 1);
-    CHECK(c.position_mm == doctest::Approx(valence::kHomeBackoffMm).epsilon(0.02));
-    // 0.0 mm sits within one debounce of travel past the stop.
-    CHECK(s.bootMm() - c.position_mm <= -30.0f + 0.01f);
-    CHECK(s.bootMm() - c.position_mm >= -30.0f - valence::kHomeSeekMmS * 0.005f);
-    CHECK_FALSE(s.level());
+    CHECK(c.home_fails == 0);
+    // Each datum lies one debounce plus a tick of re-touch travel past its stop.
+    const float touch = valence::homeTouchMmS(DEFAULT_HOME_SPEED_MM_S);
+    CHECK(c.home_rail_mm >= 200.0f);
+    CHECK(c.home_rail_mm <= 200.0f + 2.0f * touch * 0.006f);
+    CHECK(c.rail_mm == c.home_rail_mm);
+    CHECK(r->arb.rail() == c.home_rail_mm);
+    CHECK(c.position_mm == doctest::Approx(c.home_rail_mm - valence::kHomeBackoffMm).epsilon(0.001));
+    const float homeDatumBoot = s.bootMm() - c.position_mm;
+    CHECK(homeDatumBoot <= -30.0f + 0.01f);
+    CHECK(homeDatumBoot >= -30.0f - touch * 0.006f);
+    CHECK_FALSE(s.level());   // backed off the far stop
     CHECK(r->submit(MotionSource::Stream, 50.0f));   // homed: the input set moves
 }
 
-TEST_CASE("home: under the flip the seek runs to the far end and 0.0 mm is there") {
-    auto r = rig();
-    r->arb.setFlipped(true);
-    FakeSense s{r->emitter, 40.0f};
-    r->arb.setHomeSense(s);
-    REQUIRE(r->arb.home() == HomeStart::started);
-    r->run(6'000'000);
-    const MotionCensus c = r->census();
-    CHECK(c.homed);
-    CHECK(c.position_mm == doctest::Approx(valence::kHomeBackoffMm).epsilon(0.02));
-    CHECK(s.bootMm() < 40.0f);
-    CHECK(s.bootMm() > 37.0f);
+TEST_CASE("home: approach at home_speed held to the jog speed, re-touch at a quarter of it, floored") {
+    CHECK(valence::homeTouchMmS(40.0f) == 10.0f);
+    CHECK(valence::homeTouchMmS(100.0f) == 25.0f);
+    CHECK(valence::homeTouchMmS(20.0f) == valence::kHomeTouchFloorMmS);
+    CHECK(valence::homeTouchMmS(6.0f) == 6.0f);   // never above the approach
+
+    SUBCASE("factory") {
+        auto r = rig();
+        FakeSense s{r->emitter, -30.0f, 170.0f};
+        r->arb.setHomeSense(s);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        const std::vector<float> v = contactSpeeds(*r, s, 20'000'000);
+        REQUIRE(v.size() == 4);   // home approach, home re-touch, far approach, far re-touch
+        CHECK(v[0] == doctest::Approx(DEFAULT_HOME_SPEED_MM_S).epsilon(0.02));
+        CHECK(v[1] == doctest::Approx(10.0f).epsilon(0.02));
+        CHECK(v[2] == doctest::Approx(DEFAULT_HOME_SPEED_MM_S).epsilon(0.02));
+        CHECK(v[3] == doctest::Approx(10.0f).epsilon(0.02));
+        CHECK(r->census().homed);
+    }
+    SUBCASE("a live home_speed, held to the jog speed") {
+        auto r = rig();
+        valence::MotionTuning t = valence::motionDefaultTuning();
+        t.home_speed = 20.0f;
+        r->arb.applyTuning(t);
+        r->arb.setJogLimits(15.0f, DEFAULT_JOG_ACCEL_MM_S2);
+        FakeSense s{r->emitter, -30.0f, 70.0f};
+        r->arb.setHomeSense(s);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        const std::vector<float> v = contactSpeeds(*r, s, 30'000'000);
+        REQUIRE(v.size() == 4);
+        CHECK(v[0] == doctest::Approx(15.0f).epsilon(0.02));
+        CHECK(v[1] == doctest::Approx(valence::kHomeTouchFloorMmS).epsilon(0.02));
+        CHECK(v[2] == doctest::Approx(15.0f).epsilon(0.02));
+        CHECK(v[3] == doctest::Approx(valence::kHomeTouchFloorMmS).epsilon(0.02));
+        CHECK(r->census().homed);
+        CHECK(r->census().home_rail_mm == doctest::Approx(100.0f).epsilon(0.002));
+    }
 }
 
-TEST_CASE("home: no stall across the search distance ends unhomed") {
+TEST_CASE("home: under the flip the home leg runs to the far end, 0.0 mm is there, and it ends at the client's far end") {
     auto r = rig();
-    r->arb.setWindow(0.0f, 30.0f, 30.0f);   // a 30 mm search, 2.5 s at the seek speed
-    r->run(1000);
-    FakeSense s{r->emitter, -1000.0f};
+    r->arb.setFlipped(true);
+    FakeSense s{r->emitter, 40.0f, -160.0f};
     r->arb.setHomeSense(s);
     REQUIRE(r->arb.home() == HomeStart::started);
-    r->run(6'000'000);
+    r->run(20'000'000);
+    const MotionCensus c = r->census();
+    REQUIRE(c.homed);
+    CHECK(c.home_rail_mm == doctest::Approx(200.0f).epsilon(0.002));
+    // Client frame: 0 at the physical high stop, the carriage 2 mm off the low one.
+    CHECK(c.position_mm == doctest::Approx(c.home_rail_mm - valence::kHomeBackoffMm).epsilon(0.001));
+    CHECK(s.bootMm() == doctest::Approx(-160.0f + valence::kHomeBackoffMm).epsilon(0.002));
+}
+
+TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores no rail") {
+    SUBCASE("home end: no stall across max_rail") {
+        auto r = rig();
+        r->arb.setWindow(0.0f, 30.0f, 30.0f);   // max_rail 30: a 40 mm search
+        r->run(1000);
+        FakeSense s{r->emitter, -1000.0f};
+        r->arb.setHomeSense(s);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        r->run(6'000'000);
+        const MotionCensus c = r->census();
+        CHECK_FALSE(c.homing);
+        CHECK_FALSE(c.homed);
+        CHECK(c.homes == 0);
+        CHECK(c.home_fails == 1);
+        CHECK(c.home_fail_leg == 0);
+        CHECK(std::string(c.home_fail_why) == "no stall across max_rail");
+        CHECK_FALSE(c.busy);
+        CHECK(s.bootMm() == doctest::Approx(-30.0f - valence::kHomeSearchMarginMm).epsilon(0.01));
+        CHECK(r->submit(MotionSource::Manual, 10.0f));   // the rail is free again
+    }
+    SUBCASE("far end: no stall across max_rail from the home datum") {
+        auto r = rig();
+        r->arb.setWindow(0.0f, 100.0f, 100.0f);
+        r->run(1000);
+        FakeSense s{r->emitter, -30.0f, 500.0f};
+        r->arb.setHomeSense(s);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        r->run(15'000'000);
+        const MotionCensus c = r->census();
+        CHECK_FALSE(c.homing);
+        CHECK_FALSE(c.homed);
+        CHECK(c.homes == 0);
+        CHECK(c.home_fails == 1);
+        CHECK(c.home_fail_leg == 1);
+        CHECK(std::string(c.home_fail_why) == "no stall across max_rail");
+        CHECK(c.home_rail_mm == 0.0f);
+        // The far leg searched max_rail plus the margin from the home datum.
+        CHECK(s.bootMm() == doctest::Approx(-30.0f + 100.0f + valence::kHomeSearchMarginMm).epsilon(0.01));
+    }
+    SUBCASE("home end: a line still HIGH after the backoff fails before any re-touch") {
+        auto r = rig();
+        FakeSense s{r->emitter, -30.0f, 170.0f};
+        s.sticky = true;
+        r->arb.setHomeSense(s);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        r->run(5'000'000);
+        const MotionCensus c = r->census();
+        CHECK_FALSE(c.homed);
+        CHECK(c.home_fails == 1);
+        CHECK(c.home_fail_leg == 0);
+        CHECK(std::string(c.home_fail_why) == "still on the stop after the backoff (lower home_speed)");
+    }
+    SUBCASE("far end: ESTOP during the far approach") {
+        auto r = rig();
+        FakeSense s{r->emitter, -30.0f, 170.0f};
+        r->arb.setHomeSense(s);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        r->run(4'000'000);   // the home leg takes about 2 s
+        REQUIRE(r->census().homing);
+        r->arb.estop(true);
+        r->run(10'000);
+        const MotionCensus c = r->census();
+        CHECK_FALSE(c.homing);
+        CHECK_FALSE(c.homed);
+        CHECK(c.home_fail_leg == 1);
+        CHECK(std::string(c.home_fail_why) == "ESTOP");
+    }
+}
+
+TEST_CASE("home: the deadline covers both legs at home_speed, both re-touches and 2 s, and ends a late cycle") {
+    // max_rail 500 at the factory speeds: (2 x 510 + 2 x 5 + 2) mm at 40 mm/s,
+    // 2 x 15 mm at 10 mm/s, and seven 0.2 s ramps at 200 mm/s2.
+    CHECK(valence::homeCycleS(500.0f, 40.0f, 200.0f) == doctest::Approx(25.8f + 3.0f + 1.4f));
+
+    auto r = rig();
+    r->arb.setWindow(0.0f, 200.0f, 200.0f);
+    r->run(1000);
+    FakeSense s{r->emitter, -30.0f, 1000.0f};
+    r->arb.setHomeSense(s);
+    REQUIRE(r->arb.home() == HomeStart::started);
+    r->run(1000);   // the cycle starts and takes its deadline at the jog accel of now
+    const float budgetS = valence::homeCycleS(200.0f, DEFAULT_HOME_SPEED_MM_S, DEFAULT_JOG_ACCEL_MM_S2) +
+                          float(valence::kHomeTimeoutMarginUs) * 1e-6f;
+    // Every later move ramps a hundred times slower: the far approach alone
+    // outlasts the budget, and it never reaches a stop.
+    r->arb.setJogLimits(DEFAULT_JOG_MAX_SPEED_MM_S, 2.0f);
+    r->run(uint64_t((budgetS - 0.3f) * 1e6f));
+    CHECK(r->census().homing);
+    r->run(600'000);
     const MotionCensus c = r->census();
     CHECK_FALSE(c.homing);
     CHECK_FALSE(c.homed);
-    CHECK(c.homes == 0);
-    CHECK_FALSE(c.busy);
-    CHECK(s.bootMm() == doctest::Approx(-30.0f).epsilon(0.01));   // searched exactly max_rail
-    CHECK(r->submit(MotionSource::Manual, 10.0f));   // the rail is free again
+    CHECK(c.home_fail_leg == 1);
+    CHECK(std::string(c.home_fail_why) == "timed out");
+    r->run(1'000'000);
+    CHECK_FALSE(r->census().busy);   // braked to rest
 }
 
 TEST_CASE("home: ESTOP and PAUSE abort the cycle unhomed") {
     SUBCASE("ESTOP") {
         auto r = rig();
-        FakeSense s{r->emitter, -30.0f};
+        FakeSense s{r->emitter, -100.0f};
         r->arb.setHomeSense(s);
         REQUIRE(r->arb.home() == HomeStart::started);
         r->run(1'000'000);
@@ -986,6 +1140,7 @@ TEST_CASE("home: ESTOP and PAUSE abort the cycle unhomed") {
         const MotionCensus c = r->census();
         CHECK_FALSE(c.homing);
         CHECK_FALSE(c.homed);
+        CHECK(c.home_fail_leg == 0);
         CHECK(r->emitter.q8 == 0);
         CHECK(r->arb.home() == HomeStart::estop);
     }
@@ -993,20 +1148,21 @@ TEST_CASE("home: ESTOP and PAUSE abort the cycle unhomed") {
         auto r = rig();
         r->arb.pause(true);   // SPEC 11.1: the home verb runs under PAUSE
         r->run(1000);
-        FakeSense s{r->emitter, -30.0f};
+        FakeSense s{r->emitter, -100.0f};
         r->arb.setHomeSense(s);
         REQUIRE(r->arb.home() == HomeStart::started);
         r->run(1'000'000);
         CHECK(r->census().homing);
         const float moved = s.bootMm();
-        CHECK(moved < -5.0f);   // the seek ran under the latch
+        CHECK(moved < -5.0f);   // the approach ran under the latch
         r->arb.pause(true);
         r->run(500'000);
         const MotionCensus c = r->census();
         CHECK_FALSE(c.homing);
         CHECK_FALSE(c.homed);
         CHECK_FALSE(c.busy);
-        CHECK(s.bootMm() > -30.0f);   // stopped short of the stop
+        CHECK(std::string(c.home_fail_why) == "paused");
+        CHECK(s.bootMm() > -100.0f);   // stopped short of the stop
     }
 }
 

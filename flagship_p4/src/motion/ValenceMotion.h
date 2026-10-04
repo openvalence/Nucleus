@@ -22,6 +22,8 @@
 #include <array>
 #include <cstdint>
 
+#include "hub/valence_config.h"
+
 namespace valence {
 
 // One per kinetic::AnomalyType, INCLUDING its index-0 placeholder and the
@@ -83,7 +85,9 @@ struct MotionCensus {
     int32_t  residual_steps = 0;     // plan minus rendered, in steps
     float    win_min        = 0.0f;
     float    win_max        = 0.0f;
-    float    rail_mm        = 0.0f;  // the stroke force_home asserted, 0 = none
+    float    rail_mm        = 0.0f;  // the rail every source is clamped to:
+                                     // max_rail, force_home's stroke, or what
+                                     // the home cycle measured
     // The input set's ceilings as the engine plans them, overrides applied:
     // what the PD source's budget judges (PdSource.h).
     float    input_vmax_mm_s  = 0.0f;
@@ -117,6 +121,17 @@ struct MotionCensus {
     bool     homing         = false;  // a home cycle is asked for or running
     uint32_t homes          = 0;      // completed home cycles since boot; each
                                       // one is the hub's cue to clear home_required
+                                      // and to store home_rail_mm as max_rail
+    float    home_rail_mm   = 0.0f;   // the rail the last completed cycle
+                                      // measured, far datum minus home datum;
+                                      // 0 = none since boot
+    uint32_t home_fails     = 0;      // cycles that ended unhomed since boot;
+                                      // each one is the hub's cue to log why
+    uint8_t  home_fail_leg  = 0;      // where the last one ended: 0 the home
+                                      // end, 1 the far end
+    // Why the last one ended. A STRING LITERAL, static storage, so a census
+    // copy on another task never dangles. nullptr = none since boot.
+    const char* home_fail_why = nullptr;
     bool     busy           = false;
     bool     stream         = false;  // a Stream intent is the live source
 
@@ -182,6 +197,9 @@ struct MotionTuning {
     // 0x1030 overshoot_clamp. kinetic's overshoot_guard, 0 = disarmed; "on" is
     // the engine's own factory multiplier, never a value this side invents.
     float    overshoot_guard   = 0.0f;
+    // 0x1030 home_speed, mm/s: the home cycle's approach (MotionArbiter.h,
+    // homing). Not engine tuning; it rides this set to reach the motion task.
+    float    home_speed        = DEFAULT_HOME_SPEED_MM_S;
 
     bool operator==(const MotionTuning&) const = default;
 };
@@ -256,10 +274,12 @@ enum class HomeStart : uint8_t {
     estop,       // ESTOP latched
     unpowered,   // the motor power gate is shut
 };
-// Home op 1: seek the home end until the home sense, zero there, back off
-// (MotionArbiter.h, the homing constants). Any task, never blocks. The
-// outcome is the census: homing falls, and homes counts a completed cycle.
-// ESTOP, PAUSE, a power loss or a window change aborts it, unhomed.
+// Home op 1: the two-leg cycle, home end then far end, each stall re-touched
+// slowly for its datum; the rail length is measured (MotionArbiter.h, the
+// homing constants). Any task, never blocks. The outcome is the census:
+// homing falls, homes counts a completed cycle and home_rail_mm carries its
+// measurement; home_fails counts one that ended unhomed. ESTOP, PAUSE, a
+// power loss or a window change aborts it, unhomed.
 HomeStart motionHome();
 
 // SPEC 11.1 override / return. Any task, never blocks. override latches PAUSE

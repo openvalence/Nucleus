@@ -40,6 +40,11 @@
 
 // ---- Stroke geometry --------------------------------------------------------
 #define DEFAULT_MAX_RAIL_MM 500.0f
+#define MIN_RAIL_MM         10.0f
+
+// ---- Homing: the approach speed's factory value and floor (MotionArbiter.h) --
+#define DEFAULT_HOME_SPEED_MM_S 40.0f
+#define MIN_HOME_SPEED_MM_S     5.0f
 
 // ---- Speed / accel / jerk: factory defaults and hard ceilings ---------------
 #define MAX_SPEED_MM_S              10000.0f

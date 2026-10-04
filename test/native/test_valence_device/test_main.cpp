@@ -22,6 +22,10 @@
 #define NUCLEUS_ACCESSORY_SAFE_FIELDS 1
 #define NUCLEUS_ACCESSORY_CATALOG_BYTES 1
 
+// Geiger's host layer, so the GLOG lines ValenceDevice.cpp writes reach a
+// sink here (VD-HOME-4..6); hostNowMs() is defined on the rig's clock below.
+#define GEIGER_HOST_PLATFORM
+
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
@@ -76,6 +80,10 @@ int g_patPushes = 0;
 estop::Reading g_estop{};
 
 }  // namespace
+
+namespace geiger {
+uint32_t hostNowMs() { return uint32_t(g_clock.nowUs() / 1000); }
+}  // namespace geiger
 
 namespace valence {
 
@@ -771,6 +779,10 @@ TEST_CASE("VD-22: NaN and infinity are refused INVALID_VALUE naming the field, a
         expectNotANumberRefused(*rig, ch::modes_set, base, 7, IntentValue::ofU64(1),
                                 "schedule_horizon: not a number");
     }
+    SUBCASE("modes-set home_speed") {
+        expectNotANumberRefused(*rig, ch::modes_set, base, 9, IntentValue::ofF32(30.0f),
+                                "home_speed: not a number");
+    }
     SUBCASE("kinetic-set") {
         expectNotANumberRefused(*rig, ch::kinetic_set, base, 8, IntentValue::ofF32(0.37f),
                                 "chase_gain: not a number");
@@ -1046,4 +1058,127 @@ TEST_CASE("VD-HOME-3: a started cycle ECHOes; its completion clears home_require
     ++g_census.homes;
     rig->step();
     CHECK((rig->hub->safetyModes() & safety_mode_bits::HOME_REQUIRED) == 0);
+}
+
+// ---- bd val-zsr: the two-sided cycle's hub half --------------------------------
+
+namespace {
+
+// Every record at Warn and above, the floor the board's log channel bridge
+// takes (system/ValenceLogBridge.cpp).
+struct LogCapture final : geiger::ISink {
+    std::vector<std::string> lines;
+    void write(const geiger::Record& r) override {
+        if (r.level >= geiger::Level::Warn) lines.emplace_back(r.msg);
+    }
+};
+
+LogCapture& logCapture() {
+    static LogCapture c;
+    static const bool added = geiger::logger().addSink(&c);
+    REQUIRE(added);
+    return c;
+}
+
+void clearLog() {
+    geiger::drainToSinks();
+    logCapture().lines.clear();
+}
+
+bool logged(const std::string& line) {
+    geiger::drainToSinks();
+    for (const std::string& l : logCapture().lines)
+        if (l == line) return true;
+    return false;
+}
+
+// One completed cycle as the arbiter's census reports it.
+void completeHome(Rig& rig, float rail_mm) {
+    g_census.homing = false;
+    g_census.homed = true;
+    g_census.home_rail_mm = rail_mm;
+    ++g_census.homes;
+    rig.step();
+}
+
+// Offsets per StoredState.h: header 7 B, max_rail the eighth 0x1000 value;
+// home_speed the blob's last four bytes.
+constexpr size_t kBlobMaxRail = 7 + 7 * 4;
+constexpr size_t kBlobHomeSpeed = stored::kConfigBlobBytes - 4;
+
+}  // namespace
+
+TEST_CASE("VD-HOME-4: a completed cycle's rail lands in max_rail through config-set's writer, logged") {
+    auto rig = std::make_unique<Rig>();
+    logCapture();
+    persistBitsOver(*rig, 2500);   // drain the boot's own writes
+    clearLog();
+    const uint16_t gen = rig->hub->cfgGen();
+    completeHome(*rig, 612.4f);
+    CHECK(rig->device.config().max_rail == doctest::Approx(612.4f));
+    CHECK(stateF32(*rig, ch::machine_config, 24) == doctest::Approx(612.4f));   // max_rail
+    CHECK(stateF32(*rig, ch::machine_config, 33) == doctest::Approx(612.4f));   // measured_stroke
+    CHECK(rig->hub->cfgGen() == uint16_t(gen + 1));                             // RFC-011, once
+    CHECK(storedF32(*rig, kBlobMaxRail) == doctest::Approx(612.4f));
+    CHECK((persistBitsOver(*rig, 2500) & kPersistConfig) != 0);
+    CHECK(logged("HOME: homed. Home datum 0.0 mm, far datum 612.4 mm: rail 612.4 mm, max_rail 612.4 mm"));
+
+    // The same rail again: the measurement republishes, the setting and
+    // cfg_gen hold.
+    completeHome(*rig, 612.4f);
+    CHECK(rig->hub->cfgGen() == uint16_t(gen + 1));
+    CHECK(stateF32(*rig, ch::machine_config, 33) == doctest::Approx(612.4f));
+}
+
+TEST_CASE("VD-HOME-5: a rail past max_rail's bounds is stored clamped; measured_stroke keeps the measurement") {
+    auto rig = std::make_unique<Rig>();
+    clearLog();
+    completeHome(*rig, 2600.0f);
+    CHECK(rig->device.config().max_rail == ceiling::rail_mm);
+    CHECK(stateF32(*rig, ch::machine_config, 24) == ceiling::rail_mm);
+    CHECK(stateF32(*rig, ch::machine_config, 33) == doctest::Approx(2600.0f));
+    CHECK(logged("HOME: homed. Home datum 0.0 mm, far datum 2600.0 mm: rail 2600.0 mm, max_rail 2000.0 mm"));
+}
+
+TEST_CASE("VD-HOME-6: a failed cycle is logged in words with its leg; nothing is stored") {
+    auto rig = std::make_unique<Rig>();
+    clearLog();
+    const uint16_t gen = rig->hub->cfgGen();
+    const float rail = rig->device.config().max_rail;
+    g_census.homing = false;
+    g_census.homed = false;
+    g_census.home_fail_leg = 1;
+    g_census.home_fail_why = "no stall across max_rail";
+    ++g_census.home_fails;
+    rig->step();
+    CHECK(logged("HOME failed at the far end: no stall across max_rail, unhomed"));
+    CHECK(rig->device.config().max_rail == rail);
+    CHECK(rig->hub->cfgGen() == gen);
+    CHECK(stateF32(*rig, ch::machine_config, 33) == 0.0f);   // never measured
+}
+
+TEST_CASE("VD-MODES-9: home_speed writes on modes-set key 9, clamped, published at 0x1030's tail, stored") {
+    auto rig = std::make_unique<Rig>();
+    persistBitsOver(*rig, 2500);
+    const uint16_t gen = rig->hub->cfgGen();
+    CHECK(stateF32(*rig, ch::machine_modes, 8) == doctest::Approx(factory::home_speed));
+    CHECK((stateU8(*rig, ch::machine_modes, 3) & 0x08) != 0);   // bit 3: home_speed, always open
+
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(9, IntentValue::ofF32(25.0f))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    const IntentValue* v = echoed(rig->del.lastEcho, 9);
+    REQUIRE(v != nullptr);
+    CHECK(v->f32_val == 25.0f);
+    CHECK(stateF32(*rig, ch::machine_modes, 8) == 25.0f);
+    CHECK(rig->hub->cfgGen() == uint16_t(gen + 1));
+    CHECK(storedF32(*rig, kBlobHomeSpeed) == 25.0f);
+    CHECK((persistBitsOver(*rig, 2500) & kPersistConfig) != 0);
+
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(9, IntentValue::ofF32(2.0f))).has_value());
+    rig->step();
+    v = echoed(rig->del.lastEcho, 9);
+    REQUIRE(v != nullptr);
+    CHECK(v->f32_val == ceiling::home_speed_min);
+    CHECK(stateF32(*rig, ch::machine_modes, 8) == ceiling::home_speed_min);
 }

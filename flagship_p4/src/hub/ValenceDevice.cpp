@@ -316,7 +316,8 @@ constexpr uint8_t kCardWaveform = 0x08;  // 0x1122
 // catalog's (ValenceCatalog.h, the kinetic-* and machine-modes entries).
 uint8_t cardsChanged(const MotionTuning& a, const MotionTuning& b) {
     uint8_t m = 0;
-    if ((a.overshoot_guard > 0.0f) != (b.overshoot_guard > 0.0f)) m |= kCardModes;
+    if ((a.overshoot_guard > 0.0f) != (b.overshoot_guard > 0.0f) || a.home_speed != b.home_speed)
+        m |= kCardModes;
     if (a.jmax_ovr != b.jmax_ovr || a.vmax_ovr != b.vmax_ovr || a.amax_ovr != b.amax_ovr)
         m |= kCardLimits;
     if (a.chase_ff != b.chase_ff || a.chase_accel_ff != b.chase_accel_ff ||
@@ -434,29 +435,32 @@ void publishOdometer(Hub& hub, const MotionCensus& m) {
     publishPacked(hub, ch::odometer, buf, n);
 }
 
-// Layout per ValenceCatalog.h's machine-modes entry: 7 B, plus home_style
+// Layout per ValenceCatalog.h's machine-modes entry: 12 B, plus home_style
 // only where has_drive put it in the catalog.
 void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, bool horizonOpen,
                          bool flipOpen) {
-    std::array<std::byte, 9> buf{};
+    std::array<std::byte, 13> buf{};
     const bool drive = boardFeatures().has_drive;
-    const size_t len = drive ? 9 : 8;
+    const size_t len = drive ? 13 : 12;
     size_t n = 0;
     packU8(buf, n, 0);   // blend_mode_reserved
     packU8(buf, n, 0);   // stream_speed_reserved
     packU8(buf, n, t.overshoot_guard > 0.0f ? 1 : 0);   // overshoot_clamp
     // enabled_mask: bit 0 overshoot_clamp, accepted at all times. home_style
-    // (has_drive only) stays low: nothing here runs a homing cycle.
+    // (has_drive only) stays low: neither of its styles runs here.
     // schedule_horizon drops while a segments grant is live (applyModes()).
     // flipped drops whenever applyModes() would refuse it (flipOpen()).
+    // home_speed is accepted at all times; a cycle reads it at its start.
     const uint8_t horizonBit = drive ? 0x04 : 0x02;
     const uint8_t flipBit = uint8_t(horizonBit << 1);
-    packU8(buf, n, uint8_t(0x01 | (horizonOpen ? horizonBit : 0) | (flipOpen ? flipBit : 0)));
+    const uint8_t homeSpeedBit = uint8_t(flipBit << 1);
+    packU8(buf, n, uint8_t(0x01 | (horizonOpen ? horizonBit : 0) | (flipOpen ? flipBit : 0) | homeSpeedBit));
     packU8(buf, n, 2);   // motion_backend, read-only: quadrature, the LP-core emitter
     if (drive) packU8(buf, n, 0);   // home_style
     packU8(buf, n, m.horizon);      // schedule_horizon
     packU8(buf, n, m.flipped ? 1 : 0);   // flipped
     packU8(buf, n, uint8_t(hub.trialMask(ch::machine_modes)));   // trial_mask (RFC-099)
+    packF32(buf, n, t.home_speed);   // home_speed
     publishPacked(hub, ch::machine_modes, std::span<const std::byte>(buf).first(len), n);
 }
 
@@ -645,6 +649,24 @@ Ret ValenceDevice::applyConfig(const IntentValueMap& requested, bool& cfgChanged
     return Ret::ok(applied);
 }
 
+// The same door as a client's config-set key 8: its clamp, its ECHO-side copy,
+// its first-run bit, and tick()'s republish, push and persist. 0x1000 goes out
+// even when max_rail held its value, because measured_stroke moved.
+void ValenceDevice::adoptMeasuredRail(float rail_mm) {
+    IntentValueMap m{};
+    m.count = 1;
+    m.fields[0] = IntentValueField{8, IntentValue::ofF32(rail_mm)};
+    bool changed = false;
+    if (!durable(applyConfig(m, changed))) {
+        GLOGW(kTag, "HOME: homed, rail measured %.1f mm, but max_rail refused it", double(rail_mm));
+        return;
+    }
+    _cfgDirty = true;
+    _cfgGenOwed |= changed;
+    GLOGW(kTag, "HOME: homed. Home datum 0.0 mm, far datum %.1f mm: rail %.1f mm, max_rail %.1f mm",
+          double(rail_mm), double(rail_mm), double(_cfg.max_rail));
+}
+
 void ValenceDevice::noteSetupWritten(uint8_t wrote) {
     if ((_modes.setup_written | wrote) == _modes.setup_written) return;
     const bool was = commissioned(_modes);
@@ -683,10 +705,11 @@ void ValenceDevice::noteTuning(const MotionTuning& next, bool& cfgChanged) {
     _tune = next;
 }
 
-// Keys 4 (overshoot_clamp) and 7 (schedule_horizon); the whole request is
-// validated before anything is applied. A horizon change is refused INTERLOCK
-// while a segments grant is live: the grant advertised the old value for its
-// life (SPEC 5.4), and the library re-reads this one on every bundle.
+// Keys 4 (overshoot_clamp), 7 (schedule_horizon) and 9 (home_speed, clamped
+// to its catalog bounds); the whole request is validated before anything is
+// applied. A horizon change is refused INTERLOCK while a segments grant is
+// live: the grant advertised the old value for its life (SPEC 5.4), and the
+// library re-reads this one on every bundle.
 // Key 8 (flipped, RFC-088) is gated in the spec's order: SOURCE_CONFLICT while
 // a source owns the rail, NOT_HOMED while unhomed, INTERLOCK under override or
 // in motion. An unchanged value is an ordinary no-op ECHO.
@@ -694,10 +717,12 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
     const auto* f4 = findField(requested, 4);   // overshoot_clamp
     const auto* f7 = findField(requested, 7);   // schedule_horizon
     const auto* f8 = findField(requested, 8);   // flipped
-    if (!f4 && !f7 && !f8) return Ret::err(NackCode::INVALID_VALUE);
+    const auto* f9 = findField(requested, 9);   // home_speed
+    if (!f4 && !f7 && !f8 && !f9) return Ret::err(NackCode::INVALID_VALUE);
     if (f4 && !numberOf(f4)) return refuseNotANumber(ch::modes_set, 4);
     if (f7 && !numberOf(f7)) return refuseNotANumber(ch::modes_set, 7);
     if (f8 && !boolOf(f8)) return refuseNotANumber(ch::modes_set, 8);
+    if (f9 && !numberOf(f9)) return refuseNotANumber(ch::modes_set, 9);
     StoredModes nextModes = _modes;
     if (f7) nextModes.horizon = uint8_t(wholeIn(*numberOf(f7), 0.0f, float(kHorizonMs.size() - 1)));
     if (nextModes.horizon != _modes.horizon && publishGrantLive(ch::motion_segment))
@@ -714,15 +739,19 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
     IntentValueMap applied{};
     uint32_t n = 0;
     bool tuneChanged = false;
+    MotionTuning next = _tune;
     if (f4) {
-        MotionTuning next = _tune;
         const bool on = wholeIn(*numberOf(f4), 0.0f, 1.0f) != 0;
         next.overshoot_guard = overshootGuardFor(on, motionDefaultTuning().overshoot_guard);
-        noteTuning(next, tuneChanged);
         applied.fields[n++] = {4, IntentValue::ofU64(on ? 1 : 0)};
     }
     if (f7) applied.fields[n++] = {7, IntentValue::ofU64(nextModes.horizon)};
     if (f8) applied.fields[n++] = {8, IntentValue::ofU64(nextModes.flipped ? 1 : 0)};
+    if (f9) {
+        next.home_speed = clampf(*numberOf(f9), tuning_bounds::home_speed_min, tuning_bounds::home_speed_max);
+        applied.fields[n++] = {9, IntentValue::ofF32(next.home_speed)};
+    }
+    if (f4 || f9) noteTuning(next, tuneChanged);
     const bool modesChanged = !(nextModes == _modes);
     // At rest by the gate above, so the frame moves under a still carriage.
     if (nextModes.flipped != _modes.flipped) {
@@ -1584,7 +1613,8 @@ void ValenceDevice::publishMachineConfig() {
     // 38 B, matching the 0x1000 layout in ValenceCatalog.h. The window is the
     // client frame's (RFC-088).
     const StoredConfig& c = _cfg;
-    const Window w = clientWindow(motionCensus().rail_mm);
+    const MotionCensus mo = motionCensus();
+    const Window w = clientWindow(mo.rail_mm);
     std::array<std::byte, 38> buf{};
     std::span<std::byte> s(buf);
     putF32(s.subspan(0, 4), w.lo);
@@ -1600,11 +1630,10 @@ void ValenceDevice::publishMachineConfig() {
     // min/max is for. A bit held low here would gray a control the machine
     // would in fact accept.
     putU8(s.subspan(32, 1), 0xFF);
-    // measured_stroke: 0 means NOT MEASURED. force_home ASSERTS a stroke that
-    // nothing measured, and the arbiter's rail is where that assertion lives;
-    // reporting it here would dress an assertion as a measurement. This board
-    // has no way to measure a stroke, so the field is 0 forever.
-    putF32(s.subspan(33, 4), 0.0f);
+    // measured_stroke: 0 means NOT MEASURED. Only a completed home cycle
+    // measures (census.home_rail_mm); force_home's stroke is an assertion and
+    // never lands here.
+    putF32(s.subspan(33, 4), mo.home_rail_mm);
     putU8(s.subspan(37, 1), uint8_t(_hub->trialMask(ch::machine_config)));   // trial_mask (RFC-099)
     _hub->publishState(ch::machine_config, s);
     _lastPublishedCfg = c;
@@ -1911,10 +1940,20 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     }
     // A completed home cycle clears home_required (SPEC 11.2). A counter for
     // the same reason as the return's; an ESTOP since it left the machine
-    // unhomed, and that latch's home_required stands.
+    // unhomed, and that latch's home_required stands. Its measured rail
+    // becomes max_rail.
     if (mo.homes != _homesSeen) {
         _homesSeen = mo.homes;
         if (mo.homed && !mo.estop) _hub->setHomeRequired(false);
+        if (mo.home_rail_mm > 0.0f) adoptMeasuredRail(mo.home_rail_mm);
+    }
+    // The log channel (Warn, on this task: system/ValenceLogBridge) carries
+    // why a cycle ended unhomed; the arbiter's own line never reaches it.
+    if (mo.home_fails != _homeFailsSeen) {
+        _homeFailsSeen = mo.home_fails;
+        GLOGW(kTag, "HOME failed at the %s: %s%s", mo.home_fail_leg == 0 ? "home end" : "far end",
+              mo.home_fail_why != nullptr ? mo.home_fail_why : "no reason recorded",
+              mo.homed ? "" : ", unhomed");
     }
     if (uint32_t(nowMs - _lastMotionMs) >= 33u) {
         _lastMotionMs = nowMs;
@@ -1967,6 +2006,12 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         pushConfigToMotion();
         publishMachineConfig();
         _patDirty = true;   // the stroke frame is this config's window
+        // RFC-011: a hub-side change bumps after its STATE is out. A client
+        // write's bump is the hub library's own, from cfgChanged.
+        if (_cfgGenOwed) {
+            _cfgGenOwed = false;
+            _hub->bumpConfigGeneration();
+        }
         // Re-armed, not accumulated: the write lands only after the changes
         // stop. cfg_gen is read at write time, by which point Hub::update() has
         // already applied this tick's bump (§4.2). A trial alone arms nothing.

@@ -9,9 +9,10 @@
 //   flagship_p4/src/motion/MotionArbiter.cpp, compiled verbatim. This file is
 //   plumbing: the ring, the tick order, and the emitter.
 // - THE EMITTER IS IDEAL (IdealEmitter.h).
-// - THE HOME SENSE IS A STAND-IN: a stop at a fixed emitter count, HIGH from
-//   the instant the ideal carriage reaches it. No current, no S3 debounce: the
-//   arbiter's own debounce is the only delay.
+// - THE HOME SENSE IS A STAND-IN: two stops at fixed emitter counts, the home
+//   end and the rail's far end, HIGH from the instant the ideal carriage
+//   reaches either. No current, no S3 debounce: the arbiter's own debounce is
+//   the only delay.
 // See: SimMotion.h, flagship_p4/src/motion/MotionArbiter.h, bd val-sf7.2
 
 #include "SimMotion.h"
@@ -28,7 +29,8 @@
 namespace valence {
 namespace {
 
-// The --home-sense-at stop, read off the emitter's own count.
+// The --home-sense-at and --rail-end-at stops, read off the emitter's own
+// count.
 class SimHomeSense final : public HomeSense {
 public:
     explicit SimHomeSense(const IdealEmitter& emitter) : _emitter(emitter) {}
@@ -37,6 +39,7 @@ public:
         _at_mm = at_mm;
         _present = true;
     }
+    void placeFarAt(float at_mm) { _far_mm = at_mm; }
 
     bool present() const override { return _present; }
     Probe probe() override { return !_present ? Probe::undriven : level() ? Probe::high : Probe::low; }
@@ -45,17 +48,21 @@ public:
 private:
     bool level() const {
         const float pos_mm = float(_emitter.count()) * kMmPerStep;
-        return _at_mm < 0.0f ? pos_mm <= _at_mm : pos_mm >= _at_mm;
+        return past(pos_mm, _at_mm) || past(pos_mm, _far_mm);
     }
+    // At or past a stop, on its side of the boot position.
+    static bool past(float pos_mm, float stop_mm) { return stop_mm < 0.0f ? pos_mm <= stop_mm : pos_mm >= stop_mm; }
 
     const IdealEmitter& _emitter;
     float _at_mm = 0.0f;
+    float _far_mm = 0.0f;
     bool _present = false;
 };
 
 class SimHost {
 public:
     void placeHomeStop(float at_mm) { _sense.placeAt(at_mm); }
+    void placeFarStop(float at_mm) { _sense.placeFarAt(at_mm); }
 
     void begin(uint64_t now_us) {
         _emitter.advance(now_us);
@@ -132,6 +139,7 @@ SimHost g_sim;
 
 void simMotionTick(uint64_t now_us) { g_sim.tick(now_us); }
 void simMotionSetHomeSenseAt(float at_mm) { g_sim.placeHomeStop(at_mm); }
+void simMotionSetRailEndAt(float at_mm) { g_sim.placeFarStop(at_mm); }
 
 // ---- motion/ValenceMotion.h -------------------------------------------------
 

@@ -58,6 +58,7 @@ MotionTuning sampleTuning() {
     t.blend_steps = 4;
     t.settle_grace_us = 30000;
     t.overshoot_guard = kFactoryGuard;
+    t.home_speed = 25.0f;
     return t;
 }
 
@@ -191,6 +192,13 @@ TEST_CASE("config blob: every rejection leaves the factory values standing") {
         std::array<std::byte, stored::kConfigBlobBytes> b{};
         REQUIRE(stored::encodeConfig(b, c, sampleTuning(), valence::StoredModes{}, 1) == b.size());
         expectRejected(b, Reject::BadConfig);
+    }
+    SUBCASE("a home speed under its floor is rejected whole, never clamped") {
+        MotionTuning t = sampleTuning();
+        t.home_speed = 1.0f;
+        std::array<std::byte, stored::kConfigBlobBytes> b{};
+        REQUIRE(stored::encodeConfig(b, sampleConfig(), t, valence::StoredModes{}, 1) == b.size());
+        expectRejected(b, Reject::BadTuning);
     }
     SUBCASE("a schedule horizon past the select's options") {
         valence::StoredModes m;
@@ -406,6 +414,28 @@ TEST_CASE("config blob: v5 carries the first-run record; an older blob migrates 
     CHECK_FALSE(valence::commissioned(valence::StoredModes{}));   // factory-fresh
 }
 
+TEST_CASE("config blob: v6 carries the home speed; a v5 blob migrates to the factory value") {
+    std::array<std::byte, stored::kConfigBlobBytes> b{};
+    valence::StoredModes m;
+    m.setup_written = valence::kSetupRequiredMask;
+    REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), m, 21) == b.size());
+    StoredConfig c;
+    MotionTuning t;
+    valence::StoredModes got;
+    uint16_t gen = 0;
+    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    CHECK(t.home_speed == 25.0f);
+
+    std::array<std::byte, stored::kConfigV5Bytes> v5{};
+    std::memcpy(v5.data(), b.data(), v5.size());
+    v5[4] = std::byte{5};
+    t.home_speed = 0.0f;
+    REQUIRE(stored::decodeConfig(v5, kFactoryGuard, c, t, got, gen));
+    CHECK(t.home_speed == valence::factory::home_speed);
+    CHECK(got.setup_written == valence::kSetupRequiredMask);
+    CHECK(gen == 21);
+}
+
 // The cfg blob byte for byte as 0.1.5-p4hub wrote it (StoredState.h at
 // 8c37cbb: v5, 89 B), assembled field by field and never by encodeConfig(),
 // so it stays what an upgraded machine holds when the layout moves on. The
@@ -421,7 +451,8 @@ TEST_CASE("config blob: a 0.1.5 blob decodes whole, its generation and commissio
     wantC.input_accel = 40000.0f;
     wantC.input_jerk = 1500000.0f;
     wantC.max_rail = 300.0f;
-    const MotionTuning wantT = sampleTuning();
+    MotionTuning wantT = sampleTuning();
+    wantT.home_speed = valence::factory::home_speed;   // v6's, absent from v5
     valence::StoredModes wantM;
     wantM.horizon = 2;
     wantM.flipped = true;

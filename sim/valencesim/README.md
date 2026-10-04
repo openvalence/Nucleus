@@ -63,7 +63,7 @@ links libstdc++ in. Phosphor's CI builds all three for its sidecar (Phosphor
 ```
 valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
            [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
-           [--no-estop-udp] [--home-sense-at MM]
+           [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]]
            [--uncommissioned] [--no-discovery] [--discovery-port N]
            [--headless] [--no-mdns] [--enforce]
 ```
@@ -80,7 +80,8 @@ valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--durat
 | `--motor-switch` | model the board's motor switch: ESTOP cuts power and leaves the hub unhomed, `release` lands in PAUSE with `home_required` and starts the 150 ms pre-charge, `force_home` then `resume` runs again; motion is refused INTERLOCK until the switch reads `on` |
 | `--msw-fault S` | with `--motor-switch`: MSW_FLT_N reads low from S seconds after boot for 2 s. The switch latches faulted, the hub latches ESTOP cause fault, `release` is refused CLEAR_REFUSED until the line clears |
 | `--no-estop-udp` | RFC-053's runtime switch off: an ESTOP datagram on the §13.8 port reads `disabled` and never latches, so a test run cannot be stopped by the LAN. Without it the twin latches on one, exactly as a raw 0xE5 over WS (`flagship_p4/src/hub/ValenceEstopDatagram.cpp`, compiled verbatim) |
-| `--home-sense-at MM` | a home stop MM from the boot position, so home op 1 runs the board's own cycle (`MotionArbiter.cpp`, homing): the sense reads HIGH while the carriage is at or past MM on the side away from 0. The seek runs toward 0, so the stop is negative (`--home-sense-at -120`), or positive with the flip on. Without it the twin has no sense line and home op 1 refuses `UNSUPPORTED_OP`, as the release board does |
+| `--home-sense-at MM` | a home stop MM from the boot position, so home op 1 runs the board's own two-leg cycle (`MotionArbiter.cpp`, homing): the sense reads HIGH while the carriage is at or past MM on the side away from 0. The home leg runs toward 0, so the stop is negative (`--home-sense-at -120`), or positive with the flip on. Without it the twin has no sense line and home op 1 refuses `UNSUPPORTED_OP`, as the release board does |
+| `--rail-end-at MM` | with `--home-sense-at`: the far stop the second leg stalls on, MM from the boot position on the other side of it; default the stored `max_rail` from the home stop. A completed cycle stores the distance between the two as `max_rail` (`--home-sense-at -120 --rail-end-at 380` measures about 500 mm) |
 | `--no-discovery` | no UDP discovery socket: keeps a test run off the registry port |
 | `--discovery-port N` | answer DISCOVER_PROBE on N instead of the registry's `udp_discovery.port`, so a test talks to this twin and no other. A port another process holds costs only discovery (logged), never the run |
 | `--state PREFIX` | where the persisted blobs live (`PREFIX.cfg`, `PREFIX.presets`, `PREFIX.iid`); default `valencesim-state` beside the exe. Delete `.cfg` and `.presets` for factory values; deleting `.iid` makes the twin a different hub |

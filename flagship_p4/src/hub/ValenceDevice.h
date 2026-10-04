@@ -233,6 +233,9 @@ private:
 
     void serviceButtons(uint32_t nowMs);
     void homeFromButton();
+    // A completed home cycle's measured rail, stored as max_rail through
+    // config-set key 8's own writer (applyConfig()). Hub task, from tick().
+    void adoptMeasuredRail(float rail_mm);
     void beginReboot(uint32_t nowMs);
 
     void publishHubStatus();
@@ -296,8 +299,13 @@ private:
     bool _returnPending = false;
     uint32_t _returnsAtRequest = 0;
     // census.homes as tick() last acted on it: a move past it is a completed
-    // home cycle, which clears home_required.
+    // home cycle, which clears home_required and stores the measured rail.
     uint32_t _homesSeen = 0;
+    // census.home_fails as tick() last logged it.
+    uint32_t _homeFailsSeen = 0;
+    // A hub-side config change (adoptMeasuredRail()) owes cfg_gen one bump,
+    // after its STATE is republished (Hub::bumpConfigGeneration()).
+    bool _cfgGenOwed = false;
     // The motor switch's fault count as tick() last acted on it.
     uint16_t _mswFaultsSeen = 0;
     // A switch fault not yet acted on, and the tick it was first seen: an

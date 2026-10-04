@@ -84,6 +84,9 @@ static_assert(factory::input_speed == DEFAULT_MAX_SPEED_MM_S,      "catalog inpu
 static_assert(factory::input_accel == DEFAULT_ACCEL_MM_S2,         "catalog input_accel drifted");
 static_assert(factory::input_jerk  == DEFAULT_INPUT_MAX_JERK_MM_S3,"catalog input_jerk drifted");
 static_assert(factory::max_rail    == DEFAULT_MAX_RAIL_MM,         "catalog max_rail drifted");
+static_assert(factory::home_speed  == DEFAULT_HOME_SPEED_MM_S,     "catalog home_speed drifted");
+static_assert(ceiling::rail_min    == MIN_RAIL_MM,                 "catalog rail floor drifted");
+static_assert(ceiling::home_speed_min == MIN_HOME_SPEED_MM_S,      "catalog home_speed floor drifted");
 static_assert(ceiling::speed_max   == MAX_SPEED_MM_S,              "catalog speed ceiling drifted");
 static_assert(ceiling::accel_max   == MAX_ACCEL_MM_S2,             "catalog accel ceiling drifted");
 static_assert(ceiling::jerk_max    == MAX_JERK_MM_S3,              "catalog jerk ceiling drifted");

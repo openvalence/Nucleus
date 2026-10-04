@@ -271,6 +271,7 @@ inline constexpr float input_jerk  = 2000000.0f;  // DEFAULT_INPUT_MAX_JERK_MM_S
 // max_rail is a real savable setting, not derived truth — see the field
 // comment on 0x0081 below. Same mirror rule as its siblings above.
 inline constexpr float max_rail    = 500.0f;      // DEFAULT_MAX_RAIL_MM
+inline constexpr float home_speed  = 40.0f;       // DEFAULT_HOME_SPEED_MM_S
 // Mode defaults (ch::machine_modes). `blend_mode` and `stream_speed_mode`
 // have no `.dflt` here: their settings are retired bytes (see the field
 // comments there). Do not re-add either without re-adding the field's
@@ -293,13 +294,14 @@ inline constexpr std::array<uint16_t, 3> kHorizonMs{
 // and jerk maxima against valence_config.h.
 namespace ceiling {
 inline constexpr float rail_mm    = 2000.0f;      // configValid's max_rail bound
-inline constexpr float rail_min   = 10.0f;        // configValid's max_rail floor
+inline constexpr float rail_min   = 10.0f;        // configValid's max_rail floor, MIN_RAIL_MM
 inline constexpr float speed_min  = 1.0f;
 inline constexpr float speed_max  = 10000.0f;     // MAX_SPEED_MM_S
 inline constexpr float accel_min  = 10.0f;
 inline constexpr float accel_max  = 100000.0f;    // MAX_ACCEL_MM_S2
 inline constexpr float jerk_min   = 1000.0f;
 inline constexpr float jerk_max   = 50000000.0f;  // MAX_JERK_MM_S3
+inline constexpr float home_speed_min = 5.0f;     // MIN_HOME_SPEED_MM_S; its max is speed_max
 }  // namespace ceiling
 
 // Fills `c` with this device's catalog. OUT-PARAM, never a return value: a
@@ -603,14 +605,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // the wizard steps the setup entries in authoring (ascending id) order,
     // this one before the kinetic ceilings on 0x1120.
     //
-    // `max_rail` is a REAL SAVABLE SETTING, not derived truth: the
-    // user-configured ceiling that bounds the sensorless-homing search sweep
-    // and serves as the position ceiling before homing has measured the real
-    // stroke (valence_config.h DEFAULT_MAX_RAIL_MM) — on a 2 m rail,
-    // set it above 2000 mm so homing's search reaches both hard stops.
-    // `measured_stroke` (field 10, below) is the SEPARATE, read-only quantity
-    // — what homing actually measured. The two must never be conflated: a
-    // client must not adopt one as a stand-in for the other.
+    // `max_rail` is a REAL SAVABLE SETTING: the rail length, and the home
+    // cycle's search distance per leg (plus a margin, MotionArbiter.h). Before
+    // the first home an owner sets it at or above the real rail; a completed
+    // home writes the length it measured into it through config-set key 8's
+    // own writer (operator ruling 2026-10-03, Valence RFC-101), so after a
+    // home the setting IS the measurement. `measured_stroke` (field 10, below)
+    // is this boot's raw measurement, read-only; a client never writes one
+    // from the other.
     auto addMachineConfig = [&]() {
     c.addEntry({.id = ch::machine_config, .name = "machine-config",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -679,7 +681,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = ceiling::rail_min, .max = ceiling::rail_mm,
                       .dflt = SettingDefault::ofFloat(factory::max_rail),
                       .group = "Rail geometry",
-                      .desc = "Homing search distance, set above rail length",
+                      .desc = "Rail length, measured and stored by homing",
                       .role = roles::geometry_max_travel, .step = 1.0f,
                       .settingKey = 8, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::control,
@@ -713,13 +715,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                         .hasRank = true, .rank = valence::ui_ranks::detail},
                        {"window_min", "window_max", "jog_speed", "jog_accel",
                         "input_speed", "input_accel", "max_rail", "input_jerk"});
-    // measured_stroke (field 10, byte 33): THE REAL HOMING MEASUREMENT,
-    // distinct from max_rail (the configured ceiling above). 0 until the
-    // first successful home this boot; then the usable stroke sensorless
-    // homing actually felt out between the two hard stops. No setting_key —
-    // derived machine truth, never an assertion: force_home's stroke is not a
-    // measurement. This board cannot measure a stroke and publishes 0
-    // (ValenceDevice.cpp, the machine-config publisher).
+    // measured_stroke (field 10, byte 33): THE REAL HOMING MEASUREMENT. 0
+    // until the first completed home cycle this boot; then the far datum minus
+    // the home datum, unclamped (max_rail holds it clamped to its bounds). No
+    // setting_key: derived machine truth, never an assertion, so force_home's
+    // stroke never lands here.
     // Append-only: added after enabled_mask, bytes 0..32 keep their offsets.
     c.addLayoutField({.name = "measured_stroke", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
                       .desc = "Stroke measured by homing, 0 until homed",
@@ -1273,10 +1273,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // category rather than more fields on 0x0081 (see ch::machine_modes for
     // the enabled_mask arithmetic that makes the split structural).
     //
-    // Layout [7 B, 8 B with has_drive], all u8 — small enough that the
-    // on-change cadence costs nothing, and every value is an enum the catalog
-    // names, so a generic client renders it without knowing this device
-    // exists. ValenceDevice.cpp's publishMachineModes() packs the same bytes.
+    // Layout [12 B, 13 B with has_drive]: u8 enums the catalog names, then
+    // the f32 home_speed appended at the tail, so a generic client renders it
+    // without knowing this device exists. ValenceDevice.cpp's
+    // publishMachineModes() packs the same bytes.
     auto addMachineModes = [&]() {
     c.addEntry({.id = ch::machine_modes, .name = "machine-modes",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1306,22 +1306,22 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                      {"off", "on"});
     // Bit i gates the i-th setting-annotated field, same rule as 0x0081.
     // Neither reserved byte nor motion_backend carries a setting_key, so
-    // overshoot_clamp is bit 0, home_style (where it exists) bit 1, and
-    // schedule_horizon the next bit.
+    // overshoot_clamp is bit 0, home_style (where it exists) bit 1, then
+    // schedule_horizon, flipped and home_speed.
     if (feat.has_drive) {
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
                             .desc = "Settings the machine accepts right now",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
-                           {"overshoot_clamp", "home_style", "schedule_horizon", "flipped"});
+                           {"overshoot_clamp", "home_style", "schedule_horizon", "flipped", "home_speed"});
     } else {
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
                             .desc = "Settings the machine accepts right now",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
-                           {"overshoot_clamp", "schedule_horizon", "flipped"});
+                           {"overshoot_clamp", "schedule_horizon", "flipped", "home_speed"});
     }
     // Which path actually drives the motor. READ-ONLY: the backend is what is
     // soldered, so there is no choice for a setting to make.
@@ -1376,14 +1376,26 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                         .scale = 1.0f, .desc = "Settings on trial, not stored yet",
                         .role = roles::meta_trial_pending,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
-                       {"overshoot_clamp", "home_style", "schedule_horizon", "flipped"});
+                       {"overshoot_clamp", "home_style", "schedule_horizon", "flipped", "home_speed"});
     } else {
     c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Settings on trial, not stored yet",
                         .role = roles::meta_trial_pending,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
-                       {"overshoot_clamp", "schedule_horizon", "flipped"});
+                       {"overshoot_clamp", "schedule_horizon", "flipped", "home_speed"});
     }
+    // The home cycle's approach speed (MotionArbiter.h, homing): the re-touch
+    // runs at a quarter of it, and the arbiter holds it to jog_speed. Applied
+    // at the next cycle's start. Append-only, after trial_mask.
+    c.addLayoutField({.name = "home_speed", .type = PackedFieldType::f32, .unit = "mm/s", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = ceiling::home_speed_min, .max = ceiling::speed_max,
+                      .dflt = SettingDefault::ofFloat(factory::home_speed),
+                      .group = card::motion_behavior,
+                      .desc = "Approach speed for homing",
+                      .step = 1.0f,
+                      .settingKey = 9, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = valence::ui_ranks::control,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
     };
 
     // ---- "kinetic-*" — STATE, motion, section Tuning ----------------------
@@ -2097,8 +2109,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .defaultPriority = Priority::normal});
     // KEY 1 IS DELIBERATELY UNUSED. It held "blend_mode"; see the field
     // comment on machine-modes' `blend_mode_reserved`. ValenceDevice::
-    // applyModes reads only keys 4, 7 and 8, and refuses a request carrying
-    // none of them with NACK(INVALID_VALUE).
+    // applyModes reads only keys 4, 7, 8 and 9, and refuses a request
+    // carrying none of them with NACK(INVALID_VALUE).
     //
     // KEY 2 IS ALSO DELIBERATELY UNUSED. It briefly held "transport" (the WS/
     // SER/BT/DONGLE/OSSM input-source selector) before that setting was
@@ -2126,6 +2138,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = float(kHorizonMs.size() - 1)});
     c.addSchemaField({.key = 8, .name = "flipped", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
+    c.addSchemaField({.key = 9, .name = "home_speed", .type = CborFieldType::f32_t, .unit = "mm/s",
+                      .hasMin = true, .hasMax = true, .min = ceiling::home_speed_min, .max = ceiling::speed_max});
     };
 
     // ---- "kinetic-set" — INTENT, control, 5 Hz ---------------------------
