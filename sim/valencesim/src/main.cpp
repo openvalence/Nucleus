@@ -2,7 +2,7 @@
 // the REAL device catalog and delegate (flagship_p4/src/hub/ValenceDevice),
 // and the REAL kinetic::Engine behind a WebSocket speaking valence.v1
 //
-//   valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
+//   valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
 //              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
 //              [--no-estop-udp]
 //              [--uncommissioned] [--no-discovery] [--discovery-port N]
@@ -123,6 +123,7 @@ private:
 
 struct Options {
     uint16_t wsPort = 82;
+    std::string bindHost = "0.0.0.0";   // --bind: the WS listen address
     uint16_t httpPort = 80;
     bool homed = false;
     bool uncommissioned = false;   // first-run hub (RFC-079); default commissioned
@@ -142,6 +143,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
         const bool hasNext = i + 1 < argc;
         if (!std::strcmp(a, "machine")) continue;
         if (!std::strcmp(a, "--port") && hasNext) o.wsPort = uint16_t(std::atoi(argv[++i]));
+        else if (!std::strcmp(a, "--bind") && hasNext) o.bindHost = argv[++i];
         else if (!std::strcmp(a, "--http") && hasNext) o.httpPort = uint16_t(std::atoi(argv[++i]));
         else if (!std::strcmp(a, "--duration") && hasNext) o.durationS = std::atoi(argv[++i]);
         else if (!std::strcmp(a, "--homed")) o.homed = true;
@@ -265,7 +267,7 @@ int main(int argc, char** argv) {
     Options opt;
     if (!parseArgs(argc, argv, opt)) {
         std::fprintf(stderr,
-                     "usage: valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]\n"
+                     "usage: valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]\n"
                      "                  [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]\n"
                      "                  [--no-estop-udp]\n"
                      "                  [--uncommissioned] [--no-discovery] [--discovery-port N]\n"
@@ -398,8 +400,8 @@ int main(int argc, char** argv) {
         log.logf('W', "valencesim: --pairing-window: presence window open (the gesture's twin)");
     }
 
-    if (!box->port.begin(&hub, opt.wsPort, &log)) {
-        std::fprintf(stderr, "valencesim: WS listen failed on :%u\n", unsigned(opt.wsPort));
+    if (!box->port.begin(&hub, opt.wsPort, &log, opt.bindHost)) {
+        std::fprintf(stderr, "valencesim: WS listen failed on %s:%u\n", opt.bindHost.c_str(), unsigned(opt.wsPort));
         return 1;
     }
     // Non-fatal, as on the P4: a port another twin holds only costs discovery.

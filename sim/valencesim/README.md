@@ -61,7 +61,7 @@ links libstdc++ in. Phosphor's CI builds all three for its sidecar (Phosphor
 ## Run
 
 ```
-valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
+valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
            [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
            [--no-estop-udp]
            [--uncommissioned] [--no-discovery] [--discovery-port N]
@@ -71,6 +71,7 @@ valencesim [machine] [--port 82] [--http 80] [--homed] [--duration S]
 | Flag | Effect |
 |---|---|
 | `--port N` | WebSocket port, default 82 |
+| `--bind ADDR` | WebSocket listen address, default `0.0.0.0` (every interface); `127.0.0.1` keeps the twin off the LAN (Phosphor's sidecar) |
 | `--http N` | `/uitoken` port on 127.0.0.1, default 80 |
 | `--homed` | force_home at boot with the stored max rail, so motion is accepted at once |
 | `--uncommissioned` | boot as a first-run hub (RFC-079): the setup record is cleared, so stream and pattern motion are refused (pattern start NACKs `INTERLOCK`) until `config-set` writes have carried all eight keys; Manual moves still run. Without it the twin is COMMISSIONED whatever its state file says, so client tests stream at once |
