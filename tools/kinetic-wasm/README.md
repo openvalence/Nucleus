@@ -1,8 +1,8 @@
-# kinetic.wasm -- the machine's planner, offline
+# kinetic.wasm
 
-The P4's own motion planner compiled to WebAssembly, so a client can render a
-whole script through it ahead of time and tune against exactly what the
-machine will do. It is not a model of the planner: it is the same source.
+The P4's motion planner compiled to WebAssembly. A client uses it to render a
+whole script ahead of time and to compare tuning against the firmware's output.
+It is built from the planner's source files, listed below.
 
 | Piece | Source (compiled by path, never copied) |
 |---|---|
@@ -10,12 +10,11 @@ machine will do. It is not a model of the planner: it is the same source.
 | Or, in a Kinetic² build: the knot timeline, the window solver, the brake | `../Kinetic/include/kinetic2/` (no Ruckig) |
 | Intent path: window clamp, limit sets, mm to engine frame, rest reseed, tuning map, and under Kinetic² the intent-to-knot boundary | `flagship_p4/src/motion/MotionArbiter.cpp` |
 | 0x2101 sample to intent | `flagship_p4/src/motion/StreamIntent.h` |
-| Emitter (renders the steering word, every edge on time) | `sim/valencesim/src/IdealEmitter.h` |
+| Emitter (renders the steering word with ideal edge timing) | `sim/valencesim/src/IdealEmitter.h` |
 | Clock, tick order, the C ABI | `kinetic_wasm.cpp` (plumbing only) |
 
 The gates (e-stop, pause, override, power, ownership) compile in but are opened
-once at create and never exposed: they are the hub's business, not a
-renderer's.
+once at create and are not exposed through the ABI; the hub performs gating.
 
 ## Build
 
@@ -39,27 +38,26 @@ cmake --build tools/kinetic-wasm/build-k2
 ```
 
 `kinetic_version()` names the kernel (`kinetic` or `kinetic2`). A consumer
-reads it before it trusts a layout: the two builds differ in
+reads it before it parses a struct: the two builds differ in
 `kinetic_tuning`'s size, in what `p`/`v`/`a` are, in which flags can rise and
 in one anomaly bit, each marked below.
 
 ## The pin rule
 
-A vendored `kinetic.wasm` is only "the machine" when it was built from the
+A vendored `kinetic.wasm` matches a firmware image only when it was built from the
 same Nucleus commit as the firmware it stands in for, with the sibling Valence
 checkout at `valence.pin` and the same kernel switch. `kinetic_version()`
-carries the proof: `nucleus <git describe> kinetic <engine version>`, or
+records the build: `nucleus <git describe> kinetic <engine version>`, or
 `nucleus <git describe> kinetic2 <engine version>` from a Kinetic² build. A
 `-dirty` build is never vendored, and a consumer shows the string next to its
 render.
 
 ## The determinism rule
 
-Same calls in, same bits out. That holds because every build of these sources
-compiles without floating-point contraction (`-ffp-contract=off`) and without
+The same sequence of calls produces bit-identical output, because every build
+of these sources compiles without floating-point contraction (`-ffp-contract=off`) and without
 `-ffast-math`; the native suite does the same in `platformio.ini`. Never add
-either flag to any build that claims to match. The proof is
-`node tools/kinetic-wasm/check.mjs` against the fixture the native suite
+either flag to any build that claims to match. `node tools/kinetic-wasm/check.mjs` checks this against the fixture the native suite
 `test/native/test_kinetic_wasm_trace` writes to `test/fixtures/kinetic_trace.json`:
 every 1 ms sample of a 60 s script is compared bit for bit. The Kinetic² pair
 is the suite under `pio test -e native_kinetic2`, which writes
@@ -150,8 +148,8 @@ bytes, and u32 `react_us` (offset 60; the reaction horizon, below). A
 consumer sizes its buffer from the build it loaded:
 `kinetic_default_tuning` writes the whole struct. Under Kinetic² the members
 map onto `kinetic2::Config` as follows, and the rest are accepted and ignored
-(the chase is gone: a sample is a knot one latency behind, and this ABI takes
-segments only):
+(Kinetic² has no chase: a sample becomes a knot one latency behind, and this
+ABI takes segments only):
 
 | Member | Under Kinetic² |
 |---|---|
@@ -160,12 +158,12 @@ segments only):
 | `amplitude_budget` | `Config::amplitude_floor`, the same floor |
 | `curve_policy` | applied at the knot boundary: 1 forces C1, 2 C2, 0 follows the segment |
 | `lookahead_us`, `corner` | `Config::lookahead_us`, `Config::corner` (the kernel at `kinetic.pin` carries `lookahead_us` unread) |
-| `react_us` | `Config::react_us`, the reaction horizon in microseconds (factory 4000): a knot arriving while the carriage moves keeps the curve under it this far ahead of now, or through the next knot when that is nearer, and re-plans from the state there (RFC-105 (bb)). Longer keeps a re-plan out of a piece too short to bend legally; shorter keeps a one-knot guess from freezing into the motion |
+| `react_us` | `Config::react_us`, the reaction horizon in microseconds (factory 4000): a knot arriving while the carriage moves keeps the curve under it this far ahead of now, or through the next knot when that is nearer, and re-plans from the state there (RFC-105 (bb)). A longer horizon avoids re-planning inside a piece too short to change within the ceilings. A shorter horizon lets the next knot revise a plan that was based on one knot |
 | `chase_gain`, `chase_lookahead`, `handoff_k`, `smooth_budget`, `overshoot_guard`, `settle_grace_us`, `chase_ff`, `chase_accel_ff`, `chase_aim_extrap`, `blend_steps` | ignored |
 | `chase_dense_us` | ignored here; on the board it still sets the samples grant's `schedule_latency_us` (`sampleLatencyUs()`), which is the delay a Kinetic² sample renders at |
 
-## What it is not
+## Differences from the board
 
-The emitter is ideal and the tick is exact, so the timing jitter of the
-board's task wake-ups and the LP core's edge quantization are absent; the
-plan, which is what the planner decides, is the machine's.
+The emitter is ideal and the tick is exact, so the board's task wake-up jitter
+and the LP core's edge quantization are not modeled. The plan is identical to
+the board's.
