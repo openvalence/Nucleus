@@ -9,8 +9,9 @@
 //   one copy, so a gate change lands once and both run it. The emitter and the
 //   clock are handed IN; a host owns the task, the queues and the lock.
 // - THE ARBITER IS THE SOLE CALLER of the emitter (architecture.md section 2):
-//   steer() from begin() and evaluate(), park() from estop() and from
-//   evaluate() while the latch holds. Nothing else commands it.
+//   steer() from begin() and evaluate(), park() from estop(), a power loss,
+//   a home stall and evaluate() while the latch holds. Nothing else commands
+//   it.
 // - OWNING-TASK methods (begin, applyTuning, accept, evaluate, drainAnomalies,
 //   snapshot) touch the engine and run on ONE task, the host's motion task.
 //   The window solve runs lazily in the first sample after a submit, on that
@@ -82,7 +83,9 @@ inline constexpr uint32_t kIntentQueueDepth = 40;
 // ---- homing -----------------------------------------------------------------
 // Home op 1 runs two legs, the home end first, then the far end. Each leg:
 // approach at the home speed (the home_speed tuning, held to the jog speed)
-// until the home sense reads HIGH; the stop profile (PAUSE's brake); back off
+// until the home sense reads HIGH; the emitter parks at once, no brake (the
+// carriage is against the stop; only the ramp up to the cruise is planned,
+// the approach is otherwise a constant-velocity move); back off
 // kHomeRetouchBackoffMm at the home speed, where the line must read LOW;
 // re-approach at homeTouchMmS(), and that stall, moved back by the touch
 // speed times kHomeSenseLatencyUs, is the leg's datum. The home end's datum is
@@ -113,7 +116,7 @@ inline constexpr uint32_t kIntentQueueDepth = 40;
 // LOW after kStallOffSamples (3) under kStallOffA (0.5 A). This side confirms
 // the line with two reads kHomeSenseDebounceUs apart, its rise wakes the
 // motion task (ValenceHomeSense.cpp), and nothing else. kHomeSenseLatencyUs is
-// the two ends' shared contact-to-brake figure; a change to the source's
+// the two ends' shared contact-to-park figure; a change to the source's
 // numbers moves it here.
 inline constexpr uint32_t kStallConversionUs    = 150;    // the S3's INA228 shunt conversion
 inline constexpr uint32_t kStallOnSamples       = 3;      // the S3's N

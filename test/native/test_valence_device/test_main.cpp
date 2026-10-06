@@ -75,6 +75,8 @@ bool g_driveAlarm = false;
 // Calls through the motion and generator doors: what a refused write must
 // never reach.
 int g_submits = 0;
+// The intents the motion door took, in order (VD-SEG-1).
+std::vector<MotionIntent> g_intents;
 int g_patPushes = 0;
 // The fake e-stop reading: what the BoardIo task would have published.
 estop::Reading g_estop{};
@@ -91,8 +93,9 @@ uint64_t deviceNowUs() { return g_clock.nowUs(); }
 uint32_t deviceFreeHeapBytes() { return 0; }
 
 bool motionBegin() { return true; }
-bool motionSubmit(const MotionIntent&) {
+bool motionSubmit(const MotionIntent& in) {
     ++g_submits;
+    g_intents.push_back(in);
     return true;
 }
 void motionEstop() { g_census.estop = true; }
@@ -203,6 +206,7 @@ struct Rig {
         g_homeCalls = 0;
         g_driveAlarm = false;
         g_submits = g_patPushes = 0;
+        g_intents.clear();
         g_switch = MotorSwitchStatus{};
         g_switch.state = motorswitch::State::on;
         g_estop = estop::Reading{};
@@ -1181,4 +1185,69 @@ TEST_CASE("VD-MODES-9: home_speed writes on modes-set key 9, clamped, published 
     REQUIRE(v != nullptr);
     CHECK(v->f32_val == ceiling::home_speed_min);
     CHECK(stateF32(*rig, ch::machine_modes, 8) == ceiling::home_speed_min);
+}
+
+// ---- RFC-087 supersede (bd val-dz9) ---------------------------------------------
+
+namespace {
+
+// A c2h segments bundle at t_base: each sample (pos e4, duration ms), 25 ms
+// apart, end velocity unspecified, parsed the way the hub parses it.
+BundleView segmentsBundle(std::vector<std::byte>& bytes, uint32_t t_base,
+                          std::initializer_list<std::pair<uint16_t, uint16_t>> samples) {
+    const size_t n = samples.size();
+    bytes.assign(6 + 2 * n + 6 * n, std::byte{0});
+    std::span<std::byte> out(bytes);
+    putU32(out.subspan(0, 4), t_base);
+    out[4] = std::byte(uint8_t(n));
+    size_t i = 0;
+    for (const auto& s : samples) {
+        putU16(out.subspan(6 + 2 * i, 2), uint16_t(i * 250));   // 100 us units: 25 ms apart
+        const size_t at = 6 + 2 * n + 6 * i;
+        putU16(out.subspan(at, 2), s.first);
+        putU16(out.subspan(at + 2, 2), s.second);
+        putU16(out.subspan(at + 4, 2), uint16_t(limits::segment_end_vel_unspecified));
+        ++i;
+    }
+    const auto parsed = BundleView::parse(std::span<const std::byte>(bytes), 6, limits::segment_t_off_unit_us,
+                                          250'000u);
+    REQUIRE(parsed);
+    return parsed.value();
+}
+
+}  // namespace
+
+TEST_CASE("VD-SEG-1: a segments bundle flushes on the first segment the motion path takes; a samples bundle never") {
+    auto rig = std::make_unique<Rig>();
+    const uint32_t now32 = uint32_t(g_clock.nowUs());
+    std::vector<std::byte> bytes;
+
+    rig->device.onStreamBundle(ch::motion_segment, 1, segmentsBundle(bytes, now32 + 20'000, {{5000, 25}, {6000, 25}, {7000, 25}}));
+    REQUIRE(g_intents.size() == 3);
+    CHECK(g_intents[0].supersede);
+    CHECK_FALSE(g_intents[1].supersede);
+    CHECK_FALSE(g_intents[2].supersede);
+
+    // A zero-duration first sample never reaches the motion path: the flush
+    // rides the next one.
+    g_intents.clear();
+    rig->device.onStreamBundle(ch::motion_segment, 1, segmentsBundle(bytes, now32 + 40'000, {{5000, 0}, {6000, 25}}));
+    REQUIRE(g_intents.size() == 1);
+    CHECK(g_intents[0].supersede);
+
+    // 0x2100 samples: 4-byte points, never a flush.
+    g_intents.clear();
+    std::vector<std::byte> pts(6 + 2 * 2 + 4 * 2, std::byte{0});
+    std::span<std::byte> out(pts);
+    putU32(out.subspan(0, 4), now32 + 10'000);
+    out[4] = std::byte{2};
+    putU16(out.subspan(8, 2), 5000);   // t_off[1] = 5 ms
+    putU16(out.subspan(10, 2), 5000);
+    putU16(out.subspan(14, 2), 6000);
+    const auto parsed = BundleView::parse(std::span<const std::byte>(pts), 4);
+    REQUIRE(parsed);
+    rig->device.onStreamBundle(ch::motion_input, 1, parsed.value());
+    REQUIRE(g_intents.size() == 2);
+    CHECK_FALSE(g_intents[0].supersede);
+    CHECK_FALSE(g_intents[1].supersede);
 }

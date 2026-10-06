@@ -455,6 +455,16 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
         // newest knot leaves a gap the sender meant as a rest, so the curve
         // holds until the start.
         const uint64_t start = in.anchor_us > now_us ? in.anchor_us : now_us;
+        // RFC-087 supersede: a bundle replaces every knot queued at or after
+        // its first start; the motion in flight hands off there, or at the
+        // reaction horizon when the start is not past it
+        // (Engine::truncateAfter). The start is then never a rest.
+        if (in.supersede && _engine.truncateAfter(start, now_us) > 0) {
+            const kinetic2::Knot h = _engine.newest();
+            _k2_newest_us = start > h.t_us ? start : h.t_us;
+            _k2_newest_p  = h.p;
+            _k2_dirty = true;
+        }
         if (start > _k2_newest_us) {
             kinetic2::Knot hold;
             hold.t_us   = start;
@@ -834,10 +844,14 @@ void MotionArbiter::homeStep(uint64_t now_us) {
             const bool touch = _home == HomePhase::touch;
             if (_sense->high()) {
                 if (_sense_armed) {
-                    // The stop profile: PAUSE's brake at the input decel.
+                    // The carriage is against the stop: the emitter parks at
+                    // once, never a brake, and the plan is re-anchored at the
+                    // count as after an e-stop. The datum is the count before
+                    // the park.
                     _home_hit = _emitter.count();
-                    _engine.setLimits(limitsFor(false));
-                    brakeEngine(now_us);
+                    _emitter.park();
+                    resetEngine(toNorm(positionMm()), now_us);
+                    _p_cmd_mm = positionMm();
                     _home = touch ? HomePhase::touch_stop : HomePhase::approach_stop;
                     return;
                 }

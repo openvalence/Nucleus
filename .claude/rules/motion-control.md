@@ -19,7 +19,9 @@ repo's own test oracle and are never compiled here.
 
 Every intent becomes knots at one boundary (MotionArbiter.cpp, "the Kinetic²
 boundary"): a segment is a knot at its start plus its duration, a gap before
-its start a rest knot; a sample a knot at its arrival plus the grant's
+its start a rest knot, and a segments bundle's first segment first replaces
+every knot queued at or after its start, the motion in flight handing off
+there (RFC-087 supersede, `Engine::truncateAfter`); a sample a knot at its arrival plus the grant's
 `schedule_latency_us` (`sampleLatencyUs()`); a jog, a return or a homing
 backoff a knot at the park time from the newest knot (RFC-105 (k) and (n)),
 at an authored rest (a free last knot keeps its secant and is braked past,

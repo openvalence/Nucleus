@@ -66,6 +66,11 @@ struct MotionIntent {
     // RFC-030 declared curve family, registry curve_families numbering.
     // 0 = unspecified. Read only on the waveform path.
     uint8_t      curve_family = 0;
+    // RFC-087 supersede (SPEC "Supersede, the segments flush"): set on the
+    // first segment of a c2h segments bundle only. The arbiter replaces every
+    // knot queued at or after its start before planning it. Read only on the
+    // segment path.
+    bool         supersede    = false;
 };
 
 // One cross-task snapshot of the whole motion plane, refreshed on the motion

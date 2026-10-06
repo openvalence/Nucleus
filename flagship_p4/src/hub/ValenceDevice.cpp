@@ -1462,6 +1462,10 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
     const float span = w.hi - w.lo;
     uint32_t dropped = 0;
     uint32_t farClamped = 0;
+    // RFC-087 supersede: the bundle's first segment the motion path takes
+    // flushes what is queued from its start (MotionArbiter, the Kinetic²
+    // boundary). A samples bundle never flushes.
+    bool flushed = !isSegment;
     for (uint8_t i = 0; i < n; ++i) {
         // Nearest-window resolve (§7.2): a wrap-aware signed subtract, safe
         // because the wire stamp is near now by construction (the bundle
@@ -1475,12 +1479,17 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t session_id,
         const auto sample = bundle.sample(i);
         const uint16_t pos = getU16(sample.subspan(0, 2));
         const uint64_t anchor = uint64_t(now64 + int64_t(delta));
-        const std::optional<MotionIntent> in =
+        std::optional<MotionIntent> in =
             isSegment ? segmentIntent(pos, getU16(sample.subspan(2, 2)),
                                       int16_t(getU16(sample.subspan(4, 2))), w.lo, span,
                                       curveFamily, anchor)
                       : pointIntent(pos, int16_t(getU16(sample.subspan(2, 2))), w.lo, span, anchor);
-        if (!in || !motionSubmit(*in)) ++dropped;
+        if (in && !flushed) in->supersede = true;
+        if (!in || !motionSubmit(*in)) {
+            ++dropped;
+            continue;
+        }
+        flushed = true;
     }
 
     motionNoteStream(1, n, dropped);

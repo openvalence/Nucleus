@@ -1114,6 +1114,70 @@ TEST_CASE("Kinetic² segments: a start past the newest knot holds until it, so t
     CHECK(r->census().plan_mm == doctest::Approx(50.0f).epsilon(1e-4));
 }
 
+// RFC-087 (bd val-dz9): a bundle replaces every segment queued at or after its
+// first start; the segment in flight runs to that start and hands off there.
+TEST_CASE("Kinetic² RFC-087 supersede: a bundle 40 ms out replaces the queue from its start, continuous, nothing refused") {
+    constexpr float kTolMm = 0.01f;
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+
+    float jump_at_submit = 0.0f, jump_per_tick = 0.0f;
+    MotionCensus prev = r->census();
+    auto segment = [&](float mm, uint32_t dur_us, uint64_t start, bool first) {
+        MotionIntent in;
+        in.source = MotionSource::Stream;
+        in.target_mm = mm;
+        in.duration_us = dur_us;
+        in.anchor_us = start;
+        in.curve_family = 2;
+        in.supersede = first;   // what onStreamBundle sets on a bundle's first segment
+        const float before = r->census().plan_mm;
+        const bool ok = r->arb.accept(in, g_now_us);
+        jump_at_submit = std::max(jump_at_submit, std::fabs(r->census().plan_mm - before));
+        return ok;
+    };
+    auto tick = [&] {
+        r->run(1000);
+        const MotionCensus c = r->census();
+        const float carried = std::max(std::fabs(c.velocity_mm_s), std::fabs(prev.velocity_mm_s)) * 1e-3f;
+        jump_per_tick = std::max(jump_per_tick, std::fabs(c.plan_mm - prev.plan_mm) - carried);
+        prev = c;
+    };
+
+    // The first bundle: 250 ms of 25 ms segments climbing 0 -> 50 mm.
+    const uint64_t t0 = g_now_us + 10'000;
+    for (int i = 0; i < 10; ++i) REQUIRE(segment(5.0f * float(i + 1), 25'000, t0 + uint64_t(i) * 25'000, i == 0));
+    for (int t = 0; t < 100; ++t) tick();
+    // The seek: a bundle starting 40 ms out, back down to 20 mm and holding.
+    const uint64_t t_base = g_now_us + 40'000;
+    REQUIRE(segment(20.0f, 150'000, t_base, true));
+    REQUIRE(segment(20.0f, 50'000, t_base + 150'000, false));
+    while (g_now_us + 1000 < t_base) tick();
+    const float at_base_mm = prev.plan_mm;
+    const float at_base_v = prev.velocity_mm_s;
+    tick();
+    for (int t = 0; t < 99; ++t) tick();
+    const float mid_mm = prev.plan_mm;   // t_base + 100 ms: the queued climb would be near 48 mm
+    for (int t = 0; t < 400; ++t) tick();
+
+    r->arb.drainAnomalies();
+    const MotionCensus c = r->census();
+    MESSAGE("hand-off at ", at_base_mm, " mm moving ", at_base_v, " mm/s, 100 ms later ", mid_mm, " mm, end ", c.plan_mm,
+            " mm; at submit ", jump_at_submit, " mm, per tick beyond the velocity ", jump_per_tick, " mm");
+    CHECK(at_base_v > 50.0f);   // the climb in flight ran to the hand-off
+    CHECK(at_base_mm > 20.0f);
+    CHECK(mid_mm < 35.0f);      // the new bundle, not the queue, from t_base
+    CHECK(c.plan_mm == doctest::Approx(20.0f).epsilon(1e-3));
+    CHECK_FALSE(c.busy);
+    CHECK(jump_at_submit <= kTolMm);
+    CHECK(jump_per_tick <= kTolMm);
+    CHECK(c.intents == 12);
+    CHECK(c.rejected == 0);
+    CHECK(c.failures == 0);
+    CHECK(c.anom[size_t(kinetic2::AnomalyKind::KnotRefused)] == 0);
+}
+
 // ---- homing (bd val-dbo, val-zsr) ---------------------------------------------
 
 namespace {
@@ -1153,16 +1217,19 @@ public:
     bool risen = false;
 };
 
-// Runs `us` in 1 ms ticks and records the commanded speed at every rising
-// edge of the stop line: one per contact, approach or re-touch.
+// Runs `us` in 1 ms ticks and records the commanded speed the carriage met the
+// stop at, one per rising edge of the stop line (approach or re-touch): the
+// speed of the tick before, because the stall parks on the tick it rises.
 std::vector<float> contactSpeeds(Rig& r, const FakeSense& s, uint64_t us) {
     std::vector<float> v;
     bool was = s.level();
+    float speed = 0.0f;
     for (uint64_t t = 0; t < us; t += 1000) {
         r.run(1000);
         const bool now = s.level();
-        if (now && !was) v.push_back(std::fabs(r.census().velocity_mm_s));
+        if (now && !was) v.push_back(speed);
         was = now;
+        speed = std::fabs(r.census().velocity_mm_s);
     }
     return v;
 }
@@ -1467,4 +1534,39 @@ TEST_CASE("home: refused without a sense, with an undriven line, or with a stall
     CHECK(r->census().intents == 0);   // nothing moved
     s.forced.reset();
     CHECK(r->arb.home() == HomeStart::started);
+}
+
+// The operator's ruling 2026-10-06: the stall stops the carriage at once. The
+// emitter parks on the tick the sense rises, and the count never moves further
+// into the stop; the next move is the backoff, away from it.
+TEST_CASE("home: every stall parks the emitter at once; nothing runs on into the stop") {
+    auto r = rig();
+    FakeSense s{r->emitter, -30.0f, 170.0f};
+    r->arb.setHomeSense(s);
+    REQUIRE(r->arb.home() == HomeStart::started);
+    int contacts = 0, parked_at_once = 0;
+    int32_t worst_overrun = 0;
+    bool was = s.level();
+    int32_t prev_n = r->emitter.n;
+    for (int t = 0; t < 40'000 && !r->census().homed; ++t) {
+        r->run(1000);
+        const bool now = s.level();
+        if (now && !was) {
+            ++contacts;
+            if (r->emitter.q8 == 0) ++parked_at_once;
+            const int32_t n0 = r->emitter.n;
+            const int32_t dir = n0 > prev_n ? 1 : -1;
+            for (int k = 0; k < 20; ++k) {
+                r->run(1000);
+                worst_overrun = std::max(worst_overrun, dir * (r->emitter.n - n0));
+            }
+        }
+        was = s.level();
+        prev_n = r->emitter.n;
+    }
+    MESSAGE(contacts, " contacts, worst overrun after the stall ", worst_overrun, " steps");
+    CHECK(contacts == 4);   // home approach, home re-touch, far approach, far re-touch
+    CHECK(parked_at_once == 4);
+    CHECK(worst_overrun == 0);
+    CHECK(r->census().homed);
 }
