@@ -222,6 +222,7 @@ struct MotionTuning {
     // and not on a catalog card yet.
     uint32_t lookahead_us      = 250000;
     uint8_t  corner            = 0;   // kinetic2::Corner: 0 continuous, 1 cubic
+    uint32_t react_us          = 4000;   // the reaction horizon: a knot arriving mid-motion re-plans from this far ahead
 
     bool operator==(const MotionTuning&) const = default;
 };

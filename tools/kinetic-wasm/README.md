@@ -144,9 +144,10 @@ after the newest is refused (KnotRefused): nothing queued is ever replaced.
 stretch, 1 blend), `blend_steps`, and two reserved zero bytes. Start from
 `kinetic_default_tuning` and change only what the card changed.
 
-A Kinetic² build APPENDS eight bytes, 60 in all: u32 `lookahead_us` (offset
-52), u8 `corner` (offset 56; 0 continuous, 1 cubic) and three reserved zero
-bytes. A consumer sizes its buffer from the build it loaded:
+A Kinetic² build APPENDS twelve bytes, 64 in all: u32 `lookahead_us` (offset
+52), u8 `corner` (offset 56; 0 continuous, 1 cubic), three reserved zero
+bytes, and u32 `react_us` (offset 60; the reaction horizon, below). A
+consumer sizes its buffer from the build it loaded:
 `kinetic_default_tuning` writes the whole struct. Under Kinetic² the members
 map onto `kinetic2::Config` as follows, and the rest are accepted and ignored
 (the chase is gone: a sample is a knot one latency behind, and this ABI takes
@@ -159,6 +160,7 @@ segments only):
 | `amplitude_budget` | `Config::amplitude_floor`, the same floor |
 | `curve_policy` | applied at the knot boundary: 1 forces C1, 2 C2, 0 follows the segment |
 | `lookahead_us`, `corner` | `Config::lookahead_us`, `Config::corner` (the kernel at `kinetic.pin` carries `lookahead_us` unread) |
+| `react_us` | `Config::react_us`, the reaction horizon in microseconds (factory 4000): a knot arriving while the carriage moves keeps the curve under it this far ahead of now, or through the next knot when that is nearer, and re-plans from the state there (RFC-105 (bb)). Longer keeps a re-plan out of a piece too short to bend legally; shorter keeps a one-knot guess from freezing into the motion |
 | `chase_gain`, `chase_lookahead`, `handoff_k`, `smooth_budget`, `overshoot_guard`, `settle_grace_us`, `chase_ff`, `chase_accel_ff`, `chase_aim_extrap`, `blend_steps` | ignored |
 | `chase_dense_us` | ignored here; on the board it still sets the samples grant's `schedule_latency_us` (`sampleLatencyUs()`), which is the delay a Kinetic² sample renders at |
 

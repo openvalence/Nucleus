@@ -77,7 +77,8 @@ uint8_t planFlags(uint32_t kinds, bool window_clamped) {
 }
 #else
 static_assert(MotionTuning{}.lookahead_us == kinetic2::Config{}.lookahead_us &&
-                  MotionTuning{}.corner == uint8_t(kinetic2::Config{}.corner),
+                  MotionTuning{}.corner == uint8_t(kinetic2::Config{}.corner) &&
+                  MotionTuning{}.react_us == kinetic2::Config{}.react_us,
               "MotionTuning's Kinetic² defaults are kinetic2::Config's");
 
 // RFC-105 (k): a point move is a knot at the least time a rest-to-rest
@@ -658,7 +659,8 @@ void MotionArbiter::applyTuning(const MotionTuning& t) {
     // next plan; an in-flight trajectory keeps the config it was planned under.
 #if NUCLEUS_KINETIC2
     // Kinetic² reads the policy, the amplitude floor (Kinetic's amplitude
-    // budget, the same floor), the lookahead and the corner; the curve
+    // budget, the same floor), the lookahead, the corner and the reaction
+    // horizon; the curve
     // policy and the samples latency stay here, at the knot boundary. Every
     // other member is Kinetic's and accepted unread. Takes effect at the next
     // solve, which re-plans every pending knot under it.
@@ -667,6 +669,7 @@ void MotionArbiter::applyTuning(const MotionTuning& t) {
     c.amplitude_floor = t.amplitude_budget;
     c.lookahead_us    = t.lookahead_us;
     c.corner          = t.corner == 1 ? kinetic2::Corner::Cubic : kinetic2::Corner::Continuous;
+    c.react_us        = t.react_us;
     _engine.setConfig(c);
     _k2_policy       = c.policy;
     _k2_curve_policy = t.curve_policy;
@@ -1198,6 +1201,7 @@ MotionTuning motionDefaultTuning() {
     t.amplitude_budget  = k2.amplitude_floor;
     t.lookahead_us      = k2.lookahead_us;
     t.corner            = uint8_t(k2.corner);
+    t.react_us          = k2.react_us;
 #endif
     return t;
 }

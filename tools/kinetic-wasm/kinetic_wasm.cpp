@@ -101,6 +101,7 @@ struct kinetic_tuning {
     uint32_t lookahead_us;      // the solver's lookahead window
     uint8_t  corner;            // 0 continuous, 1 cubic
     uint8_t  reserved2[3];      // zero
+    uint32_t react_us;          // the reaction horizon
 #endif
 };
 
@@ -110,7 +111,7 @@ static_assert(sizeof(kinetic_sample) == 64, "kinetic_sample layout is ABI");
 static_assert(offsetof(kinetic_sample, plan_mm) == 32 && offsetof(kinetic_sample, anomalies) == 52 &&
                   offsetof(kinetic_sample, mode) == 56 && offsetof(kinetic_sample, plans) == 60,
               "kinetic_sample layout is ABI");
-static_assert(sizeof(kinetic_tuning) == (valence::kKinetic2 ? 60 : 52), "kinetic_tuning layout is ABI");
+static_assert(sizeof(kinetic_tuning) == (valence::kKinetic2 ? 64 : 52), "kinetic_tuning layout is ABI");
 
 // kinetic_sample::flags
 inline constexpr uint8_t KINETIC_FLAG_BUSY     = 1u << 0;  // the plan has motion left to render
@@ -296,6 +297,7 @@ MotionTuning fromC(const kinetic_tuning& t) {
 #if NUCLEUS_KINETIC2
     m.lookahead_us      = t.lookahead_us;
     m.corner            = t.corner;
+    m.react_us          = t.react_us;
 #endif
     return m;
 }
@@ -323,6 +325,7 @@ kinetic_tuning toC(const MotionTuning& m) {
 #if NUCLEUS_KINETIC2
     t.lookahead_us      = m.lookahead_us;
     t.corner            = m.corner;
+    t.react_us          = m.react_us;
 #endif
     return t;
 }

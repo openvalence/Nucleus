@@ -20,7 +20,7 @@ const k = instance.exports;
 k._initialize?.();
 
 const SAMPLE = 64;           // sizeof(kinetic_sample)
-const TUNE = fx.tuning_bytes ?? 52;   // sizeof(kinetic_tuning): 60 from a Kinetic² build
+const TUNE = fx.tuning_bytes ?? 52;   // sizeof(kinetic_tuning): 64 from a Kinetic² build
 const TUNE_POLICY = 48;      // offsetof(kinetic_tuning, infeasible_policy)
 const OFFSET = 0xcbf29ce484222325n;
 const PRIME = 0x100000001b3n;
