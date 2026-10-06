@@ -6,7 +6,7 @@ machine will do. It is not a model of the planner: it is the same source.
 
 | Piece | Source (compiled by path, never copied) |
 |---|---|
-| Waveform shaping, Blend/Stretch, ceiling and window scan, Ruckig guard | `lib/kinetic/include/kinetic/kinetic.hpp` + `lib/ruckig/src` |
+| Waveform shaping, Blend/Stretch, ceiling and window scan, Ruckig guard | `../Kinetic/include/kinetic/kinetic.hpp` + `../Kinetic/third_party/ruckig/src` |
 | Intent path: window clamp, limit sets, mm to engine frame, rest reseed, tuning map | `flagship_p4/src/motion/MotionArbiter.cpp` |
 | 0x2101 sample to intent | `flagship_p4/src/motion/StreamIntent.h` |
 | Emitter (renders the steering word, every edge on time) | `sim/valencesim/src/IdealEmitter.h` |

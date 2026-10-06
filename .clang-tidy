@@ -8,7 +8,7 @@
 # every header it can reach, which here means ESP-IDF, the managed components
 # and vendored ruckig -- tens of thousands of findings in code we do not own.
 # Scope is OUR code: the board projects and the first-party libraries.
-HeaderFilterRegex: 'flagship_[a-z0-9]+/(src|ulp)/|lib/(geiger|flux|kinetic)/'
+HeaderFilterRegex: 'flagship_[a-z0-9]+/(src|ulp)/|lib/(geiger|flux)/|Kinetic/include/'
 
 Checks: >
   bugprone-*,

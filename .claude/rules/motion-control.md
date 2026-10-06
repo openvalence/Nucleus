@@ -9,17 +9,19 @@ Architecture-level motion doctrine (one command one plan, the MotionArbiter
 sole-caller rule, the two-chip split, HP-evaluates / LP-renders) lives in
 `.claude/rules/architecture.md` §2. This file is the mechanism layer.
 
-## Kinetic (`lib/kinetic/`)
+## Kinetic (`../Kinetic`, pinned by `kinetic.pin`)
 
 Every command becomes ONE trajectory planned from the engine's actual
 (p, v, a); the sampler evaluates it. Event-driven, never clocked.
 
-- **Map:** header-only, hardware-free `kinetic::Engine` wrapping vendored
-  `lib/ruckig/`, which is BYTE-IDENTICAL to upstream. Wrap, never patch; see
-  `lib/ruckig/VENDORED.md`. The library's home is the sibling Kinetic repo;
-  both directories here are its copy at `kinetic.pin`, and canon_lint fails
-  on any byte drift. An engine change lands in Kinetic first. A namespace
-  rename is gated on the native suite, never a blind sed pass.
+- **Map:** header-only, hardware-free `kinetic::Engine` wrapping Kinetic's
+  vendored `third_party/ruckig/`, which is BYTE-IDENTICAL to upstream. Wrap,
+  never patch; see that directory's `VENDORED.md`. The library is the sibling
+  Kinetic checkout, consumed in place (PlatformIO `symlink://`, CMake by
+  path), never copied here; canon_lint fails when its HEAD is not
+  `kinetic.pin` or its consumed paths are dirty. An engine change lands in
+  Kinetic first, then the operator moves the pin. A namespace rename is gated
+  on the native suite, never a blind sed pass.
 - **Division of labor (MEASURED; re-run the bench before re-litigating).**
   Ruckig Community is a point-to-point planner, not a waveform interpolator.
   WAVEFORM (every duration-carrying segment, with NO duration floor: a 10 ms

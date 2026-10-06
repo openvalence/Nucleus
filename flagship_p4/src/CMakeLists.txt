@@ -7,9 +7,11 @@
 # the first-party adapter in patterns/arduino_compat (lib/strokeengine_patterns/
 # VENDORED.md).
 #
-# lib/kinetic is header-only too, but the vendored Ruckig it wraps is not: its
-# step solvers are real translation units and are listed here. lib/ruckig is
-# BYTE-IDENTICAL to upstream -- wrap, never patch (lib/ruckig/VENDORED.md).
+# Kinetic is the sibling checkout ../Kinetic beside this repo, pinned by
+# kinetic.pin at the Nucleus root and READ-ONLY from here: a change lands in
+# Kinetic first, then the pin moves. Its engine is header-only; the Ruckig it
+# vendors is not, so those step solvers are listed here as real translation
+# units.
 idf_component_register(SRCS "main.cpp"
                             "hub/ValenceHub.cpp" "hub/ValenceDevice.cpp"
                             "hub/ValenceWsPort.cpp" "hub/ValenceEstopDatagram.cpp"
@@ -29,23 +31,23 @@ idf_component_register(SRCS "main.cpp"
                             "system/ValenceAccessoryIo.cpp"
                             "system/ValencePdSource.cpp"
                             "system/ValenceHomeSense.cpp"
-                            "../../lib/ruckig/src/ruckig/brake.cpp"
-                            "../../lib/ruckig/src/ruckig/position_first_step1.cpp"
-                            "../../lib/ruckig/src/ruckig/position_first_step2.cpp"
-                            "../../lib/ruckig/src/ruckig/position_second_step1.cpp"
-                            "../../lib/ruckig/src/ruckig/position_second_step2.cpp"
-                            "../../lib/ruckig/src/ruckig/position_third_step1.cpp"
-                            "../../lib/ruckig/src/ruckig/position_third_step2.cpp"
-                            "../../lib/ruckig/src/ruckig/velocity_second_step1.cpp"
-                            "../../lib/ruckig/src/ruckig/velocity_second_step2.cpp"
-                            "../../lib/ruckig/src/ruckig/velocity_third_step1.cpp"
-                            "../../lib/ruckig/src/ruckig/velocity_third_step2.cpp"
+                            "../../../Kinetic/third_party/ruckig/src/ruckig/brake.cpp"
+                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_first_step1.cpp"
+                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_first_step2.cpp"
+                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_second_step1.cpp"
+                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_second_step2.cpp"
+                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_third_step1.cpp"
+                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_third_step2.cpp"
+                            "../../../Kinetic/third_party/ruckig/src/ruckig/velocity_second_step1.cpp"
+                            "../../../Kinetic/third_party/ruckig/src/ruckig/velocity_second_step2.cpp"
+                            "../../../Kinetic/third_party/ruckig/src/ruckig/velocity_third_step1.cpp"
+                            "../../../Kinetic/third_party/ruckig/src/ruckig/velocity_third_step2.cpp"
                        INCLUDE_DIRS "." "hub" "motion" "system"
                                     "../../lib/valence/include"
                                     "../../lib/geiger/include"
                                     "../../lib/flux/include"
-                                    "../../lib/kinetic/include"
-                                    "../../lib/ruckig/include"
+                                    "../../../Kinetic/include"
+                                    "../../../Kinetic/third_party/ruckig/include"
                                     "../../lib/strokeengine_patterns/include"
                                     "patterns/arduino_compat"
                        # REQUIRES: reached from a header in the PUBLIC include

@@ -2,7 +2,7 @@
 // MotionArbiter and kinetic::Engine, fed 0x2101 segments in wire units and
 // stepped on a fixed tick against an ideal emitter, for an offline renderer
 // Constraints:
-// - NO PLANNING LIVES HERE. The shaping is lib/kinetic + lib/ruckig, the
+// - NO PLANNING LIVES HERE. The shaping is ../Kinetic (engine + Ruckig), the
 //   intent path is flagship_p4/src/motion/MotionArbiter.cpp, the wire decode
 //   is flagship_p4/src/motion/StreamIntent.h, the emitter is
 //   sim/valencesim/src/IdealEmitter.h: every one compiled verbatim, the same

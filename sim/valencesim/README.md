@@ -13,7 +13,7 @@ with no device semantics.
 | Hub | `lib/valence` (`valence::Hub`), the pinned sibling | real |
 | Catalog | `flagship_p4/src/hub/ValenceCatalog.h` + `boardFeatures()` | real, same etag as the board |
 | Delegate and every STATE publisher | `flagship_p4/src/hub/ValenceDevice.cpp`, compiled verbatim | real |
-| Motion planner | `lib/kinetic` (`kinetic::Engine` over vendored Ruckig) | real |
+| Motion planner | `../Kinetic` (`kinetic::Engine` over Ruckig), the sibling checkout `kinetic.pin` names | real |
 | Arbiter: gates, window clamp, limit sets, feedforward, census | `flagship_p4/src/motion/MotionArbiter.cpp`, compiled verbatim | real |
 | Motion task plumbing | `src/SimMotion.cpp` | a ring on the one hub thread instead of FreeRTOS queues; census refreshed every pass, not at 50 Hz |
 | Emitter and position truth | `src/SimMotion.cpp` | ideal: renders the arbiter's steering word exactly, so `late`, `resteers`, `catchups` and `stack_free` read 0 |
@@ -50,7 +50,8 @@ cmake --build sim/valencesim/build
 Output: `sim/valencesim/build/valencesim.exe`, statically linked. The first
 configure fetches IXWebSocket v11.4.6 and applies Valence Bench's
 subprotocol-echo patch from `../Valence/hub/bench/cmake/`. The sibling
-checkout must exist beside this repo (override with `-DVALENCE_ROOT=`).
+Valence and Kinetic checkouts must exist beside this repo (override with
+`-DVALENCE_ROOT=` and `-DKINETIC_ROOT=`).
 
 Linux and macOS: the same two `cmake` lines without the compiler flags (a
 C++23 GCC or Clang, `cmake`, `ninja`, `git`; built with GCC 16 and with Clang

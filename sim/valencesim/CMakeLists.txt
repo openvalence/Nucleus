@@ -14,6 +14,8 @@ get_filename_component(NUCLEUS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE
 # WS port and IXWebSocket patch are COMPILED from their home, never copied.
 set(VALENCE_ROOT "${NUCLEUS_ROOT}/../Valence" CACHE PATH "Sibling Valence checkout")
 set(BENCH_SRC "${VALENCE_ROOT}/hub/bench/src")
+# The sibling checkout kinetic.pin names. Read-only from here, like Valence.
+set(KINETIC_ROOT "${NUCLEUS_ROOT}/../Kinetic" CACHE PATH "Sibling Kinetic checkout")
 
 include(FetchContent)
 set(USE_TLS OFF CACHE BOOL "" FORCE)
@@ -26,9 +28,9 @@ FetchContent_Declare(ixwebsocket
     PATCH_COMMAND ${CMAKE_COMMAND} -P ${VALENCE_ROOT}/hub/bench/cmake/PatchIXWebSocket.cmake)
 FetchContent_MakeAvailable(ixwebsocket)
 
-# The vendored Ruckig step solvers are real translation units; everything else
+# Kinetic's Ruckig step solvers are real translation units; everything else
 # the engine needs is header-only. Same list the P4 component compiles.
-file(GLOB RUCKIG_SRC "${NUCLEUS_ROOT}/lib/ruckig/src/ruckig/*.cpp")
+file(GLOB RUCKIG_SRC "${KINETIC_ROOT}/third_party/ruckig/src/ruckig/*.cpp")
 
 add_executable(valencesim
     src/main.cpp
@@ -50,9 +52,9 @@ target_include_directories(valencesim PRIVATE
     "${NUCLEUS_ROOT}/flagship_p4/src"
     "${NUCLEUS_ROOT}/flagship_p4/src/hub"
     "${NUCLEUS_ROOT}/lib/valence/include"
-    "${NUCLEUS_ROOT}/lib/kinetic/include"
+    "${KINETIC_ROOT}/include"
     "${NUCLEUS_ROOT}/lib/geiger/include"
-    "${NUCLEUS_ROOT}/lib/ruckig/include"
+    "${KINETIC_ROOT}/third_party/ruckig/include"
     "${NUCLEUS_ROOT}/lib/strokeengine_patterns/include"
     "${NUCLEUS_ROOT}/flagship_p4/src/patterns/arduino_compat"
     "${BENCH_SRC}")

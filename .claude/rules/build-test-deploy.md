@@ -25,8 +25,9 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
   exactly one `$PROJECT_DIR/ulp` with no per-environment override.
 - `python tools/canon_lint.py` gates every substantive change; zero findings
   is the bar.
-- Host tests for the liftable libraries (`lib/geiger`, `lib/flux`,
-  `lib/kinetic`), the shared motion core
+- Host tests for the liftable libraries (`lib/geiger`, `lib/flux`, and
+  Kinetic's own suite compiled from `../Kinetic/tests` as `test_kinetic`), the
+  shared motion core
   (`flagship_p4/src/motion/MotionArbiter.*`, suite `test_motion_arbiter`) and
   the pattern generator (`flagship_p4/src/patterns/`, suite
   `test_pattern_engine`) are the check a namespace rename or a gate change is

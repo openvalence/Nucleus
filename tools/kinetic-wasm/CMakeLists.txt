@@ -44,7 +44,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 
 get_filename_component(NUCLEUS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
-file(GLOB RUCKIG_SRC "${NUCLEUS_ROOT}/lib/ruckig/src/ruckig/*.cpp")
+set(KINETIC_ROOT "${NUCLEUS_ROOT}/../Kinetic")
+file(GLOB RUCKIG_SRC "${KINETIC_ROOT}/third_party/ruckig/src/ruckig/*.cpp")
 
 set(SHA_HEADER "${CMAKE_CURRENT_BINARY_DIR}/gen/kinetic_git_sha.h")
 add_custom_target(kinetic_git_sha
@@ -64,9 +65,9 @@ target_include_directories(kinetic PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/gen"
     "${NUCLEUS_ROOT}/flagship_p4/src"
     "${NUCLEUS_ROOT}/lib/valence/include"
-    "${NUCLEUS_ROOT}/lib/kinetic/include"
+    "${KINETIC_ROOT}/include"
     "${NUCLEUS_ROOT}/lib/geiger/include"
-    "${NUCLEUS_ROOT}/lib/ruckig/include")
+    "${KINETIC_ROOT}/third_party/ruckig/include")
 
 # Geiger's mute host branch: no GEIGER_HOST_PLATFORM, so every GLOG site
 # compiles to nothing and the binary imports no I/O.
