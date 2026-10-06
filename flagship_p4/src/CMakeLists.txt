@@ -9,9 +9,8 @@
 #
 # Kinetic is the sibling checkout ../Kinetic beside this repo, pinned by
 # kinetic.pin at the Nucleus root and READ-ONLY from here: a change lands in
-# Kinetic first, then the pin moves. Its engine is header-only; the Ruckig it
-# vendors is not, so those step solvers are listed here as real translation
-# units.
+# Kinetic first, then the pin moves. Nucleus plans with Kinetic²
+# (include/kinetic2), header-only: an include path is the whole of consuming it.
 idf_component_register(SRCS "main.cpp"
                             "hub/ValenceHub.cpp" "hub/ValenceDevice.cpp"
                             "hub/ValenceWsPort.cpp" "hub/ValenceEstopDatagram.cpp"
@@ -31,23 +30,11 @@ idf_component_register(SRCS "main.cpp"
                             "system/ValenceAccessoryIo.cpp"
                             "system/ValencePdSource.cpp"
                             "system/ValenceHomeSense.cpp"
-                            "../../../Kinetic/third_party/ruckig/src/ruckig/brake.cpp"
-                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_first_step1.cpp"
-                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_first_step2.cpp"
-                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_second_step1.cpp"
-                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_second_step2.cpp"
-                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_third_step1.cpp"
-                            "../../../Kinetic/third_party/ruckig/src/ruckig/position_third_step2.cpp"
-                            "../../../Kinetic/third_party/ruckig/src/ruckig/velocity_second_step1.cpp"
-                            "../../../Kinetic/third_party/ruckig/src/ruckig/velocity_second_step2.cpp"
-                            "../../../Kinetic/third_party/ruckig/src/ruckig/velocity_third_step1.cpp"
-                            "../../../Kinetic/third_party/ruckig/src/ruckig/velocity_third_step2.cpp"
                        INCLUDE_DIRS "." "hub" "motion" "system"
                                     "../../lib/valence/include"
                                     "../../lib/geiger/include"
                                     "../../lib/flux/include"
                                     "../../../Kinetic/include"
-                                    "../../../Kinetic/third_party/ruckig/include"
                                     "../../lib/strokeengine_patterns/include"
                                     "patterns/arduino_compat"
                        # REQUIRES: reached from a header in the PUBLIC include
@@ -67,13 +54,6 @@ idf_component_register(SRCS "main.cpp"
                                      esp_driver_usb_serial_jtag
                                      espressif__esp_hosted
                                      espressif__esp_wifi_remote)
-
-# The planner kernel switch (Kconfig NUCLEUS_KINETIC2, motion/ValenceMotion.h).
-# PUBLIC: it sizes MotionCensus and lays out MotionArbiter, so every translation
-# unit that includes either must see the same value.
-if(CONFIG_NUCLEUS_KINETIC2)
-    target_compile_definitions(${COMPONENT_LIB} PUBLIC NUCLEUS_KINETIC2=1)
-endif()
 
 # Float multiply-adds stay unfused (val-63b): GCC's default -ffp-contract=fast
 # emits fmadd.s, and the planner must match kinetic.wasm and the native suite,

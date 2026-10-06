@@ -11,72 +11,63 @@ sole-caller rule, the two-chip split, HP-evaluates / LP-renders) lives in
 
 ## Kinetic (`../Kinetic`, pinned by `kinetic.pin`)
 
-**The kernel is a build switch (bd val-klo).** `NUCLEUS_KINETIC2` (Kconfig on
-the P4, a CMake option for valencesim and kinetic-wasm, the `native_kinetic2`
-environment for the suites; its home is `flagship_p4/src/motion/ValenceMotion.h`)
-puts `kinetic2::Engine<1>` in place of `kinetic::Engine` inside MotionArbiter,
-default OFF until the bench rules (val-2lv). Everything below describes
-Kinetic, the default. Under Kinetic² every intent becomes knots at one
-boundary (MotionArbiter.cpp, "the Kinetic² boundary"): a segment is a knot at
-its start plus its duration, a gap before its start a rest knot; a sample a
-knot at its arrival plus the grant's `schedule_latency_us`
-(`sampleLatencyUs()`); a jog, a return or a homing backoff a knot at the
-park time from the newest knot (RFC-105 (k) and (n)), at an authored rest (a
-free last knot keeps its secant and is braked past, RFC-105 (dd)), stretched,
-never trimmed; a homing seek two knots at the leg's speed, a ramp-up at the
-jog accel and a knot the brake past lands on the search end, so it cruises
-into contact; a generator's stop and PAUSE are the arbiter's brake, which
-refuses a knot due before its end; a timeline that runs dry still moving is
-the engine's own brake, which a new knot re-plans from (RFC-105 (dd)).
-Kinetic² has no Ruckig, no chase heuristics and no dwell rule; a point move
-is a quintic, up to 1.875 times a cruise (`kPointMoveSlowdown`, which the
+**The planner is Kinetic² (operator ruling 2026-10-06, bd val-z1k).**
+`kinetic2::Engine<1, 64>` inside MotionArbiter is the one planner of every
+Nucleus build: the P4 image, valencesim, kinetic-wasm and the native suites.
+The Kinetic repo's `include/kinetic/` engine and its `third_party/` are that
+repo's own test oracle and are never compiled here.
+
+Every intent becomes knots at one boundary (MotionArbiter.cpp, "the Kinetic²
+boundary"): a segment is a knot at its start plus its duration, a gap before
+its start a rest knot; a sample a knot at its arrival plus the grant's
+`schedule_latency_us` (`sampleLatencyUs()`); a jog, a return or a homing
+backoff a knot at the park time from the newest knot (RFC-105 (k) and (n)),
+at an authored rest (a free last knot keeps its secant and is braked past,
+RFC-105 (dd)), stretched, never trimmed; a homing seek two knots at the leg's
+speed, a ramp-up at the jog accel and a knot the brake past lands on the
+search end, so it cruises into contact; a generator's stop and PAUSE are the
+arbiter's brake, which refuses a knot due before its end; a timeline that runs
+dry still moving is the engine's own brake, which a new knot re-plans from
+(RFC-105 (dd)). Kinetic² has no chase heuristics and no dwell rule; a point
+move is a quintic, up to 1.875 times a cruise (`kPointMoveSlowdown`, which the
 home deadline carries for the backoffs).
 
-Every command becomes ONE trajectory planned from the engine's actual
-(p, v, a); the sampler evaluates it. Event-driven, never clocked.
+Event-driven, never clocked: an intent becomes knots at arrival, the pending
+window is solved at the next sample, and the sampler evaluates it.
 
-- **Map:** header-only, hardware-free `kinetic::Engine` wrapping Kinetic's
-  vendored `third_party/ruckig/`, which is BYTE-IDENTICAL to upstream. Wrap,
-  never patch; see that directory's `VENDORED.md`. The library is the sibling
-  Kinetic checkout, consumed in place (PlatformIO `symlink://`, CMake by
-  path), never copied here; canon_lint fails when its HEAD is not
-  `kinetic.pin` or its consumed paths are dirty. An engine change lands in
-  Kinetic first, then the operator moves the pin. A namespace rename is gated
-  on the native suite, never a blind sed pass.
-- **Division of labor (MEASURED; re-run the bench before re-litigating).**
-  Ruckig Community is a point-to-point planner, not a waveform interpolator.
-  WAVEFORM (every duration-carrying segment, with NO duration floor: a 10 ms
-  knot is a 10 ms span with its authored tangent) is a Hermite curve in the
-  client's declared family over exactly the commanded duration, ceiling and
-  window scanned. An illegal shape is first shortened toward a legal stroke
-  that still holds the deadline (the Blend policy; the amplitude budget is a
-  FLOOR the search must honor, never cross), and only a shape still illegal at
-  that floor falls through to the Ruckig guard. Stretch (keep the stroke,
-  overrun the deadline) is the one alternative contract. Amplitude is the one
-  quantity a ceiling may shape; this is the operator-ratified exception
-  (2026-09-02) to "ceilings are clamps, never targets". CHASE (bare points,
-  no duration) is Ruckig replan-per-point. A chase point's future anchor is
-  its ARRIVAL time (SPEC 5.4, RFC-084), never a start: its plan begins where
-  the previous future point arrives and is stretched to reach the point at
-  its anchor, while a segment's anchor stays its start; a point already due
-  is the time-optimal chase, unchanged. Sample synthesis is gone
-  (2026-09-02): no client sends bare points at a rate that needs a holdback.
-  SETTLE is brake-to-rest when a plan ends still-moving with no fresh command.
+- **Map:** header-only, hardware-free `kinetic2::Engine`: a knot timeline (64
+  knots per axis here), a window solver that re-plans every pending knot
+  together, and a brake. The library is the sibling Kinetic checkout,
+  consumed in place (PlatformIO `symlink://`, CMake by path), never copied
+  here; canon_lint fails when its HEAD is not `kinetic.pin` or its consumed
+  paths are dirty. An engine change lands in Kinetic first, then the operator
+  moves the pin. A namespace rename is gated on the native suite, never a
+  blind sed pass.
+- **Deadlines and amplitude.** A segment's knot holds its commanded duration
+  under Blend by trimming the stroke, never below `amplitude_floor` (the
+  0x1122 `amplitude_budget`); Stretch keeps the stroke and moves the knot
+  later. Amplitude is the one quantity a ceiling may shape; this is the
+  operator-ratified exception (2026-09-02) to "ceilings are clamps, never
+  targets". A sample is never trimmed, only stretched. A Manual move always
+  plans under Stretch: a jog that lands short is a wrong answer.
 - **One activity clock (operator ruling 2026-09-02).** Every "is the stream
-  alive" question in the engine (settle grace, cold start, staleness) keys on
-  ONE reference stamped by every commit and every plan end, in the engine's
-  own clock. A reset voids the plan and the pipeline; it never erases the
-  stream's cadence. Two mechanisms answering the same question from different
-  references is the defect class that produced every field hitch of
-  2026-09-02.
-- **Safety:** Ruckig Community has NO position limits and quintics can bulge,
-  so the Engine owns the window: targets clamped, end velocities bound-safe,
-  quintics legality-scanned, sampled output clamped. Exceptions are never
-  instantiated; non-finite inputs are rejected at `commit()`.
-- **Whichever task calls `commit()` needs a deep stack** because it nests
-  KB-scale Ruckig temporaries. Never size one down without a measured
-  high-water mark under a real motion workload (T1 class, `memory-budget.md`
-  T21). That stack is HP-side and internal RAM only (`governance.md` §6).
+  alive" question keys on ONE reference in the engine's own clock: under
+  Kinetic² the timeline itself, alive while a knot is pending. Two mechanisms
+  answering the same question from different references is the defect class
+  that produced every field hitch of 2026-09-02.
+- **Safety:** the arbiter clamps every target to the window before it becomes
+  a knot; the solver's referee scores every extremum of a piece against the
+  ceilings and the window and never accepts an excursion; authored velocities
+  are bounded (EndVelClamped); the census output is window-clamped.
+  Exceptions are never instantiated; a non-finite knot is refused at
+  `submit()`.
+- **Whichever task samples the engine first after a submit needs a deep
+  stack**: the window solve copies the pending knots and runs the solver's
+  fixed arrays on the calling stack, KB-scale. That is the motion task only.
+  Its size is not yet measured under Kinetic² (bd val-4q1); never size it
+  down without a measured high-water mark under a real motion workload (T1
+  class, `memory-budget.md` T21). That stack is HP-side and internal RAM only
+  (`governance.md` §6).
 
 ## The LP-core emitter (`flagship_p4/ulp/`)
 

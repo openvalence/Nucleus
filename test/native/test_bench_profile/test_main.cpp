@@ -20,7 +20,7 @@
 
 // Named here so the dependency finder builds them; the .cpp below needs all three.
 #include "geiger/geiger.h"
-#include "kinetic/kinetic.hpp"
+#include "kinetic2/engine.hpp"
 #include "valence/generated/registry_constants.hpp"
 
 #include "../../../flagship_p4/src/motion/MotionArbiter.cpp"
@@ -104,17 +104,13 @@ TEST_CASE("bench profile: motion runs with the switch reporting off, and the cen
     MotionCensus c = r->census();
     CHECK_FALSE(c.motor_on);   // the switch's word is never dressed up
     CHECK(c.power_gate);
-    if constexpr (valence::kKinetic2) {
-        // Kinetic² renders a lone sample at its grant's latency, and 120 mm in
-        // that time is spent (RFC-105 promise 3): the move is a timed segment.
-        MotionIntent in;
-        in.source = MotionSource::Stream;
-        in.target_mm = 120.0f;
-        in.duration_us = 1'500'000;
-        REQUIRE(r->arb.accept(in, g_now_us));
-    } else {
-        REQUIRE(r->submit(MotionSource::Stream, 120.0f));
-    }
+    // A lone sample renders at its grant's latency, and 120 mm in that time is
+    // spent (RFC-105 promise 3): the move is a timed segment.
+    MotionIntent in;
+    in.source = MotionSource::Stream;
+    in.target_mm = 120.0f;
+    in.duration_us = 1'500'000;
+    REQUIRE(r->arb.accept(in, g_now_us));
     r->run(2'000'000);
     c = r->census();
     CHECK(c.position_mm == doctest::Approx(120.0f).epsilon(0.01));

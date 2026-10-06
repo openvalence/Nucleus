@@ -4,9 +4,8 @@
 // Constraints:
 // - Compiles tools/kinetic-wasm/kinetic_wasm.cpp itself, the same ABI source
 //   em++ builds, so the two runs differ only in compiler and libm.
-// - ONE FIXTURE PER KERNEL: kinetic_trace.json from the native environment,
-//   kinetic2_trace.json from native_kinetic2 (NUCLEUS_KINETIC2), each replayed
-//   by check.mjs against the wasm built with the same switch.
+// - ONE FIXTURE, the Kinetic² trace: Phosphor's funscript player test reads
+//   the same file name, so it never moves.
 // - THE FIXTURE IS REGENERATED ON EVERY RUN and is deterministic: a diff in
 //   git means the planner's output moved, which is the planner change's to
 //   explain in its own commit. The SCRIPT lives in the fixture, so check.mjs
@@ -32,7 +31,7 @@
 
 // Named here so the dependency finder builds them; the .cpp files below need all three.
 #include "geiger/geiger.h"
-#include "kinetic/kinetic.hpp"
+#include "kinetic2/engine.hpp"
 #include "valence/generated/registry_constants.hpp"
 
 #include "../../../flagship_p4/src/motion/MotionArbiter.cpp"
@@ -75,7 +74,7 @@ void segment(std::vector<Event>& ev, uint32_t start_ms, uint16_t pos, uint16_t d
 // Moderate swings at 250 ms (C1 cubic declared), one re-steer mid-segment, a
 // 1.5 s gap after a segment that ends moving (the settle brake), then
 // quintic swings with full-window strokes the ceilings cannot meet (Blend),
-// then the same under Stretch (the Ruckig guard).
+// then the same under Stretch (the stretched deadline).
 std::vector<Event> script() {
     std::vector<Event> ev;
     for (uint32_t i = 0; i < 80; ++i) {
@@ -170,7 +169,7 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
             trace += "[" + num(s.p) + "," + num(s.v) + "," + num(s.a) + "]";
         }
         if (s.plan_kind < kinds.size()) ++kinds[s.plan_kind];
-        if (s.mode == uint8_t(kinetic::Mode::Settle)) ++settled;   // the style ordinal under both kernels
+        if (s.mode == uint8_t(valence::PlanStyle::settle)) ++settled;
         anom_mask |= s.anomalies;
         flags_seen |= s.flags;
     }
@@ -180,11 +179,7 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
     // The script reached what it exists to reach (T10: assert the load landed).
     CHECK(refused == 0);
     CHECK(accepted == ev.size() - 1);
-    CHECK(kinds[uint8_t(kinetic::PlanKind::Quintic)] > 0);
-    if constexpr (!valence::kKinetic2) {
-        CHECK(kinds[uint8_t(kinetic::PlanKind::Cubic)] > 0);
-        CHECK(kinds[uint8_t(kinetic::PlanKind::Ruckig)] > 0);
-    }
+    CHECK(kinds[valence::kPlanKindQuintic] > 0);
     CHECK(settled > 0);
     CHECK((flags_seen & KINETIC_FLAG_SHAPED) != 0);
     CHECK((flags_seen & KINETIC_FLAG_FALLBACK) != 0);
@@ -201,8 +196,8 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
     std::string hex;
     for (const uint64_t x : hashes) hex += (hex.empty() ? "\"" : ",\"") + hex64(x) + "\"";
 
-    const std::filesystem::path out = std::filesystem::path(__FILE__).parent_path() / ".." / ".." / "fixtures" /
-                                      (valence::kKinetic2 ? "kinetic2_trace.json" : "kinetic_trace.json");
+    const std::filesystem::path out =
+        std::filesystem::path(__FILE__).parent_path() / ".." / ".." / "fixtures" / "kinetic_trace.json";
     std::filesystem::create_directories(out.parent_path());
     std::ofstream f(out, std::ios::binary | std::ios::trunc);
     REQUIRE(f.good());
@@ -211,8 +206,8 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
       << "\"create\": [" << num(kVmax) << "," << num(kAmax) << "," << num(kJmax) << "," << num(kRail) << ","
       << kHorizonMs << "],\n"
       << "\"window\": [" << num(kWinLo) << "," << num(kWinHi) << "],\n"
-      // check.mjs sizes its kinetic_tuning buffer from this; absent means 52.
-      << (valence::kKinetic2 ? "\"tuning_bytes\": " + std::to_string(sizeof(kinetic_tuning)) + ",\n" : std::string())
+      // check.mjs sizes its kinetic_tuning buffer from this.
+      << "\"tuning_bytes\": " << sizeof(kinetic_tuning) << ",\n"
       << "\"dt_s\": 0.001,\n\"steps\": " << kSteps << ",\n\"block\": " << kBlock << ",\n"
       << "\"trace_every\": " << kTraceEveryMs << ",\n"
       << "\"summary\": {\"accepted\": " << accepted << ", \"anomaly_mask\": " << anom_mask

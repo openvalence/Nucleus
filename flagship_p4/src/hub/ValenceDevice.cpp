@@ -380,7 +380,7 @@ void publishPlanStrip(Hub& hub, const MotionCensus& m) {
     // flags: active, live_mode, grad_mode. live_mode and grad_mode named a
     // legacy interpolator split that has no counterpart in this engine.
     packU8(buf, n, m.busy ? 0x01u : 0u);
-    // style: kinetic::Mode, or `hold` for a hold segment, so a long dwell
+    // style: the planner's style (MotionArbiter.cpp PlanStyle), or `hold` for a hold segment, so a long dwell
     // reads as a live plan and never as a stall.
     packU8(buf, n, m.plan_hold ? kPlanStyleHold : m.mode);
     packU16(buf, n, wireU16(m.plan_start, 10000.0f));

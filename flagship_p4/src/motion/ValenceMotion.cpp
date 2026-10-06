@@ -10,8 +10,9 @@
 // - The engine (inside the arbiter) and the task stack live in INTERNAL RAM,
 //   never PSRAM: the HP side is unreachable while the flash cache is off, and
 //   the sampler must not fault during an OTA write. Only the LP core is immune.
-// - commit() nests KB-scale Ruckig temporaries on the CALLING stack, so it
-//   runs on the motion task and nowhere else (T1, memory-budget.md T21).
+// - The window solve puts KB-scale temporaries on the CALLING stack (a copy of
+//   the pending knots and the solver's fixed arrays), so the engine is sampled
+//   on the motion task and nowhere else (T1, memory-budget.md T21).
 // - THE ENGINE IS TOUCHED BY THE MOTION TASK ONLY. Every cross-task reader
 //   goes through _pub, a plain POD the tick refreshes under _mux; census()
 //   copies it under the same lock and calls nothing.
@@ -144,15 +145,11 @@ bool MotionTask::begin() {
     _arb.begin(espNowUs());
     refreshSnapshot(espNowUs());
     // Core 1 with the hub, at a higher priority than it: the tick is a
-    // polynomial evaluation and two 32-bit stores, and commit() runs only when
-    // an intent arrives. Core 0 keeps app_main and the esp_hosted SDIO service.
-    // RAISED 16,384 -> 24,576 ON A MEASUREMENT, which is the direction T21
-    // permits: under the val-091.11 stream proof -- a 0.8 Hz sine at 50 Hz,
-    // 499 accepted intents in 10 s, every one a commit() nesting KB-scale
-    // Ruckig temporaries -- the deepest free was 1,296 B of 16,384, 8 %
-    // headroom [verified 2026-09-21 -- census().stack_free over COM15]. The
-    // idle mark before that run read 12,316 B, which is exactly why an idle
-    // high-water mark is not a sizing number.
+    // polynomial evaluation and two 32-bit stores, and the window solve runs
+    // only in the first sample after an intent arrives. Core 0 keeps app_main and
+    // the esp_hosted SDIO service. kMotionTaskStackBytes is not yet measured
+    // under Kinetic² (bd val-4q1): size it only on a high-water mark taken
+    // under a real motion workload, never an idle one.
     const BaseType_t ok = xTaskCreatePinnedToCore(&MotionTask::taskTrampoline, "Motion",
                                                   kMotionTaskStackBytes, this, 6, &_task, 1);
     if (ok != pdPASS) return false;

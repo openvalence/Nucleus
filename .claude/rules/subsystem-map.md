@@ -48,7 +48,7 @@ slowly. For anything finer, ask codebase-memory rather than grepping for
 | `flagship_ch32v003/` | The board monitor's own PlatformIO project (bare metal, ch32v003fun): `src/monitor_core.c` holds every decision and is hardware-free (suite `test_supervisor`), `src/main.c` is the chip glue. The P4 programs it over SWIO; its image ships inside the Nucleus OTA |
 | `flagship_p4/sdkconfig.defaults` | Silicon, memory map, PSRAM, radio. Hand-written, tracked |
 | `sim/valencesim/` | The device twin: real hub, catalog, device and engine on a desktop. CMake, never pio |
-| `../Kinetic` | The trajectory engine and its vendored Ruckig, hardware-free: the sibling checkout, consumed in place and pinned by `kinetic.pin` (canon_lint `kinetic-pin-mismatch`, `kinetic-pin-dirty`). Change Kinetic first, then bump the pin; nothing is copied here |
+| `../Kinetic` | The trajectory engine, hardware-free: the sibling checkout, consumed in place and pinned by `kinetic.pin` (canon_lint `kinetic-pin-mismatch`, `kinetic-pin-dirty`). Nucleus compiles only `include/kinetic2` (Kinetic², operator ruling 2026-10-06, `motion-control.md`). Change Kinetic first, then bump the pin; nothing is copied here |
 | `lib/geiger`, `lib/flux` | Logging and LED cores (liftable, hardware-free) |
 | `lib/valence` | Symlink to the sibling Valence repo, pinned by `valence.pin`. READ-ONLY from here |
 | `docs/` | Prose that outlives a run; `docs/flagship-board.md` forwards to the PCB rationale in the Hardware repo |

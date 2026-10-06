@@ -5,8 +5,8 @@
 # clang-tidy coverage until that lands.
 #
 # HeaderFilterRegex is the load-bearing line. Without it clang-tidy analyzes
-# every header it can reach, which here means ESP-IDF, the managed components
-# and vendored ruckig -- tens of thousands of findings in code we do not own.
+# every header it can reach, which here means ESP-IDF and the managed
+# components -- tens of thousands of findings in code we do not own.
 # Scope is OUR code: the board projects and the first-party libraries.
 HeaderFilterRegex: 'flagship_[a-z0-9]+/(src|ulp)/|lib/(geiger|flux)/|Kinetic/include/'
 

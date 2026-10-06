@@ -26,7 +26,8 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
 - `python tools/canon_lint.py` gates every substantive change; zero findings
   is the bar.
 - Host tests for the liftable libraries (`lib/geiger`, `lib/flux`, and
-  Kinetic's own suite compiled from `../Kinetic/tests` as `test_kinetic`), the
+  Kinetic²'s own suite compiled from `../Kinetic/tests/test_kinetic2.cpp` as
+  `test_kinetic`), the
   shared motion core
   (`flagship_p4/src/motion/MotionArbiter.*`, suite `test_motion_arbiter`) and
   the pattern generator (`flagship_p4/src/patterns/`, suite
@@ -34,12 +35,11 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
   gated on: `pio test -e native` from the root project, every suite under
   `test/native/` named in the output
   (T10 -- the runner misreports, so read the suite names and the exit code).
-- The planner kernel is a build switch (`NUCLEUS_KINETIC2`,
-  `flagship_p4/src/motion/ValenceMotion.h`, bd val-klo), default off. A change
-  to the motion path builds both: `pio run -d flagship_p4 -e flagship_p4` and
-  `-e flagship_p4_kinetic2`, `pio test -e native` and `-e native_kinetic2`
-  (the motion suites with `-f`). Each kernel has its own kinetic.wasm trace
-  fixture (`tools/kinetic-wasm/README.md`).
+- The planner is Kinetic² in every build (operator ruling 2026-10-06,
+  `motion-control.md`); there is no kernel switch. A change to the motion
+  path rebuilds `pio run -d flagship_p4 -e flagship_p4` and `pio test -e
+  native`, which rewrites the one kinetic.wasm trace fixture
+  `test/fixtures/kinetic_trace.json` (`tools/kinetic-wasm/README.md`).
 
 ## The bench
 

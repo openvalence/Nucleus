@@ -24,28 +24,13 @@
 
 #include "hub/valence_config.h"
 
-// The planner kernel, picked at BUILD time (bd val-klo): 0 is Kinetic
-// (kinetic::Engine), 1 is Kinetic² (kinetic2::Engine<1>). Defined by the build,
-// never by a source file: Kconfig NUCLEUS_KINETIC2 on the P4
-// (flagship_p4/src/CMakeLists.txt), the NUCLEUS_KINETIC2 CMake option for
-// valencesim and kinetic-wasm, the native_kinetic2 environment for the native
-// suites. EVERY translation unit of one image must see the same value: it sizes
-// MotionCensus and lays out MotionArbiter, so a mixed build is two classes with
-// one name and silent memory corruption.
-#ifndef NUCLEUS_KINETIC2
-#define NUCLEUS_KINETIC2 0
-#endif
-
 namespace valence {
 
-inline constexpr bool kKinetic2 = NUCLEUS_KINETIC2 != 0;
-
-// One per kinetic::AnomalyType, INCLUDING its index-0 placeholder and the
-// retired kind that holds its ordinal. The enum is append-only and the 0x1111
-// per-kind field list is indexed by it, so this number and that list move
-// together or the table re-points. Kinetic² keeps kinds 0..10 and appends
-// KnotRefused (11).
-inline constexpr uint8_t kAnomalyKinds = kKinetic2 ? 12 : 11;
+// One per kinetic2::AnomalyKind, INCLUDING its index-0 placeholder and the
+// reserved and retired kinds that hold their ordinals. The enum is append-only
+// and the 0x1111 per-kind field list is indexed by it, so this number and that
+// list move together or the table re-points.
+inline constexpr uint8_t kAnomalyKinds = 12;
 
 // Origin of an intent. It picks the ceiling SET and the gating, nothing else.
 // The value is the SPEC 11.4 source id the hub publishes on control-owner, and
@@ -64,9 +49,9 @@ enum class MotionSource : uint8_t {
 // labels are the same strings, pinned by a static_assert in ValenceDevice.cpp.
 inline constexpr std::array<const char*, 4> kMotionSourceNames{"Jog", "Stream", "Classic", "Advanced"};
 
-// A point move, or a waveform span when duration_us is nonzero. Under Kinetic²
-// a Pattern or Advanced point is that generator's stop and renders as the
-// brake (MotionArbiter.cpp, the Kinetic² boundary): a generator moves by spans.
+// A point move, or a waveform span when duration_us is nonzero. A Pattern or
+// Advanced point is that generator's stop and renders as the brake
+// (MotionArbiter.cpp, the Kinetic² boundary): a generator moves by spans.
 struct MotionIntent {
     MotionSource source       = MotionSource::Manual;
     float        target_mm    = 0.0f;
@@ -153,8 +138,8 @@ struct MotionCensus {
     bool     stream         = false;  // a Stream intent is the live source
 
     // ---- the active plan, normalized, as 0x1110 publishes it ----
-    uint8_t  mode             = 0;   // kinetic::Mode's ordinals, under either kernel
-    uint8_t  plan_kind        = 0;   // kinetic::PlanKind's ordinals, under either kernel
+    uint8_t  mode             = 0;   // the 0x1111 mode select's ordinals (MotionArbiter.cpp PlanStyle)
+    uint8_t  plan_kind        = 0;   // the 0x1111 plan_kind select's ordinals
     float    plan_start       = 0.0f;
     float    plan_end         = 0.0f;
     float    plan_cur         = 0.0f;
@@ -163,17 +148,16 @@ struct MotionCensus {
     uint32_t plan_elapsed_us  = 0;
     bool     plan_hold        = false;  // the active plan is a hold: timed, its
                                         // start its end (SPEC 9.6)
-    // RFC-100 plan.flags: registry plan_flags bits of the plan the arbiter
-    // committed last, 0 while no plan or a SETTLE brake is in flight. A
-    // stream's anchored plan sets them when it is planned, up to one schedule
-    // horizon before its segment starts.
+    // RFC-100 plan.flags: registry plan_flags bits of the piece toward the
+    // first pending knot, as the solver decided it; 0 while nothing is
+    // pending or a brake is in flight.
     uint8_t  plan_flags       = 0;
 
     // ---- planner diagnostics, as 0x1111 publishes them ----
     uint32_t plans          = 0;
     uint32_t failures       = 0;
     uint32_t anomalies      = 0;   // every kind, summed
-    std::array<uint32_t, kAnomalyKinds> anom{};  // indexed by kinetic::AnomalyType
+    std::array<uint32_t, kAnomalyKinds> anom{};  // indexed by kinetic2::AnomalyKind
     uint32_t plan_us_last   = 0;
     uint32_t plan_us_max    = 0;
     float    plan_us_avg    = 0.0f;
@@ -211,15 +195,14 @@ struct MotionTuning {
     float    amplitude_budget  = 0.0f;
     uint8_t  blend_steps       = 0;
     uint32_t settle_grace_us   = 0;
-    // 0x1030 overshoot_clamp. kinetic's overshoot_guard, 0 = disarmed; "on" is
-    // the engine's own factory multiplier, never a value this side invents.
+    // 0x1030 overshoot_clamp, 0 = disarmed. Persisted and published; the
+    // planner does not read it (motionDefaultTuning()).
     float    overshoot_guard   = 0.0f;
     // 0x1030 home_speed, mm/s: the home cycle's approach (MotionArbiter.h,
     // homing). Not engine tuning; it rides this set to reach the motion task.
     float    home_speed        = DEFAULT_HOME_SPEED_MM_S;
-    // Kinetic² planner options (RFC-105), read only by a Kinetic² build, which
-    // static_asserts these defaults against kinetic2::Config's. Not persisted
-    // and not on a catalog card yet.
+    // Kinetic² planner options (RFC-105), static_asserted against
+    // kinetic2::Config's defaults. Not persisted and not on a catalog card yet.
     uint32_t lookahead_us      = 250000;
     uint8_t  corner            = 0;   // kinetic2::Corner: 0 continuous, 1 cubic
     uint32_t react_us          = 4000;   // the reaction horizon: a knot arriving mid-motion re-plans from this far ahead
@@ -229,8 +212,8 @@ struct MotionTuning {
 
 // The motion task's stack, in bytes, and the ONE home for that number (C-1):
 // the create site and main.cpp's high-water watch table both read it here, so
-// the reported total can never drift from the allocated one. The measurement
-// that set it is on the create site in ValenceMotion.cpp.
+// the reported total can never drift from the allocated one. Not yet measured
+// under Kinetic² (bd val-4q1); never size it down without that measurement.
 inline constexpr uint32_t kMotionTaskStackBytes = 24576;
 
 // The sampler period, microseconds, and the ONE home for it (C-1). The S3
@@ -245,8 +228,8 @@ inline constexpr uint32_t kMotionTaskStackBytes = 24576;
 inline constexpr uint32_t kMotionTickUs = 1000;
 
 // RFC-059 schedule_latency_us of a samples grant, the one home the hub's grant
-// and the arbiter both read. Under Kinetic² it is exact, not a budget: a
-// sample is a knot this long after it arrives (RFC-105 promise 1).
+// and the arbiter both read. It is exact, not a budget: a sample is a knot
+// this long after it arrives (RFC-105 promise 1).
 constexpr uint32_t sampleLatencyUs(const MotionTuning& t) { return t.chase_dense_us + kMotionTickUs; }
 
 // Brings up the engine, the arbiter and the motion task. The emitter is PARKED

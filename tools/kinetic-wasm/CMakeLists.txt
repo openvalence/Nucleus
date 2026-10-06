@@ -4,8 +4,6 @@
 #   emcmake cmake -S tools/kinetic-wasm -B tools/kinetic-wasm/build -G Ninja
 #   cmake --build tools/kinetic-wasm/build
 # Output: tools/kinetic-wasm/build/kinetic.wasm (gitignored, never committed).
-# The Kinetic² build is the same with -DNUCLEUS_KINETIC2=ON into its own tree
-# (tools/kinetic-wasm/build-k2 by convention).
 #
 # Every planning source is the one the P4 compiles, by path; nothing is copied.
 # The determinism rule (README.md) is the compile flags below: no FP
@@ -47,7 +45,6 @@ set(CMAKE_CXX_EXTENSIONS ON)
 
 get_filename_component(NUCLEUS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 set(KINETIC_ROOT "${NUCLEUS_ROOT}/../Kinetic")
-file(GLOB RUCKIG_SRC "${KINETIC_ROOT}/third_party/ruckig/src/ruckig/*.cpp")
 
 set(SHA_HEADER "${CMAKE_CURRENT_BINARY_DIR}/gen/kinetic_git_sha.h")
 add_custom_target(kinetic_git_sha
@@ -56,20 +53,9 @@ add_custom_target(kinetic_git_sha
     BYPRODUCTS "${SHA_HEADER}"
     VERBATIM)
 
-# The board's kernel switch (flagship_p4/src/motion/ValenceMotion.h). A Kinetic²
-# build compiles no Ruckig: the only Kinetic it reads is header types.
-option(NUCLEUS_KINETIC2 "plan with Kinetic² (kinetic2::Engine<1>) instead of Kinetic" OFF)
-if(NUCLEUS_KINETIC2)
-    set(RUCKIG_SRC "")
-endif()
-
 add_executable(kinetic
     kinetic_wasm.cpp
-    "${NUCLEUS_ROOT}/flagship_p4/src/motion/MotionArbiter.cpp"
-    ${RUCKIG_SRC})
-if(NUCLEUS_KINETIC2)
-    target_compile_definitions(kinetic PRIVATE NUCLEUS_KINETIC2=1)
-endif()
+    "${NUCLEUS_ROOT}/flagship_p4/src/motion/MotionArbiter.cpp")
 add_dependencies(kinetic kinetic_git_sha)
 set_target_properties(kinetic PROPERTIES SUFFIX ".wasm")
 
@@ -78,8 +64,7 @@ target_include_directories(kinetic PRIVATE
     "${NUCLEUS_ROOT}/flagship_p4/src"
     "${NUCLEUS_ROOT}/lib/valence/include"
     "${KINETIC_ROOT}/include"
-    "${NUCLEUS_ROOT}/lib/geiger/include"
-    "${KINETIC_ROOT}/third_party/ruckig/include")
+    "${NUCLEUS_ROOT}/lib/geiger/include")
 
 # Geiger's mute host branch: no GEIGER_HOST_PLATFORM, so every GLOG site
 # compiles to nothing and the binary imports no I/O.
@@ -88,8 +73,8 @@ target_compile_options(kinetic PRIVATE -O2 -ffp-contract=off -fno-fast-math -Wal
     -Wno-unused-const-variable)
 
 # Standalone wasm, no JS glue, no filesystem: a Worker instantiates it with
-# WebAssembly.instantiate and calls the exports. The stack is sized for
-# commit(), which nests KB-scale Ruckig temporaries (motion-control.md).
+# WebAssembly.instantiate and calls the exports. The stack is sized for the
+# window solve's KB-scale temporaries (motion-control.md).
 target_link_options(kinetic PRIVATE
     -O2
     --no-entry

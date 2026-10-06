@@ -8,7 +8,7 @@
 
 // Named here so the dependency finder builds them; the .cpp below needs all three.
 #include "geiger/geiger.h"
-#include "kinetic/kinetic.hpp"
+#include "kinetic2/engine.hpp"
 #include "valence/generated/registry_constants.hpp"
 
 #include "../../../flagship_p4/src/motion/MotionArbiter.cpp"

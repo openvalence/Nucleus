@@ -21,8 +21,8 @@ namespace valence {
 
 // The pattern task's stack, in bytes, and the ONE home for that number (C-1):
 // the create site and main.cpp's high-water watch table both read it here.
-// Sized, not yet measured (bd val-def.1). The task never plans -- commit()
-// and its KB-scale Ruckig temporaries run on the motion task -- so its
+// Sized, not yet measured (bd val-def.1). The task never plans -- the window
+// solve and its KB-scale temporaries run on the motion task -- so its
 // deepest path is one Geiger line (a 128 B record plus newlib's float
 // vsnprintf frame, ~1.5 KB) over a MotionCensus copy (~0.3 KB) and the
 // engine's own frames; 4,096 B leaves roughly a third of it spare. The two

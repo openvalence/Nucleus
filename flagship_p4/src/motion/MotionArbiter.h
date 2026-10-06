@@ -13,12 +13,10 @@
 //   evaluate() while the latch holds. Nothing else commands it.
 // - OWNING-TASK methods (begin, applyTuning, accept, evaluate, drainAnomalies,
 //   snapshot) touch the engine and run on ONE task, the host's motion task.
-//   accept() calls commit(), which nests KB-scale Ruckig temporaries on that
-//   task's stack (T1, memory-budget.md T21). Under Kinetic² the window solve
-//   runs lazily in the first sample after a submit, on the same task, with a
-//   copy of the pending knots on its stack.
-// - THE KERNEL IS A BUILD SWITCH (ValenceMotion.h NUCLEUS_KINETIC2). Every
-//   conversion between this interface and Kinetic²'s knots lives in
+//   The window solve runs lazily in the first sample after a submit, on that
+//   task, with a copy of the pending knots and the solver's fixed arrays on
+//   its stack: KB-scale temporaries (T1, memory-budget.md T21).
+// - Every conversion between this interface and Kinetic²'s knots lives in
 //   MotionArbiter.cpp's Kinetic² boundary section, nowhere else.
 // - CROSS-TASK methods (estop, pause, override, returnToPause, acquireRail,
 //   releaseRail, setEstopCutsPower, setMotorPowered, setCommissioned, the limit and window setters,
@@ -26,7 +24,7 @@
 //   They write flags and scalars the owning task reads on its next pass;
 //   estop() and a power loss also park the emitter on the CALLING task,
 //   because an e-stop that waits for a tick is not one.
-// - The object holds the engine (KB-scale either way). Host it at file scope in
+// - The object holds the engine (KB-scale). Host it at file scope in
 //   INTERNAL RAM: never a stack local, never PSRAM, which is unreachable while
 //   the flash cache is off and the sampler must not fault during an OTA write.
 // - Millimeters on this interface, normalized 0..1 window units inside the
@@ -39,28 +37,17 @@
 
 #include "ValenceMotion.h"
 #include "hub/valence_config.h"
-#if NUCLEUS_KINETIC2
 #include "kinetic2/engine.hpp"
 #include "kinetic2/sources.hpp"
-#else
-#include "kinetic/kinetic.hpp"
-#endif
 
 namespace valence {
 
-// The kernel the arbiter plans with (ValenceMotion.h kKinetic2). Kinetic² is
-// one axis here; its timeline holds 64 knots, two full 32-sample bundles.
-#if NUCLEUS_KINETIC2
+// The planner, Kinetic² (operator ruling 2026-10-06, bd val-z1k): one axis
+// here; its timeline holds 64 knots, two full 32-sample bundles.
 using MotionEngine = kinetic2::Engine<1, 64>;
 using EngineLimits = kinetic2::Limits;
 using EngineConfig = kinetic2::Config;
 using EngineAnomaly = kinetic2::Anomaly;
-#else
-using MotionEngine = kinetic::Engine;
-using EngineLimits = kinetic::Limits;
-using EngineConfig = kinetic::Config;
-using EngineAnomaly = kinetic::Anomaly;
-#endif
 
 // ---- machine constants ------------------------------------------------------
 
@@ -86,10 +73,10 @@ inline constexpr uint32_t kMinCyclesPerEdge = 40;
 // Intent queue depth, for whichever queue a host puts in front of accept(). A
 // bundle carries up to limits::bundle_max_samples (32) samples and the hub
 // delegate submits them in one pass, so the queue has to absorb a whole bundle
-// plus whatever the previous one left. THE QUEUE IS NOT THE SCHEDULE: an
-// anchored commit past the engine's own kScheduleDepth is refused by the
-// engine and counted as a plan failure, which is the honest place for that
-// ceiling to live.
+// plus whatever the previous one left. THE QUEUE IS NOT THE SCHEDULE: a knot
+// past the engine's timeline (MotionEngine, 64 knots) is refused by the engine
+// and counted as a plan failure, which is the honest place for that ceiling
+// to live.
 inline constexpr uint32_t kIntentQueueDepth = 40;
 
 // ---- homing -----------------------------------------------------------------
@@ -149,7 +136,7 @@ constexpr float homeTouchMmS(float home_mm_s) {
     return floored < home_mm_s ? floored : home_mm_s;
 }
 
-// How much longer than distance over speed a Kinetic² point move takes: a
+// How much longer than distance over speed a point move takes: a
 // rest-to-rest quintic at its analytic minimum time, whose peak speed is 1.875
 // times its mean (RFC-105 (k)). A home cycle's backoffs are point moves; its
 // seeks cruise (MotionArbiter.cpp, the Kinetic² boundary).
@@ -158,8 +145,7 @@ inline constexpr float kPointMoveSlowdown = 1.875f;
 // The cycle's own time, before kHomeTimeoutMarginUs: both approaches across
 // their whole search and the three backoffs at the home speed, both re-touches
 // across their whole reach at the touch speed, plus ramps of home speed over
-// the jog accel. Kinetic cruises all seven moves with one ramp each (half to
-// accelerate, half to stop). Under Kinetic² a seek's smoothstep ramp-up lasts
+// the jog accel. A seek's smoothstep ramp-up lasts
 // 1.5 ramps and adds half of that, and the brake past its last knot adds half
 // a ramp, so 1.25 for each of the four seeks; a backoff is a quintic, at most
 // kPointMoveSlowdown times its distance over speed plus one ramp. The jerk
@@ -167,13 +153,9 @@ inline constexpr float kPointMoveSlowdown = 1.875f;
 constexpr float homeCycleS(float max_rail_mm, float home_mm_s, float accel_mm_s2) {
     const float seek = (max_rail_mm + kHomeFrameMarginMm) + (max_rail_mm + kHomeSearchMarginMm);
     const float slow = 2.0f * (kHomeRetouchBackoffMm + kHomeSearchMarginMm);
-    if constexpr (kKinetic2) {
-        const float backoff = 2.0f * kHomeRetouchBackoffMm + kHomeBackoffMm;
-        return seek / home_mm_s + slow / homeTouchMmS(home_mm_s) + kPointMoveSlowdown * backoff / home_mm_s +
-               (4.0f * 1.25f + 3.0f) * home_mm_s / accel_mm_s2;
-    }
-    return (seek + 2.0f * kHomeRetouchBackoffMm + kHomeBackoffMm) / home_mm_s + slow / homeTouchMmS(home_mm_s) +
-           7.0f * home_mm_s / accel_mm_s2;
+    const float backoff = 2.0f * kHomeRetouchBackoffMm + kHomeBackoffMm;
+    return seek / home_mm_s + slow / homeTouchMmS(home_mm_s) + kPointMoveSlowdown * backoff / home_mm_s +
+           (4.0f * 1.25f + 3.0f) * home_mm_s / accel_mm_s2;
 }
 
 // At the factory speeds. A faster home speed is checked where it runs: the
@@ -243,7 +225,7 @@ HomeSense& noHomeSense();
 
 class MotionArbiter {
 public:
-    // The engine's clock, microseconds. Read only to time commit().
+    // The engine's clock, microseconds. Read only to time the window solve.
     using Clock = uint64_t (*)();
 
     MotionArbiter(MotionEmitter& emitter, Clock now_us) : _emitter(emitter), _now_us(now_us) {}
@@ -254,8 +236,7 @@ public:
     void applyTuning(const MotionTuning& t);
     bool accept(const MotionIntent& in, uint64_t now_us); // gates, clamp, commit
     void evaluate(uint64_t now_us, float dt_s);
-    // Returns the kinds drained, bit k = anomaly kind k (kinetic::AnomalyType,
-    // or kinetic2::AnomalyKind, which keeps its numbers and appends).
+    // Returns the kinds drained, bit k = kinetic2::AnomalyKind k.
     uint32_t drainAnomalies();
     // Every census field the arbiter owns. The emitter's counters (edges,
     // late, resteers, catchups, step_q8, emitter_faults) and stack_free are
@@ -333,29 +314,21 @@ public:
     void noteStream(uint32_t bundles, uint32_t samples, uint32_t dropped);
 
     float positionMm() const { return float(_emitter.count() - _origin) * kMmPerStep; }
-#if NUCLEUS_KINETIC2
     // Owning task. The planned state at now_us, engine frame, for host tooling
     // (tools/kinetic-wasm): the same sample evaluate() and snapshot() take, so
     // reading it at their time changes nothing. Nothing on the board calls it.
     kinetic2::State planState(uint64_t now_us) { return sampleEngine(now_us); }
-#else
-    // Owning task. Read-only, for host tooling that evaluates the plan in
-    // double with no side effect (Engine::planView + evalPiece): the offline
-    // planner, tools/kinetic-wasm. Nothing on the board reads the engine here.
-    const MotionEngine& engine() const { return _engine; }
-#endif
     float winMin() const { return _win_min; }
     float winMax() const { return _win_max; }
     float rail() const { return _rail; }
 
 private:
-    // The engine's construction config: the kernel's defaults plus the
-    // protocol values it is handed rather than spelling (Kinetic's dwell span).
+    // The engine's construction config: the kernel's defaults.
     static EngineConfig engineConfig();
 
-    // The active plan as the census reads it, in the engine frame, from
-    // whichever kernel this build runs. mode and plan_kind are kinetic::Mode's
-    // and kinetic::PlanKind's ordinals under both.
+    // The active plan as the census reads it, in the engine frame. mode and
+    // plan_kind are the 0x1111 selects' option ordinals (MotionArbiter.cpp
+    // PlanStyle, kPlanKindQuintic).
     struct PlanRead {
         float    pos = 0.0f, vel = 0.0f, start = 0.0f, target = 0.0f;
         float    duration_s = 0.0f, elapsed_s = 0.0f;
@@ -397,14 +370,12 @@ private:
     // under `lim`. Owning task; counts the plan cost and a failure as a
     // rejection.
     bool plan(float target, const MotionIntent& in, const EngineLimits& lim, uint64_t now_us);
-#if NUCLEUS_KINETIC2
     // The Kinetic² boundary (MotionArbiter.cpp): an intent becomes a knot, a
     // brake or a refusal here and nowhere else.
     bool submitKnots(float target_norm, const MotionIntent& in, const EngineLimits& lim, uint64_t now_us);
     // The one door to the engine's stateAt(): records the brake the engine
     // takes from a knot that ends the timeline still moving (RFC-105 (dd)).
     kinetic2::State sampleEngine(uint64_t now_us);
-#endif
     // The home cycle, owning task only (MotionArbiter.cpp, homing). A leg:
     // approach, approach_stop, clear (the backoff), touch, touch_stop; then
     // the far leg, or finish (the final backoff).
@@ -442,7 +413,6 @@ private:
 
     MotionEngine _engine{engineConfig()};
 
-#if NUCLEUS_KINETIC2
     // Kinetic² boundary state, owning task only. The newest knot the engine
     // holds (or the rest point after a reset, or a brake's end): a segment
     // starting after it is a rest until its start, and a jog chains from it.
@@ -464,7 +434,6 @@ private:
     kinetic2::Policy _k2_policy = kinetic2::Config{}.policy;
     uint8_t  _k2_curve_policy = 0;
     uint32_t _k2_latency_us   = sampleLatencyUs(motionDefaultTuning());
-#endif
 
     float _win_min = 0.0f;
     float _win_max = DEFAULT_MAX_RAIL_MM;
@@ -565,9 +534,6 @@ private:
     bool     _stream    = false;
     uint32_t _anomalies = 0;
     std::array<uint32_t, kAnomalyKinds> _anom{};
-#if !NUCLEUS_KINETIC2
-    uint8_t  _plan_flags = 0;   // RFC-100: registry plan_flags, set by plan()
-#endif
     float    _distance_mm = 0.0f;
     float    _peak_mm_s   = 0.0f;
     uint32_t _strokes     = 0;

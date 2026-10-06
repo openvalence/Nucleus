@@ -1,4 +1,4 @@
-# Kconfig overlay for the flagship_p4_bench_kinetic2 env (platformio.ini): the
-# devkit bench quadrature on LPG10/LPG12, the same line flagship_p4_bench sets
-# through custom_sdkconfig. Listed after kinetic2.sdkconfig.defaults.
+# Kconfig overlay for the flagship_p4_bench env (platformio.ini), listed after
+# sdkconfig.defaults in its SDKCONFIG_DEFAULTS: the devkit bench quadrature on
+# LPG10/LPG12 (src/Kconfig.projbuild NUCLEUS_BENCH_QUAD_LP10_12).
 CONFIG_NUCLEUS_BENCH_QUAD_LP10_12=y

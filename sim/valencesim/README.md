@@ -13,7 +13,7 @@ with no device semantics.
 | Hub | `lib/valence` (`valence::Hub`), the pinned sibling | real |
 | Catalog | `flagship_p4/src/hub/ValenceCatalog.h` + `boardFeatures()` | real, same etag as the board |
 | Delegate and every STATE publisher | `flagship_p4/src/hub/ValenceDevice.cpp`, compiled verbatim | real |
-| Motion planner | `../Kinetic` (`kinetic::Engine` over Ruckig), the sibling checkout `kinetic.pin` names | real |
+| Motion planner | `../Kinetic` (`kinetic2::Engine`, Kinetic²), the sibling checkout `kinetic.pin` names | real |
 | Arbiter: gates, window clamp, limit sets, feedforward, census | `flagship_p4/src/motion/MotionArbiter.cpp`, compiled verbatim | real |
 | Motion task plumbing | `src/SimMotion.cpp` | a ring on the one hub thread instead of FreeRTOS queues; census refreshed every pass, not at 50 Hz |
 | Emitter and position truth | `src/SimMotion.cpp` | ideal: renders the arbiter's steering word exactly, so `late`, `resteers`, `catchups` and `stack_free` read 0 |
@@ -52,11 +52,6 @@ configure fetches IXWebSocket v11.4.6 and applies Valence Bench's
 subprotocol-echo patch from `../Valence/hub/bench/cmake/`. The sibling
 Valence and Kinetic checkouts must exist beside this repo (override with
 `-DVALENCE_ROOT=` and `-DKINETIC_ROOT=`).
-
-The Kinetic² planner (bd val-klo, `NUCLEUS_KINETIC2` in
-`flagship_p4/src/motion/ValenceMotion.h`) is the same configure with
-`-DNUCLEUS_KINETIC2=ON` into its own tree, `sim/valencesim/build-k2`, so a bench
-can run both twins side by side. It compiles no Ruckig.
 
 Linux and macOS: the same two `cmake` lines without the compiler flags (a
 C++23 GCC or Clang, `cmake`, `ninja`, `git`; built with GCC 16 and with Clang

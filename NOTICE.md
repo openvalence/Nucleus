@@ -34,7 +34,6 @@ Section numbers are CERN-OHL-S-2.0's own.
 | Component | Origin | License | Used by Nucleus for |
 |---|---|---|---|
 | OSSM-Lite (fray-d) | https://github.com/fray-d/OSSM-Lite | CERN-OHL-S-2.0 | The Advanced generator's stroke and modulation math, carved out in `flagship_p4/src/patterns/advanced/` (its `NOTICE.md` lists the modifications). The modulator field definitions in `flagship_p4/src/hub/ValenceCatalog.h` (RFC-066) are Valence interface vocabulary, credited there, and stay Apache-2.0 |
-| Ruckig Community Version 0.19.4 | https://github.com/pantor/ruckig | MIT, Copyright (c) 2021 Lars Berscheid | Kinetic's `third_party/ruckig`, vendored unmodified there (its `VENDORED.md`); the jerk-limited trajectory solver under Kinetic, compiled into the firmware |
 | StrokeEngine patterns (theelims) | https://github.com/theelims/StrokeEngine, as carried by https://github.com/KinkyMakers/OSSM-hardware (`Software/lib/StrokeEngine/src/`) | MIT, Copyright (C) 2021 theelims | `lib/strokeengine_patterns`, the seven core stroke patterns (`lib/strokeengine_patterns/VENDORED.md`) |
 | ESP-IDF 5.5.4 | https://github.com/espressif/esp-idf | Apache-2.0 | The framework the P4 firmware builds on (`flagship_p4`); fetched at build time, not stored in this repository |
 | espressif/esp_hosted 2.12.13 | https://components.espressif.com/components/espressif/esp_hosted | Apache-2.0 | Host side of the C6 WiFi link; the C6 runs Espressif's stock slave image (managed component) |

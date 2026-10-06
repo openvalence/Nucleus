@@ -1,6 +1,6 @@
 // valencesim -- the Nucleus device twin on a desktop: the REAL valence::Hub,
 // the REAL device catalog and delegate (flagship_p4/src/hub/ValenceDevice),
-// and the REAL kinetic::Engine behind a WebSocket speaking valence.v1
+// and the REAL kinetic2::Engine behind a WebSocket speaking valence.v1
 //
 //   valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
 //              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]

@@ -1,5 +1,5 @@
 // SimMotion -- motion/ValenceMotion.h on a desktop: the board's own
-// MotionArbiter and kinetic::Engine, hosted on the sim's one thread, steering
+// MotionArbiter and kinetic2::Engine, hosted on the sim's one thread, steering
 // an ideal emitter
 // Constraints:
 // - SINGLE-THREADED (SimMotion.h). The P4 hands intents across a FreeRTOS

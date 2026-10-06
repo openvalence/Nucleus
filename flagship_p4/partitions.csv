@@ -17,9 +17,8 @@
 # _parse_partitions), so a serial flash lands in slot A and OTA alternates
 # from there.
 #
-# 4 MB per slot against a 1.31 MB image: the vendored Ruckig step solvers that
-# kinetic wraps are most of the growth, and none of it is compressible by build
-# flags. 8.5 MB of the 16 MB part is used; the tail is unallocated on purpose,
+# 4 MB per slot against a 1.30 MB image. 8.5 MB of the 16 MB part is used;
+# the tail is unallocated on purpose,
 # because a future data partition must not force the app slots to move (moving
 # them invalidates every otadata entry and needs a serial flash to recover).
 #

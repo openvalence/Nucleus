@@ -178,7 +178,7 @@ inline constexpr uint8_t kApLastKey = uint8_t(apModKeyBase(kApBaseCount - 1) + 5
 
 // plan-strip `style` option for a hold: a timed plan whose start is its end
 // (SPEC 9.6 hold segment, an RFC-095 dwell among them). Indices below it are
-// kinetic::Mode's.
+// the planner's styles (MotionArbiter.cpp PlanStyle).
 inline constexpr uint8_t kPlanStyleHold = 4;
 
 // MIRROR of kMotionSourceNames (flagship_p4/src/motion/ValenceMotion.h),
@@ -216,7 +216,7 @@ inline constexpr std::string_view pattern_presets  = "Library / Pattern presets"
 // DEVICE-authored EVENT channel in the ecosystem and therefore the proof that
 // the grammar fix works: nothing below required a registry change.
 namespace anom_body {
-inline constexpr uint8_t kind   = 1;  // kinetic::AnomalyType, mirrors event_kind; labels live in event_kinds
+inline constexpr uint8_t kind   = 1;  // kinetic2::AnomalyKind, mirrors event_kind; labels live in event_kinds
 inline constexpr uint8_t seq    = 2;  // engine's rolling event id (wraps)
 inline constexpr uint8_t target = 3;  // the command target that provoked it, 0..1 normalized
 inline constexpr uint8_t detail = 4;  // KIND-SPECIFIC scalar — see the option labels
@@ -278,8 +278,8 @@ inline constexpr float home_speed  = 40.0f;       // DEFAULT_HOME_SPEED_MM_S
 // have no `.dflt` here: their settings are retired bytes (see the field
 // comments there). Do not re-add either without re-adding the field's
 // setting_key first.
-// kinetic::Config::overshoot_guard defaults ARMED (1.0), so the toggle that
-// drives it defaults on.
+// overshoot_guard's factory value is ARMED (1.0, motionDefaultTuning()), so
+// the toggle defaults on. The planner does not read it.
 inline constexpr uint8_t overshoot_clamp   = 1;
 }  // namespace factory
 
@@ -906,7 +906,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // ---- "motion-input" — STREAM, c2h, control, ≤333 Hz ---------------------
     // Continuous stroke-window targets + optional signed handoff velocity,
     // decoded straight off BundleView by the hub delegate's onStreamBundle()
-    // into the Kinetic pacing ring; maps to arbiter source 1
+    // into the motion queue (motionSubmit()); maps to arbiter source 1
     // (MotionSource::TCODE_STREAM), the same source id legacy TCode uses.
     // scale 10000 on target = 1e-4 resolution over the 0..1 stroke window;
     // scale 1000 on vel = 1e-3 resolution, i16 signed (0 = no handoff
@@ -935,10 +935,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // ---- "motion-segment" — STREAM, c2h, control, ≤50 Hz --------------------
     // TIMED-SEGMENT motion streaming, the WAVEFORM-mode companion to 0x0084.
     // Carries the sender's native segments — ONE {target, duration, end_vel}
-    // per stroke leg — which the Kinetic engine renders as a C2 quintic
-    // over EXACTLY the commanded duration. Decoded by FIXED OFFSET in the
-    // delegate's onStreamBundle() (same convention as 0x0084), enqueued into
-    // the SAME Kinetic pacing ring, mapped to arbiter source 1
+    // per stroke leg — which the planner renders as a knot at the segment's
+    // start plus its duration (MotionArbiter.cpp, the Kinetic² boundary).
+    // Decoded by FIXED OFFSET in the delegate's onStreamBundle() (same
+    // convention as 0x0084), enqueued into the SAME motion queue, mapped to arbiter source 1
     // (TCODE_STREAM) — a client uses 0x0084 OR 0x0085, both ARE "the stream
     // input".
     //   * duration_ms is the commanded segment duration and MUST be ≥1;
@@ -979,7 +979,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "plan-strip" — STATE, elevated, 45 Hz ------------------------------
-    // THE PLANNER'S CURRENT SEGMENT: what Kinetic is executing right now,
+    // THE PLANNER'S CURRENT SEGMENT: what the planner is executing right now,
     // as a strip you can draw. Together with 0x0080's raw/tgt/pos triple it
     // is the whole input for the diagnostic graphing CLI: raw demand in,
     // planner shape out, carriage response.
@@ -1096,9 +1096,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // Plan counts, the per-kind anomaly breakdown, the on-device plan-time
     // bench, and the Valence stream-ingress counters.
     //
-    // The per-kind counters are eleven NAMED fields rather than one array: a
+    // The per-kind counters are twelve NAMED fields rather than one array: a
     // generic client renders named fields with no per-device knowledge.
-    // Their order is kinetic::AnomalyType's own, which is APPEND-ONLY
+    // Their order is kinetic2::AnomalyKind's own, which is APPEND-ONLY
     // upstream, so a new engine kind appends a field to the END OF THIS
     // BLOCK — shifting every offset after it. The catalog's own layout is
     // what a client decodes against and the etag moves with it, so that is
@@ -1113,8 +1113,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // increments it, so EVERY subscriber sees the reset happened, not only
     // the session that asked for it. Without it a client watching the
     // counters cannot tell a reset from a reboot from a wrap.
-    //   [3*4 + 11*4 + 12 + 5*4 + 2 + 1 + 1 = 92 B; a Kinetic² build carries
-    //    a twelfth kind, anom_knot_refused, for 96 B]
+    //   [3*4 + 12*4 + 12 + 5*4 + 2 + 1 + 1 = 96 B]
     auto addMotionDiag = [&]() {
     c.addEntry({.id = ch::motion_diag, .name = "kinetic-diag",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1133,14 +1132,15 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectField({.name = "mode",      .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .group = card::planner, .desc = "Planning mode of the motion core"},
                      {"idle", "waveform", "chase", "settle"});
-    // Options are indexed by kinetic::PlanKind and the enum is APPEND-ONLY.
+    // Option ordinals are wire values and the list is APPEND-ONLY; the planner
+    // renders only none and quintic (MotionArbiter.cpp kPlanKindQuintic).
     // "cubic" (=3) arrived with curve_policy/ForceC1: a C1 cubic and a C2 quintic
     // are different curves and the client must be able to tell them apart, so
     // this list grows rather than collapsing both into "hermite".
     c.addSelectField({.name = "plan_kind", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .group = card::planner, .desc = "Curve type of the active plan"},
                      {"none", "quintic", "ruckig", "cubic"});
-    // Per-kind breakdown — names are kinetic::AnomalyType's, index 0 is
+    // Per-kind breakdown — names are kinetic2::AnomalyKind's, index 0 is
     // the engine's own "none" placeholder and is never counted, so it is
     // rank hidden: a permanent zero is padding, not a gauge.
     c.addLayoutField({.name = "anom_none",        .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
@@ -1173,12 +1173,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "anom_dwell_zeroed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = card::anomalies,
                       .desc = "Stale arrival speeds ignored on held positions"});
-    // Kinetic² only (MotionCensus::anom has one more slot there): kind 11.
-    if constexpr (kKinetic2) {
-        c.addLayoutField({.name = "anom_knot_refused", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                          .group = card::anomalies,
-                          .desc = "Points refused as late or out of order"});
-    }
+    c.addLayoutField({.name = "anom_knot_refused", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
+                      .group = card::anomalies,
+                      .desc = "Points refused as late or out of order"});
     c.addLayoutField({.name = "plan_us_last", .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
                       .group = card::plan_time, .desc = "Compute time of the latest plan",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
@@ -1206,7 +1203,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "motion-anomaly" — EVENT, watch, normal ----------------------------
-    // Kinetic's anomaly feed, as EDGES.
+    // The planner's anomaly feed, as EDGES.
     //
     // FIRST DEVICE-AUTHORED EVENT CHANNEL: every field below is keyed by
     // THIS CHANNEL'S OWN schema (valence::anom_body), naming them costs no
@@ -1215,7 +1212,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // catalog's body-map grammar exists to prevent.
     //
     // The kind rides the frame's event_kind (33) and is labeled by this entry's
-    // event_kinds table (RFC-065), index-aligned with kinetic::AnomalyType and
+    // event_kinds table (RFC-065), index-aligned with kinetic2::AnomalyKind and
     // APPEND-ONLY: a released kind is never relabeled, a retired one keeps its
     // label. Body key 1 mirrors the value (SPEC 9.4 MAY) and carries no labels,
     // because the table is their one home. The entry's events.anomaly role is
@@ -1233,15 +1230,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasCategory = true, .category = valence::ui_categories::motion,
                 .hasRank = true, .rank = valence::ui_ranks::diagnostic,
                 .role = valence::channel_roles::events_anomaly});
-    if constexpr (kKinetic2) {
-        c.setEventKinds({"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
-                         "waveform_fallback", "waveform_scaled", "waveform_centered",
-                         "handoff_bounded", "waveform_smoothed", "dwell_zeroed", "knot_refused"});
-    } else {
-        c.setEventKinds({"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
-                         "waveform_fallback", "waveform_scaled", "waveform_centered",
-                         "handoff_bounded", "waveform_smoothed", "dwell_zeroed"});
-    }
+    c.setEventKinds({"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
+                     "waveform_fallback", "waveform_scaled", "waveform_centered",
+                     "handoff_bounded", "waveform_smoothed", "dwell_zeroed", "knot_refused"});
     c.addSchemaField({.key = anom_body::kind, .name = "kind", .type = CborFieldType::uint_t, .unit = "",
                       .group = card::anomalies, .desc = "Anomaly kind, same as the event kind"});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",
@@ -1433,7 +1424,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     //
     // Applied live and persisted with 0x1000 and cfg_gen in one blob
     // (StoredState.h). The `default` annotations stay the FACTORY values
-    // (kinetic::Config), never the stored ones: SPEC distinguishes default
+    // (motionDefaultTuning()), never the stored ones: SPEC distinguishes default
     // from current, and current is what the STATE carries.
     auto addKineticLimits = [&]() {
     c.addEntry({.id = ch::kinetic_limits, .name = "kinetic-limits",
@@ -1482,11 +1473,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // per-path split, NOT a legacy one: neither path is deprecated and the
     // plugin ships both.
     //
-    // All of them are wired — every applied write reaches the engine config
-    // before its next plan — so the mask reports them ENABLED, the truth. A
-    // knob that is accepted but whose path is not currently active is a
-    // different statement from a knob the machine refuses, and graying it would
-    // be exactly the lie enabled_mask exists to prevent.
+    // The planner reads only chase_dense_ms (the samples grant's latency,
+    // sampleLatencyUs()); the rest are accepted, persisted and unread, yet the
+    // mask reports them ENABLED. PLANNED CHANGE: the mask, the card and the
+    // defaults follow the planner through an RFC (bd val-68v), never a
+    // silent edit here: they are wire.
     auto addKineticChase = [&]() {
     c.addEntry({.id = ch::kinetic_chase, .name = "kinetic-chase",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
