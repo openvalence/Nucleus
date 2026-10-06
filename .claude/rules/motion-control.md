@@ -21,7 +21,9 @@ boundary (MotionArbiter.cpp, "the Kinetic² boundary"): a segment is a knot at
 its start plus its duration, a gap before its start a rest knot; a sample a
 knot at its arrival plus the grant's `schedule_latency_us`
 (`sampleLatencyUs()`); a jog, a return or a homing leg a knot at the park time
-from the newest knot (RFC-105 (k) and (n)), stretched, never trimmed; a
+from the newest knot (RFC-105 (k) and (n)), at an authored rest (a free last
+knot keeps its secant and is braked past, RFC-105 (dd)), stretched, never
+trimmed; a
 generator's stop, PAUSE and a timeline that runs dry still moving are the
 brake. Kinetic² has no Ruckig, no chase heuristics and no dwell rule; a point
 move is a quintic, up to 1.875 times a cruise (`kPointMoveSlowdown`, which

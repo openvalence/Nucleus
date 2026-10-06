@@ -546,9 +546,12 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
         _k2_chase = false;
     } else if (manual) {
         // A jog, a return or a homing leg: a sample (RFC-105 (n)) whose latency
-        // is the park time from the newest knot under the jog set.
+        // is the park time from the newest knot under the jog set, at an
+        // authored rest: a free last knot keeps its secant and the engine
+        // brakes past it (RFC-105 (dd)).
         const uint64_t from = _k2_newest_us > now_us ? _k2_newest_us : now_us;
         k = kinetic2::knotFromSample(p, from, parkUs(std::fabs(p - _k2_newest_p), lim));
+        k.has_v = true;   // v = 0
         _k2_chase = false;
     } else {
         // A 0x2100 sample: one behind, at the grant's latency (RFC-105 promise

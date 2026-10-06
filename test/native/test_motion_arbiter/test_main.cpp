@@ -962,7 +962,7 @@ TEST_CASE("Kinetic² RFC-100: plan_flags from the solver, fallback never, 0 with
     CHECK((clamp->census().plan_flags & pf::clamped) != 0);
 }
 
-TEST_CASE("Kinetic² samples: one behind at the grant's latency, never past the newest, a backwards one refused as kind 11" *
+TEST_CASE("Kinetic² samples: one behind at the grant's latency, a stream that stops brakes past the newest, a backwards one refused as kind 11" *
           doctest::skip(!valence::kKinetic2)) {
     auto r = rig();
     r->arb.forceHome(400.0f);
@@ -981,17 +981,25 @@ TEST_CASE("Kinetic² samples: one behind at the grant's latency, never past the 
         r->run(20'000);
     }
     // One behind: the plan passes the first sample `latency` after it arrived.
+    // The newest is reached moving at the secant into it and nothing follows,
+    // so the engine brakes from there (RFC-105 (dd)): past the newest by at
+    // most the stop distance from that secant at the input ceilings.
     const float last = target;
+    const float v_end = 0.1f / 0.020f;   // mm/s
+    const float stop = v_end * v_end / (2.0f * DEFAULT_ACCEL_MM_S2) +
+                       v_end * DEFAULT_ACCEL_MM_S2 / (2.0f * DEFAULT_INPUT_MAX_JERK_MM_S3);
     float peak = 0.0f;
     for (int i = 0; i < 2000; ++i) {
         r->run(1000);
         peak = std::max(peak, r->census().plan_mm);
     }
-    CHECK(peak <= last + 1e-3f);   // never past the newest
+    CHECK(peak <= last + stop);
     CHECK_FALSE(r->census().busy);
-    CHECK(r->census().plan_mm == doctest::Approx(last).epsilon(1e-5));
+    CHECK(r->census().plan_mm >= last);
+    CHECK(r->census().plan_mm <= last + stop);
     r->arb.drainAnomalies();
-    CHECK(r->census().anomalies == 0);   // a legal stream spends nothing
+    CHECK(r->census().anomalies == 1);   // the stop is the one spend
+    CHECK(r->census().anom[size_t(kinetic2::AnomalyKind::SettleEngaged)] == 1);
 
     // Two samples in one tick share a knot time: the second goes backwards.
     REQUIRE(r->submit(MotionSource::Stream, 10.0f));
