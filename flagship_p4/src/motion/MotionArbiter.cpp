@@ -36,6 +36,9 @@ constexpr float kTrackHz = 50.0f;
 // as a stroke, so dither around a standstill never inflates the odometer.
 constexpr float kStrokeMinMm = 1.0f;
 
+// A Kinetic² homing seek's speed ceiling over its authored cruise (homePlan()).
+constexpr float kCruiseCeilingHeadroom = 1.005f;
+
 bool isGenerator(MotionSource s) { return s == MotionSource::Pattern || s == MotionSource::Advanced; }
 
 [[maybe_unused]] const char* sourceName(uint8_t id) {
@@ -548,13 +551,41 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
                                       fam <= 3 ? kinetic2::Family(fam) : kinetic2::Family::Unspecified);
         _k2_chase = false;
     } else if (manual) {
-        // A jog, a return or a homing leg: a sample (RFC-105 (n)) whose latency
-        // is the park time from the newest knot under the jog set, at an
-        // authored rest: a free last knot keeps its secant and the engine
-        // brakes past it (RFC-105 (dd)).
         const uint64_t from = _k2_newest_us > now_us ? _k2_newest_us : now_us;
-        k = kinetic2::knotFromSample(p, from, parkUs(std::fabs(p - _k2_newest_p), lim));
-        k.has_v = true;   // v = 0
+        const float d = std::fabs(p - _k2_newest_p);
+        const float sgn = p >= _k2_newest_p ? 1.0f : -1.0f;
+        // A homing seek (a Manual move with an end velocity, homePlan())
+        // cruises at that speed: a ramp knot reaching it from rest, then a
+        // knot at the same speed placed so the engine's brake past it, with
+        // nothing after it, lands on the target. The piece between two equal
+        // authored velocities a cruise apart is a straight cruise. The ramp is
+        // a smoothstep, legal at the jog ceilings when it lasts
+        // max(1.5 v / amax, sqrt(6 v / jmax)), plus parkUs()'s 1 ms margin.
+        // A leg too short to hold both is a point move.
+        const float v = std::fabs(in.end_vel_mm_s) / span();
+        const float t_ramp = std::fmax(1.5f * v / lim.amax, std::sqrt(6.0f * v / lim.jmax));
+        const uint32_t ramp_us = t_ramp < 600.0f ? uint32_t(t_ramp * 1e6f) + 1000u : 0u;
+        const float d_ramp = 0.5f * v * float(ramp_us) * 1e-6f;
+        const float d_stop = kinetic2::Profile::brake(kinetic2::State{0.0f, v, 0.0f}, 0, lim).end().p;
+        if (in.has_end_vel && v > 0.0f && ramp_us > 0u && d > d_ramp + d_stop) {
+            kinetic2::Knot ramp;
+            ramp.t_us   = from + ramp_us;
+            ramp.p      = _k2_newest_p + sgn * d_ramp;
+            ramp.has_v  = true;
+            ramp.v      = sgn * v;
+            ramp.family = kinetic2::Family::C2;
+            if (!_engine.submit(ramp, now_us)) return false;
+            k = ramp;
+            k.p    = p - sgn * d_stop;
+            k.t_us = ramp.t_us + uint64_t((d - d_ramp - d_stop) / v * 1e6f);
+        } else {
+            // A jog, a return, a backoff or a short seek: a sample (RFC-105
+            // (n)) whose latency is the park time from the newest knot under
+            // the jog set, at an authored rest: a free last knot keeps its
+            // secant and the engine brakes past it (RFC-105 (dd)).
+            k = kinetic2::knotFromSample(p, from, parkUs(d, lim));
+            k.has_v = true;   // v = 0
+        }
         _k2_chase = false;
     } else {
         // A 0x2100 sample: one behind, at the grant's latency (RFC-105 promise
@@ -852,19 +883,31 @@ void MotionArbiter::homeOrigin(int32_t count, float at_mm, uint64_t now_us) {
     _p_cmd_mm = positionMm();
 }
 
-bool MotionArbiter::homePlan(float target_mm, float v_mm_s, uint64_t now_us) {
+bool MotionArbiter::homePlan(float target_mm, float v_mm_s, bool seek, uint64_t now_us) {
     EngineLimits lim = limitsFor(true);
     lim.vmax = v_mm_s / span();
     MotionIntent in;
     in.source = MotionSource::Manual;
     in.target_mm = target_mm;
+    // Under Kinetic² a seek carries its speed as an end velocity, which the
+    // knot boundary renders as a cruise (submitKnots()); Kinetic cruises a
+    // speed-bound point move by itself. The seek's ceiling sits
+    // kCruiseCeilingHeadroom over the cruise: a velocity authored exactly at
+    // the ceiling fails the solver's ratio test by a rounding and the knot is
+    // dropped (measured: every cycle failed). The plan's peak stays the cruise
+    // (measured 40.0000 mm/s at 40).
+    if (kKinetic2 && seek) {
+        in.has_end_vel  = true;
+        in.end_vel_mm_s = v_mm_s;
+        lim.vmax *= kCruiseCeilingHeadroom;
+    }
     return plan(target_mm, in, lim, now_us);
 }
 
 void MotionArbiter::homeSeek(bool touch, bool armed, uint64_t now_us) {
     _sense_armed = armed;
     const float target = touch ? homeAway(_home_leg, _home_at_mm, -kHomeSearchMarginMm) : homePast(_home_leg);
-    if (!homePlan(target, touch ? _touch_v : _home_v, now_us))
+    if (!homePlan(target, touch ? _touch_v : _home_v, true, now_us))
         return homeEnd(touch ? "the re-touch did not plan" : "the approach did not plan");
     _home = touch ? HomePhase::touch : HomePhase::approach;
 }
@@ -926,7 +969,7 @@ void MotionArbiter::homeStep(uint64_t now_us) {
             // A far stall is only read: the home datum keeps its label.
             if (_home_leg == 0) homeOrigin(_home_hit, homeStopAt(0), now_us);
             _home_at_mm = float(_home_hit - _origin) * kMmPerStep;
-            if (!homePlan(homeAway(_home_leg, _home_at_mm, kHomeRetouchBackoffMm), _home_v, now_us))
+            if (!homePlan(homeAway(_home_leg, _home_at_mm, kHomeRetouchBackoffMm), _home_v, false, now_us))
                 return homeEnd("the backoff did not plan");
             _home = HomePhase::clear;
             return;
@@ -975,7 +1018,7 @@ void MotionArbiter::homeMeasure(uint64_t now_us) {
     // pushes it back (setWindow()).
     _rail = len;
     homeOrigin(_home_flip ? _home_datum[1] : _home_datum[0], 0.0f, now_us);
-    if (!homePlan(_home_flip ? kHomeBackoffMm : len - kHomeBackoffMm, _home_v, now_us))
+    if (!homePlan(_home_flip ? kHomeBackoffMm : len - kHomeBackoffMm, _home_v, false, now_us))
         return homeEnd("the final backoff did not plan");
     _home = HomePhase::finish;
 }

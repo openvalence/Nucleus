@@ -20,15 +20,17 @@ Kinetic, the default. Under Kinetic² every intent becomes knots at one
 boundary (MotionArbiter.cpp, "the Kinetic² boundary"): a segment is a knot at
 its start plus its duration, a gap before its start a rest knot; a sample a
 knot at its arrival plus the grant's `schedule_latency_us`
-(`sampleLatencyUs()`); a jog, a return or a homing leg a knot at the park time
-from the newest knot (RFC-105 (k) and (n)), at an authored rest (a free last
-knot keeps its secant and is braked past, RFC-105 (dd)), stretched, never
-trimmed; a
-generator's stop and PAUSE are the arbiter's brake, which refuses a knot due
-before its end; a timeline that runs dry still moving is the engine's own
-brake, which a new knot re-plans from (RFC-105 (dd)). Kinetic² has no Ruckig, no chase heuristics and no dwell rule; a point
-move is a quintic, up to 1.875 times a cruise (`kPointMoveSlowdown`, which
-the home deadline carries).
+(`sampleLatencyUs()`); a jog, a return or a homing backoff a knot at the
+park time from the newest knot (RFC-105 (k) and (n)), at an authored rest (a
+free last knot keeps its secant and is braked past, RFC-105 (dd)), stretched,
+never trimmed; a homing seek two knots at the leg's speed, a ramp-up at the
+jog accel and a knot the brake past lands on the search end, so it cruises
+into contact; a generator's stop and PAUSE are the arbiter's brake, which
+refuses a knot due before its end; a timeline that runs dry still moving is
+the engine's own brake, which a new knot re-plans from (RFC-105 (dd)).
+Kinetic² has no Ruckig, no chase heuristics and no dwell rule; a point move
+is a quintic, up to 1.875 times a cruise (`kPointMoveSlowdown`, which the
+home deadline carries for the backoffs).
 
 Every command becomes ONE trajectory planned from the engine's actual
 (p, v, a); the sampler evaluates it. Event-driven, never clocked.

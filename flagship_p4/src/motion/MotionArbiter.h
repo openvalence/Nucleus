@@ -149,21 +149,30 @@ constexpr float homeTouchMmS(float home_mm_s) {
     return floored < home_mm_s ? floored : home_mm_s;
 }
 
-// How much longer than distance over speed a speed-bound point move takes.
-// Kinetic² renders one as a rest-to-rest quintic at its analytic minimum time,
-// whose peak speed is 1.875 times its mean (RFC-105 (k)); Kinetic cruises at
-// the speed.
-inline constexpr float kPointMoveSlowdown = kKinetic2 ? 1.875f : 1.0f;
+// How much longer than distance over speed a Kinetic² point move takes: a
+// rest-to-rest quintic at its analytic minimum time, whose peak speed is 1.875
+// times its mean (RFC-105 (k)). A home cycle's backoffs are point moves; its
+// seeks cruise (MotionArbiter.cpp, the Kinetic² boundary).
+inline constexpr float kPointMoveSlowdown = 1.875f;
 
 // The cycle's own time, before kHomeTimeoutMarginUs: both approaches across
 // their whole search and the three backoffs at the home speed, both re-touches
-// across their whole reach at the touch speed, and an accel and a decel ramp
-// on each of the seven moves.
+// across their whole reach at the touch speed, plus ramps of home speed over
+// the jog accel. Kinetic cruises all seven moves with one ramp each (half to
+// accelerate, half to stop). Under Kinetic² a seek's smoothstep ramp-up lasts
+// 1.5 ramps and adds half of that, and the brake past its last knot adds half
+// a ramp, so 1.25 for each of the four seeks; a backoff is a quintic, at most
+// kPointMoveSlowdown times its distance over speed plus one ramp. The jerk
+// ramps and the 1 ms knot margins are inside kHomeTimeoutMarginUs.
 constexpr float homeCycleS(float max_rail_mm, float home_mm_s, float accel_mm_s2) {
-    const float fast = (max_rail_mm + kHomeFrameMarginMm) + (max_rail_mm + kHomeSearchMarginMm) +
-                       2.0f * kHomeRetouchBackoffMm + kHomeBackoffMm;
+    const float seek = (max_rail_mm + kHomeFrameMarginMm) + (max_rail_mm + kHomeSearchMarginMm);
     const float slow = 2.0f * (kHomeRetouchBackoffMm + kHomeSearchMarginMm);
-    return kPointMoveSlowdown * (fast / home_mm_s + slow / homeTouchMmS(home_mm_s)) +
+    if constexpr (kKinetic2) {
+        const float backoff = 2.0f * kHomeRetouchBackoffMm + kHomeBackoffMm;
+        return seek / home_mm_s + slow / homeTouchMmS(home_mm_s) + kPointMoveSlowdown * backoff / home_mm_s +
+               (4.0f * 1.25f + 3.0f) * home_mm_s / accel_mm_s2;
+    }
+    return (seek + 2.0f * kHomeRetouchBackoffMm + kHomeBackoffMm) / home_mm_s + slow / homeTouchMmS(home_mm_s) +
            7.0f * home_mm_s / accel_mm_s2;
 }
 
@@ -424,7 +433,9 @@ private:
     void homeOrigin(int32_t count, float at_mm, uint64_t now_us);
     // Ends the cycle; a failure records `why` and the leg for the census.
     void homeEnd(const char* why);
-    bool homePlan(float target_mm, float v_mm_s, uint64_t now_us);
+    // Plans a leg at v_mm_s; `seek` marks an approach or re-touch, which
+    // cruises into its contact rather than stopping at its target.
+    bool homePlan(float target_mm, float v_mm_s, bool seek, uint64_t now_us);
 
     MotionEmitter& _emitter;
     Clock          _now_us;

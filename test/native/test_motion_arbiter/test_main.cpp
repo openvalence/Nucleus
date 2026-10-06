@@ -111,7 +111,8 @@ std::unique_ptr<Rig> rig() { return std::make_unique<Rig>(); }
 
 // Kinetic² renders a point move as a rest-to-rest quintic at its analytic
 // minimum time (RFC-105 (k)), up to 1.875 times Kinetic's cruise: a case that
-// waits for a jog or a home cycle to finish waits twice as long under it.
+// waits for a jog, or a home cycle with its point-move backoffs, to finish
+// waits twice as long under it.
 constexpr uint64_t moveUs(uint64_t us) { return valence::kKinetic2 ? 2 * us : us; }
 
 }  // namespace
@@ -1343,18 +1344,11 @@ TEST_CASE("home: approach at home_speed held to the jog speed, re-touch at a qua
         REQUIRE(r->arb.home() == HomeStart::started);
         const std::vector<float> v = contactSpeeds(*r, s, moveUs(20'000'000));
         REQUIRE(v.size() == 4);   // home approach, home re-touch, far approach, far re-touch
-        if constexpr (valence::kKinetic2) {
-            // A quintic seek touches below its peak, never above it.
-            for (size_t i = 0; i < v.size(); ++i) {
-                CHECK(v[i] > 0.0f);
-                CHECK(v[i] <= (i % 2 == 0 ? DEFAULT_HOME_SPEED_MM_S : 10.0f) * 1.02f);
-            }
-        } else {
-            CHECK(v[0] == doctest::Approx(DEFAULT_HOME_SPEED_MM_S).epsilon(0.02));
-            CHECK(v[1] == doctest::Approx(10.0f).epsilon(0.02));
-            CHECK(v[2] == doctest::Approx(DEFAULT_HOME_SPEED_MM_S).epsilon(0.02));
-            CHECK(v[3] == doctest::Approx(10.0f).epsilon(0.02));
-        }
+        // Both kernels cruise a seek, so contact is at the leg's speed.
+        CHECK(v[0] == doctest::Approx(DEFAULT_HOME_SPEED_MM_S).epsilon(0.02));
+        CHECK(v[1] == doctest::Approx(10.0f).epsilon(0.02));
+        CHECK(v[2] == doctest::Approx(DEFAULT_HOME_SPEED_MM_S).epsilon(0.02));
+        CHECK(v[3] == doctest::Approx(10.0f).epsilon(0.02));
         CHECK(r->census().homed);
     }
     SUBCASE("a live home_speed, held to the jog speed") {
@@ -1368,17 +1362,10 @@ TEST_CASE("home: approach at home_speed held to the jog speed, re-touch at a qua
         REQUIRE(r->arb.home() == HomeStart::started);
         const std::vector<float> v = contactSpeeds(*r, s, moveUs(30'000'000));
         REQUIRE(v.size() == 4);
-        if constexpr (valence::kKinetic2) {
-            for (size_t i = 0; i < v.size(); ++i) {
-                CHECK(v[i] > 0.0f);
-                CHECK(v[i] <= (i % 2 == 0 ? 15.0f : valence::kHomeTouchFloorMmS) * 1.02f);
-            }
-        } else {
-            CHECK(v[0] == doctest::Approx(15.0f).epsilon(0.02));
-            CHECK(v[1] == doctest::Approx(valence::kHomeTouchFloorMmS).epsilon(0.02));
-            CHECK(v[2] == doctest::Approx(15.0f).epsilon(0.02));
-            CHECK(v[3] == doctest::Approx(valence::kHomeTouchFloorMmS).epsilon(0.02));
-        }
+        CHECK(v[0] == doctest::Approx(15.0f).epsilon(0.02));
+        CHECK(v[1] == doctest::Approx(valence::kHomeTouchFloorMmS).epsilon(0.02));
+        CHECK(v[2] == doctest::Approx(15.0f).epsilon(0.02));
+        CHECK(v[3] == doctest::Approx(valence::kHomeTouchFloorMmS).epsilon(0.02));
         CHECK(r->census().homed);
         CHECK(r->census().home_rail_mm == doctest::Approx(100.0f).epsilon(0.002));
     }
@@ -1469,10 +1456,13 @@ TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores
 }
 
 TEST_CASE("home: the deadline covers both legs at home_speed, both re-touches and 2 s, and ends a late cycle") {
-    // max_rail 500 at the factory speeds: (520 + 510 + 2 x 5 + 2) mm at 40 mm/s,
-    // 2 x 15 mm at 10 mm/s, and seven 0.2 s ramps at 200 mm/s2.
+    // max_rail 500 at the factory speeds: (520 + 510) mm of seeks and
+    // (2 x 5 + 2) mm of backoffs at 40 mm/s, 2 x 15 mm at 10 mm/s, and 0.2 s
+    // ramps at 200 mm/s2: seven under Kinetic; under Kinetic² 1.25 for each of
+    // the four seeks and one for each of the three quintic backoffs, which
+    // take 1.875 times their distance over speed.
     CHECK(valence::homeCycleS(500.0f, 40.0f, 200.0f) ==
-          doctest::Approx(valence::kPointMoveSlowdown * (26.05f + 3.0f) + 1.4f));
+          doctest::Approx(valence::kKinetic2 ? 25.75f + 3.0f + 1.875f * 0.3f + 8.0f * 0.2f : 26.05f + 3.0f + 1.4f));
 
     auto r = rig();
     r->arb.setWindow(0.0f, 200.0f, 200.0f);
