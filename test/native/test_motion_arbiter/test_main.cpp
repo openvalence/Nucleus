@@ -1094,33 +1094,75 @@ TEST_CASE("Kinetic² starvation: a sample arriving during the engine's brake re-
     CHECK_FALSE(c.busy);
 }
 
-// KNOWN DEFECT at kinetic.pin 8b777fb, pinned so the fix cannot go unnoticed:
-// a successor knot re-solves the window and the engine rebuilds the piece in
-// flight from its ORIGIN, so the plan moves under the carriage at the instant
-// of the submit (RFC-105 (b) promises continuity). The case asserts the
-// defect: when Kinetic rebases the in-flight piece and the pin moves, it
-// fails, and becomes the continuity check (worst < 0.01 mm).
-TEST_CASE("Kinetic² KNOWN DEFECT: a successor knot moves the plan under the carriage at the submit" *
+// RFC-105 (bb): a knot arriving while the carriage moves keeps the curve
+// under it through the reaction horizon and re-plans from there. Measured
+// through the arbiter every tick: a submit does not move the plan at that
+// instant, and from one tick to the next the plan moves no further than its
+// velocity carries in one tick. Liveness is asserted too, so a case whose
+// knots were all refused or dropped cannot pass by standing still.
+TEST_CASE("Kinetic² continuity: a segment or a sample arriving mid-piece never moves the plan under the carriage" *
           doctest::skip(!valence::kKinetic2)) {
+    constexpr float kTolMm = 0.01f;
     auto r = rig();
     r->arb.forceHome(400.0f);
     r->run(1000);
-    float worst = 0.0f;
-    uint64_t start = g_now_us + 120'000;
-    for (int i = 0; i < 8; ++i) {
-        MotionIntent in;
-        in.source = MotionSource::Stream;
-        in.target_mm = 200.0f + 60.0f * std::sin(0.8f * float(i + 1));
-        in.duration_us = 250'000;
-        in.anchor_us = start;
-        in.curve_family = 2;
+    REQUIRE(r->submit(MotionSource::Manual, 200.0f));
+    r->run(moveUs(5'000'000));
+    REQUIRE_FALSE(r->census().busy);
+
+    float jump_at_submit = 0.0f, jump_per_tick = 0.0f, travel = 0.0f;
+    MotionCensus prev = r->census();
+    auto submit = [&](const MotionIntent& in) {
         const float before = r->census().plan_mm;
-        REQUIRE(r->arb.accept(in, g_now_us));
-        worst = std::max(worst, std::fabs(r->census().plan_mm - before));
-        r->run(250'000);
-        start += 250'000;
+        const bool ok = r->arb.accept(in, g_now_us);
+        jump_at_submit = std::max(jump_at_submit, std::fabs(r->census().plan_mm - before));
+        return ok;
+    };
+    auto tick = [&] {
+        r->run(1000);
+        const MotionCensus c = r->census();
+        const float carried = std::max(std::fabs(c.velocity_mm_s), std::fabs(prev.velocity_mm_s)) * 1e-3f;
+        jump_per_tick = std::max(jump_per_tick, std::fabs(c.plan_mm - prev.plan_mm) - carried);
+        travel += std::fabs(c.plan_mm - prev.plan_mm);
+        prev = c;
+    };
+
+    SUBCASE("250 ms C2 segments, each arriving 120 ms before its start") {
+        uint64_t start = g_now_us + 120'000;
+        for (int i = 0; i < 12; ++i) {
+            MotionIntent in;
+            in.source = MotionSource::Stream;
+            in.target_mm = 200.0f + 120.0f * std::sin(0.8f * float(i + 1));
+            in.duration_us = 250'000;
+            in.anchor_us = start;
+            in.curve_family = 2;
+            REQUIRE(submit(in));
+            for (int t = 0; t < 250; ++t) tick();
+            start += 250'000;
+        }
+        for (int t = 0; t < 500; ++t) tick();
     }
-    CHECK(worst > 1.0f);   // measured 2026-10-06: 7.3 mm here, 67 mm on a wider stroke
+    SUBCASE("a 60 Hz sample scrub: a 150 mm/s ramp, a hold, a 1.5 Hz sweep of 60 mm") {
+        for (int i = 0; i < 240; ++i) {
+            const float p = i < 40   ? 200.0f + 2.5f * float(i + 1)
+                            : i < 60 ? 300.0f
+                                     : 300.0f + 60.0f * std::sin(9.424778f * float(i - 60) / 60.0f);
+            MotionIntent in;
+            in.source = MotionSource::Stream;
+            in.target_mm = p;
+            (void)submit(in);   // a refusal is counted by the census and checked below
+            for (int t = 0; t < (i % 3 == 2 ? 16 : 17); ++t) tick();
+        }
+        for (int t = 0; t < 500; ++t) tick();
+    }
+    r->arb.drainAnomalies();
+    const MotionCensus c = r->census();
+    MESSAGE("at submit ", jump_at_submit, " mm, per tick beyond the velocity ", jump_per_tick, " mm, travel ", travel, " mm");
+    CHECK(jump_at_submit <= kTolMm);
+    CHECK(jump_per_tick <= kTolMm);
+    CHECK(c.rejected == 0);
+    CHECK(c.failures == 0);
+    CHECK(travel > 500.0f);
 }
 
 TEST_CASE("Kinetic² segments: a start past the newest knot holds until it, so the move begins at its start" *
