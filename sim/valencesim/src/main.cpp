@@ -67,6 +67,7 @@
 #include "hub/ValenceDiscovery.h"
 #include "hub/ValenceEstopDatagram.h"
 #include "hub/valence_config.h"
+#include "motion/MotionArbiter.h"
 #include "motion/ValenceMotion.h"
 #include "net/WsServerPort.h"
 #include "patterns/ValencePattern.h"
@@ -343,15 +344,18 @@ int main(int argc, char** argv) {
     // writes have carried all eight keys.
     box->device.setSetupWritten(opt.uncommissioned ? 0 : valence::kSetupRequiredMask);
     if (opt.uncommissioned) log.logf('W', "valencesim: --uncommissioned: first-run hub, setup record cleared");
-    // The far stop defaults to the stored max_rail from the home stop, on the
-    // other side of the boot position: a rail exactly as long as the setting.
+    // The far stop defaults to the stored max_rail plus both safety margins
+    // from the home stop, on the other side of the boot position: a usable rail
+    // exactly as long as the setting, so a cycle stores what it found.
     if (opt.homeSenseAtMm) {
-        const float maxRail = box->device.config().max_rail;
-        const float farAt = opt.railEndAtMm.value_or(*opt.homeSenseAtMm < 0.0f ? *opt.homeSenseAtMm + maxRail
-                                                                               : *opt.homeSenseAtMm - maxRail);
+        const float stops = box->device.config().max_rail + 2.0f * valence::kHomeSafetyMarginMm;
+        const float farAt = opt.railEndAtMm.value_or(*opt.homeSenseAtMm < 0.0f ? *opt.homeSenseAtMm + stops
+                                                                               : *opt.homeSenseAtMm - stops);
         valence::simMotionSetRailEndAt(farAt);
-        log.logf('W', "valencesim: --rail-end-at: far stop at %.1f mm from the boot position, rail %.1f mm",
-                 double(farAt), double(std::fabs(farAt - *opt.homeSenseAtMm)));
+        const float between = std::fabs(farAt - *opt.homeSenseAtMm);
+        log.logf('W', "valencesim: --rail-end-at: far stop at %.1f mm from the boot position, %.1f mm stop to stop, "
+                 "usable rail %.1f mm", double(farAt), double(between),
+                 double(between - 2.0f * valence::kHomeSafetyMarginMm));
     }
     box->device.pushConfigToMotion();
 

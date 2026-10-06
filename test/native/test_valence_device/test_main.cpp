@@ -1121,7 +1121,7 @@ TEST_CASE("VD-HOME-4: a completed cycle's rail lands in max_rail through config-
     CHECK(rig->hub->cfgGen() == uint16_t(gen + 1));                             // RFC-011, once
     CHECK(storedF32(*rig, kBlobMaxRail) == doctest::Approx(612.4f));
     CHECK((persistBitsOver(*rig, 2500) & kPersistConfig) != 0);
-    CHECK(logged("HOME: homed. Home datum 0.0 mm, far datum 612.4 mm: rail 612.4 mm, max_rail 612.4 mm"));
+    CHECK(logged("HOME: homed. Usable rail 612.4 mm between the safety margins, max_rail 612.4 mm"));
 
     // The same rail again: the measurement republishes, the setting and
     // cfg_gen hold.
@@ -1137,7 +1137,7 @@ TEST_CASE("VD-HOME-5: a rail past max_rail's bounds is stored clamped; measured_
     CHECK(rig->device.config().max_rail == ceiling::rail_mm);
     CHECK(stateF32(*rig, ch::machine_config, 24) == ceiling::rail_mm);
     CHECK(stateF32(*rig, ch::machine_config, 33) == doctest::Approx(2600.0f));
-    CHECK(logged("HOME: homed. Home datum 0.0 mm, far datum 2600.0 mm: rail 2600.0 mm, max_rail 2000.0 mm"));
+    CHECK(logged("HOME: homed. Usable rail 2600.0 mm between the safety margins, max_rail 2000.0 mm"));
 }
 
 TEST_CASE("VD-HOME-6: a failed cycle is logged in words with its leg; nothing is stored") {

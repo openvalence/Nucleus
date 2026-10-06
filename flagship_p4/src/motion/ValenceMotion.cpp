@@ -53,7 +53,10 @@ uint64_t espNowUs() { return static_cast<uint64_t>(esp_timer_get_time()); }
 
 // The LP core's shared words. steer() is the only writer of ulp_g_dir and the
 // arbiter its only caller; park() is one 32-bit store with one writer either
-// way.
+// way. park() and count() run in the home sense's interrupt too
+// (MotionArbiter::homeSenseRose()): one aligned store and one aligned load in
+// LP memory, nothing else, so neither may grow a lock, a log or a counter.
+// That interrupt is not IRAM-resident: it waits out a flash write.
 class LpEmitter final : public MotionEmitter {
 public:
     int32_t count() const override { return static_cast<int32_t>(ulp_g_pos); }
@@ -126,6 +129,9 @@ private:
 
 MotionTask g_motion;
 
+// The home sense's interrupt, in this order: the arbiter parks an armed seek,
+// then the task is woken to read it.
+void parkSeekFromIsr() { g_motion.arbiter().homeSenseRose(); }
 void wakeMotionFromIsr() { g_motion.wakeFromIsr(); }
 
 // Before begin() has created the task the handle is null and nothing wakes.
@@ -141,7 +147,7 @@ bool MotionTask::begin() {
     _tuneQueue = xQueueCreate(1, sizeof(MotionTuning));
     if (_tuneQueue == nullptr) return false;
     // The task does not exist yet, so this caller is the arbiter's one owner.
-    _arb.setHomeSense(homeSenseBegin(&wakeMotionFromIsr));
+    _arb.setHomeSense(homeSenseBegin(&parkSeekFromIsr, &wakeMotionFromIsr));
     _arb.begin(espNowUs());
     refreshSnapshot(espNowUs());
     // Core 1 with the hub, at a higher priority than it: the tick is a

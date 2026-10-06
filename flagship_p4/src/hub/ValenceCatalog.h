@@ -609,10 +609,12 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // the wizard steps the setup entries in authoring (ascending id) order,
     // this one before the kinetic ceilings on 0x1120.
     //
-    // `max_rail` is a REAL SAVABLE SETTING: the rail length, and the home
-    // cycle's search distance per leg (plus a margin, MotionArbiter.h). Before
-    // the first home an owner sets it at or above the real rail; a completed
-    // home writes the length it measured into it through config-set key 8's
+    // `max_rail` is a REAL SAVABLE SETTING: the usable rail length, stop to
+    // stop minus a safety margin at each end, and the home cycle's search
+    // distance per leg (plus both margins and a search margin, MotionArbiter.h
+    // homing). Before the first home an owner sets it at or above the real
+    // rail; a completed home writes the usable length it measured into it
+    // through config-set key 8's
     // own writer (operator ruling 2026-10-03, Valence RFC-101), so after a
     // home the setting IS the measurement. `measured_stroke` (field 10, below)
     // is this boot's raw measurement, read-only; a client never writes one
@@ -720,8 +722,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                        {"window_min", "window_max", "jog_speed", "jog_accel",
                         "input_speed", "input_accel", "max_rail", "input_jerk"});
     // measured_stroke (field 10, byte 33): THE REAL HOMING MEASUREMENT. 0
-    // until the first completed home cycle this boot; then the far datum minus
-    // the home datum, unclamped (max_rail holds it clamped to its bounds). No
+    // until the first completed home cycle this boot; then the usable rail,
+    // the far datum minus the home datum minus both safety margins, unclamped
+    // (max_rail holds it clamped to its bounds). No
     // setting_key: derived machine truth, never an assertion, so force_home's
     // stroke never lands here.
     // Append-only: added after enabled_mask, bytes 0..32 keep their offsets.

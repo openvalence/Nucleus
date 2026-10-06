@@ -2,7 +2,7 @@
 
 // ValenceHomeSense -- BOARD_GPIO_HOME_SENSE as the arbiter's HomeSense: a
 // level read, a rise confirmed by a second read, and a rising-edge interrupt
-// that wakes the motion task
+// that parks an armed seek and wakes the motion task
 // Constraints:
 // - IDF-free here; ValenceHomeSense.cpp is the board host and the sim has its
 //   own stand-in (sim/valencesim/src/SimMotion.cpp).
@@ -13,10 +13,13 @@
 //   pull-down. probe() lifts it to the pull-up for kProbeSettleUs to tell a
 //   driven-low line from an undriven one, so it runs on the hub task before a
 //   cycle and never during one (MotionArbiter::home()).
-// - The interrupt stamps a rise and calls `wake` (the motion task's notify,
-//   so the rise is read now and not on the next tick); nothing in it touches
-//   motion. high() is the line HIGH, a rise younger than kHomeSenseDebounceUs
-//   read again at that age (MotionArbiter.h, homing).
+// - The interrupt calls `rose` FIRST (MotionArbiter::homeSenseRose(): an armed
+//   seek parks there, before anything else runs), then stamps the rise, then
+//   calls `wake` (the motion task's notify, so the rise is confirmed now and
+//   not on the next tick). The rise is NOT debounced before the park: high()
+//   on the motion task confirms it (the line HIGH, a rise younger than
+//   kHomeSenseDebounceUs read again at that age), and a rise it rejects
+//   resumes the seek (MotionArbiter.h, homing).
 // See: MotionArbiter.h (homing: the input contract), BoardPins.h,
 // docs/board-map.md
 
@@ -24,9 +27,9 @@
 
 namespace valence {
 
-// Called from an ISR: no blocking, no log. Null wakes nothing.
-using HomeSenseWake = void (*)();
+// Called from an ISR: no blocking, no log. Null does nothing.
+using HomeSenseIsr = void (*)();
 
-HomeSense& homeSenseBegin(HomeSenseWake wake);
+HomeSense& homeSenseBegin(HomeSenseIsr rose, HomeSenseIsr wake);
 
 }  // namespace valence

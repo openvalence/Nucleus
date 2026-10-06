@@ -22,17 +22,33 @@ boundary"): a segment is a knot at its start plus its duration, a gap before
 its start a rest knot, and a segments bundle's first segment first replaces
 every knot queued at or after its start, the motion in flight handing off
 there (RFC-087 supersede, `Engine::truncateAfter`); a sample a knot at its arrival plus the grant's
-`schedule_latency_us` (`sampleLatencyUs()`); a jog, a return or a homing
-backoff a knot at the park time from the newest knot (RFC-105 (k) and (n)),
-at an authored rest (a free last knot keeps its secant and is braked past,
-RFC-105 (dd)), stretched, never trimmed; a homing seek two knots at the leg's
-speed, a ramp-up at the jog accel and a knot the brake past lands on the
-search end, so it cruises into contact; a generator's stop and PAUSE are the
-arbiter's brake, which refuses a knot due before its end; a timeline that runs
-dry still moving is the engine's own brake, which a new knot re-plans from
-(RFC-105 (dd)). Kinetic² has no chase heuristics and no dwell rule; a point
-move is a quintic, up to 1.875 times a cruise (`kPointMoveSlowdown`, which the
-home deadline carries for the backoffs).
+`schedule_latency_us` (`sampleLatencyUs()`); a jog or a return a knot at the
+park time from the newest knot (RFC-105 (k) and (n)), at an authored rest (a
+free last knot keeps its secant and is braked past, RFC-105 (dd)), stretched,
+never trimmed; a generator's stop and PAUSE are the arbiter's brake, which
+refuses a knot due before its end; a timeline that runs dry still moving is
+the engine's own brake, which a new knot re-plans from (RFC-105 (dd)).
+Kinetic² has no chase heuristics and no dwell rule; a point move is a
+quintic, up to 1.875 times a cruise.
+
+**Homing never reaches the planner (operator ruling 2026-10-06, bd val-cp5).**
+Home op 1 is the arbiter's own second producer, the seek producer
+(MotionArbiter.cpp, homing): every leg steers the emitter directly at a
+constant velocity, no accel, decel or jerk profile (`kHomeRampMs`, a build
+constant, 0 by default, gives a drive that faults on a step-rate step a
+linear ramp without a wire change). An approach or a re-touch ends on the
+home sense's rise, which parks the emitter from the interrupt
+(`MotionArbiter::homeSenseRose()`); a backoff ends on a distance counted on
+the emitter's step count, its last tick rendering the remainder so it lands
+on the count. The plan-tracking feedforward, its velocity cap and its
+residual kick never steer during a cycle; the engine is reset at the count
+when the cycle ends, as after an e-stop. Exclusivity is the rail: a cycle
+owns it from the request to its end, `accept()` refuses every intent
+meanwhile, and `evaluate()` runs one producer per tick. **The safety margin
+(`kHomeSafetyMarginMm`, 5 mm) is never a commandable position**: 0.0 mm is a
+margin off the low stop's datum, the rail ends a margin short of the high
+one, so a 300 mm stop-to-stop rail is a 290 mm usable rail, and the usable
+rail is what max_rail stores.
 
 Event-driven, never clocked: an intent becomes knots at arrival, the pending
 window is solved at the next sample, and the sampler evaluates it.
@@ -122,7 +138,18 @@ per sample, decoded in numpy; board `val-091.3`].
 ## ISR / IRAM / core discipline
 
 - Motion code on the HP side uses microcritical sections, not ISRs: short
-  float math only, no heap allocation, no ISR context.
+  float math only, no heap allocation, no ISR context. ONE exception, by
+  operator ruling 2026-10-06 (bd val-cp5, "10 ms is not acceptable"): the home
+  sense's rising-edge interrupt calls `MotionArbiter::homeSenseRose()`, which
+  may compare-and-swap the seek word, call the emitter's `park()` (a store of
+  0 to `g_step_q8`) and `count()` (a load of `g_pos`), store the latched
+  count, and nothing else: no float, no log, no allocation, no engine, no
+  FreeRTOS call. It is not IRAM-resident, so a flash write holds it off.
+- `g_step_q8` has more than one writer only for a stop: every writer other
+  than `steer()` on the motion task stores 0 (e-stop, power loss, the home
+  sense's interrupt). A steer racing an interrupt park is parked again by the
+  motion task (`homeSteer()`, a full fence between its steer and its read of
+  the seek word).
 - The HP-to-LP channel is the LP shared memory window. It carries a velocity
   and flags, single-writer per field, never a rendered buffer. A renderer that
   buffers ahead turns every late refill into dead air on the output, which is

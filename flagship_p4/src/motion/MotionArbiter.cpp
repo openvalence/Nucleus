@@ -30,9 +30,6 @@ constexpr float kTrackHz = 50.0f;
 // as a stroke, so dither around a standstill never inflates the odometer.
 constexpr float kStrokeMinMm = 1.0f;
 
-// A homing seek's speed ceiling over its authored cruise (homePlan()).
-constexpr float kCruiseCeilingHeadroom = 1.005f;
-
 bool isGenerator(MotionSource s) { return s == MotionSource::Pattern || s == MotionSource::Advanced; }
 
 [[maybe_unused]] const char* sourceName(uint8_t id) {
@@ -214,6 +211,18 @@ HomeStart MotionArbiter::home() {
     return HomeStart::started;
 }
 
+void MotionArbiter::homeSenseRose() {
+    // One rise trips one armed seek; anything else is not this interrupt's.
+    uint32_t armed = kSeekArmed;
+    if (!_seek.compare_exchange_strong(armed, kSeekTripping)) return;
+    // The trip is ordered before the park: homeSteer() steers, fences and
+    // reads the word, so a steer racing this park is parked again behind it.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    _emitter.park();
+    _seek_hit.store(_emitter.count(), std::memory_order_relaxed);
+    _seek.store(kSeekLatched, std::memory_order_release);
+}
+
 float MotionArbiter::forceHome(float stroke_mm) {
     // Written so a NaN takes the default: !(x >= 1), not (x < 1).
     float stroke = stroke_mm;
@@ -348,7 +357,9 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
 
     // Window clamp. The jog under override reaches the whole asserted rail
     // (SPEC 11.1 lifts the window); every other intent, Manual included, is
-    // held inside the configured window, itself held inside the rail.
+    // held inside the configured window, itself held inside the rail. A homed
+    // rail ends kHomeSafetyMarginMm short of each stop's datum, so nothing
+    // here admits a point inside either safety margin: never widen [0, rail].
     float target = in.target_mm;
     const float lo = jog ? 0.0f : (_win_min > 0.0f ? _win_min : 0.0f);
     const float hi_win = _win_max < _rail ? _win_max : _rail;
@@ -424,8 +435,8 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     // The engine solves its whole pending window under the config it holds at
     // the next sample, so these limits and this policy apply to every knot
     // still pending, not to this one alone. A Manual move never trims its
-    // amplitude: a jog or a homing seek that lands short of its target is a
-    // wrong answer, so it stretches.
+    // amplitude: a jog that lands short of its target is a wrong answer, so it
+    // stretches.
     kinetic2::Config cfg = _engine.config();
     cfg.limits = lim;
     cfg.policy = manual ? kinetic2::Policy::Stretch : _k2_policy;
@@ -482,41 +493,13 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
                                       fam <= 3 ? kinetic2::Family(fam) : kinetic2::Family::Unspecified);
         _k2_chase = false;
     } else if (manual) {
+        // A jog or a return: a sample (RFC-105 (n)) whose latency is the park
+        // time from the newest knot under the jog set, at an authored rest: a
+        // free last knot keeps its secant and the engine brakes past it
+        // (RFC-105 (dd)).
         const uint64_t from = _k2_newest_us > now_us ? _k2_newest_us : now_us;
-        const float d = std::fabs(p - _k2_newest_p);
-        const float sgn = p >= _k2_newest_p ? 1.0f : -1.0f;
-        // A homing seek (a Manual move with an end velocity, homePlan())
-        // cruises at that speed: a ramp knot reaching it from rest, then a
-        // knot at the same speed placed so the engine's brake past it, with
-        // nothing after it, lands on the target. The piece between two equal
-        // authored velocities a cruise apart is a straight cruise. The ramp is
-        // a smoothstep, legal at the jog ceilings when it lasts
-        // max(1.5 v / amax, sqrt(6 v / jmax)), plus parkUs()'s 1 ms margin.
-        // A leg too short to hold both is a point move.
-        const float v = std::fabs(in.end_vel_mm_s) / span();
-        const float t_ramp = std::fmax(1.5f * v / lim.amax, std::sqrt(6.0f * v / lim.jmax));
-        const uint32_t ramp_us = t_ramp < 600.0f ? uint32_t(t_ramp * 1e6f) + 1000u : 0u;
-        const float d_ramp = 0.5f * v * float(ramp_us) * 1e-6f;
-        const float d_stop = kinetic2::Profile::brake(kinetic2::State{0.0f, v, 0.0f}, 0, lim).end().p;
-        if (in.has_end_vel && v > 0.0f && ramp_us > 0u && d > d_ramp + d_stop) {
-            kinetic2::Knot ramp;
-            ramp.t_us   = from + ramp_us;
-            ramp.p      = _k2_newest_p + sgn * d_ramp;
-            ramp.has_v  = true;
-            ramp.v      = sgn * v;
-            ramp.family = kinetic2::Family::C2;
-            if (!_engine.submit(ramp, now_us)) return false;
-            k = ramp;
-            k.p    = p - sgn * d_stop;
-            k.t_us = ramp.t_us + uint64_t((d - d_ramp - d_stop) / v * 1e6f);
-        } else {
-            // A jog, a return, a backoff or a short seek: a sample (RFC-105
-            // (n)) whose latency is the park time from the newest knot under
-            // the jog set, at an authored rest: a free last knot keeps its
-            // secant and the engine brakes past it (RFC-105 (dd)).
-            k = kinetic2::knotFromSample(p, from, parkUs(d, lim));
-            k.has_v = true;   // v = 0
-        }
+        k = kinetic2::knotFromSample(p, from, parkUs(std::fabs(p - _k2_newest_p), lim));
+        k.has_v = true;   // v = 0
         _k2_chase = false;
     } else {
         // A 0x2100 sample: one behind, at the grant's latency (RFC-105 promise
@@ -572,7 +555,6 @@ kinetic2::State MotionArbiter::sampleEngine(uint64_t now_us) {
 
 void MotionArbiter::setRailFrame(bool on, uint64_t now_us) {
     _rail_frame = on;
-    _rail_margin = 0.0f;
     resetEngine(toNorm(positionMm()), now_us);
     _p_cmd_mm = positionMm();
 }
@@ -636,7 +618,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         _brake_req.store(false);   // park already stopped it
         _returning = false;        // estop() dropped override with it
         _emitter.park();
-        if (_homing.load()) homeEnd("ESTOP");
+        if (_homing.load()) homeEnd("ESTOP", now_us);
         // ONCE per latch, and on the task that owns the engine: without it the
         // abandoned plan keeps reading busy and canClearEstop() -- which asks
         // exactly that -- would never let the latch drop (SPEC 11.2).
@@ -656,7 +638,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         if (_brake_req.exchange(false)) _pause_pos_mm.store(positionMm());
         _returning = false;
         _emitter.park();
-        if (_homing.load()) homeEnd("motor power off");
+        if (_homing.load()) homeEnd("motor power off", now_us);
         if (!_power_settled.exchange(true)) {
             resetEngine(toNorm(positionMm()), now_us);
             _p_cmd_mm = positionMm();
@@ -675,21 +657,21 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     // intent plans from the new frame's rest.
     if (_frame_moved) {
         _frame_moved = false;
-        // A cycle planned in the old frame: its seek or backoff is void.
-        if (_homing.load()) homeEnd("the travel window changed");
+        // A cycle counted in the old frame: its seek or backoff is void.
+        if (_homing.load()) homeEnd("the travel window changed", now_us);
         resetEngine(toNorm(positionMm()), now_us);
         _p_cmd_mm = positionMm();
         _emitter.steer(0.0f);
         return;
     }
 
-    // A pause ends a cycle before its brake runs, so the brake is PAUSE's.
-    if (_home_abort.exchange(false) && _homing.load()) homeEnd("paused");
+    // A pause ends a cycle, which parks: a seek has no brake to run.
+    if (_home_abort.exchange(false) && _homing.load()) homeEnd("paused", now_us);
     if (_brake_req.exchange(false)) brakeToRest(now_us);
-    // Before the tick's one sample: a cycle step may re-origin the count and
-    // reseed the engine, and the feedforward below must see only the new frame.
+    // While a cycle runs the seek producer is the emitter's one steerer and
+    // the plan-tracking path below never runs: the cycle owns the rail.
     if (_home_req.exchange(false)) homeStart(now_us);
-    if (_home != HomePhase::idle) homeStep(now_us);
+    if (_home != HomePhase::idle) return homeStep(now_us, dt_s);
 
     // RETURN (SPEC 11.1): an ordinary Manual plan at the jog set, planned here
     // because the engine is this task's. The rail clamp still applies.
@@ -720,12 +702,9 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         _returns.fetch_add(1);
         GLOGI(kTag, "RETURN: arrived, override off, PAUSE holds");
     }
-    // Override gone (return, resume or ESTOP) and no home cycle: back to the
-    // window frame, at rest. ANY END of a cycle drops its margin the same way,
-    // into the rail frame while override holds.
-    const bool jogging = _override.load();
-    if (_rail_frame && (!jogging || _rail_margin > 0.0f) && _home == HomePhase::idle && !_engine.isBusy(now_us))
-        setRailFrame(jogging, now_us);
+    // Override gone (return, resume or ESTOP): back to the window frame, at
+    // rest.
+    if (_rail_frame && !_override.load() && !_engine.isBusy(now_us)) setRailFrame(false, now_us);
 
     // Feedforward: the plan's OWN mean velocity across the interval that just
     // elapsed. Summed over a move this telescopes to exactly the plan's
@@ -764,15 +743,17 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
 }
 
 // ---- homing -----------------------------------------------------------------
-// Owning task only. The cycle plans through plan() at the jog accel with the
-// speed held to the phase's own, in the rail frame widened by
-// kHomeFrameMarginMm at each end, and the window clamp never sees it: an
-// approach has to reach a stop the window may exclude. Positions are the
-// physical frame's throughout (MotionArbiter.h, homing): the start is declared
-// max_rail from the home stop, the home end's stalls take its label, and only
-// the measured rail relabels after that. Under the flip the home end is the
-// physical far end (SPEC 9.6): the legs swap direction and the physical frame
-// keeps 0 at the low end.
+// Owning task only, except homeSenseRose(). The seek producer: every leg is a
+// constant velocity steered straight onto the emitter, ended by a count or a
+// stall, and the engine holds at the count until the cycle ends and is reset
+// there. The plan-tracking path, its velocity cap and its residual kick never
+// steer during a cycle, and the window clamp never sees one: an approach has
+// to reach a stop the window excludes. Positions are the physical frame's
+// throughout (MotionArbiter.h, homing): the start is declared at the far
+// stop's datum, the home end's stalls take its label, and only the measured
+// rail relabels after that. Under the flip the home end is the physical far
+// end (SPEC 9.6): the legs swap direction and the physical frame keeps 0 at
+// the low end.
 
 void MotionArbiter::homeOrigin(int32_t count, float at_mm, uint64_t now_us) {
     _origin = count - int32_t(std::lround(at_mm * kStepsPerMm));
@@ -780,38 +761,58 @@ void MotionArbiter::homeOrigin(int32_t count, float at_mm, uint64_t now_us) {
     _p_cmd_mm = positionMm();
 }
 
-bool MotionArbiter::homePlan(float target_mm, float v_mm_s, bool seek, uint64_t now_us) {
-    EngineLimits lim = limitsFor(true);
-    lim.vmax = v_mm_s / span();
-    MotionIntent in;
-    in.source = MotionSource::Manual;
-    in.target_mm = target_mm;
-    // A seek carries its speed as an end velocity, which the knot boundary
-    // renders as a cruise (submitKnots()). The seek's ceiling sits
-    // kCruiseCeilingHeadroom over the cruise: a velocity authored exactly at
-    // the ceiling fails the solver's ratio test by a rounding and the knot is
-    // dropped (measured: every cycle failed). The plan's peak stays the cruise
-    // (measured 40.0000 mm/s at 40).
-    if (seek) {
-        in.has_end_vel  = true;
-        in.end_vel_mm_s = v_mm_s;
-        lim.vmax *= kCruiseCeilingHeadroom;
+void MotionArbiter::homeLeg(HomePhase phase, float end_mm, float v_mm_s, uint64_t now_us) {
+    _home = phase;
+    _leg_end = _origin + int32_t(std::lround(end_mm * kStepsPerMm));
+    _leg_dir = _leg_end >= _emitter.count() ? 1 : -1;
+    _leg_v = v_mm_s;
+    _leg_start_us = now_us;
+}
+
+void MotionArbiter::homeSteer(float v_mm_s) {
+    _seek_v = v_mm_s;
+    _emitter.steer(v_mm_s);
+    // Pairs with homeSenseRose()'s fence: either this read sees the trip, or
+    // the interrupt's park lands after the steer above.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    const uint32_t s = _seek.load();
+    if (s == kSeekTripping || s == kSeekLatched) {
+        _emitter.park();
+        _seek_v = 0.0f;
     }
-    return plan(target_mm, in, lim, now_us);
+}
+
+bool MotionArbiter::homeDrive(uint64_t now_us, float dt_s) {
+    const int32_t left = _leg_dir * (_leg_end - _emitter.count());
+    if (left <= 0) {
+        _emitter.park();
+        _seek_v = 0.0f;
+        return true;
+    }
+    float v = _leg_v;
+    if constexpr (kHomeRampMs > 0) {
+        const float ramp = float(now_us - _leg_start_us) * 1e-3f / float(kHomeRampMs);
+        if (ramp < 1.0f) v *= ramp;
+    }
+    // The last tick renders the remainder, so a counted leg lands on its count
+    // and never past it into the safety margin.
+    const float left_mm = float(left) * kMmPerStep;
+    if (left_mm < v * dt_s) v = left_mm / dt_s;
+    homeSteer(float(_leg_dir) * v);
+    return false;
 }
 
 void MotionArbiter::homeSeek(bool touch, bool armed, uint64_t now_us) {
     _sense_armed = armed;
-    const float target = touch ? homeAway(_home_leg, _home_at_mm, -kHomeSearchMarginMm) : homePast(_home_leg);
-    if (!homePlan(target, touch ? _touch_v : _home_v, true, now_us))
-        return homeEnd(touch ? "the re-touch did not plan" : "the approach did not plan");
-    _home = touch ? HomePhase::touch : HomePhase::approach;
+    const float end = touch ? homeAway(_home_leg, _home_at_mm, -kHomeSearchMarginMm) : homePast(_home_leg);
+    homeLeg(touch ? HomePhase::touch : HomePhase::approach, end, touch ? _touch_v : _home_v, now_us);
+    if (armed) _seek.store(kSeekArmed);
 }
 
 void MotionArbiter::homeStart(uint64_t now_us) {
     if (!_homing.load()) return;   // ended between the request and this tick
     _home_leg = 0;
-    if (_engine.isBusy(now_us)) return homeEnd("the machine is moving");
+    if (_engine.isBusy(now_us)) return homeEnd("the machine is moving", now_us);
     _home_flip = _flipped.load();
     // The position reference is replaced from here: a cycle that does not
     // finish leaves the machine unhomed, never homed at a stale origin.
@@ -819,116 +820,126 @@ void MotionArbiter::homeStart(uint64_t now_us) {
     _home_v = _jog_v < _home_speed ? _jog_v : _home_speed;
     _touch_v = homeTouchMmS(_home_v);
     _rail = _max_rail;
-    _rail_margin = kHomeFrameMarginMm;
-    _rail_frame = true;
-    _home_deadline_us = now_us + uint64_t(homeCycleS(_max_rail, _home_v, _jog_a) * 1e6f) + kHomeTimeoutMarginUs;
-    // The carriage is declared max_rail from the home stop: the approach
-    // searches that far plus the margin.
-    homeOrigin(_emitter.count(), homeAway(0, homeStopAt(0), _max_rail), now_us);
+    _home_deadline_us = now_us + uint64_t(homeCycleS(_max_rail, _home_v) * 1e6f) + kHomeTimeoutMarginUs;
+    // The carriage is declared at the far stop's datum: max_rail plus both
+    // margins from the home stop's.
+    homeOrigin(_emitter.count(), homeAway(0, homeStopAt(0), _max_rail + 2.0f * kHomeSafetyMarginMm), now_us);
     GLOGI(kTag, "HOME: approaching the home end at %.1f mm/s (re-touch %.1f mm/s), searching %.0f mm",
-          double(_home_v), double(_touch_v), double(_max_rail + kHomeFrameMarginMm));
+          double(_home_v), double(_touch_v),
+          double(_max_rail + 2.0f * (kHomeSafetyMarginMm + kHomeSearchMarginMm)));
     homeSeek(false, true, now_us);   // home() probed the line LOW
 }
 
-void MotionArbiter::homeStep(uint64_t now_us) {
-    if (now_us >= _home_deadline_us) {
-        if (_engine.isBusy(now_us)) {
-            _engine.setLimits(limitsFor(false));
-            brakeEngine(now_us);
-        }
-        return homeEnd("timed out");
-    }
+void MotionArbiter::homeStep(uint64_t now_us, float dt_s) {
+    if (now_us >= _home_deadline_us) return homeEnd("timed out", now_us);
     switch (_home) {
         case HomePhase::approach:
         case HomePhase::touch: {
             const bool touch = _home == HomePhase::touch;
-            if (_sense->high()) {
-                if (_sense_armed) {
-                    // The carriage is against the stop: the emitter parks at
-                    // once, never a brake, and the plan is re-anchored at the
-                    // count as after an e-stop. The datum is the count before
-                    // the park.
-                    _home_hit = _emitter.count();
-                    _emitter.park();
-                    resetEngine(toNorm(positionMm()), now_us);
-                    _p_cmd_mm = positionMm();
-                    _home = touch ? HomePhase::touch_stop : HomePhase::approach_stop;
-                    return;
+            const uint32_t s = _seek.load(std::memory_order_acquire);
+            // The interrupt is between its park and its latch: parked, and
+            // read on the next tick.
+            if (s == kSeekTripping) return;
+            if (s == kSeekLatched) {
+                // The interrupt parked on the rise; the confirming read decides.
+                if (_sense->high()) {
+                    _seek.store(kSeekIdle);
+                    return homeContact(touch, _seek_hit.load(std::memory_order_relaxed), now_us);
                 }
-            } else {
+                _seek.store(kSeekArmed);
+                GLOGW_EVERY_MS(1000, kTag, "HOME: a rise that did not confirm parked the seek for a tick");
+            } else if (_sense->high()) {
+                // A rise the interrupt did not trip on (it raced the arming,
+                // or the host has no interrupt): park on this tick.
+                if (_sense_armed) {
+                    const uint32_t was = _seek.exchange(kSeekIdle);
+                    _emitter.park();
+                    const int32_t hit =
+                        was == kSeekLatched ? _seek_hit.load(std::memory_order_relaxed) : _emitter.count();
+                    return homeContact(touch, hit, now_us);
+                }
+            } else if (!_sense_armed) {
                 _sense_armed = true;
+                _seek.store(kSeekArmed);
             }
-            if (!_engine.isBusy(now_us))
-                return homeEnd(touch ? "no stall on the slow re-touch" : "no stall across max_rail");
+            if (homeDrive(now_us, dt_s))
+                return homeEnd(touch ? "no stall on the slow re-touch" : "no stall across max_rail", now_us);
             return;
         }
-        case HomePhase::approach_stop:
-            if (_engine.isBusy(now_us)) return;
-            // The home end's stall takes its label at once, so a cycle that
-            // ends from here on leaves positions measured from the home stop.
-            // A far stall is only read: the home datum keeps its label.
-            if (_home_leg == 0) homeOrigin(_home_hit, homeStopAt(0), now_us);
-            _home_at_mm = float(_home_hit - _origin) * kMmPerStep;
-            if (!homePlan(homeAway(_home_leg, _home_at_mm, kHomeRetouchBackoffMm), _home_v, false, now_us))
-                return homeEnd("the backoff did not plan");
-            _home = HomePhase::clear;
-            return;
-        case HomePhase::clear: {
+        case HomePhase::clear:
             // The level at rest decides.
-            if (_engine.isBusy(now_us)) return;
-            if (_sense->high()) return homeEnd("still on the stop after the backoff (lower home_speed)");
+            if (!homeDrive(now_us, dt_s)) return;
+            if (_sense->high()) return homeEnd("still on the stop after the backoff (lower home_speed)", now_us);
             return homeSeek(true, true, now_us);
-        }
-        case HomePhase::touch_stop: {
-            if (_engine.isBusy(now_us)) return;
-            // The contact came kHomeSenseLatencyUs of re-touch travel before
-            // the sense did: the datum is moved back along the leg by it.
-            const int32_t lag = int32_t(std::lround(_touch_v * float(kHomeSenseLatencyUs) * 1e-6f * kStepsPerMm));
-            _home_datum[_home_leg] = _home_hit + (homeTowardLow(_home_leg) ? lag : -lag);
-            if (_home_leg == 1) return homeMeasure(now_us);
-            homeOrigin(_home_datum[0], homeStopAt(0), now_us);
-            _home_leg = 1;
-            GLOGI(kTag, "HOME: home datum taken, approaching the far end");
-            return homeSeek(false, false, now_us);   // still pressed on the home stop
-        }
-        case HomePhase::finish: {
-            // The count arrives too, not only the plan: the frame change after
-            // the cycle reseeds at the count and would keep its tracking lag.
-            if (_engine.isBusy(now_us) || std::fabs(_p_cmd_mm - positionMm()) > kMmPerStep) return;
-            if (_sense->high()) return homeEnd("still on the far stop after the final backoff (lower home_speed)");
+        case HomePhase::finish:
+            if (!homeDrive(now_us, dt_s)) return;
+            if (_sense->high())
+                return homeEnd("still on the far stop after the final backoff (lower home_speed)", now_us);
             _homed = true;
             _max_rail = _rail;
             _home_rail_mm = _rail;
             ++_homes;
-            homeEnd(nullptr);
-            GLOGI(kTag, "HOME: homed, rail %.2f mm, %.1f mm off the far end", double(_rail), double(kHomeBackoffMm));
+            homeEnd(nullptr, now_us);
+            GLOGI(kTag, "HOME: homed, rail %.2f mm between the %.1f mm safety margins", double(_rail),
+                  double(kHomeSafetyMarginMm));
             return;
-        }
         case HomePhase::idle:
             return;
     }
 }
 
-void MotionArbiter::homeMeasure(uint64_t now_us) {
-    const int32_t steps = _home_datum[1] - _home_datum[0];
-    const float len = float(steps < 0 ? -steps : steps) * kMmPerStep;
-    if (!(len >= MIN_RAIL_MM)) return homeEnd("the far datum is under the rail floor from the home datum");
-    // The physical frame: 0 at the low end's datum, the rail the measured
-    // length. A completed cycle makes it max_rail too; the hub stores it and
-    // pushes it back (setWindow()).
-    _rail = len;
-    homeOrigin(_home_flip ? _home_datum[1] : _home_datum[0], 0.0f, now_us);
-    if (!homePlan(_home_flip ? kHomeBackoffMm : len - kHomeBackoffMm, _home_v, false, now_us))
-        return homeEnd("the final backoff did not plan");
-    _home = HomePhase::finish;
+void MotionArbiter::homeContact(bool touch, int32_t hit, uint64_t now_us) {
+    _seek_v = 0.0f;
+    _home_hit = hit;
+    if (!touch) {
+        // The home end's stall takes its label at once, so a cycle that ends
+        // from here on leaves positions measured from the home datum. A far
+        // stall is only read: the home datum keeps its label.
+        if (_home_leg == 0) homeOrigin(hit, homeStopAt(0), now_us);
+        _home_at_mm = float(hit - _origin) * kMmPerStep;
+        return homeLeg(HomePhase::clear, homeAway(_home_leg, _home_at_mm, kHomeSafetyMarginMm), _home_v, now_us);
+    }
+    // The contact came kHomeSenseLatencyUs of re-touch travel before the
+    // sense did: the datum is moved back along the leg by it.
+    const int32_t lag = int32_t(std::lround(_touch_v * float(kHomeSenseLatencyUs) * 1e-6f * kStepsPerMm));
+    _home_datum[_home_leg] = hit + (homeTowardLow(_home_leg) ? lag : -lag);
+    if (_home_leg == 1) return homeMeasure(now_us);
+    homeOrigin(_home_datum[0], homeStopAt(0), now_us);
+    _home_leg = 1;
+    GLOGI(kTag, "HOME: home datum taken, approaching the far end");
+    homeSeek(false, false, now_us);   // still pressed on the home stop
 }
 
-void MotionArbiter::homeEnd(const char* why) {
+void MotionArbiter::homeMeasure(uint64_t now_us) {
+    const int32_t steps = _home_datum[1] - _home_datum[0];
+    const float stops = float(steps < 0 ? -steps : steps) * kMmPerStep;
+    const float len = stops - 2.0f * kHomeSafetyMarginMm;
+    if (!(len >= MIN_RAIL_MM))
+        return homeEnd("the usable rail between the safety margins is under the rail floor", now_us);
+    // The physical frame: 0 a safety margin off the low end's datum, the rail
+    // the usable length. A completed cycle makes it max_rail too; the hub
+    // stores it and pushes it back (setWindow()).
+    _rail = len;
+    homeOrigin(_home_flip ? _home_datum[1] : _home_datum[0], -kHomeSafetyMarginMm, now_us);
+    homeLeg(HomePhase::finish, _home_flip ? 0.0f : len, _home_v, now_us);
+}
+
+void MotionArbiter::homeEnd(const char* why, uint64_t now_us) {
+    _seek.store(kSeekIdle);
     if (why != nullptr) {
         ++_home_fails;
         _home_fail_leg = _home_leg;
         _home_fail_why = why;
         GLOGI(kTag, "HOME failed at the %s: %s", _home_leg == 0 ? "home end" : "far end", why);
+    }
+    // A cycle that ran stops where it is and the planner starts again from
+    // the count, as after an e-stop. One refused at its start never steered:
+    // whatever moves is the planner's own and is left alone.
+    if (_home != HomePhase::idle) {
+        _emitter.park();
+        _seek_v = 0.0f;
+        resetEngine(toNorm(positionMm()), now_us);
+        _p_cmd_mm = positionMm();
     }
     _home = HomePhase::idle;
     _home_req.store(false);
@@ -964,7 +975,7 @@ MotionArbiter::PlanRead MotionArbiter::readPlan(uint64_t now_us) {
     r.plans    = _k2_plans;
     r.failures = _k2_failures;
     if (now_us < _k2_brake_to_us) {
-        // A brake renders: PAUSE, a generator's stop, a home stall, a starved stream.
+        // A brake renders: PAUSE, a generator's stop, a starved stream.
         r.mode       = uint8_t(PlanStyle::settle);
         r.start      = _k2_brake_from_p;
         r.target     = _k2_brake_to_p;
@@ -1006,14 +1017,18 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
         _stroke_run_mm += std::fabs(d_mm);
     }
 
-    const float vel_mm_s = s.vel * s_mm;
+    // While a cycle runs the seek producer is the plan: its steered velocity,
+    // the count as the plan position, and its leg's end as the target. The
+    // engine only holds at the cycle's last re-anchor.
+    const bool seeking = _home != HomePhase::idle;
+    const float vel_mm_s = seeking ? _seek_v : s.vel * s_mm;
     if (std::fabs(vel_mm_s) > _peak_mm_s) _peak_mm_s = std::fabs(vel_mm_s);
 
     MotionCensus c{};
     c.steps          = steps - _origin;
     c.position_mm    = float(c.steps) * kMmPerStep;
-    c.plan_mm        = toMm(s.pos);
-    c.target_mm      = toMm(s.target);
+    c.plan_mm        = seeking ? c.position_mm : toMm(s.pos);
+    c.target_mm      = seeking ? float(_leg_end - _origin) * kMmPerStep : toMm(s.target);
     c.velocity_mm_s  = vel_mm_s;
     c.residual_steps = static_cast<int32_t>(std::lround((c.plan_mm - c.position_mm) * kStepsPerMm));
     c.win_min        = _win_min;
@@ -1037,7 +1052,7 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.home_fails     = _home_fails;
     c.home_fail_leg  = _home_fail_leg;
     c.home_fail_why  = _home_fail_why;
-    c.busy           = _engine.isBusy(now_us);
+    c.busy           = seeking || _engine.isBusy(now_us);
     c.mode           = s.mode;
     c.plan_kind      = s.plan_kind;
     c.plan_start     = s.start;

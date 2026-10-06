@@ -638,8 +638,8 @@ void ValenceDevice::adoptMeasuredRail(float rail_mm) {
     }
     _cfgDirty = true;
     _cfgGenOwed |= changed;
-    GLOGW(kTag, "HOME: homed. Home datum 0.0 mm, far datum %.1f mm: rail %.1f mm, max_rail %.1f mm",
-          double(rail_mm), double(rail_mm), double(_cfg.max_rail));
+    GLOGW(kTag, "HOME: homed. Usable rail %.1f mm between the safety margins, max_rail %.1f mm",
+          double(rail_mm), double(_cfg.max_rail));
 }
 
 void ValenceDevice::noteSetupWritten(uint8_t wrote) {

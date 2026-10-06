@@ -11,8 +11,10 @@
 // - THE EMITTER IS IDEAL (IdealEmitter.h).
 // - THE HOME SENSE IS A STAND-IN: two stops at fixed emitter counts, the home
 //   end and the rail's far end, HIGH from the instant the ideal carriage
-//   reaches either. No current, no S3 detect, no confirming read: the motion
-//   tick is the only delay.
+//   reaches either. No current, no S3 detect, no confirming read. Its rise is
+//   seen after the tick's render and handed to MotionArbiter::homeSenseRose()
+//   before the evaluation, the board interrupt's path at tick resolution: the
+//   motion tick is the only delay.
 // See: SimMotion.h, flagship_p4/src/motion/MotionArbiter.h, bd val-sf7.2
 
 #include "SimMotion.h"
@@ -45,6 +47,14 @@ public:
     Probe probe() override { return !_present ? Probe::undriven : level() ? Probe::high : Probe::low; }
     bool high() override { return _present && level(); }
 
+    // A rising edge since the previous call: the board's interrupt.
+    bool rose() {
+        const bool now = _present && level();
+        const bool edge = now && !_was;
+        _was = now;
+        return edge;
+    }
+
 private:
     bool level() const {
         const float pos_mm = float(_emitter.count()) * kMmPerStep;
@@ -57,6 +67,7 @@ private:
     float _at_mm = 0.0f;
     float _far_mm = 0.0f;
     bool _present = false;
+    bool _was = false;
 };
 
 class SimHost {
@@ -88,6 +99,7 @@ public:
     // stops rendering between ticks.
     void tick(uint64_t now_us) {
         _emitter.advance(now_us);
+        if (_sense.rose()) _arb.homeSenseRose();
         if (_tune_pending) {
             _arb.applyTuning(*_tune_pending);
             _tune_pending.reset();

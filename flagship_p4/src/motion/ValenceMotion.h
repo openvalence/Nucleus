@@ -129,9 +129,10 @@ struct MotionCensus {
     uint32_t homes          = 0;      // completed home cycles since boot; each
                                       // one is the hub's cue to clear home_required
                                       // and to store home_rail_mm as max_rail
-    float    home_rail_mm   = 0.0f;   // the rail the last completed cycle
-                                      // measured, far datum minus home datum;
-                                      // 0 = none since boot
+    float    home_rail_mm   = 0.0f;   // the usable rail the last completed
+                                      // cycle measured: far datum minus home
+                                      // datum minus both safety margins
+                                      // (MotionArbiter.h); 0 = none since boot
     uint32_t home_fails     = 0;      // cycles that ended unhomed since boot;
                                       // each one is the hub's cue to log why
     uint8_t  home_fail_leg  = 0;      // where the last one ended: 0 the home
@@ -283,8 +284,9 @@ enum class HomeStart : uint8_t {
     unpowered,   // the motor power gate is shut
 };
 // Home op 1: the two-leg cycle, home end then far end, each stall re-touched
-// slowly for its datum; the rail length is measured (MotionArbiter.h, the
-// homing constants). Any task, never blocks. The outcome is the census:
+// slowly for its datum; the usable rail between the safety margins is
+// measured (MotionArbiter.h, the homing constants). Any task, never blocks.
+// The outcome is the census:
 // homing falls, homes counts a completed cycle and home_rail_mm carries its
 // measurement; home_fails counts one that ended unhomed. ESTOP, PAUSE, a
 // power loss or a window change aborts it, unhomed.

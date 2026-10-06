@@ -1,11 +1,16 @@
-// ValenceHomeSense -- the board host of the home sense: pad setup, the rise
-// stamp and wake, the confirmed level read and the pull-up probe
+// ValenceHomeSense -- the board host of the home sense: pad setup, the rise's
+// park, stamp and wake, the confirmed level read and the pull-up probe
 // Constraints:
 // - Pad setup is gpio_set_direction() and gpio_set_pull_mode(), never
 //   gpio_config() (BoardPins.h: the same door for every pad, LP or not).
-// - g_rose_us and g_rose are the two words the ISR writes, stamp first;
-//   high() on the motion task is their one reader and clears g_rose.
-//   Lock-free atomic stores and the wake, no log, no allocation.
+// - The ISR calls the arbiter's park (`rose`) before anything else, then
+//   writes g_rose_us and g_rose, stamp first, then the wake; high() on the
+//   motion task is the stamp's one reader and clears g_rose. Lock-free atomic
+//   stores and the two calls, no log, no allocation.
+// - The GPIO ISR service is installed without ESP_INTR_FLAG_IRAM, so the
+//   handler is held off while the flash cache is disabled; the LP core keeps
+//   rendering the seek through a flash write.
+//   TODO(val-sv6): an IRAM-resident park that a flash write cannot hold off.
 // - high() busy-waits at most kHomeSenseDebounceUs on the motion task, once
 //   per rise: the second read of a rise that young. The source drives the
 //   line push-pull, so two reads that far apart reject a coupled spike and
@@ -38,14 +43,17 @@ gpio_num_t pad() { return static_cast<gpio_num_t>(BOARD_GPIO_HOME_SENSE); }
 
 std::atomic<uint32_t> g_rose_us{0};   // esp_timer's low word at the last rise
 std::atomic<bool> g_rose{false};
-std::atomic<HomeSenseWake> g_wake{nullptr};
+std::atomic<HomeSenseIsr> g_rose_cb{nullptr};
+std::atomic<HomeSenseIsr> g_wake{nullptr};
 
 uint32_t nowUs32() { return static_cast<uint32_t>(esp_timer_get_time()); }
 
+// The park first: nothing ahead of it but the dispatcher.
 void onRise(void*) {
+    if (const HomeSenseIsr rose = g_rose_cb.load(std::memory_order_relaxed)) rose();
     g_rose_us.store(nowUs32(), std::memory_order_relaxed);
     g_rose.store(true, std::memory_order_release);
-    if (const HomeSenseWake wake = g_wake.load(std::memory_order_relaxed)) wake();
+    if (const HomeSenseIsr wake = g_wake.load(std::memory_order_relaxed)) wake();
 }
 
 class BoardHomeSense final : public HomeSense {
@@ -73,7 +81,8 @@ public:
         return gpio_get_level(pad()) != 0;
     }
 
-    void begin(HomeSenseWake wake) {
+    void begin(HomeSenseIsr rose, HomeSenseIsr wake) {
+        g_rose_cb.store(rose, std::memory_order_relaxed);
         g_wake.store(wake, std::memory_order_relaxed);
         if constexpr (kHasPin) {
             gpio_set_direction(pad(), GPIO_MODE_INPUT);
@@ -108,8 +117,8 @@ BoardHomeSense g_sense;
 
 }  // namespace
 
-HomeSense& homeSenseBegin(HomeSenseWake wake) {
-    g_sense.begin(wake);
+HomeSense& homeSenseBegin(HomeSenseIsr rose, HomeSenseIsr wake) {
+    g_sense.begin(rose, wake);
     return g_sense;
 }
 
