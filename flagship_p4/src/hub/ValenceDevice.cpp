@@ -240,8 +240,9 @@ void setConfigKey(StoredConfig& c, uint8_t key, float v, float rail, bool flippe
     }
 }
 
-// The 0x3120 schema's keys in wire order; 4, 5, 15 and 19 are released.
-constexpr std::array<uint8_t, 16> kTuningKeys{1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 20};
+// The 0x3120 schema's keys in wire order; the gaps are released keys
+// (ValenceCatalog.h, kinetic-set).
+constexpr std::array<uint8_t, 9> kTuningKeys{1, 2, 3, 10, 13, 14, 17, 21, 22};
 // chase_dense: a live samples grant commits to it (applyTuning()).
 constexpr uint8_t kChaseDenseKey = 10;
 
@@ -253,26 +254,19 @@ std::optional<IntentValue> setTuningKey(MotionTuning& t, uint8_t key, float v) {
         case 1:  t.jmax_ovr = clampf(v, 0.0f, b::jmax_ovr_max);  return IntentValue::ofF32(t.jmax_ovr);
         case 2:  t.vmax_ovr = clampf(v, 0.0f, b::vmax_ovr_max);  return IntentValue::ofF32(t.vmax_ovr);
         case 3:  t.amax_ovr = clampf(v, 0.0f, b::amax_ovr_max);  return IntentValue::ofF32(t.amax_ovr);
-        case 6:  t.chase_ff = wholeIn(v, 0.0f, 1.0f) != 0;         return IntentValue::ofU64(t.chase_ff);
-        case 7:  t.chase_accel_ff = wholeIn(v, 0.0f, 1.0f) != 0;   return IntentValue::ofU64(t.chase_accel_ff);
-        case 8:  t.chase_gain = clampf(v, 0.0f, b::chase_gain_max);     return IntentValue::ofF32(t.chase_gain);
-        case 9:  t.chase_lookahead = clampf(v, 0.0f, b::lookahead_max); return IntentValue::ofF32(t.chase_lookahead);
         case 10:  // ms on the wire, us in the engine
             t.chase_dense_us = uint32_t(clampf(v, b::dense_ms_min, b::dense_ms_max) * 1000.0f + 0.5f);
             return IntentValue::ofF32(float(t.chase_dense_us) / 1000.0f);
-        case 11: t.chase_aim_extrap = wholeIn(v, 0.0f, 1.0f) != 0; return IntentValue::ofU64(t.chase_aim_extrap);
-        case 12: t.handoff_k = clampf(v, 0.0f, b::handoff_k_max);   return IntentValue::ofF32(t.handoff_k);
         case 13: t.curve_policy = uint8_t(wholeIn(v, 0.0f, float(b::curve_policy_max)));
                  return IntentValue::ofU64(t.curve_policy);
         case 14: t.infeasible_policy = uint8_t(wholeIn(v, 0.0f, float(b::infeasible_max)));
                  return IntentValue::ofU64(t.infeasible_policy);
-        case 16: t.smooth_budget = clampf(v, 0.0f, b::budget_max);    return IntentValue::ofF32(t.smooth_budget);
         case 17: t.amplitude_budget = clampf(v, 0.0f, b::budget_max); return IntentValue::ofF32(t.amplitude_budget);
-        case 18: t.blend_steps = uint8_t(wholeIn(v, float(b::blend_steps_min), float(b::blend_steps_max)));
-                 return IntentValue::ofU64(t.blend_steps);
-        case 20:  // ms on the wire, us in the engine
-            t.settle_grace_us = uint32_t(clampf(v, 0.0f, b::settle_ms_max) * 1000.0f + 0.5f);
-            return IntentValue::ofF32(float(t.settle_grace_us) / 1000.0f);
+        case 21: t.corner = uint8_t(wholeIn(v, 0.0f, float(b::corner_max)));
+                 return IntentValue::ofU64(t.corner);
+        case 22:  // ms on the wire, us in the engine
+            t.react_us = uint32_t(clampf(v, 0.0f, b::react_ms_max) * 1000.0f + 0.5f);
+            return IntentValue::ofF32(float(t.react_us) / 1000.0f);
         default: return std::nullopt;
     }
 }
@@ -283,19 +277,12 @@ std::optional<IntentValue> tuningKeyValue(const MotionTuning& t, uint8_t key) {
         case 1:  return IntentValue::ofF32(t.jmax_ovr);
         case 2:  return IntentValue::ofF32(t.vmax_ovr);
         case 3:  return IntentValue::ofF32(t.amax_ovr);
-        case 6:  return IntentValue::ofU64(t.chase_ff);
-        case 7:  return IntentValue::ofU64(t.chase_accel_ff);
-        case 8:  return IntentValue::ofF32(t.chase_gain);
-        case 9:  return IntentValue::ofF32(t.chase_lookahead);
         case 10: return IntentValue::ofF32(float(t.chase_dense_us) / 1000.0f);
-        case 11: return IntentValue::ofU64(t.chase_aim_extrap);
-        case 12: return IntentValue::ofF32(t.handoff_k);
         case 13: return IntentValue::ofU64(t.curve_policy);
         case 14: return IntentValue::ofU64(t.infeasible_policy);
-        case 16: return IntentValue::ofF32(t.smooth_budget);
         case 17: return IntentValue::ofF32(t.amplitude_budget);
-        case 18: return IntentValue::ofU64(t.blend_steps);
-        case 20: return IntentValue::ofF32(float(t.settle_grace_us) / 1000.0f);
+        case 21: return IntentValue::ofU64(t.corner);
+        case 22: return IntentValue::ofF32(float(t.react_us) / 1000.0f);
         default: return std::nullopt;
     }
 }
@@ -306,28 +293,22 @@ float baselineNumber(uint8_t key, const IntentValue& v) {
     return numberOf(&f).value_or(0.0f);
 }
 
-// The four tuning cards, one bit each in ValenceDevice::_tuneDirty.
+// The three tuning cards, one bit each in ValenceDevice::_tuneDirty.
 constexpr uint8_t kCardModes    = 0x01;  // 0x1030
 constexpr uint8_t kCardLimits   = 0x02;  // 0x1120
-constexpr uint8_t kCardChase    = 0x04;  // 0x1121
 constexpr uint8_t kCardWaveform = 0x08;  // 0x1122
 
 // Which cards differ between two tuning sets. Field-to-card membership is the
 // catalog's (ValenceCatalog.h, the kinetic-* and machine-modes entries).
 uint8_t cardsChanged(const MotionTuning& a, const MotionTuning& b) {
     uint8_t m = 0;
-    if ((a.overshoot_guard > 0.0f) != (b.overshoot_guard > 0.0f) || a.home_speed != b.home_speed)
+    if (a.home_speed != b.home_speed)
         m |= kCardModes;
     if (a.jmax_ovr != b.jmax_ovr || a.vmax_ovr != b.vmax_ovr || a.amax_ovr != b.amax_ovr)
         m |= kCardLimits;
-    if (a.chase_ff != b.chase_ff || a.chase_accel_ff != b.chase_accel_ff ||
-        a.chase_gain != b.chase_gain || a.chase_lookahead != b.chase_lookahead ||
-        a.chase_dense_us != b.chase_dense_us || a.chase_aim_extrap != b.chase_aim_extrap ||
-        a.handoff_k != b.handoff_k)
-        m |= kCardChase;
     if (a.curve_policy != b.curve_policy || a.infeasible_policy != b.infeasible_policy ||
-        a.smooth_budget != b.smooth_budget || a.amplitude_budget != b.amplitude_budget ||
-        a.blend_steps != b.blend_steps || a.settle_grace_us != b.settle_grace_us)
+        a.amplitude_budget != b.amplitude_budget || a.chase_dense_us != b.chase_dense_us ||
+        a.corner != b.corner || a.react_us != b.react_us)
         m |= kCardWaveform;
     return m;
 }
@@ -446,16 +427,16 @@ void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, 
     size_t n = 0;
     packU8(buf, n, 0);   // blend_mode_reserved
     packU8(buf, n, 0);   // stream_speed_reserved
-    packU8(buf, n, t.overshoot_guard > 0.0f ? 1 : 0);   // overshoot_clamp
-    // enabled_mask: bit 0 overshoot_clamp, accepted at all times. home_style
-    // (has_drive only) stays low: neither of its styles runs here.
-    // schedule_horizon drops while a segments grant is live (applyModes()).
-    // flipped drops whenever applyModes() would refuse it (flipOpen()).
-    // home_speed is accepted at all times; a cycle reads it at its start.
-    const uint8_t horizonBit = drive ? 0x04 : 0x02;
+    packU8(buf, n, 0);   // overshoot_clamp_reserved
+    // enabled_mask: home_style (has_drive only, bit 0) stays low: neither of
+    // its styles runs here. schedule_horizon drops while a segments grant is
+    // live (applyModes()). flipped drops whenever applyModes() would refuse it
+    // (flipOpen()). home_speed is accepted at all times; a cycle reads it at
+    // its start.
+    const uint8_t horizonBit = drive ? 0x02 : 0x01;
     const uint8_t flipBit = uint8_t(horizonBit << 1);
     const uint8_t homeSpeedBit = uint8_t(flipBit << 1);
-    packU8(buf, n, uint8_t(0x01 | (horizonOpen ? horizonBit : 0) | (flipOpen ? flipBit : 0) | homeSpeedBit));
+    packU8(buf, n, uint8_t((horizonOpen ? horizonBit : 0) | (flipOpen ? flipBit : 0) | homeSpeedBit));
     packU8(buf, n, 2);   // motion_backend, read-only: quadrature, the LP-core emitter
     if (drive) packU8(buf, n, 0);   // home_style
     packU8(buf, n, m.horizon);      // schedule_horizon
@@ -465,9 +446,11 @@ void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, 
     publishPacked(hub, ch::machine_modes, std::span<const std::byte>(buf).first(len), n);
 }
 
-// The three kinetic cards, each only when `cards` names it. Every setting on
-// them is applied (0x3120), so every enabled_mask bit is high.
-void publishKineticCards(Hub& hub, const MotionTuning& t, uint8_t cards) {
+// The two kinetic cards, each only when `cards` names it. Every setting on
+// them is applied (0x3120), so every enabled_mask bit is high but
+// chase_dense_ms's, which drops while a samples grant is live (latencyOpen
+// false; applyTuning() refuses it then).
+void publishKineticCards(Hub& hub, const MotionTuning& t, uint8_t cards, bool latencyOpen) {
     if (cards & kCardLimits) {
         std::array<std::byte, 14> buf{};
         size_t n = 0;
@@ -478,31 +461,22 @@ void publishKineticCards(Hub& hub, const MotionTuning& t, uint8_t cards) {
         packU8(buf, n, uint8_t(hub.trialMask(ch::kinetic_limits)));
         publishPacked(hub, ch::kinetic_limits, buf, n);
     }
-    if (cards & kCardChase) {
-        std::array<std::byte, 21> buf{};
-        size_t n = 0;
-        packU8(buf, n, t.chase_ff ? 1 : 0);
-        packU8(buf, n, t.chase_accel_ff ? 1 : 0);
-        packF32(buf, n, t.chase_gain);
-        packF32(buf, n, t.chase_lookahead);
-        packU32(buf, n, t.chase_dense_us);     // scale 1000, unit ms: the wire carries us
-        packU8(buf, n, t.chase_aim_extrap ? 1 : 0);
-        packF32(buf, n, t.handoff_k);
-        packU8(buf, n, 0x7F);                  // enabled_mask
-        packU8(buf, n, uint8_t(hub.trialMask(ch::kinetic_chase)));
-        publishPacked(hub, ch::kinetic_chase, buf, n);
-    }
     if (cards & kCardWaveform) {
-        std::array<std::byte, 17> buf{};
+        std::array<std::byte, 26> buf{};
         size_t n = 0;
         packU8(buf, n, t.curve_policy);
         packU8(buf, n, t.infeasible_policy);
-        packF32(buf, n, t.smooth_budget);
+        packF32(buf, n, 0.0f);                 // smooth_budget_reserved
         packF32(buf, n, t.amplitude_budget);
-        packU8(buf, n, t.blend_steps);
-        packU32(buf, n, t.settle_grace_us);    // scale 1000, unit ms: the wire carries us
-        packU8(buf, n, 0x3F);                  // enabled_mask
+        packU8(buf, n, 0);                     // blend_steps_reserved
+        packU32(buf, n, 0);                    // settle_grace_reserved
+        // enabled_mask: curve_policy, infeasible_policy, amplitude_budget,
+        // chase_dense_ms (bit 3), corner, react_ms.
+        packU8(buf, n, uint8_t(latencyOpen ? 0x3F : 0x37));
         packU8(buf, n, uint8_t(hub.trialMask(ch::kinetic_waveform)));
+        packU32(buf, n, t.chase_dense_us);     // scale 1000, unit ms: the wire carries us
+        packU8(buf, n, t.corner);
+        packU32(buf, n, t.react_us);           // scale 1000, unit ms: the wire carries us
         publishPacked(hub, ch::kinetic_waveform, buf, n);
     }
 }
@@ -706,8 +680,8 @@ void ValenceDevice::noteTuning(const MotionTuning& next, bool& cfgChanged) {
     _tune = next;
 }
 
-// Keys 4 (overshoot_clamp), 7 (schedule_horizon) and 9 (home_speed, clamped
-// to its catalog bounds); the whole request is validated before anything is
+// Keys 7 (schedule_horizon), 8 (flipped) and 9 (home_speed, clamped to its
+// catalog bounds); the whole request is validated before anything is
 // applied. A horizon change is refused INTERLOCK while a segments grant is
 // live: the grant advertised the old value for its life (SPEC 5.4), and the
 // library re-reads this one on every bundle.
@@ -715,12 +689,10 @@ void ValenceDevice::noteTuning(const MotionTuning& next, bool& cfgChanged) {
 // a source owns the rail, NOT_HOMED while unhomed, INTERLOCK under override or
 // in motion. An unchanged value is an ordinary no-op ECHO.
 Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged) {
-    const auto* f4 = findField(requested, 4);   // overshoot_clamp
     const auto* f7 = findField(requested, 7);   // schedule_horizon
     const auto* f8 = findField(requested, 8);   // flipped
     const auto* f9 = findField(requested, 9);   // home_speed
-    if (!f4 && !f7 && !f8 && !f9) return Ret::err(NackCode::INVALID_VALUE);
-    if (f4 && !numberOf(f4)) return refuseNotANumber(ch::modes_set, 4);
+    if (!f7 && !f8 && !f9) return Ret::err(NackCode::INVALID_VALUE);
     if (f7 && !numberOf(f7)) return refuseNotANumber(ch::modes_set, 7);
     if (f8 && !boolOf(f8)) return refuseNotANumber(ch::modes_set, 8);
     if (f9 && !numberOf(f9)) return refuseNotANumber(ch::modes_set, 9);
@@ -741,18 +713,13 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
     uint32_t n = 0;
     bool tuneChanged = false;
     MotionTuning next = _tune;
-    if (f4) {
-        const bool on = wholeIn(*numberOf(f4), 0.0f, 1.0f) != 0;
-        next.overshoot_guard = overshootGuardFor(on, motionDefaultTuning().overshoot_guard);
-        applied.fields[n++] = {4, IntentValue::ofU64(on ? 1 : 0)};
-    }
     if (f7) applied.fields[n++] = {7, IntentValue::ofU64(nextModes.horizon)};
     if (f8) applied.fields[n++] = {8, IntentValue::ofU64(nextModes.flipped ? 1 : 0)};
     if (f9) {
         next.home_speed = clampf(*numberOf(f9), tuning_bounds::home_speed_min, tuning_bounds::home_speed_max);
         applied.fields[n++] = {9, IntentValue::ofF32(next.home_speed)};
     }
-    if (f4 || f9) noteTuning(next, tuneChanged);
+    if (f9) noteTuning(next, tuneChanged);
     const bool modesChanged = !(nextModes == _modes);
     // At rest by the gate above, so the frame moves under a still carriage.
     if (nextModes.flipped != _modes.flipped) {
@@ -1657,7 +1624,7 @@ void ValenceDevice::pushConfigToMotion() const {
 std::expected<void, stored::ConfigReject> ValenceDevice::adoptConfigBlob(std::span<const std::byte> blob,
                                                                          uint16_t& cfgGen) {
     const auto adopted =
-        stored::decodeConfig(blob, motionDefaultTuning().overshoot_guard, _cfg, _tune, _modes, cfgGen);
+        stored::decodeConfig(blob, motionDefaultTuning(), _cfg, _tune, _modes, cfgGen);
     if (!adopted) return adopted;
     _cfgDirty = false;
     // The engine adopts through the live write's own door, never a side path.
@@ -1677,8 +1644,6 @@ size_t ValenceDevice::encodeConfigBlob(std::span<std::byte> out, uint16_t cfgGen
         for (uint8_t k = 1; k <= 8; ++k)
             if (const auto b = _hub->trialBaselineOf(ch::config_set, k))
                 setConfigKey(c, k, baselineNumber(k, *b), rail, _modes.flipped);
-        if (const auto b = _hub->trialBaselineOf(ch::modes_set, 4))
-            t.overshoot_guard = overshootGuardFor(baselineNumber(4, *b) != 0.0f, motionDefaultTuning().overshoot_guard);
         for (const uint8_t k : kTuningKeys)
             if (const auto b = _hub->trialBaselineOf(ch::kinetic_set, k)) (void)setTuningKey(t, k, baselineNumber(k, *b));
     }
@@ -1702,7 +1667,6 @@ std::optional<IntentValue> ValenceDevice::trialBaseline(uint16_t channel_id, uin
             default: return std::nullopt;
         }
     }
-    if (channel_id == ch::modes_set && key == 4) return IntentValue::ofU64(_tune.overshoot_guard > 0.0f ? 1 : 0);
     if (channel_id == ch::kinetic_set && key != kChaseDenseKey) return tuningKeyValue(_tune, key);
     return std::nullopt;
 }
@@ -1773,7 +1737,7 @@ void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     // _tune is the factory set or the adopted one, and the engine already holds
     // it either way (adoptConfigBlob pushed it), so nothing is pushed here.
     publishMachineModes(hub, _tune, _modes, !publishGrantLive(ch::motion_segment), flipOpen(motionCensus()));
-    publishKineticCards(hub, _tune, kCardLimits | kCardChase | kCardWaveform);
+    publishKineticCards(hub, _tune, kCardLimits | kCardWaveform, !publishGrantLive(ch::motion_input));
     const MotionCensus mo = motionCensus();
     publishMotion(hub, mo, patternActive());
     publishPlanStrip(hub, mo);
@@ -1922,14 +1886,19 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
                               _hub->streamIngressCounters(i).dropped);
     }
 
-    // The schedule_horizon and flipped enabled_mask bits follow the segments
-    // grants and the rail's state, which no write announces.
+    // The schedule_horizon, flipped and chase_dense_ms enabled_mask bits
+    // follow the publish grants and the rail's state, which no write announces.
     const bool horizonOpen = !publishGrantLive(ch::motion_segment);
     const bool flipNowOpen = flipOpen(mo);
     if (horizonOpen != _horizonOpenSent || flipNowOpen != _flipOpenSent) {
         _horizonOpenSent = horizonOpen;
         _flipOpenSent = flipNowOpen;
         publishMachineModes(*_hub, _tune, _modes, horizonOpen, flipNowOpen);
+    }
+    const bool latencyOpen = !publishGrantLive(ch::motion_input);
+    if (latencyOpen != _latencyOpenSent) {
+        _latencyOpenSent = latencyOpen;
+        publishKineticCards(*_hub, _tune, kCardWaveform, latencyOpen);
     }
 
     // RETURN arrived (SPEC 11.1): override drops, plain PAUSE stays. A counter,
@@ -1974,7 +1943,7 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         motionSetTuning(_tune);
         if (_tuneDirty & kCardModes)
             publishMachineModes(*_hub, _tune, _modes, _horizonOpenSent, _flipOpenSent);
-        publishKineticCards(*_hub, _tune, _tuneDirty);
+        publishKineticCards(*_hub, _tune, _tuneDirty, _latencyOpenSent);
         _tuneDirty = 0;
         // Same blob as 0x1000: the tuning write bumped cfg_gen too.
         if (_durableDirty) {
@@ -2027,7 +1996,7 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _trialGenSent = _hub->trialGen();
         publishMachineConfig();
         publishMachineModes(*_hub, _tune, _modes, _horizonOpenSent, _flipOpenSent);
-        publishKineticCards(*_hub, _tune, kCardLimits | kCardChase | kCardWaveform);
+        publishKineticCards(*_hub, _tune, kCardLimits | kCardWaveform, _latencyOpenSent);
     }
 
     // 1 Hz, and at once when the motor switch moved: a client watching a

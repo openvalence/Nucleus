@@ -171,10 +171,11 @@ struct MotionCensus {
     float    peak_mm_s      = 0.0f;
 };
 
-// The engine's tuning as the 0x1030 / 0x1120-0x1122 cards speak it. The hub
+// The engine's tuning as the 0x1030 / 0x1120 / 0x1122 cards speak it. The hub
 // delegate OWNS the live set (seeded from motionDefaultTuning(), written by
 // 0x3030 / 0x3120) and hands every change to motionSetTuning(); the engine
-// only ever holds what the delegate last pushed.
+// only ever holds what the delegate last pushed. Every member is read: a
+// member the planner stops reading leaves this struct and the wire together.
 struct MotionTuning {
     // Input-set ceiling overrides, NORMALIZED window units. 0 = derive the
     // ceiling from the mm input limits. jmax applies to both sets, because the
@@ -182,27 +183,18 @@ struct MotionTuning {
     float    jmax_ovr          = 0.0f;
     float    vmax_ovr          = 0.0f;
     float    amax_ovr          = 0.0f;
-    bool     chase_ff          = false;
-    bool     chase_accel_ff    = false;
-    float    chase_gain        = 0.0f;
-    float    chase_lookahead   = 0.0f;
+    // The samples grant's schedule_latency_us, less the motion tick
+    // (sampleLatencyUs()).
     uint32_t chase_dense_us    = 0;
-    bool     chase_aim_extrap  = false;
-    float    handoff_k         = 0.0f;
     uint8_t  curve_policy      = 0;   // catalog ordinal: 0 follow, 1 C1, 2 C2
     uint8_t  infeasible_policy = 0;   // catalog ordinal: 0 stretch, 1 blend
-    float    smooth_budget     = 0.0f;
-    float    amplitude_budget  = 0.0f;
-    uint8_t  blend_steps       = 0;
-    uint32_t settle_grace_us   = 0;
-    // 0x1030 overshoot_clamp, 0 = disarmed. Persisted and published; the
-    // planner does not read it (motionDefaultTuning()).
-    float    overshoot_guard   = 0.0f;
+    float    amplitude_budget  = 0.0f;   // kinetic2::Config::amplitude_floor
     // 0x1030 home_speed, mm/s: the home cycle's approach (MotionArbiter.h,
     // homing). Not engine tuning; it rides this set to reach the motion task.
     float    home_speed        = DEFAULT_HOME_SPEED_MM_S;
     // Kinetic² planner options (RFC-105), static_asserted against
-    // kinetic2::Config's defaults. Not persisted and not on a catalog card yet.
+    // kinetic2::Config's defaults. lookahead_us is neither persisted nor on a
+    // card: the kernel at kinetic.pin does not read it (bd val-88t).
     uint32_t lookahead_us      = 250000;
     uint8_t  corner            = 0;   // kinetic2::Corner: 0 continuous, 1 cubic
     uint32_t react_us          = 4000;   // the reaction horizon: a knot arriving mid-motion re-plans from this far ahead

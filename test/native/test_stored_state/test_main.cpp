@@ -33,7 +33,15 @@ using Reject = valence::stored::ConfigReject;
 
 namespace {
 
-constexpr float kFactoryGuard = 1.25f;
+// The engine's factory set as decodeConfig() is handed it, off the struct
+// defaults, so a member an older layout lacks is seen to come from here.
+MotionTuning factoryTune() {
+    MotionTuning t;
+    t.corner = 1;
+    t.react_us = 7000;
+    return t;
+}
+const MotionTuning kFactory = factoryTune();
 
 // The decode out-param the config cases do not inspect.
 valence::StoredModes g_modes;
@@ -44,21 +52,13 @@ MotionTuning sampleTuning() {
     t.jmax_ovr = 150000.0f;
     t.vmax_ovr = 3.5f;
     t.amax_ovr = 42.0f;
-    t.chase_ff = true;
-    t.chase_accel_ff = false;
-    t.chase_gain = 0.8f;
-    t.chase_lookahead = 1.3f;
     t.chase_dense_us = 35000;
-    t.chase_aim_extrap = true;
-    t.handoff_k = 2.0f;
     t.curve_policy = 2;
     t.infeasible_policy = 1;
-    t.smooth_budget = 0.25f;
     t.amplitude_budget = 0.6f;
-    t.blend_steps = 4;
-    t.settle_grace_us = 30000;
-    t.overshoot_guard = kFactoryGuard;
     t.home_speed = 25.0f;
+    t.corner = 1;
+    t.react_us = 6500;
     return t;
 }
 
@@ -85,7 +85,7 @@ TEST_CASE("config blob: round trip carries config, tuning and cfg_gen") {
     StoredConfig c;
     MotionTuning t;
     uint16_t gen = 0;
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, g_modes, gen));
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, g_modes, gen));
     CHECK(c == sampleConfig());
     CHECK(t == sampleTuning());
     CHECK(gen == 4242);
@@ -98,27 +98,64 @@ TEST_CASE("config blob: cfg_gen 65535 and 0, either side of the counter's wrap, 
         StoredConfig c;
         MotionTuning t;
         uint16_t gen = 99;
-        REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, g_modes, gen));
+        REQUIRE(stored::decodeConfig(b, kFactory, c, t, g_modes, gen));
         CHECK(c == sampleConfig());
         CHECK(t == sampleTuning());
         CHECK(gen == want);
     }
 }
 
-TEST_CASE("config blob: overshoot is stored as on/off and re-derived from the factory multiplier") {
-    MotionTuning off = sampleTuning();
-    off.overshoot_guard = 0.0f;
-    std::array<std::byte, stored::kConfigBlobBytes> b{};
-    REQUIRE(stored::encodeConfig(b, sampleConfig(), off, valence::StoredModes{}, 1) == b.size());
+// Offsets per StoredState.h: header 7 B, the eight 0x1000 f32, then the
+// tuning: jmax, vmax, amax, four retired f32, amplitude_budget, chase_dense_us,
+// a retired u32, three retired u8, curve_policy, infeasible_policy, a retired
+// u8 and the retired overshoot_clamp byte.
+TEST_CASE("config blob: retired slots are written zero and never read or checked") {
+    auto b = encodedConfig();
+    constexpr size_t kTune = 7 + 8 * 4;
+    // Relative to the tuning block, which ends at 47.
+    auto retired = [](size_t off) { return (off >= 12 && off < 28) || (off >= 36 && off < 43) || off == 45 || off == 46; };
+    for (size_t off = 0; off < 47; ++off)
+        if (retired(off)) CHECK(b[kTune + off] == std::byte{0});
+    // Garbage an older firmware's knobs could have left there is ignored.
+    for (size_t off = 0; off < 47; ++off)
+        if (retired(off)) b[kTune + off] = std::byte{0xFF};
     StoredConfig c;
     MotionTuning t;
     uint16_t gen = 0;
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, g_modes, gen));
-    CHECK(t.overshoot_guard == 0.0f);
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, g_modes, gen));
+    CHECK(t == sampleTuning());
+}
 
-    const auto on = encodedConfig();
-    REQUIRE(stored::decodeConfig(on, 2.0f, c, t, g_modes, gen));
-    CHECK(t.overshoot_guard == 2.0f);   // a new engine factory value wins
+TEST_CASE("config blob: v7 carries corner and react_us; a v6 blob migrates to the factory's") {
+    const auto b = encodedConfig(30);
+    StoredConfig c;
+    MotionTuning t;
+    valence::StoredModes got;
+    uint16_t gen = 0;
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, got, gen));
+    CHECK(t.corner == 1);
+    CHECK(t.react_us == 6500);
+
+    std::array<std::byte, stored::kConfigV6Bytes> v6{};
+    std::memcpy(v6.data(), b.data(), v6.size());
+    v6[4] = std::byte{6};
+    MotionTuning want = sampleTuning();
+    want.corner = kFactory.corner;
+    want.react_us = kFactory.react_us;
+    REQUIRE(stored::decodeConfig(v6, kFactory, c, t, got, gen));
+    CHECK(t == want);
+    CHECK(gen == 30);
+
+    // Out of its bounds, rejected whole: a corner past the enum, a horizon
+    // past react_ms_max.
+    auto bad = b;
+    bad[stored::kConfigV6Bytes] = std::byte{2};
+    CHECK_FALSE(stored::decodeConfig(bad, kFactory, c, t, got, gen));
+    MotionTuning longReact = sampleTuning();
+    longReact.react_us = 100001;
+    std::array<std::byte, stored::kConfigBlobBytes> f{};
+    REQUIRE(stored::encodeConfig(f, sampleConfig(), longReact, valence::StoredModes{}, 1) == f.size());
+    CHECK_FALSE(stored::decodeConfig(f, kFactory, c, t, got, gen));
 }
 
 TEST_CASE("config blob: every rejection leaves the factory values standing") {
@@ -132,7 +169,7 @@ TEST_CASE("config blob: every rejection leaves the factory values standing") {
         MotionTuning t = factoryTune;
         valence::StoredModes m = heldModes;
         uint16_t gen = 99;
-        const auto r = stored::decodeConfig(in, kFactoryGuard, c, t, m, gen);
+        const auto r = stored::decodeConfig(in, kFactory, c, t, m, gen);
         REQUIRE_FALSE(r.has_value());
         CHECK(r.error() == why);
         CHECK(c == factoryCfg);
@@ -181,7 +218,7 @@ TEST_CASE("config blob: every rejection leaves the factory values standing") {
     }
     SUBCASE("out-of-range tuning is rejected whole, never clamped") {
         MotionTuning t = sampleTuning();
-        t.blend_steps = 11;
+        t.infeasible_policy = 2;
         std::array<std::byte, stored::kConfigBlobBytes> b{};
         REQUIRE(stored::encodeConfig(b, sampleConfig(), t, valence::StoredModes{}, 1) == b.size());
         expectRejected(b, Reject::BadTuning);
@@ -307,14 +344,14 @@ TEST_CASE("config blob: a pre-rename v2 blob decodes into the jog fields") {
     for (float v : {10.0f, 190.0f, 64.0f, 333.0f, 800.0f, 40000.0f, 1500000.0f, 300.0f}) put(v);
     for (float v : {0.0f, 0.0f, 0.0f, 0.5f, 1.0f, 2.0f, 0.1f, 0.5f}) put(v);
     put(uint32_t(30000));   // chase_dense_us
-    put(uint32_t(20000));   // settle_grace_us
+    put(uint32_t(20000));   // retired slot
     for (uint8_t v : {uint8_t(1), uint8_t(0), uint8_t(1), uint8_t(1), uint8_t(0), uint8_t(3), uint8_t(1)}) put(v);
     REQUIRE(n == b.size());
 
     StoredConfig c;
     MotionTuning t;
     uint16_t gen = 0;
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, g_modes, gen));
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, g_modes, gen));
     CHECK(gen == 31);
     CHECK(c.jog_speed == 64.0f);
     CHECK(c.jog_accel == 333.0f);
@@ -331,7 +368,7 @@ TEST_CASE("config blob: the schedule horizon round trips; a v2 blob migrates to 
     MotionTuning t;
     valence::StoredModes got;
     uint16_t gen = 0;
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, got, gen));
     CHECK(got.horizon == 2);
     CHECK(valence::kHorizonMs[got.horizon] == 1000);
 
@@ -341,16 +378,16 @@ TEST_CASE("config blob: the schedule horizon round trips; a v2 blob migrates to 
     std::memcpy(v2.data(), b.data(), v2.size());
     v2[4] = std::byte{2};
     got.horizon = 1;
-    REQUIRE(stored::decodeConfig(v2, kFactoryGuard, c, t, got, gen));
+    REQUIRE(stored::decodeConfig(v2, kFactory, c, t, got, gen));
     CHECK(got.horizon == 0);
     CHECK(valence::kHorizonMs[got.horizon] == 250);
 
     // An ordinal past the select's options is rejected whole.
     b[stored::kConfigV3Bytes - 1] = std::byte{3};
-    CHECK_FALSE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    CHECK_FALSE(stored::decodeConfig(b, kFactory, c, t, got, gen));
     // A v3 label on v2 bytes is a length mismatch, never a misread.
     v2[4] = std::byte{3};
-    CHECK_FALSE(stored::decodeConfig(v2, kFactoryGuard, c, t, got, gen));
+    CHECK_FALSE(stored::decodeConfig(v2, kFactory, c, t, got, gen));
 }
 
 TEST_CASE("config blob: v4 carries the flip; a v3 blob migrates to unflipped") {
@@ -363,20 +400,20 @@ TEST_CASE("config blob: v4 carries the flip; a v3 blob migrates to unflipped") {
     MotionTuning t;
     valence::StoredModes got;
     uint16_t gen = 0;
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, got, gen));
     CHECK(got.flipped);
     CHECK(got.horizon == 1);
 
     std::array<std::byte, stored::kConfigV3Bytes> v3{};
     std::memcpy(v3.data(), b.data(), v3.size());
     v3[4] = std::byte{3};
-    REQUIRE(stored::decodeConfig(v3, kFactoryGuard, c, t, got, gen));
+    REQUIRE(stored::decodeConfig(v3, kFactory, c, t, got, gen));
     CHECK_FALSE(got.flipped);
     CHECK(got.horizon == 1);
 
     // The flip byte is a bool: anything but 0 or 1 is rejected whole.
     b[stored::kConfigV4Bytes - 1] = std::byte{2};
-    CHECK_FALSE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    CHECK_FALSE(stored::decodeConfig(b, kFactory, c, t, got, gen));
 }
 
 TEST_CASE("config blob: v5 carries the first-run record; an older blob migrates uncommissioned") {
@@ -390,7 +427,7 @@ TEST_CASE("config blob: v5 carries the first-run record; an older blob migrates 
     MotionTuning t;
     valence::StoredModes got;
     uint16_t gen = 0;
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, got, gen));
     CHECK(got.setup_written == valence::kSetupRequiredMask);
     CHECK(valence::commissioned(got));
     CHECK(got.flipped);
@@ -400,7 +437,7 @@ TEST_CASE("config blob: v5 carries the first-run record; an older blob migrates 
     std::array<std::byte, stored::kConfigV4Bytes> v4{};
     std::memcpy(v4.data(), b.data(), v4.size());
     v4[4] = std::byte{4};
-    REQUIRE(stored::decodeConfig(v4, kFactoryGuard, c, t, got, gen));
+    REQUIRE(stored::decodeConfig(v4, kFactory, c, t, got, gen));
     CHECK(got.setup_written == 0);
     CHECK_FALSE(valence::commissioned(got));
     CHECK(got.flipped);
@@ -408,7 +445,7 @@ TEST_CASE("config blob: v5 carries the first-run record; an older blob migrates 
     // A partial pass persists as written and is still uncommissioned.
     m.setup_written = 0x7F;   // max_rail never written
     REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), m, 15) == b.size());
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, got, gen));
     CHECK(got.setup_written == 0x7F);
     CHECK_FALSE(valence::commissioned(got));
     CHECK_FALSE(valence::commissioned(valence::StoredModes{}));   // factory-fresh
@@ -423,14 +460,14 @@ TEST_CASE("config blob: v6 carries the home speed; a v5 blob migrates to the fac
     MotionTuning t;
     valence::StoredModes got;
     uint16_t gen = 0;
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, got, gen));
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, got, gen));
     CHECK(t.home_speed == 25.0f);
 
     std::array<std::byte, stored::kConfigV5Bytes> v5{};
     std::memcpy(v5.data(), b.data(), v5.size());
     v5[4] = std::byte{5};
     t.home_speed = 0.0f;
-    REQUIRE(stored::decodeConfig(v5, kFactoryGuard, c, t, got, gen));
+    REQUIRE(stored::decodeConfig(v5, kFactory, c, t, got, gen));
     CHECK(t.home_speed == valence::factory::home_speed);
     CHECK(got.setup_written == valence::kSetupRequiredMask);
     CHECK(gen == 21);
@@ -440,7 +477,8 @@ TEST_CASE("config blob: v6 carries the home speed; a v5 blob migrates to the fac
 // 8c37cbb: v5, 89 B), assembled field by field and never by encodeConfig(),
 // so it stays what an upgraded machine holds when the layout moves on. The
 // compares are whole-struct: a field a later layout adds must come out at the
-// value want* gives it.
+// value want* gives it. The retired slots carry that firmware's factory
+// values, which decode ignores.
 TEST_CASE("config blob: a 0.1.5 blob decodes whole, its generation and commissioning kept") {
     StoredConfig wantC;
     wantC.window_min = 12.5f;
@@ -453,6 +491,8 @@ TEST_CASE("config blob: a 0.1.5 blob decodes whole, its generation and commissio
     wantC.max_rail = 300.0f;
     MotionTuning wantT = sampleTuning();
     wantT.home_speed = valence::factory::home_speed;   // v6's, absent from v5
+    wantT.corner = kFactory.corner;                    // v7's
+    wantT.react_us = kFactory.react_us;
     valence::StoredModes wantM;
     wantM.horizon = 2;
     wantM.flipped = true;
@@ -470,15 +510,15 @@ TEST_CASE("config blob: a 0.1.5 blob decodes whole, its generation and commissio
     for (float v : {wantC.window_min, wantC.window_max, wantC.jog_speed, wantC.jog_accel,
                     wantC.input_speed, wantC.input_accel, wantC.input_jerk, wantC.max_rail})
         put(v);
-    for (float v : {wantT.jmax_ovr, wantT.vmax_ovr, wantT.amax_ovr, wantT.chase_gain, wantT.chase_lookahead,
-                    wantT.handoff_k, wantT.smooth_budget, wantT.amplitude_budget})
+    // jmax, vmax, amax, four retired slots, amplitude_budget
+    for (float v : {wantT.jmax_ovr, wantT.vmax_ovr, wantT.amax_ovr, 0.9f, 1.3f, 1.5f, 0.5f,
+                    wantT.amplitude_budget})
         put(v);
     put(uint32_t(wantT.chase_dense_us));
-    put(uint32_t(wantT.settle_grace_us));
-    // chase_ff, chase_accel_ff, chase_aim_extrap, curve_policy,
-    // infeasible_policy, blend_steps, overshoot_clamp on
-    for (uint8_t v : {uint8_t(wantT.chase_ff), uint8_t(wantT.chase_accel_ff), uint8_t(wantT.chase_aim_extrap),
-                      wantT.curve_policy, wantT.infeasible_policy, wantT.blend_steps, uint8_t(1)})
+    put(uint32_t(30000));        // retired slot
+    // three retired slots, curve_policy, infeasible_policy, two retired slots
+    for (uint8_t v : {uint8_t(1), uint8_t(1), uint8_t(1), wantT.curve_policy, wantT.infeasible_policy, uint8_t(6),
+                      uint8_t(1)})
         put(v);
     put(uint8_t(wantM.horizon));
     put(uint8_t(1));             // flipped
@@ -489,7 +529,7 @@ TEST_CASE("config blob: a 0.1.5 blob decodes whole, its generation and commissio
     MotionTuning t;
     valence::StoredModes m;
     uint16_t gen = 0;
-    REQUIRE(stored::decodeConfig(b, kFactoryGuard, c, t, m, gen));
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, m, gen));
     CHECK(gen == 4660);
     CHECK(c == wantC);
     CHECK(t == wantT);

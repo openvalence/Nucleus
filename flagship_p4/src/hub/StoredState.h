@@ -1,8 +1,8 @@
 #pragma once
 
 // StoredState -- the config-generation state the hub keeps across a reboot
-// (0x1000 config, 0x1030 modes, 0x1120-0x1122 tuning, cfg_gen) and its blob
-// codec, hardware-free
+// (0x1000 config, 0x1030 modes, 0x1120 and 0x1122 tuning, cfg_gen) and its
+// blob codec, hardware-free
 // Constraints:
 // - HARDWARE-FREE and header-only: the P4 composition (NVS), the host twin (a
 //   file) and the native suite all run this one codec.
@@ -19,8 +19,11 @@
 //   stored setting; the next write is the current version. A NEWER version is
 //   refused whole, never read as the prefix this firmware knows.
 // - A TUNING FIELD APPENDED LATER takes its factory value when an older blob
-//   lacks it: the engine's (passed in, as factoryGuard is) or the catalog's
+//   lacks it: the engine's (passed in as factoryTune) or the catalog's
 //   (factory::home_speed), never a zero.
+// - A RETIRED SETTING KEEPS ITS SLOT: the bytes the retired 0x1121 card,
+//   0x1122's retired fields and overshoot_clamp held are written zero and
+//   never read or checked, so every older layout still decodes positionally.
 // - THE FIRST-RUN RECORD SURVIVES MIGRATION: every layout from v5 on carries
 //   setup_written and decode keeps it, because losing it re-gates content
 //   motion on an upgraded machine (RFC-079). Older blobs have no record and
@@ -31,8 +34,6 @@
 // - Fields are copied one at a time in host byte order. The blob never leaves
 //   the device that wrote it, so no wire endianness applies, and struct padding
 //   never reaches storage.
-// - overshoot_clamp is stored as the wire's on/off, not the engine multiplier:
-//   "on" is whatever the running engine's factory multiplier is.
 // See: ValenceHub.cpp (NVS key and wear), ValenceDevice.h, bd val-091.11.2
 
 #include <array>
@@ -88,48 +89,43 @@ inline bool commissioned(const StoredModes& m) {
 
 // ---- tuning bounds ------------------------------------------------------------
 // What 0x3120 clamps to and what a stored set must sit inside. Mirrors the
-// catalog's kinetic-* min/max, which mirror the engine's own clamps.
+// catalog's kinetic-* min/max, which mirror the engine's own clamps where it
+// has one. The engine takes any reaction horizon: react_ms_max is this hub's
+// bound, past which a re-plan would wait out most of a stroke.
 namespace tuning_bounds {
 inline constexpr float    jmax_ovr_max      = 2000000.0f;
 inline constexpr float    vmax_ovr_max      = 20.0f;
 inline constexpr float    amax_ovr_max      = 500.0f;
-inline constexpr float    chase_gain_max    = 1.5f;
-inline constexpr float    lookahead_max     = 8.0f;
 inline constexpr float    dense_ms_min      = 10.0f;
 inline constexpr float    dense_ms_max      = 500.0f;
-inline constexpr float    handoff_k_max     = 8.0f;
 inline constexpr uint8_t  curve_policy_max  = 2;
 inline constexpr uint8_t  infeasible_max    = 1;
 inline constexpr float    budget_max        = 1.0f;
-inline constexpr uint8_t  blend_steps_min   = 1;
-inline constexpr uint8_t  blend_steps_max   = 10;
-inline constexpr float    settle_ms_max     = 200.0f;
+inline constexpr uint8_t  corner_max        = 1;
+inline constexpr float    react_ms_max      = 100.0f;
 inline constexpr float    home_speed_min    = ceiling::home_speed_min;
 inline constexpr float    home_speed_max    = ceiling::speed_max;
 }  // namespace tuning_bounds
-
-// "on" is the engine's factory multiplier, never a number chosen here.
-inline float overshootGuardFor(bool on, float factoryGuard) {
-    return on ? (factoryGuard > 0.0f ? factoryGuard : 1.0f) : 0.0f;
-}
 
 // ---- config blob ----------------------------------------------------------------
 
 namespace stored {
 
 inline constexpr uint32_t kConfigMagic   = 0x56434647u;  // "VCFG"
-inline constexpr uint8_t  kConfigVersion = 6;            // bump on ANY layout change
+inline constexpr uint8_t  kConfigVersion = 7;            // bump on ANY layout change
 // v1, the 40 B struct dump this codec replaced (u16 version), is retired:
 // refused, never migrated.
 inline constexpr uint8_t  kConfigOldestVersion = 2;
 // v2: magic 4, version 1, cfg_gen 2, config 8 x f32, tuning 8 x f32 + 2 x u32 + 7 x u8
 inline constexpr size_t   kConfigV2Bytes = 4 + 1 + 2 + 32 + 32 + 8 + 7;
 // v3 appends the schedule_horizon ordinal (u8), v4 the flip (u8, 0/1), v5
-// the setup_written mask (u8), v6 the home speed (f32, mm/s).
+// the setup_written mask (u8), v6 the home speed (f32, mm/s), v7 the corner
+// (u8) and the reaction horizon (u32, us).
 inline constexpr size_t   kConfigV3Bytes = kConfigV2Bytes + 1;
 inline constexpr size_t   kConfigV4Bytes = kConfigV3Bytes + 1;
 inline constexpr size_t   kConfigV5Bytes = kConfigV4Bytes + 1;
-inline constexpr size_t   kConfigBlobBytes = kConfigV5Bytes + 4;
+inline constexpr size_t   kConfigV6Bytes = kConfigV5Bytes + 4;
+inline constexpr size_t   kConfigBlobBytes = kConfigV6Bytes + 1 + 4;
 
 // 0 for a version this firmware cannot read.
 inline constexpr size_t configBytesFor(uint8_t version) {
@@ -137,7 +133,8 @@ inline constexpr size_t configBytesFor(uint8_t version) {
          : version == 3 ? kConfigV3Bytes
          : version == 4 ? kConfigV4Bytes
          : version == 5 ? kConfigV5Bytes
-         : version == 6 ? kConfigBlobBytes : 0;
+         : version == 6 ? kConfigV6Bytes
+         : version == 7 ? kConfigBlobBytes : 0;
 }
 
 static_assert([] {
@@ -153,7 +150,7 @@ enum class ConfigReject : uint8_t {
     NewerVersion,     // written by a newer firmware
     BadSize,          // shorter than the header, or not its version's length
     BadConfig,        // a 0x1000 value non-finite or outside its bounds
-    BadTuning,        // a 0x1120-0x1122 value outside its bounds, or a flag byte not 0/1
+    BadTuning,        // a 0x1120 or 0x1122 value outside its bounds
     BadModes,         // a 0x1030 value outside its bounds, or the flip byte not 0/1
 };
 
@@ -205,16 +202,12 @@ inline bool tuningValid(const MotionTuning& t) {
     return in(t.jmax_ovr, 0.0f, b::jmax_ovr_max)
         && in(t.vmax_ovr, 0.0f, b::vmax_ovr_max)
         && in(t.amax_ovr, 0.0f, b::amax_ovr_max)
-        && in(t.chase_gain, 0.0f, b::chase_gain_max)
-        && in(t.chase_lookahead, 0.0f, b::lookahead_max)
         && in(float(t.chase_dense_us) / 1000.0f, b::dense_ms_min, b::dense_ms_max)
-        && in(t.handoff_k, 0.0f, b::handoff_k_max)
         && t.curve_policy <= b::curve_policy_max
         && t.infeasible_policy <= b::infeasible_max
-        && in(t.smooth_budget, 0.0f, b::budget_max)
         && in(t.amplitude_budget, 0.0f, b::budget_max)
-        && t.blend_steps >= b::blend_steps_min && t.blend_steps <= b::blend_steps_max
-        && in(float(t.settle_grace_us) / 1000.0f, 0.0f, b::settle_ms_max)
+        && t.corner <= b::corner_max
+        && in(float(t.react_us) / 1000.0f, 0.0f, b::react_ms_max)
         && in(t.home_speed, b::home_speed_min, b::home_speed_max);
 }
 
@@ -232,26 +225,29 @@ inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
     for (float v : {c.window_min, c.window_max, c.jog_speed, c.jog_accel,
                     c.input_speed, c.input_accel, c.input_jerk, c.max_rail})
         put(out, n, v);
-    for (float v : {t.jmax_ovr, t.vmax_ovr, t.amax_ovr, t.chase_gain, t.chase_lookahead,
-                    t.handoff_k, t.smooth_budget, t.amplitude_budget})
+    // A 0.0f or 0 below is a retired slot.
+    for (float v : {t.jmax_ovr, t.vmax_ovr, t.amax_ovr, 0.0f, 0.0f, 0.0f, 0.0f, t.amplitude_budget})
         put(out, n, v);
     put(out, n, t.chase_dense_us);
-    put(out, n, t.settle_grace_us);
-    for (uint8_t v : {uint8_t(t.chase_ff), uint8_t(t.chase_accel_ff), uint8_t(t.chase_aim_extrap),
-                      t.curve_policy, t.infeasible_policy, t.blend_steps,
-                      uint8_t(t.overshoot_guard > 0.0f)})
+    put(out, n, uint32_t(0));
+    for (uint8_t v : {uint8_t(0), uint8_t(0), uint8_t(0), t.curve_policy, t.infeasible_policy, uint8_t(0),
+                      uint8_t(0)})
         put(out, n, v);
     put(out, n, m.horizon);
     put(out, n, uint8_t(m.flipped));
     put(out, n, m.setup_written);
     put(out, n, t.home_speed);
+    put(out, n, t.corner);
+    put(out, n, t.react_us);
     return n;
 }
 
 // All-or-nothing: an error leaves every output untouched, so the caller's
-// factory values stand. factoryGuard is the running engine's overshoot
-// multiplier. Stack cost: the ~100 B of staged values.
-inline std::expected<void, ConfigReject> decodeConfig(std::span<const std::byte> in, float factoryGuard,
+// factory values stand. factoryTune is the running engine's factory set; a
+// member an older layout lacks keeps its value. Stack cost: the ~100 B of
+// staged values.
+inline std::expected<void, ConfigReject> decodeConfig(std::span<const std::byte> in,
+                                                      const MotionTuning& factoryTune,
                                                       StoredConfig& cfgOut, MotionTuning& tuneOut,
                                                       StoredModes& modesOut, uint16_t& genOut) {
     using detail::get;
@@ -272,23 +268,16 @@ inline std::expected<void, ConfigReject> decodeConfig(std::span<const std::byte>
                      &c.input_speed, &c.input_accel, &c.input_jerk, &c.max_rail})
         *f = get<float>(in, n);
 
-    MotionTuning t;
-    for (float* f : {&t.jmax_ovr, &t.vmax_ovr, &t.amax_ovr, &t.chase_gain, &t.chase_lookahead,
-                     &t.handoff_k, &t.smooth_budget, &t.amplitude_budget})
+    MotionTuning t = factoryTune;
+    for (float* f : {&t.jmax_ovr, &t.vmax_ovr, &t.amax_ovr})
         *f = get<float>(in, n);
-    t.chase_dense_us  = get<uint32_t>(in, n);
-    t.settle_grace_us = get<uint32_t>(in, n);
-    std::array<uint8_t, 7> b{};
-    for (uint8_t& v : b) v = get<uint8_t>(in, n);
-    for (size_t i : {0u, 1u, 2u, 6u})
-        if (b[i] > 1) return Err(ConfigReject::BadTuning);
-    t.chase_ff          = b[0] != 0;
-    t.chase_accel_ff    = b[1] != 0;
-    t.chase_aim_extrap  = b[2] != 0;
-    t.curve_policy      = b[3];
-    t.infeasible_policy = b[4];
-    t.blend_steps       = b[5];
-    t.overshoot_guard   = overshootGuardFor(b[6] != 0, factoryGuard);
+    n += 4 * sizeof(float);   // retired slots
+    t.amplitude_budget  = get<float>(in, n);
+    t.chase_dense_us    = get<uint32_t>(in, n);
+    n += sizeof(uint32_t) + 3;   // retired slots
+    t.curve_policy      = get<uint8_t>(in, n);
+    t.infeasible_policy = get<uint8_t>(in, n);
+    n += 2;   // retired slots
 
     StoredModes m;
     if (version >= 3) m.horizon = get<uint8_t>(in, n);
@@ -299,6 +288,10 @@ inline std::expected<void, ConfigReject> decodeConfig(std::span<const std::byte>
     }
     if (version >= 5) m.setup_written = get<uint8_t>(in, n);
     t.home_speed = version >= 6 ? get<float>(in, n) : factory::home_speed;
+    if (version >= 7) {
+        t.corner   = get<uint8_t>(in, n);
+        t.react_us = get<uint32_t>(in, n);
+    }
 
     if (!configValid(c)) return Err(ConfigReject::BadConfig);
     if (!tuningValid(t)) return Err(ConfigReject::BadTuning);
