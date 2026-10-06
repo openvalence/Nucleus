@@ -28,9 +28,9 @@
 #endif
 
 #if NUCLEUS_BENCH_NO_MOTOR
-#define FIRMWARE_VERSION "0.1.11-p4hub-bench"
+#define FIRMWARE_VERSION "0.1.12-p4hub-bench"
 #else
-#define FIRMWARE_VERSION "0.1.11-p4hub"
+#define FIRMWARE_VERSION "0.1.12-p4hub"
 #endif
 
 // Identity strings for WELCOME key 37 (RFC-016a). Static storage, so the views
@@ -53,7 +53,7 @@
 #define DEFAULT_JOG_ACCEL_MM_S2     200.0f
 #define DEFAULT_ACCEL_MM_S2         50000.0f
 #define MAX_ACCEL_MM_S2             100000.0f
-#define DEFAULT_INPUT_MAX_JERK_MM_S3 2000000.0f
+#define DEFAULT_INPUT_MAX_JERK_MM_S3 5000000.0f
 #define MAX_JERK_MM_S3              50000000.0f
 
 #ifdef __cplusplus

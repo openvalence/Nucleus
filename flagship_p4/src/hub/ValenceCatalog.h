@@ -269,7 +269,7 @@ inline constexpr float jog_speed  = 50.0f;       // DEFAULT_JOG_MAX_SPEED_MM_S
 inline constexpr float jog_accel  = 200.0f;      // DEFAULT_JOG_ACCEL_MM_S2
 inline constexpr float input_speed = 1000.0f;     // DEFAULT_MAX_SPEED_MM_S (operator 2026-10-03: 1000 confirmed safe)
 inline constexpr float input_accel = 50000.0f;    // DEFAULT_ACCEL_MM_S2
-inline constexpr float input_jerk  = 2000000.0f;  // DEFAULT_INPUT_MAX_JERK_MM_S3
+inline constexpr float input_jerk  = 5000000.0f;  // DEFAULT_INPUT_MAX_JERK_MM_S3 (operator 2026-10-06: 2e6 was kinematically limiting; 5e6 to 1e7 is the machine)
 // max_rail is a real savable setting, not derived truth — see the field
 // comment on 0x0081 below. Same mirror rule as its siblings above.
 inline constexpr float max_rail    = 500.0f;      // DEFAULT_MAX_RAIL_MM
