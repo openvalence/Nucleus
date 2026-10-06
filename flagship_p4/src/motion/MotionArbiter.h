@@ -392,8 +392,8 @@ private:
     // The Kinetic² boundary (MotionArbiter.cpp): an intent becomes a knot, a
     // brake or a refusal here and nowhere else.
     bool submitKnots(float target_norm, const MotionIntent& in, const EngineLimits& lim, uint64_t now_us);
-    // The one door to the engine's stateAt(): a knot that ends the timeline
-    // still moving is braked from its own time first (RFC-105 (a)).
+    // The one door to the engine's stateAt(): records the brake the engine
+    // takes from a knot that ends the timeline still moving (RFC-105 (dd)).
     kinetic2::State sampleEngine(uint64_t now_us);
 #endif
     // The home cycle, owning task only (MotionArbiter.cpp, homing). A leg:
@@ -438,8 +438,11 @@ private:
     uint64_t _k2_newest_us = 0;
     float    _k2_newest_p  = 0.0f;
     // The brake in flight, engine frame, which the engine does not report.
+    // starved: the engine's own brake from a starved knot, which a new knot
+    // replaces; otherwise an explicit brake, which renders to its end.
     uint64_t _k2_brake_from_us = 0, _k2_brake_to_us = 0;
     float    _k2_brake_from_p  = 0.0f, _k2_brake_to_p = 0.0f;
+    bool     _k2_starved = false;
     bool     _k2_chase = false;           // the newest knot is a sample's
     bool     _k2_window_clamped = false;  // the last plan's target was window-clamped
     bool     _k2_dirty = false;           // submitted since the last sample: it solves

@@ -1011,7 +1011,7 @@ TEST_CASE("Kinetic² samples: one behind at the grant's latency, a stream that s
     CHECK(c.rejected == 1);
 }
 
-TEST_CASE("Kinetic² starved segment stream: a last knot still moving is braked from its own time, as settle" *
+TEST_CASE("Kinetic² starved segment stream: the engine brakes a last knot still moving from its own time, as settle" *
           doctest::skip(!valence::kKinetic2)) {
     auto r = rig();
     r->arb.forceHome(400.0f);
@@ -1040,6 +1040,58 @@ TEST_CASE("Kinetic² starved segment stream: a last knot still moving is braked 
     CHECK(c.position_mm > 100.0f);   // the stop runs on past the knot, at rest
     r->arb.drainAnomalies();
     CHECK(r->census().anom[size_t(kinetic2::AnomalyKind::SettleEngaged)] == 1);
+}
+
+// RFC-105 (dd): the brake from a starved knot is the engine's guess that
+// nothing follows, so a sample arriving during it re-plans from the braking
+// state. An explicit brake would refuse it: its knot is due before the
+// brake's end. Here the stream resumes on the line it was moving along.
+TEST_CASE("Kinetic² starvation: a sample arriving during the engine's brake re-plans from it, never refused" *
+          doctest::skip(!valence::kKinetic2)) {
+    auto r = rig();
+    r->arb.setInputLimits(DEFAULT_MAX_SPEED_MM_S, 100.0f, DEFAULT_INPUT_MAX_JERK_MM_S3);   // a brake of about 0.6 s
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    MotionIntent in;
+    in.source = MotionSource::Stream;
+    in.target_mm = 100.0f;
+    in.duration_us = 2'000'000;
+    in.has_end_vel = true;
+    in.end_vel_mm_s = 60.0f;   // and then a gap
+    REQUIRE(r->arb.accept(in, g_now_us));
+    for (int i = 0; i < 4000 && r->census().mode != 3; ++i) r->run(1000);
+    REQUIRE(r->census().mode == 3);
+    r->run(20'000);
+    MotionCensus c = r->census();
+    REQUIRE(c.mode == 3);
+    const float p0 = c.plan_mm, v0 = c.velocity_mm_s;
+    REQUIRE(v0 > 40.0f);
+    const uint64_t t0 = g_now_us;
+    const float latency_s = float(valence::sampleLatencyUs(valence::motionDefaultTuning())) * 1e-6f;
+    float prev_p = p0, prev_v = v0, jump = 0.0f;
+    for (int k = 0; k < 10; ++k) {
+        MotionIntent s;
+        s.source = MotionSource::Stream;
+        s.target_mm = p0 + v0 * (float(g_now_us - t0) * 1e-6f + latency_s);
+        CAPTURE(k);
+        REQUIRE(r->arb.accept(s, g_now_us));
+        for (int t = 0; t < 17; ++t) {
+            r->run(1000);
+            c = r->census();
+            jump = std::max(jump, std::fabs(c.plan_mm - prev_p) - std::max(std::fabs(c.velocity_mm_s), std::fabs(prev_v)) * 1e-3f);
+            prev_p = c.plan_mm;
+            prev_v = c.velocity_mm_s;
+            if (k == 0 && t == 0) CHECK(c.mode == 2);   // toward the sample's knot: the brake no longer renders
+        }
+    }
+    r->run(3'000'000);
+    CHECK(jump <= 0.01f);
+    r->arb.drainAnomalies();
+    c = r->census();
+    CHECK(c.rejected == 0);
+    CHECK(c.failures == 0);
+    CHECK(c.anom[size_t(kinetic2::AnomalyKind::KnotRefused)] == 0);
+    CHECK_FALSE(c.busy);
 }
 
 // KNOWN DEFECT at kinetic.pin 8b777fb, pinned so the fix cannot go unnoticed:

@@ -463,6 +463,7 @@ void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
     _k2_newest_us   = now_us;
     _k2_newest_p    = p_norm;
     _k2_brake_to_us = 0;
+    _k2_starved     = false;
     _k2_chase       = false;
 #endif
 }
@@ -480,6 +481,7 @@ bool MotionArbiter::brakeEngine(uint64_t at_us) {
     _k2_brake_from_p  = s.p;
     _k2_brake_to_us   = pr.n > 0 ? pr.end_us() : at_us;
     _k2_brake_to_p    = pr.n > 0 ? pr.end().p : s.p;
+    _k2_starved       = false;
     _k2_newest_us     = _k2_brake_to_us;
     _k2_newest_p      = _k2_brake_to_p;
     return pr.n > 0;
@@ -565,6 +567,10 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     _k2_newest_p  = k.p;
     _k2_dirty = true;
     ++_k2_plans;
+    // A knot accepted during a starvation brake re-planned from it: the brake
+    // no longer renders. An explicit brake still does until its end.
+    if (_k2_starved) _k2_brake_to_us = 0;
+    _k2_starved = false;
     return true;
 }
 
@@ -573,12 +579,27 @@ kinetic2::State MotionArbiter::sampleEngine(uint64_t now_us) {
     // cost under Kinetic², so it is what plan_us_* times.
     const bool timed = _k2_dirty;
     const uint64_t t0 = timed ? _now_us() : 0;
-    // A starved stream: the last knot is due and still moving. The engine would
-    // hold at it, a velocity step; the brake from the knot's own time lands at
-    // rest instead (RFC-105 (a)). Before stateAt(), which retires the knot.
-    if (_engine.pending() == 1) {
-        const kinetic2::Solved& k = _engine.solved(0, 0);
-        if (_engine.pending() == 1 && k.t_us <= now_us && std::fabs(k.v) > 1e-6f) brakeEngine(k.t_us - 1);
+    // A starved stream: the last knot is due and still moving. The engine
+    // brakes from it at its own time and a knot arriving meanwhile re-plans
+    // from the braking state (RFC-105 (dd)), so the arbiter never brakes here:
+    // an explicit brake would refuse that knot. The engine does not report the
+    // profile; it is recomputed for the census from the same state and limits,
+    // before stateAt() retires the knot. solved() first: it may drop knots.
+    if (_engine.pending() > 0) {
+        (void)_engine.solved(0, 0);
+        const size_t n = _engine.pending();
+        const kinetic2::Solved& k = _engine.solved(0, n > 0 ? n - 1 : 0);
+        if (n > 0 && k.t_us <= now_us && (std::fabs(k.v) > 1e-6f || std::fabs(k.a) > 1e-6f)) {
+            const kinetic2::Profile pr =
+                kinetic2::Profile::brake(kinetic2::State{k.p, k.v, k.a}, k.t_us, _engine.config().limits);
+            _k2_brake_from_us = k.t_us;
+            _k2_brake_from_p  = k.p;
+            _k2_brake_to_us   = pr.end_us();
+            _k2_brake_to_p    = pr.end().p;
+            _k2_newest_us     = _k2_brake_to_us;
+            _k2_newest_p      = _k2_brake_to_p;
+            _k2_starved       = true;
+        }
     }
     const kinetic2::State s = _engine.stateAt(0, now_us);
     if (timed) notePlanCost(uint32_t(_now_us() - t0));

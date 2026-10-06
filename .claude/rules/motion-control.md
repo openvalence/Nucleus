@@ -24,8 +24,9 @@ knot at its arrival plus the grant's `schedule_latency_us`
 from the newest knot (RFC-105 (k) and (n)), at an authored rest (a free last
 knot keeps its secant and is braked past, RFC-105 (dd)), stretched, never
 trimmed; a
-generator's stop, PAUSE and a timeline that runs dry still moving are the
-brake. Kinetic² has no Ruckig, no chase heuristics and no dwell rule; a point
+generator's stop and PAUSE are the arbiter's brake, which refuses a knot due
+before its end; a timeline that runs dry still moving is the engine's own
+brake, which a new knot re-plans from (RFC-105 (dd)). Kinetic² has no Ruckig, no chase heuristics and no dwell rule; a point
 move is a quintic, up to 1.875 times a cruise (`kPointMoveSlowdown`, which
 the home deadline carries).
 
