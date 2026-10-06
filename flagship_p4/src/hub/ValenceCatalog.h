@@ -41,6 +41,8 @@
 #include "valence/channel/settings_trial_channel.hpp"
 #include "valence/channel/trust_channels.hpp"
 
+#include "motion/ValenceMotion.h"
+
 namespace valence {
 
 // Device-catalog channel ids. The reserved 0x0001-0x0007 range is owned by
@@ -1111,7 +1113,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // increments it, so EVERY subscriber sees the reset happened, not only
     // the session that asked for it. Without it a client watching the
     // counters cannot tell a reset from a reboot from a wrap.
-    //   [3*4 + 11*4 + 12 + 5*4 + 2 + 1 + 1 = 92 B]
+    //   [3*4 + 11*4 + 12 + 5*4 + 2 + 1 + 1 = 92 B; a Kinetic² build carries
+    //    a twelfth kind, anom_knot_refused, for 96 B]
     auto addMotionDiag = [&]() {
     c.addEntry({.id = ch::motion_diag, .name = "kinetic-diag",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1170,6 +1173,12 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "anom_dwell_zeroed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = card::anomalies,
                       .desc = "Stale arrival speeds ignored on held positions"});
+    // Kinetic² only (MotionCensus::anom has one more slot there): kind 11.
+    if constexpr (kKinetic2) {
+        c.addLayoutField({.name = "anom_knot_refused", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
+                          .group = card::anomalies,
+                          .desc = "Points refused as late or out of order"});
+    }
     c.addLayoutField({.name = "plan_us_last", .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
                       .group = card::plan_time, .desc = "Compute time of the latest plan",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});
@@ -1224,9 +1233,15 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasCategory = true, .category = valence::ui_categories::motion,
                 .hasRank = true, .rank = valence::ui_ranks::diagnostic,
                 .role = valence::channel_roles::events_anomaly});
-    c.setEventKinds({"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
-                     "waveform_fallback", "waveform_scaled", "waveform_centered",
-                     "handoff_bounded", "waveform_smoothed", "dwell_zeroed"});
+    if constexpr (kKinetic2) {
+        c.setEventKinds({"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
+                         "waveform_fallback", "waveform_scaled", "waveform_centered",
+                         "handoff_bounded", "waveform_smoothed", "dwell_zeroed", "knot_refused"});
+    } else {
+        c.setEventKinds({"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
+                         "waveform_fallback", "waveform_scaled", "waveform_centered",
+                         "handoff_bounded", "waveform_smoothed", "dwell_zeroed"});
+    }
     c.addSchemaField({.key = anom_body::kind, .name = "kind", .type = CborFieldType::uint_t, .unit = "",
                       .group = card::anomalies, .desc = "Anomaly kind, same as the event kind"});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",

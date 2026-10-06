@@ -32,6 +32,14 @@ FetchContent_MakeAvailable(ixwebsocket)
 # the engine needs is header-only. Same list the P4 component compiles.
 file(GLOB RUCKIG_SRC "${KINETIC_ROOT}/third_party/ruckig/src/ruckig/*.cpp")
 
+# The board's kernel switch (flagship_p4/src/motion/ValenceMotion.h), so a Mac
+# or Linux bench can A/B the two planners on one build host. A Kinetic² build
+# compiles no Ruckig.
+option(NUCLEUS_KINETIC2 "plan with Kinetic² (kinetic2::Engine<1>) instead of Kinetic" OFF)
+if(NUCLEUS_KINETIC2)
+    set(RUCKIG_SRC "")
+endif()
+
 add_executable(valencesim
     src/main.cpp
     src/SimMotion.cpp
@@ -61,6 +69,9 @@ target_include_directories(valencesim PRIVATE
 
 # Device GLOG sites are audible here; without it Geiger's host branch is mute.
 target_compile_definitions(valencesim PRIVATE GEIGER_HOST_PLATFORM)
+if(NUCLEUS_KINETIC2)
+    target_compile_definitions(valencesim PRIVATE NUCLEUS_KINETIC2=1)
+endif()
 
 # The board's catalog capacities, from their one home, so the twin's catalog
 # and scratch are the P4's.

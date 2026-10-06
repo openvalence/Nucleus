@@ -4,6 +4,9 @@
 // Constraints:
 // - Compiles tools/kinetic-wasm/kinetic_wasm.cpp itself, the same ABI source
 //   em++ builds, so the two runs differ only in compiler and libm.
+// - ONE FIXTURE PER KERNEL: kinetic_trace.json from the native environment,
+//   kinetic2_trace.json from native_kinetic2 (NUCLEUS_KINETIC2), each replayed
+//   by check.mjs against the wasm built with the same switch.
 // - THE FIXTURE IS REGENERATED ON EVERY RUN and is deterministic: a diff in
 //   git means the planner's output moved, which is the planner change's to
 //   explain in its own commit. The SCRIPT lives in the fixture, so check.mjs
@@ -167,7 +170,7 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
             trace += "[" + num(s.p) + "," + num(s.v) + "," + num(s.a) + "]";
         }
         if (s.plan_kind < kinds.size()) ++kinds[s.plan_kind];
-        if (s.mode == uint8_t(kinetic::Mode::Settle)) ++settled;
+        if (s.mode == uint8_t(kinetic::Mode::Settle)) ++settled;   // the style ordinal under both kernels
         anom_mask |= s.anomalies;
         flags_seen |= s.flags;
     }
@@ -177,9 +180,11 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
     // The script reached what it exists to reach (T10: assert the load landed).
     CHECK(refused == 0);
     CHECK(accepted == ev.size() - 1);
-    CHECK(kinds[uint8_t(kinetic::PlanKind::Cubic)] > 0);
     CHECK(kinds[uint8_t(kinetic::PlanKind::Quintic)] > 0);
-    CHECK(kinds[uint8_t(kinetic::PlanKind::Ruckig)] > 0);
+    if constexpr (!valence::kKinetic2) {
+        CHECK(kinds[uint8_t(kinetic::PlanKind::Cubic)] > 0);
+        CHECK(kinds[uint8_t(kinetic::PlanKind::Ruckig)] > 0);
+    }
     CHECK(settled > 0);
     CHECK((flags_seen & KINETIC_FLAG_SHAPED) != 0);
     CHECK((flags_seen & KINETIC_FLAG_FALLBACK) != 0);
@@ -196,8 +201,8 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
     std::string hex;
     for (const uint64_t x : hashes) hex += (hex.empty() ? "\"" : ",\"") + hex64(x) + "\"";
 
-    const std::filesystem::path out =
-        std::filesystem::path(__FILE__).parent_path() / ".." / ".." / "fixtures" / "kinetic_trace.json";
+    const std::filesystem::path out = std::filesystem::path(__FILE__).parent_path() / ".." / ".." / "fixtures" /
+                                      (valence::kKinetic2 ? "kinetic2_trace.json" : "kinetic_trace.json");
     std::filesystem::create_directories(out.parent_path());
     std::ofstream f(out, std::ios::binary | std::ios::trunc);
     REQUIRE(f.good());
@@ -206,6 +211,8 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
       << "\"create\": [" << num(kVmax) << "," << num(kAmax) << "," << num(kJmax) << "," << num(kRail) << ","
       << kHorizonMs << "],\n"
       << "\"window\": [" << num(kWinLo) << "," << num(kWinHi) << "],\n"
+      // check.mjs sizes its kinetic_tuning buffer from this; absent means 52.
+      << (valence::kKinetic2 ? "\"tuning_bytes\": " + std::to_string(sizeof(kinetic_tuning)) + ",\n" : std::string())
       << "\"dt_s\": 0.001,\n\"steps\": " << kSteps << ",\n\"block\": " << kBlock << ",\n"
       << "\"trace_every\": " << kTraceEveryMs << ",\n"
       << "\"summary\": {\"accepted\": " << accepted << ", \"anomaly_mask\": " << anom_mask

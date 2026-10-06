@@ -1,0 +1,4 @@
+# Kconfig overlay for the flagship_p4_kinetic2 env (platformio.ini), listed after
+# sdkconfig.defaults in its SDKCONFIG_DEFAULTS: the release image with the
+# Kinetic² planner (src/Kconfig.projbuild NUCLEUS_KINETIC2, bd val-klo).
+CONFIG_NUCLEUS_KINETIC2=y

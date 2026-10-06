@@ -11,6 +11,22 @@ sole-caller rule, the two-chip split, HP-evaluates / LP-renders) lives in
 
 ## Kinetic (`../Kinetic`, pinned by `kinetic.pin`)
 
+**The kernel is a build switch (bd val-klo).** `NUCLEUS_KINETIC2` (Kconfig on
+the P4, a CMake option for valencesim and kinetic-wasm, the `native_kinetic2`
+environment for the suites; its home is `flagship_p4/src/motion/ValenceMotion.h`)
+puts `kinetic2::Engine<1>` in place of `kinetic::Engine` inside MotionArbiter,
+default OFF until the bench rules (val-2lv). Everything below describes
+Kinetic, the default. Under Kinetic² every intent becomes knots at one
+boundary (MotionArbiter.cpp, "the Kinetic² boundary"): a segment is a knot at
+its start plus its duration, a gap before its start a rest knot; a sample a
+knot at its arrival plus the grant's `schedule_latency_us`
+(`sampleLatencyUs()`); a jog, a return or a homing leg a knot at the park time
+from the newest knot (RFC-105 (k) and (n)), stretched, never trimmed; a
+generator's stop, PAUSE and a timeline that runs dry still moving are the
+brake. Kinetic² has no Ruckig, no chase heuristics and no dwell rule; a point
+move is a quintic, up to 1.875 times a cruise (`kPointMoveSlowdown`, which
+the home deadline carries).
+
 Every command becomes ONE trajectory planned from the engine's actual
 (p, v, a); the sampler evaluates it. Event-driven, never clocked.
 

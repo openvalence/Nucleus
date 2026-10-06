@@ -4,6 +4,9 @@
 //   emitter that renders the steering word exactly. No IDF, no FreeRTOS.
 // - Compiles flagship_p4/src/motion/MotionArbiter.cpp itself, the one copy the
 //   board and the sim both link, so a gate change is caught here before either.
+// - Runs under both kernels: the native environment is Kinetic, native_kinetic2
+//   is Kinetic² (NUCLEUS_KINETIC2). A case about one kernel's planning is
+//   skipped under the other, never weakened to pass both.
 //   The STOP cases also compile the pattern generator, the gate's one client.
 // See: flagship_p4/src/motion/MotionArbiter.h, bd val-sf7.1
 
@@ -21,6 +24,7 @@
 // Named here so the dependency finder builds them; the .cpp below needs all three.
 #include "geiger/geiger.h"
 #include "kinetic/kinetic.hpp"
+#include "kinetic2/types.hpp"   // the Kinetic² cases name its anomaly kinds; skipped under Kinetic
 #include "valence/generated/registry_constants.hpp"
 
 #include "../../../flagship_p4/src/motion/MotionArbiter.cpp"
@@ -105,6 +109,11 @@ struct Rig {
 
 std::unique_ptr<Rig> rig() { return std::make_unique<Rig>(); }
 
+// Kinetic² renders a point move as a rest-to-rest quintic at its analytic
+// minimum time (RFC-105 (k)), up to 1.875 times Kinetic's cruise: a case that
+// waits for a jog or a home cycle to finish waits twice as long under it.
+constexpr uint64_t moveUs(uint64_t us) { return valence::kKinetic2 ? 2 * us : us; }
+
 }  // namespace
 
 TEST_CASE("steerWord parks on NaN and crawl, flags the emitter floor, keeps direction") {
@@ -137,6 +146,9 @@ TEST_CASE("uncommissioned (RFC-079 first run): Stream and Pattern are refused, M
     CHECK(r->submit(MotionSource::Manual, 100.0f));
     CHECK(r->census().rejected == 2);
     r->arb.setCommissioned(true);
+    // Kinetic²: a sample due before the pending jog's knot is behind the newest
+    // knot and refused (RFC-105 (c)), so the jog lands first.
+    if constexpr (valence::kKinetic2) r->run(5'000'000);
     CHECK(r->submit(MotionSource::Stream, 120.0f));
 }
 
@@ -164,7 +176,7 @@ TEST_CASE("PAUSE brakes a moving carriage to rest and holds it") {
     r->arb.forceHome(500.0f);
     r->run(1000);
     REQUIRE(r->submit(MotionSource::Manual, 300.0f));
-    r->run(400'000);
+    r->run(valence::kKinetic2 ? 3'000'000 : 400'000);   // the quintic starts slowly
     const float v0 = r->census().velocity_mm_s;
     REQUIRE(std::fabs(v0) > 10.0f);
     const float p0 = r->census().position_mm;
@@ -313,11 +325,13 @@ TEST_CASE("window clamp: every source held in the window; the jog under override
     r->run(1000);
     REQUIRE(r->submit(MotionSource::Stream, 250.0f));
     CHECK(r->census().demand_mm == doctest::Approx(200.0f));
+    // Kinetic²: two samples arriving in one tick are one knot time; the second is refused.
+    if constexpr (valence::kKinetic2) r->run(1000);
     REQUIRE(r->submit(MotionSource::Stream, 20.0f));
     CHECK(r->census().demand_mm == doctest::Approx(100.0f));
     REQUIRE(r->submit(MotionSource::Manual, 390.0f));
     CHECK(r->census().demand_mm == doctest::Approx(200.0f));
-    r->run(5'000'000);
+    r->run(moveUs(5'000'000));
     r->arb.override();
     REQUIRE(r->submit(MotionSource::Manual, 390.0f));
     CHECK(r->census().demand_mm == doctest::Approx(390.0f));
@@ -370,7 +384,13 @@ TEST_CASE("Pattern source: gated and window-clamped like Stream, never the live 
     r->arb.pause(true);
     CHECK_FALSE(r->submit(MotionSource::Pattern, 150.0f));
     r->arb.pause(false);
-    REQUIRE(r->submit(MotionSource::Pattern, 350.0f));
+    if constexpr (valence::kKinetic2) {
+        // Kinetic² renders a generator's durationless point as its stop (the
+        // brake), so the generator moves by strokes: a timed one here.
+        REQUIRE(r->arb.accept(MotionIntent{MotionSource::Pattern, 350.0f, 50'000}, g_now_us));
+    } else {
+        REQUIRE(r->submit(MotionSource::Pattern, 350.0f));
+    }
     CHECK(r->census().demand_mm == doctest::Approx(200.0f));
     r->run(5000);
     const MotionCensus c = r->census();
@@ -584,7 +604,7 @@ TEST_CASE("override: PAUSE holds every source but the jog, which reaches outside
     CHECK_FALSE(r->submit(MotionSource::Pattern, 180.0f));
     REQUIRE(r->submit(MotionSource::Manual, 350.0f));
     CHECK(r->census().demand_mm == doctest::Approx(350.0f));
-    r->run(10'000'000);
+    r->run(moveUs(10'000'000));
     CHECK(r->census().position_mm == doctest::Approx(350.0f).epsilon(0.01));
     // resume clears override with PAUSE; the hub refuses that resume while
     // override holds, so this is the arbiter's half only.
@@ -730,7 +750,8 @@ TEST_CASE("a 32-segment bundle spanning the 1000 ms schedule horizon parks whole
     CHECK(c.failures == 0);
 }
 
-TEST_CASE("the dwell rule runs at the registry's span: a re-commanded hold reports dwell_zeroed, kind 10") {
+TEST_CASE("the dwell rule runs at the registry's span: a re-commanded hold reports dwell_zeroed, kind 10" *
+          doctest::skip(valence::kKinetic2)) {
     auto r = rig();
     r->arb.forceHome(400.0f);
     r->run(1000);
@@ -762,7 +783,7 @@ TEST_CASE("flip: targets mirror in, positions and the window mirror out, the eng
     r->arb.setFlipped(true);
     // Client 100 mm is physical 300 mm.
     REQUIRE(r->submit(MotionSource::Manual, 100.0f));
-    r->run(10'000'000);
+    r->run(moveUs(10'000'000));
     const MotionCensus c = r->census();
     CHECK(c.position_mm == doctest::Approx(100.0f).epsilon(0.01));
     CHECK(float(c.steps) * valence::kMmPerStep == doctest::Approx(300.0f).epsilon(0.01));
@@ -776,7 +797,7 @@ TEST_CASE("flip: targets mirror in, positions and the window mirror out, the eng
     REQUIRE(r->submit(MotionSource::Manual, 150.0f));
     r->run(300'000);
     CHECK(r->census().velocity_mm_s > 0.0f);
-    r->run(10'000'000);
+    r->run(moveUs(10'000'000));
     r->arb.setFlipped(false);
     CHECK(r->census().position_mm == doctest::Approx(250.0f).epsilon(0.01));
 
@@ -859,7 +880,8 @@ bool tightSegment(Rig& r, uint32_t duration_us) {
     return r.arb.accept(in, g_now_us);
 }
 
-TEST_CASE("RFC-100: plan_flags name how the last plan was bent, and read 0 with nothing in flight") {
+TEST_CASE("RFC-100: plan_flags name how the last plan was bent, and read 0 with nothing in flight" *
+          doctest::skip(valence::kKinetic2)) {
     namespace pf = valence::plan_flags;
     auto r = rig();
     r->arb.forceHome(400.0f);
@@ -889,6 +911,177 @@ TEST_CASE("RFC-100: plan_flags name how the last plan was bent, and read 0 with 
     CHECK(stretch->census().plan_flags == (pf::fallback | pf::stretched));
     stretch->run(10'000'000);
     CHECK(stretch->census().plan_flags == 0);
+}
+
+// ---- Kinetic² (bd val-klo) ------------------------------------------------------
+// The knot boundary: what an intent becomes, and what the census reads back.
+
+TEST_CASE("Kinetic² RFC-100: plan_flags from the solver, fallback never, 0 with nothing in flight" *
+          doctest::skip(!valence::kKinetic2)) {
+    namespace pf = valence::plan_flags;
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->arb.setWindow(100.0f, 300.0f, 400.0f);
+    r->run(1000);
+    // A segment the ceilings meet: nothing spent.
+    MotionIntent easy;
+    easy.source = MotionSource::Stream;
+    easy.target_mm = 120.0f;
+    easy.duration_us = 2'000'000;
+    REQUIRE(r->arb.accept(easy, g_now_us));
+    r->run(1000);
+    CHECK(r->census().busy);
+    CHECK(r->census().plan_flags == 0);
+    r->run(3'000'000);
+    REQUIRE_FALSE(r->census().busy);
+    CHECK(r->census().plan_flags == 0);
+
+    auto blend = rigAtOrigin(1);
+    REQUIRE(tightSegment(*blend, 40'000));
+    blend->run(1000);
+    CHECK((blend->census().plan_flags & pf::shaped) != 0);
+    CHECK((blend->census().plan_flags & pf::fallback) == 0);
+
+    auto stretch = rigAtOrigin(0);
+    REQUIRE(tightSegment(*stretch, 40'000));
+    stretch->run(1000);
+    CHECK(stretch->census().plan_flags == pf::stretched);
+    stretch->run(10'000'000);
+    CHECK(stretch->census().plan_flags == 0);
+    stretch->arb.drainAnomalies();
+    CHECK(stretch->census().anom[size_t(kinetic2::AnomalyKind::DeadlineStretched)] == 1);
+
+    // The window clamp moved the target: clamped, while that plan is the last.
+    auto clamp = rigAtOrigin(1);
+    MotionIntent past;
+    past.source = MotionSource::Stream;
+    past.target_mm = 350.0f;
+    past.duration_us = 5'000'000;
+    REQUIRE(clamp->arb.accept(past, g_now_us));
+    clamp->run(1000);
+    CHECK((clamp->census().plan_flags & pf::clamped) != 0);
+}
+
+TEST_CASE("Kinetic² samples: one behind at the grant's latency, never past the newest, a backwards one refused as kind 11" *
+          doctest::skip(!valence::kKinetic2)) {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    // Off the rail end first: a curve at rest on the wall has no room to round.
+    REQUIRE(r->submit(MotionSource::Manual, 100.0f));
+    r->run(moveUs(5'000'000));
+    REQUIRE_FALSE(r->census().busy);
+    // A slow ramp of samples, 20 ms apart, then the sender stops: 5 mm/s, so
+    // the stop inside one interval stays under the factory jerk ceiling.
+    float target = 100.0f;
+    for (int i = 0; i < 40; ++i) {
+        target += 0.1f;
+        REQUIRE(r->submit(MotionSource::Stream, target));
+        CHECK(r->census().mode == 2);   // chase: a sample's knot
+        r->run(20'000);
+    }
+    // One behind: the plan passes the first sample `latency` after it arrived.
+    const float last = target;
+    float peak = 0.0f;
+    for (int i = 0; i < 2000; ++i) {
+        r->run(1000);
+        peak = std::max(peak, r->census().plan_mm);
+    }
+    CHECK(peak <= last + 1e-3f);   // never past the newest
+    CHECK_FALSE(r->census().busy);
+    CHECK(r->census().plan_mm == doctest::Approx(last).epsilon(1e-5));
+    r->arb.drainAnomalies();
+    CHECK(r->census().anomalies == 0);   // a legal stream spends nothing
+
+    // Two samples in one tick share a knot time: the second goes backwards.
+    REQUIRE(r->submit(MotionSource::Stream, 10.0f));
+    CHECK_FALSE(r->submit(MotionSource::Stream, 12.0f));
+    r->arb.drainAnomalies();
+    const MotionCensus c = r->census();
+    CHECK(c.anom[size_t(kinetic2::AnomalyKind::KnotRefused)] == 1);
+    CHECK(c.failures == 1);
+    CHECK(c.rejected == 1);
+}
+
+TEST_CASE("Kinetic² starved segment stream: a last knot still moving is braked from its own time, as settle" *
+          doctest::skip(!valence::kKinetic2)) {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    MotionIntent in;
+    in.source = MotionSource::Stream;
+    in.target_mm = 100.0f;
+    in.duration_us = 1'000'000;
+    in.has_end_vel = true;
+    in.end_vel_mm_s = 60.0f;   // and then nothing
+    REQUIRE(r->arb.accept(in, g_now_us));
+    float v_prev = 0.0f, dv_max = 0.0f;
+    bool settled = false;
+    for (int i = 0; i < 3000; ++i) {
+        r->run(1000);
+        const MotionCensus c = r->census();
+        dv_max = std::max(dv_max, std::fabs(c.velocity_mm_s - v_prev));
+        v_prev = c.velocity_mm_s;
+        settled = settled || c.mode == 3;
+    }
+    CHECK(settled);
+    // No velocity step: one tick at the input decel is the largest change.
+    CHECK(dv_max <= DEFAULT_ACCEL_MM_S2 * 1e-3f * 1.01f);
+    const MotionCensus c = r->census();
+    CHECK_FALSE(c.busy);
+    CHECK(c.position_mm > 100.0f);   // the stop runs on past the knot, at rest
+    r->arb.drainAnomalies();
+    CHECK(r->census().anom[size_t(kinetic2::AnomalyKind::SettleEngaged)] == 1);
+}
+
+// KNOWN DEFECT at kinetic.pin 8b777fb, pinned so the fix cannot go unnoticed:
+// a successor knot re-solves the window and the engine rebuilds the piece in
+// flight from its ORIGIN, so the plan moves under the carriage at the instant
+// of the submit (RFC-105 (b) promises continuity). The case asserts the
+// defect: when Kinetic rebases the in-flight piece and the pin moves, it
+// fails, and becomes the continuity check (worst < 0.01 mm).
+TEST_CASE("Kinetic² KNOWN DEFECT: a successor knot moves the plan under the carriage at the submit" *
+          doctest::skip(!valence::kKinetic2)) {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    float worst = 0.0f;
+    uint64_t start = g_now_us + 120'000;
+    for (int i = 0; i < 8; ++i) {
+        MotionIntent in;
+        in.source = MotionSource::Stream;
+        in.target_mm = 200.0f + 60.0f * std::sin(0.8f * float(i + 1));
+        in.duration_us = 250'000;
+        in.anchor_us = start;
+        in.curve_family = 2;
+        const float before = r->census().plan_mm;
+        REQUIRE(r->arb.accept(in, g_now_us));
+        worst = std::max(worst, std::fabs(r->census().plan_mm - before));
+        r->run(250'000);
+        start += 250'000;
+    }
+    CHECK(worst > 1.0f);   // measured 2026-10-06: 7.3 mm here, 67 mm on a wider stroke
+}
+
+TEST_CASE("Kinetic² segments: a start past the newest knot holds until it, so the move begins at its start" *
+          doctest::skip(!valence::kKinetic2)) {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    MotionIntent in;
+    in.source = MotionSource::Stream;
+    in.target_mm = 50.0f;
+    in.duration_us = 500'000;
+    in.anchor_us = g_now_us + 300'000;
+    REQUIRE(r->arb.accept(in, g_now_us));
+    r->run(290'000);
+    CHECK(r->census().busy);
+    CHECK(r->census().plan_hold);   // a live plan, at rest
+    CHECK(std::fabs(r->census().velocity_mm_s) < 1e-3f);
+    r->run(260'000);
+    CHECK(r->census().velocity_mm_s > 1.0f);
+    r->run(500'000);
+    CHECK(r->census().plan_mm == doctest::Approx(50.0f).epsilon(1e-4));
 }
 
 // ---- homing (bd val-dbo, val-zsr) ---------------------------------------------
@@ -1046,12 +1239,20 @@ TEST_CASE("home: approach at home_speed held to the jog speed, re-touch at a qua
         FakeSense s{r->emitter, -30.0f, 170.0f};
         r->arb.setHomeSense(s);
         REQUIRE(r->arb.home() == HomeStart::started);
-        const std::vector<float> v = contactSpeeds(*r, s, 20'000'000);
+        const std::vector<float> v = contactSpeeds(*r, s, moveUs(20'000'000));
         REQUIRE(v.size() == 4);   // home approach, home re-touch, far approach, far re-touch
-        CHECK(v[0] == doctest::Approx(DEFAULT_HOME_SPEED_MM_S).epsilon(0.02));
-        CHECK(v[1] == doctest::Approx(10.0f).epsilon(0.02));
-        CHECK(v[2] == doctest::Approx(DEFAULT_HOME_SPEED_MM_S).epsilon(0.02));
-        CHECK(v[3] == doctest::Approx(10.0f).epsilon(0.02));
+        if constexpr (valence::kKinetic2) {
+            // A quintic seek touches below its peak, never above it.
+            for (size_t i = 0; i < v.size(); ++i) {
+                CHECK(v[i] > 0.0f);
+                CHECK(v[i] <= (i % 2 == 0 ? DEFAULT_HOME_SPEED_MM_S : 10.0f) * 1.02f);
+            }
+        } else {
+            CHECK(v[0] == doctest::Approx(DEFAULT_HOME_SPEED_MM_S).epsilon(0.02));
+            CHECK(v[1] == doctest::Approx(10.0f).epsilon(0.02));
+            CHECK(v[2] == doctest::Approx(DEFAULT_HOME_SPEED_MM_S).epsilon(0.02));
+            CHECK(v[3] == doctest::Approx(10.0f).epsilon(0.02));
+        }
         CHECK(r->census().homed);
     }
     SUBCASE("a live home_speed, held to the jog speed") {
@@ -1063,12 +1264,19 @@ TEST_CASE("home: approach at home_speed held to the jog speed, re-touch at a qua
         FakeSense s{r->emitter, -30.0f, 70.0f};
         r->arb.setHomeSense(s);
         REQUIRE(r->arb.home() == HomeStart::started);
-        const std::vector<float> v = contactSpeeds(*r, s, 30'000'000);
+        const std::vector<float> v = contactSpeeds(*r, s, moveUs(30'000'000));
         REQUIRE(v.size() == 4);
-        CHECK(v[0] == doctest::Approx(15.0f).epsilon(0.02));
-        CHECK(v[1] == doctest::Approx(valence::kHomeTouchFloorMmS).epsilon(0.02));
-        CHECK(v[2] == doctest::Approx(15.0f).epsilon(0.02));
-        CHECK(v[3] == doctest::Approx(valence::kHomeTouchFloorMmS).epsilon(0.02));
+        if constexpr (valence::kKinetic2) {
+            for (size_t i = 0; i < v.size(); ++i) {
+                CHECK(v[i] > 0.0f);
+                CHECK(v[i] <= (i % 2 == 0 ? 15.0f : valence::kHomeTouchFloorMmS) * 1.02f);
+            }
+        } else {
+            CHECK(v[0] == doctest::Approx(15.0f).epsilon(0.02));
+            CHECK(v[1] == doctest::Approx(valence::kHomeTouchFloorMmS).epsilon(0.02));
+            CHECK(v[2] == doctest::Approx(15.0f).epsilon(0.02));
+            CHECK(v[3] == doctest::Approx(valence::kHomeTouchFloorMmS).epsilon(0.02));
+        }
         CHECK(r->census().homed);
         CHECK(r->census().home_rail_mm == doctest::Approx(100.0f).epsilon(0.002));
     }
@@ -1080,7 +1288,7 @@ TEST_CASE("home: under the flip the home leg runs to the far end, 0.0 mm is ther
     FakeSense s{r->emitter, 40.0f, -160.0f};
     r->arb.setHomeSense(s);
     REQUIRE(r->arb.home() == HomeStart::started);
-    r->run(20'000'000);
+    r->run(moveUs(20'000'000));
     const MotionCensus c = r->census();
     REQUIRE(c.homed);
     CHECK(c.home_rail_mm == doctest::Approx(200.0f).epsilon(0.002));
@@ -1134,7 +1342,7 @@ TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores
         s.sticky = true;
         r->arb.setHomeSense(s);
         REQUIRE(r->arb.home() == HomeStart::started);
-        r->run(5'000'000);
+        r->run(moveUs(5'000'000));
         const MotionCensus c = r->census();
         CHECK_FALSE(c.homed);
         CHECK(c.home_fails == 1);
@@ -1146,7 +1354,7 @@ TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores
         FakeSense s{r->emitter, -30.0f, 170.0f};
         r->arb.setHomeSense(s);
         REQUIRE(r->arb.home() == HomeStart::started);
-        r->run(4'000'000);   // the home leg takes about 2 s
+        r->run(moveUs(4'000'000));   // the home leg takes about 2 s (Kinetic)
         REQUIRE(r->census().homing);
         r->arb.estop(true);
         r->run(10'000);
@@ -1161,7 +1369,8 @@ TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores
 TEST_CASE("home: the deadline covers both legs at home_speed, both re-touches and 2 s, and ends a late cycle") {
     // max_rail 500 at the factory speeds: (520 + 510 + 2 x 5 + 2) mm at 40 mm/s,
     // 2 x 15 mm at 10 mm/s, and seven 0.2 s ramps at 200 mm/s2.
-    CHECK(valence::homeCycleS(500.0f, 40.0f, 200.0f) == doctest::Approx(26.05f + 3.0f + 1.4f));
+    CHECK(valence::homeCycleS(500.0f, 40.0f, 200.0f) ==
+          doctest::Approx(valence::kPointMoveSlowdown * (26.05f + 3.0f) + 1.4f));
 
     auto r = rig();
     r->arb.setWindow(0.0f, 200.0f, 200.0f);
@@ -1210,7 +1419,7 @@ TEST_CASE("home: ESTOP and PAUSE abort the cycle unhomed") {
         FakeSense s{r->emitter, -100.0f};
         r->arb.setHomeSense(s);
         REQUIRE(r->arb.home() == HomeStart::started);
-        r->run(1'000'000);
+        r->run(valence::kKinetic2 ? 3'000'000 : 1'000'000);   // the quintic seek starts slowly
         CHECK(r->census().homing);
         const float moved = s.bootMm();
         CHECK(moved < -5.0f);   // the approach ran under the latch

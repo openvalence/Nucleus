@@ -104,7 +104,17 @@ TEST_CASE("bench profile: motion runs with the switch reporting off, and the cen
     MotionCensus c = r->census();
     CHECK_FALSE(c.motor_on);   // the switch's word is never dressed up
     CHECK(c.power_gate);
-    REQUIRE(r->submit(MotionSource::Stream, 120.0f));
+    if constexpr (valence::kKinetic2) {
+        // Kinetic² renders a lone sample at its grant's latency, and 120 mm in
+        // that time is spent (RFC-105 promise 3): the move is a timed segment.
+        MotionIntent in;
+        in.source = MotionSource::Stream;
+        in.target_mm = 120.0f;
+        in.duration_us = 1'500'000;
+        REQUIRE(r->arb.accept(in, g_now_us));
+    } else {
+        REQUIRE(r->submit(MotionSource::Stream, 120.0f));
+    }
     r->run(2'000'000);
     c = r->census();
     CHECK(c.position_mm == doctest::Approx(120.0f).epsilon(0.01));

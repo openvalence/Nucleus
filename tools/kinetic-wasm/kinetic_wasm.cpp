@@ -1,7 +1,10 @@
 // kinetic_wasm -- the machine's own motion planner behind a C ABI: the board's
-// MotionArbiter and kinetic::Engine, fed 0x2101 segments in wire units and
-// stepped on a fixed tick against an ideal emitter, for an offline renderer
+// MotionArbiter and its engine, fed 0x2101 segments in wire units and stepped
+// on a fixed tick against an ideal emitter, for an offline renderer
 // Constraints:
+// - THE KERNEL IS THE BOARD'S BUILD SWITCH (NUCLEUS_KINETIC2, ValenceMotion.h):
+//   kinetic::Engine by default, kinetic2::Engine<1> with the CMake option on.
+//   kinetic_version() names which; the ABI differs only where README.md says.
 // - NO PLANNING LIVES HERE. The shaping is ../Kinetic (engine + Ruckig), the
 //   intent path is flagship_p4/src/motion/MotionArbiter.cpp, the wire decode
 //   is flagship_p4/src/motion/StreamIntent.h, the emitter is
@@ -28,7 +31,6 @@
 
 #include "../../sim/valencesim/src/IdealEmitter.h"
 #include "geiger/geiger.h"
-#include "kinetic/kinetic.hpp"
 #include "motion/MotionArbiter.h"
 #include "motion/StreamIntent.h"
 #include "motion/ValenceMotion.h"
@@ -94,6 +96,12 @@ struct kinetic_tuning {
     uint8_t  infeasible_policy; // 0 stretch, 1 blend
     uint8_t  blend_steps;
     uint8_t  reserved[2];       // zero
+#if NUCLEUS_KINETIC2
+    // Appended for Kinetic²'s planner options; a Kinetic build stops above.
+    uint32_t lookahead_us;      // the solver's lookahead window
+    uint8_t  corner;            // 0 continuous, 1 cubic
+    uint8_t  reserved2[3];      // zero
+#endif
 };
 
 }  // extern "C"
@@ -102,12 +110,12 @@ static_assert(sizeof(kinetic_sample) == 64, "kinetic_sample layout is ABI");
 static_assert(offsetof(kinetic_sample, plan_mm) == 32 && offsetof(kinetic_sample, anomalies) == 52 &&
                   offsetof(kinetic_sample, mode) == 56 && offsetof(kinetic_sample, plans) == 60,
               "kinetic_sample layout is ABI");
-static_assert(sizeof(kinetic_tuning) == 52, "kinetic_tuning layout is ABI");
+static_assert(sizeof(kinetic_tuning) == (valence::kKinetic2 ? 60 : 52), "kinetic_tuning layout is ABI");
 
 // kinetic_sample::flags
 inline constexpr uint8_t KINETIC_FLAG_BUSY     = 1u << 0;  // the plan has motion left to render
 inline constexpr uint8_t KINETIC_FLAG_SHAPED   = 1u << 1;  // a deadline was held by spending amplitude or shape (Blend)
-inline constexpr uint8_t KINETIC_FLAG_FALLBACK = 1u << 2;  // the Ruckig guard took a segment, or a deadline stretched
+inline constexpr uint8_t KINETIC_FLAG_FALLBACK = 1u << 2;  // the Ruckig guard took a segment (Kinetic only), or a deadline stretched
 inline constexpr uint8_t KINETIC_FLAG_CLAMPED  = 1u << 3;  // raw p is outside the window: the output backstop is acting
 inline constexpr uint8_t KINETIC_FLAG_REFUSED  = 1u << 4;  // a submit since the previous step was refused
 
@@ -118,13 +126,21 @@ using valence::IdealEmitter;
 using valence::MotionArbiter;
 using valence::MotionCensus;
 using valence::MotionTuning;
+#if NUCLEUS_KINETIC2
+using AnomalyType = kinetic2::AnomalyKind;
+#else
 using kinetic::AnomalyType;
+#endif
 
 constexpr uint32_t kindBit(AnomalyType k) { return 1u << uint8_t(k); }
 
 constexpr uint32_t kShapedMask   = kindBit(AnomalyType::WaveformScaled) | kindBit(AnomalyType::WaveformSmoothed);
 constexpr uint32_t kFallbackMask = kindBit(AnomalyType::WaveformFallback) | kindBit(AnomalyType::DeadlineStretched);
+#if NUCLEUS_KINETIC2
+constexpr uint32_t kRefusedMask  = kindBit(AnomalyType::PlanFailed) | kindBit(AnomalyType::KnotRefused);
+#else
 constexpr uint32_t kRefusedMask  = kindBit(AnomalyType::PlanFailed);
+#endif
 static_assert(valence::kAnomalyKinds <= 32, "the anomaly mask is one word");
 
 // commit() is timed against this clock for the census; offline that cost is
@@ -204,15 +220,24 @@ public:
             if (c.anom[k] != _anom[k]) mask |= 1u << k;
         _anom = c.anom;
 
+#if NUCLEUS_KINETIC2
+        // Kinetic² is float throughout: p, v and a are its own floats, widened.
+        // Its frame is the window, 0..1.
+        const kinetic2::State st = _arb.planState(_now_us);
+        const double p = st.p, v = st.v, a = st.a;
+        const double lo = 0.0, hi = 1.0;
+#else
         const kinetic::PlanView pv = _arb.engine().planView();
         double p = 0.0, v = 0.0, a = 0.0;
         kinetic::Engine::evalPiece(pv.active, _now_us, p, v, a);
+        const double lo = pv.lo, hi = pv.hi;
+#endif
 
         uint8_t flags = 0;
         if (c.busy) flags |= KINETIC_FLAG_BUSY;
         if (mask & kShapedMask) flags |= KINETIC_FLAG_SHAPED;
         if (mask & kFallbackMask) flags |= KINETIC_FLAG_FALLBACK;
-        if (p < pv.lo || p > pv.hi) flags |= KINETIC_FLAG_CLAMPED;
+        if (p < lo || p > hi) flags |= KINETIC_FLAG_CLAMPED;
         if (_refused || (mask & kRefusedMask)) flags |= KINETIC_FLAG_REFUSED;
         _refused = false;
 
@@ -268,6 +293,10 @@ MotionTuning fromC(const kinetic_tuning& t) {
     m.blend_steps       = t.blend_steps;
     m.settle_grace_us   = t.settle_grace_us;
     m.overshoot_guard   = t.overshoot_guard;
+#if NUCLEUS_KINETIC2
+    m.lookahead_us      = t.lookahead_us;
+    m.corner            = t.corner;
+#endif
     return m;
 }
 
@@ -291,6 +320,10 @@ kinetic_tuning toC(const MotionTuning& m) {
     t.curve_policy      = m.curve_policy;
     t.infeasible_policy = m.infeasible_policy;
     t.blend_steps       = m.blend_steps;
+#if NUCLEUS_KINETIC2
+    t.lookahead_us      = m.lookahead_us;
+    t.corner            = m.corner;
+#endif
     return t;
 }
 
@@ -366,12 +399,20 @@ KINETIC_API void kinetic_step(kinetic_handle* h, double dt_s, kinetic_sample* ou
 
 KINETIC_API double kinetic_now_us(const kinetic_handle* h) { return h != nullptr ? h->host.nowUs() : 0.0; }
 
-// "nucleus <git sha> kinetic <engine version>". Static storage.
+// "nucleus <git sha> kinetic <engine version>", or "... kinetic2 <engine
+// version>" from a Kinetic² build. Static storage.
 KINETIC_API const char* kinetic_version() {
+#if NUCLEUS_KINETIC2
+    constexpr const char* kKernel = " kinetic2 ";
+    constexpr const char* kKernelVersion = kinetic2::kVersion;
+#else
+    constexpr const char* kKernel = " kinetic ";
+    constexpr const char* kKernelVersion = kinetic::kVersion;
+#endif
     static char buf[96] = {};
     if (buf[0] == '\0') {
         size_t n = 0;
-        for (const char* part : {"nucleus ", NUCLEUS_GIT_SHA, " kinetic ", kinetic::kVersion})
+        for (const char* part : {"nucleus ", NUCLEUS_GIT_SHA, kKernel, kKernelVersion})
             for (; *part != '\0' && n + 1 < sizeof(buf); ++part) buf[n++] = *part;
     }
     return buf;

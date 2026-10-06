@@ -3,9 +3,11 @@
 // compares every 1 ms sample, bit for bit, against the native run.
 //
 //   node tools/kinetic-wasm/check.mjs [kinetic.wasm] [kinetic_trace.json]
+//   node tools/kinetic-wasm/check.mjs tools/kinetic-wasm/build-k2/kinetic.wasm test/fixtures/kinetic2_trace.json
 //
 // Exit 0 only when every block hash matches. The fixture is the native
 // suite's output (test/native/test_kinetic_wasm_trace); regenerate it there.
+// A wasm and a fixture must come from the same kernel switch (README.md).
 import { readFile } from 'node:fs/promises';
 
 const here = new URL('.', import.meta.url);
@@ -18,7 +20,7 @@ const k = instance.exports;
 k._initialize?.();
 
 const SAMPLE = 64;           // sizeof(kinetic_sample)
-const TUNE = 52;             // sizeof(kinetic_tuning)
+const TUNE = fx.tuning_bytes ?? 52;   // sizeof(kinetic_tuning): 60 from a Kinetic² build
 const TUNE_POLICY = 48;      // offsetof(kinetic_tuning, infeasible_policy)
 const OFFSET = 0xcbf29ce484222325n;
 const PRIME = 0x100000001b3n;

@@ -4,14 +4,21 @@
 // - HARDWARE-FREE (MotionArbiter.h). Geiger is the log path and binds its own
 //   platform layer; on a host it is mute, never a second log path.
 // - The plan is computed AT INTENT ARRIVAL from the actual (p, v, a). The tick
-//   only EVALUATES it. Nothing here plans on a clock.
-// See: MotionArbiter.h, .claude/rules/motion-control.md, bd val-091.4
+//   only EVALUATES it. Nothing here plans on a clock. Under Kinetic² an intent
+//   becomes knots at arrival and the window is solved at the next sample.
+// - Kernel-specific code is fenced by NUCLEUS_KINETIC2 (ValenceMotion.h). With
+//   the switch off this file compiles to exactly what it was before the
+//   switch existed: tools/kinetic-wasm's trace fixture proves it bit for bit.
+// See: MotionArbiter.h, .claude/rules/motion-control.md, bd val-091.4, bd val-klo
 
 #include "MotionArbiter.h"
 
 #include <cmath>
 
 #include "geiger/geiger.h"
+// Kinetic's Config is the home of the factory tuning values (motionDefaultTuning()),
+// including the members Kinetic² ignores; only its types are used under Kinetic².
+#include "kinetic/kinetic.hpp"
 #include "valence/generated/registry_constants.hpp"
 
 namespace valence {
@@ -37,6 +44,15 @@ bool isGenerator(MotionSource s) { return s == MotionSource::Pattern || s == Mot
 
 static_assert(kAnomalyKinds <= 32, "drainAnomalies() reports the kinds as one word");
 
+// The census publishes kinetic::Mode's and kinetic::PlanKind's ordinals under
+// either kernel: they are the 0x1110 style and 0x1111 plan_kind selects.
+enum class PlanStyle : uint8_t { idle = 0, waveform = 1, chase = 2, settle = 3 };
+static_assert(uint8_t(kinetic::Mode::Idle) == uint8_t(PlanStyle::idle) &&
+                  uint8_t(kinetic::Mode::Waveform) == uint8_t(PlanStyle::waveform) &&
+                  uint8_t(kinetic::Mode::Chase) == uint8_t(PlanStyle::chase) &&
+                  uint8_t(kinetic::Mode::Settle) == uint8_t(PlanStyle::settle),
+              "the style select's options are kinetic::Mode's");
+
 class AbsentHomeSense final : public HomeSense {
 public:
     bool present() const override { return false; }
@@ -46,6 +62,7 @@ public:
 
 AbsentHomeSense g_absent_sense;
 
+#if !NUCLEUS_KINETIC2
 // RFC-100: the registry plan_flags bits one plan earned, from the anomaly
 // kinds its commit recorded and whether the window clamp moved its target.
 uint8_t planFlags(uint32_t kinds, bool window_clamped) {
@@ -58,6 +75,21 @@ uint8_t planFlags(uint32_t kinds, bool window_clamped) {
     if (window_clamped || has(AnomalyType::EndVelClamped)) f |= plan_flags::clamped;
     return f;
 }
+#else
+static_assert(MotionTuning{}.lookahead_us == kinetic2::Config{}.lookahead_us &&
+                  MotionTuning{}.corner == uint8_t(kinetic2::Config{}.corner),
+              "MotionTuning's Kinetic² defaults are kinetic2::Config's");
+
+// RFC-105 (k): a point move is a knot at the least time a rest-to-rest
+// quintic of `d` is legal under every ceiling, plus the 1 ms margin Kinetic's
+// oracle test proves it legal with (tests/test_kinetic2_oracle.cpp). A ceiling
+// of 0 or a non-finite one parks the knot 600 s out, where the solver spends it.
+uint32_t parkUs(float d, const kinetic2::Limits& L) {
+    const float t = std::fmax(std::fmax(1.875f * d / L.vmax, std::sqrt(5.7735f * d / L.amax)),
+                              std::cbrt(60.0f * d / L.jmax));
+    return !(t < 600.0f) ? 600000000u : uint32_t(t * 1e6f) + 1000u;
+}
+#endif
 
 }  // namespace
 
@@ -238,7 +270,7 @@ void MotionArbiter::begin(uint64_t now_us) {
     _emitter.steer(0.0f);            // PARKED until an intent lands
     _origin    = _emitter.count();
     _odo_steps = _origin;
-    _engine.resetAt(toNorm(0.0f), now_us);
+    resetEngine(toNorm(0.0f), now_us);
     _p_cmd_mm = 0.0f;
 }
 
@@ -358,7 +390,19 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
     return plan(target, in, limitsFor(manual), now_us);
 }
 
-bool MotionArbiter::plan(float target, const MotionIntent& in, const kinetic::Limits& lim, uint64_t now_us) {
+bool MotionArbiter::plan(float target, const MotionIntent& in, const EngineLimits& lim, uint64_t now_us) {
+#if NUCLEUS_KINETIC2
+    if (!submitKnots(toNorm(target), in, lim, now_us)) {
+        ++_rejected;
+        GLOGW_EVERY_MS(1000, kTag, "REJECT: knot refused for %.2f mm", double(target));
+        return false;
+    }
+    ++_intents;
+    _k2_window_clamped = target != in.target_mm;
+    _demand_mm = target;
+    _stream    = in.source == MotionSource::Stream;
+    return true;
+#else
     const float s  = span();
     _engine.setLimits(lim);
 
@@ -392,10 +436,7 @@ bool MotionArbiter::plan(float target, const MotionIntent& in, const kinetic::Li
     drainAnomalies();
     const uint64_t t0 = _now_us();
     const bool ok = _engine.commit(cmd, now_us);
-    const uint32_t plan_us = uint32_t(_now_us() - t0);
-    _plan_us_last = plan_us;
-    if (plan_us > _plan_us_max) _plan_us_max = plan_us;
-    _plan_us_avg += (float(plan_us) - _plan_us_avg) * 0.125f;
+    notePlanCost(uint32_t(_now_us() - t0));
     const uint32_t kinds = drainAnomalies();
     if (!ok) {
         ++_rejected;
@@ -407,18 +448,152 @@ bool MotionArbiter::plan(float target, const MotionIntent& in, const kinetic::Li
     _demand_mm = target;
     _stream    = in.source == MotionSource::Stream;
     return true;
+#endif
 }
+
+void MotionArbiter::notePlanCost(uint32_t us) {
+    _plan_us_last = us;
+    if (us > _plan_us_max) _plan_us_max = us;
+    _plan_us_avg += (float(us) - _plan_us_avg) * 0.125f;
+}
+
+void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
+    _engine.resetAt(p_norm, now_us);
+#if NUCLEUS_KINETIC2
+    _k2_newest_us   = now_us;
+    _k2_newest_p    = p_norm;
+    _k2_brake_to_us = 0;
+    _k2_chase       = false;
+#endif
+}
+
+bool MotionArbiter::brakeEngine(uint64_t at_us) {
+#if NUCLEUS_KINETIC2
+    // The engine stops from its own state at at_us and reports neither the
+    // profile's end nor its length: recomputed here from the same state and
+    // limits by the same function, so the census reads exactly what renders.
+    const kinetic2::State s = _engine.stateAt(0, at_us);
+    const kinetic2::Profile pr = kinetic2::Profile::brake(s, at_us, _engine.config().limits);
+    _engine.brake(at_us);
+    _k2_dirty = true;
+    _k2_brake_from_us = at_us;
+    _k2_brake_from_p  = s.p;
+    _k2_brake_to_us   = pr.n > 0 ? pr.end_us() : at_us;
+    _k2_brake_to_p    = pr.n > 0 ? pr.end().p : s.p;
+    _k2_newest_us     = _k2_brake_to_us;
+    _k2_newest_p      = _k2_brake_to_p;
+    return pr.n > 0;
+#else
+    return _engine.brake(at_us);
+#endif
+}
+
+#if NUCLEUS_KINETIC2
+// ---- the Kinetic² boundary ----------------------------------------------------
+// Every conversion from an intent to the engine's knots (bd val-klo, RFC-105).
+// The engine sees knots, a brake and resets; nothing here reads a wire format.
+
+bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLimits& lim, uint64_t now_us) {
+    const bool manual = in.source == MotionSource::Manual;
+    // The engine solves its whole pending window under the config it holds at
+    // the next sample, so these limits and this policy apply to every knot
+    // still pending, not to this one alone. A Manual move never trims its
+    // amplitude: a jog or a homing seek that lands short of its target is a
+    // wrong answer, so it stretches.
+    kinetic2::Config cfg = _engine.config();
+    cfg.limits = lim;
+    cfg.policy = manual ? kinetic2::Policy::Stretch : _k2_policy;
+    _engine.setConfig(cfg);
+
+    // At rest the state is the emitter's count and nothing else (Kinetic's
+    // reseed rule, see the other kernel's branch of plan()). pending() first:
+    // isBusy() solves, and a bundle must not solve once per sample.
+    if (_engine.pending() == 0 && !_engine.isBusy(now_us)) {
+        resetEngine(toNorm(positionMm()), now_us);
+        _p_cmd_mm = positionMm();
+    }
+
+    // A generator's stop arrives as a point at its braking distance (Kinetic
+    // plans that as a stop from the live state); here it is the brake itself.
+    if (in.duration_us == 0 && isGenerator(in.source)) {
+        brakeEngine(now_us);
+        _k2_chase = false;
+        return true;
+    }
+
+    kinetic2::Knot k;
+    if (in.duration_us > 0) {
+        // A 0x2101 segment, or a generator's stroke: a knot at its start plus
+        // its duration with the sender's end velocity. A start past the
+        // newest knot leaves a gap the sender meant as a rest, so the curve
+        // holds until the start, as Kinetic starts a segment at its anchor.
+        const uint64_t start = in.anchor_us > now_us ? in.anchor_us : now_us;
+        if (start > _k2_newest_us) {
+            kinetic2::Knot hold;
+            hold.t_us   = start;
+            hold.p      = _k2_newest_p;
+            hold.has_v  = true;
+            hold.v      = 0.0f;
+            hold.family = kinetic2::Family::C2;
+            if (!_engine.submit(hold, now_us)) return false;
+            _k2_newest_us = start;
+            _k2_dirty = true;
+        }
+        // The curve policy (0 follow, 1 C1, 2 C2) overrides the sender's family.
+        const uint8_t fam = _k2_curve_policy == 1 ? 1 : _k2_curve_policy == 2 ? 2 : in.curve_family;
+        k = kinetic2::knotFromSegment(p, in.duration_us, in.has_end_vel, in.end_vel_mm_s / span(), start,
+                                      fam <= 3 ? kinetic2::Family(fam) : kinetic2::Family::Unspecified);
+        _k2_chase = false;
+    } else if (manual) {
+        // A jog, a return or a homing leg: a sample (RFC-105 (n)) whose latency
+        // is the park time from the newest knot under the jog set.
+        const uint64_t from = _k2_newest_us > now_us ? _k2_newest_us : now_us;
+        k = kinetic2::knotFromSample(p, from, parkUs(std::fabs(p - _k2_newest_p), lim));
+        _k2_chase = false;
+    } else {
+        // A 0x2100 sample: one behind, at the grant's latency (RFC-105 promise
+        // 1). A future anchor is the sample's arrival (RFC-084).
+        const uint64_t arrival = in.anchor_us > now_us ? in.anchor_us : now_us;
+        k = kinetic2::knotFromSample(p, arrival, _k2_latency_us);
+        _k2_chase = true;
+    }
+    if (!_engine.submit(k, now_us)) return false;
+    _k2_newest_us = k.t_us;
+    _k2_newest_p  = k.p;
+    _k2_dirty = true;
+    ++_k2_plans;
+    return true;
+}
+
+kinetic2::State MotionArbiter::sampleEngine(uint64_t now_us) {
+    // The first sample after a submit solves the window: that is the plan's
+    // cost under Kinetic², so it is what plan_us_* times.
+    const bool timed = _k2_dirty;
+    const uint64_t t0 = timed ? _now_us() : 0;
+    // A starved stream: the last knot is due and still moving. The engine would
+    // hold at it, a velocity step; the brake from the knot's own time lands at
+    // rest instead (RFC-105 (a)). Before stateAt(), which retires the knot.
+    if (_engine.pending() == 1) {
+        const kinetic2::Solved& k = _engine.solved(0, 0);
+        if (_engine.pending() == 1 && k.t_us <= now_us && std::fabs(k.v) > 1e-6f) brakeEngine(k.t_us - 1);
+    }
+    const kinetic2::State s = _engine.stateAt(0, now_us);
+    if (timed) notePlanCost(uint32_t(_now_us() - t0));
+    _k2_dirty = false;
+    return s;
+}
+#endif
 
 void MotionArbiter::setRailFrame(bool on, uint64_t now_us) {
     _rail_frame = on;
     _rail_margin = 0.0f;
-    _engine.resetAt(toNorm(positionMm()), now_us);
+    resetEngine(toNorm(positionMm()), now_us);
     _p_cmd_mm = positionMm();
 }
 
-kinetic::Limits MotionArbiter::limitsFor(bool manual) const {
+EngineLimits MotionArbiter::limitsFor(bool manual) const {
     const float s = span();
-    kinetic::Limits lim;
+    EngineLimits lim;
     lim.vmax = manual ? _jog_v / s : inputVmaxMm() / s;
     lim.amax = manual ? _jog_a / s : inputAmaxMm() / s;
     lim.jmax = _ovr_j > 0.0f ? _ovr_j : _in_j / s;
@@ -435,12 +610,20 @@ kinetic::Limits MotionArbiter::limitsFor(bool manual) const {
 // `return` goes back to.
 void MotionArbiter::brakeToRest(uint64_t now_us) {
     _engine.setLimits(limitsFor(false));
+#if NUCLEUS_KINETIC2
+    [[maybe_unused]] const float v = sampleEngine(now_us).v * span();   // log only
+#else
     [[maybe_unused]] const float v = _engine.velocityAt(now_us) * span();   // log only
-    if (!_engine.brake(now_us)) {
+#endif
+    if (!brakeEngine(now_us)) {
         _pause_pos_mm.store(positionMm());
         return;
     }
+#if NUCLEUS_KINETIC2
+    _demand_mm = toMm(_k2_brake_to_p);   // where it comes to rest
+#else
     _demand_mm = toMm(_engine.snapshot(now_us).target);   // where it comes to rest
+#endif
     _pause_pos_mm.store(_demand_mm);
     GLOGI(kTag, "PAUSE: braking from %.1f mm/s", double(v));
 }
@@ -449,6 +632,22 @@ void MotionArbiter::applyTuning(const MotionTuning& t) {
     // A COPY of the live config with the tuning fields replaced, so the
     // limits accept() last set ride through untouched. Takes effect at the
     // next plan; an in-flight trajectory keeps the config it was planned under.
+#if NUCLEUS_KINETIC2
+    // Kinetic² reads the policy, the amplitude floor (Kinetic's amplitude
+    // budget, the same floor), the lookahead and the corner; the curve
+    // policy and the samples latency stay here, at the knot boundary. Every
+    // other member is Kinetic's and accepted unread. Takes effect at the next
+    // solve, which re-plans every pending knot under it.
+    kinetic2::Config c = _engine.config();
+    c.policy          = t.infeasible_policy == 0 ? kinetic2::Policy::Stretch : kinetic2::Policy::Blend;
+    c.amplitude_floor = t.amplitude_budget;
+    c.lookahead_us    = t.lookahead_us;
+    c.corner          = t.corner == 1 ? kinetic2::Corner::Cubic : kinetic2::Corner::Continuous;
+    _engine.setConfig(c);
+    _k2_policy       = c.policy;
+    _k2_curve_policy = t.curve_policy;
+    _k2_latency_us   = sampleLatencyUs(t);
+#else
     kinetic::Config c = _engine.config();
     c.chase_feedforward           = t.chase_ff;
     c.chase_accel_ff              = t.chase_accel_ff;
@@ -466,6 +665,7 @@ void MotionArbiter::applyTuning(const MotionTuning& t) {
     c.settle_grace_us             = t.settle_grace_us;
     c.overshoot_guard             = t.overshoot_guard;
     _engine.setConfig(c);
+#endif
     _ovr_v = t.vmax_ovr;
     _ovr_a = t.amax_ovr;
     _ovr_j = t.jmax_ovr;
@@ -483,7 +683,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         // abandoned plan keeps reading busy and canClearEstop() -- which asks
         // exactly that -- would never let the latch drop (SPEC 11.2).
         if (!_estop_settled) {
-            _engine.resetAt(toNorm(positionMm()), now_us);
+            resetEngine(toNorm(positionMm()), now_us);
             _p_cmd_mm = positionMm();
             _estop_settled = true;
         }
@@ -500,7 +700,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         _emitter.park();
         if (_homing.load()) homeEnd("motor power off");
         if (!_power_settled.exchange(true)) {
-            _engine.resetAt(toNorm(positionMm()), now_us);
+            resetEngine(toNorm(positionMm()), now_us);
             _p_cmd_mm = positionMm();
         }
         return;
@@ -519,7 +719,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         _frame_moved = false;
         // A cycle planned in the old frame: its seek or backoff is void.
         if (_homing.load()) homeEnd("the travel window changed");
-        _engine.resetAt(toNorm(positionMm()), now_us);
+        resetEngine(toNorm(positionMm()), now_us);
         _p_cmd_mm = positionMm();
         _emitter.steer(0.0f);
         return;
@@ -549,7 +749,14 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
 
     // The one side-effecting sample per tick: it promotes scheduled plans and
     // engages SETTLE when a plan ends still moving.
+#if NUCLEUS_KINETIC2
+    // PLANNED CHANGE (bd val-klo): the RFC-103 oscillator (kinetic2/oscillator.hpp)
+    // is additive on this sampled state, after the planner and before the
+    // feedforward, and is not wired yet.
+    const float p_plan_mm = toMm(sampleEngine(now_us).p);
+#else
     const float p_plan_mm = toMm(_engine.positionAt(now_us));
+#endif
 
     // Arrival ends the return: override drops, plain PAUSE stays.
     if (_returning && !_engine.isBusy(now_us)) {
@@ -614,12 +821,12 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
 
 void MotionArbiter::homeOrigin(int32_t count, float at_mm, uint64_t now_us) {
     _origin = count - int32_t(std::lround(at_mm * kStepsPerMm));
-    _engine.resetAt(toNorm(positionMm()), now_us);
+    resetEngine(toNorm(positionMm()), now_us);
     _p_cmd_mm = positionMm();
 }
 
 bool MotionArbiter::homePlan(float target_mm, float v_mm_s, uint64_t now_us) {
-    kinetic::Limits lim = limitsFor(true);
+    EngineLimits lim = limitsFor(true);
     lim.vmax = v_mm_s / span();
     MotionIntent in;
     in.source = MotionSource::Manual;
@@ -661,7 +868,7 @@ void MotionArbiter::homeStep(uint64_t now_us) {
     if (now_us >= _home_deadline_us) {
         if (_engine.isBusy(now_us)) {
             _engine.setLimits(limitsFor(false));
-            _engine.brake(now_us);
+            brakeEngine(now_us);
         }
         return homeEnd("timed out");
     }
@@ -674,7 +881,7 @@ void MotionArbiter::homeStep(uint64_t now_us) {
                     // The stop profile: PAUSE's brake at the input decel.
                     _home_hit = _emitter.count();
                     _engine.setLimits(limitsFor(false));
-                    _engine.brake(now_us);
+                    brakeEngine(now_us);
                     _home = touch ? HomePhase::touch_stop : HomePhase::approach_stop;
                     return;
                 }
@@ -763,19 +970,72 @@ void MotionArbiter::homeEnd(const char* why) {
 // miscounted kind reads as a diagnosis that never happened.
 uint32_t MotionArbiter::drainAnomalies() {
     uint32_t kinds = 0;
-    kinetic::Anomaly a;
+    EngineAnomaly a;
     while (_engine.popAnomaly(a)) {
         if (a.kind < kAnomalyKinds) {
             ++_anom[a.kind];
             kinds |= 1u << a.kind;
         }
         ++_anomalies;
+#if NUCLEUS_KINETIC2
+        // Kinetic counts its own failures; Kinetic²'s are a dropped knot and a refused one.
+        if (a.kind == uint8_t(kinetic2::AnomalyKind::PlanFailed) || a.kind == uint8_t(kinetic2::AnomalyKind::KnotRefused))
+            ++_k2_failures;
+#endif
     }
     return kinds;
 }
 
-MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
+MotionArbiter::PlanRead MotionArbiter::readPlan(uint64_t now_us) {
+    PlanRead r;
+#if NUCLEUS_KINETIC2
+    const kinetic2::State st = sampleEngine(now_us);
+    r.pos      = st.p;
+    r.vel      = st.v;
+    r.start    = st.p;
+    r.target   = st.p;
+    r.plans    = _k2_plans;
+    r.failures = _k2_failures;
+    if (now_us < _k2_brake_to_us) {
+        // A brake renders: PAUSE, a generator's stop, a home stall, a starved stream.
+        r.mode       = uint8_t(PlanStyle::settle);
+        r.start      = _k2_brake_from_p;
+        r.target     = _k2_brake_to_p;
+        r.duration_s = float(_k2_brake_to_us - _k2_brake_from_us) * 1e-6f;
+        r.elapsed_s  = now_us > _k2_brake_from_us ? float(now_us - _k2_brake_from_us) * 1e-6f : 0.0f;
+    } else if (_engine.pending() > 0) {
+        // The piece toward the first pending knot, as the solver decided it.
+        const kinetic2::Solved& k = _engine.solved(0, 0);
+        r.mode       = uint8_t(_k2_chase ? PlanStyle::chase : PlanStyle::waveform);
+        r.plan_kind  = uint8_t(kinetic::PlanKind::Quintic);
+        r.start      = k.from.p;
+        r.target     = k.p;
+        r.duration_s = float(k.t_us - k.from_us) * 1e-6f;
+        r.elapsed_s  = now_us > k.from_us ? float(now_us - k.from_us) * 1e-6f : 0.0f;
+        // RFC-100 from the solver: fallback is never set, nothing falls back.
+        if (k.share < 1.0f) r.flags |= plan_flags::shaped;
+        if (k.stretched_s > 0.0f) r.flags |= plan_flags::stretched;
+        if (k.clamped || _k2_window_clamped) r.flags |= plan_flags::clamped;
+    }
+#else
     const kinetic::Snapshot s = _engine.snapshot(now_us);
+    r.pos        = s.pos;
+    r.vel        = s.vel;
+    r.start      = s.start;
+    r.target     = s.target;
+    r.duration_s = s.duration_s;
+    r.elapsed_s  = s.elapsed_s;
+    r.mode       = s.mode;
+    r.plan_kind  = s.plan_kind;
+    r.flags      = _plan_flags;
+    r.plans      = s.plans;
+    r.failures   = s.failures;
+#endif
+    return r;
+}
+
+MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
+    const PlanRead s = readPlan(now_us);
     const float s_mm = span();
 
     const int32_t steps = _emitter.count();
@@ -835,10 +1095,10 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.plan_elapsed_us  = uint32_t(s.elapsed_s * 1e6f);
     // An RFC-095 dwell is one of these: the generator sends it as a hold
     // segment so a client reads a live plan, never a stalled source.
-    c.plan_hold = c.busy && s.mode == uint8_t(kinetic::Mode::Waveform) &&
+    c.plan_hold = c.busy && s.mode == uint8_t(PlanStyle::waveform) &&
                   std::fabs(s.target - s.start) < limits::segment_dwell_span;
     // A SETTLE brake is the engine's own plan, never a bent command.
-    c.plan_flags = c.busy && s.mode != uint8_t(kinetic::Mode::Settle) ? _plan_flags : 0;
+    c.plan_flags = c.busy && s.mode != uint8_t(PlanStyle::settle) ? s.flags : 0;
     c.plans          = s.plans;
     c.failures       = s.failures;
     c.anomalies      = _anomalies;
@@ -877,10 +1137,14 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
 
 // ---- factory tuning ---------------------------------------------------------
 
-kinetic::Config MotionArbiter::engineConfig() {
+EngineConfig MotionArbiter::engineConfig() {
+#if NUCLEUS_KINETIC2
+    return kinetic2::Config{};
+#else
     kinetic::Config c;
     c.dwell_span_norm = limits::segment_dwell_span;
     return c;
+#endif
 }
 
 MotionTuning motionDefaultTuning() {
@@ -903,6 +1167,14 @@ MotionTuning motionDefaultTuning() {
     t.blend_steps      = cfg.infeasible_blend_steps;
     t.settle_grace_us  = cfg.settle_grace_us;
     t.overshoot_guard  = cfg.overshoot_guard;
+#if NUCLEUS_KINETIC2
+    // The members Kinetic² reads take its factory values (applyTuning()).
+    const kinetic2::Config k2{};
+    t.infeasible_policy = k2.policy == kinetic2::Policy::Stretch ? 0 : 1;
+    t.amplitude_budget  = k2.amplitude_floor;
+    t.lookahead_us      = k2.lookahead_us;
+    t.corner            = uint8_t(k2.corner);
+#endif
     return t;
 }
 

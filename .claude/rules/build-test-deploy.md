@@ -34,6 +34,12 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
   gated on: `pio test -e native` from the root project, every suite under
   `test/native/` named in the output
   (T10 -- the runner misreports, so read the suite names and the exit code).
+- The planner kernel is a build switch (`NUCLEUS_KINETIC2`,
+  `flagship_p4/src/motion/ValenceMotion.h`, bd val-klo), default off. A change
+  to the motion path builds both: `pio run -d flagship_p4 -e flagship_p4` and
+  `-e flagship_p4_kinetic2`, `pio test -e native` and `-e native_kinetic2`
+  (the motion suites with `-f`). Each kernel has its own kinetic.wasm trace
+  fixture (`tools/kinetic-wasm/README.md`).
 
 ## The bench
 

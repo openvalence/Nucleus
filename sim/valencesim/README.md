@@ -53,6 +53,11 @@ subprotocol-echo patch from `../Valence/hub/bench/cmake/`. The sibling
 Valence and Kinetic checkouts must exist beside this repo (override with
 `-DVALENCE_ROOT=` and `-DKINETIC_ROOT=`).
 
+The Kinetic² planner (bd val-klo, `NUCLEUS_KINETIC2` in
+`flagship_p4/src/motion/ValenceMotion.h`) is the same configure with
+`-DNUCLEUS_KINETIC2=ON` into its own tree, `sim/valencesim/build-k2`, so a bench
+can run both twins side by side. It compiles no Ruckig.
+
 Linux and macOS: the same two `cmake` lines without the compiler flags (a
 C++23 GCC or Clang, `cmake`, `ninja`, `git`; built with GCC 16 and with Clang
 23 on libc++, macOS itself untried). Output `build/valencesim`; Linux GCC

@@ -22,4 +22,15 @@ config NUCLEUS_DRIVE_LINK
         and DRV_RDY are still watched and still latch ESTOP, and the
         self-check's drive-link row reads SKIPPED.
 
+config NUCLEUS_KINETIC2
+    bool "Plan motion with Kinetic² instead of Kinetic"
+    default n
+    help
+        The planner kernel inside MotionArbiter (bd val-klo): off is Kinetic
+        (kinetic::Engine and its Ruckig), on is Kinetic² (kinetic2::Engine<1>,
+        the knot timeline of Valence RFC-105). Off until the bench rules
+        (val-2lv). The flagship_p4_kinetic2 env sets it through
+        custom_sdkconfig. Every source of the image sees one value: the
+        component exports it as NUCLEUS_KINETIC2 (src/CMakeLists.txt).
+
 endmenu

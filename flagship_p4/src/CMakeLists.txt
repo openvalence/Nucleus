@@ -68,6 +68,13 @@ idf_component_register(SRCS "main.cpp"
                                      espressif__esp_hosted
                                      espressif__esp_wifi_remote)
 
+# The planner kernel switch (Kconfig NUCLEUS_KINETIC2, motion/ValenceMotion.h).
+# PUBLIC: it sizes MotionCensus and lays out MotionArbiter, so every translation
+# unit that includes either must see the same value.
+if(CONFIG_NUCLEUS_KINETIC2)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC NUCLEUS_KINETIC2=1)
+endif()
+
 # Float multiply-adds stay unfused (val-63b): GCC's default -ffp-contract=fast
 # emits fmadd.s, and the planner must match kinetic.wasm and the native suite,
 # both built -ffp-contract=off, bit for bit. Do not drop it for speed.

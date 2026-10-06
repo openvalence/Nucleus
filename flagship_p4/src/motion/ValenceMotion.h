@@ -24,13 +24,28 @@
 
 #include "hub/valence_config.h"
 
+// The planner kernel, picked at BUILD time (bd val-klo): 0 is Kinetic
+// (kinetic::Engine), 1 is Kinetic² (kinetic2::Engine<1>). Defined by the build,
+// never by a source file: Kconfig NUCLEUS_KINETIC2 on the P4
+// (flagship_p4/src/CMakeLists.txt), the NUCLEUS_KINETIC2 CMake option for
+// valencesim and kinetic-wasm, the native_kinetic2 environment for the native
+// suites. EVERY translation unit of one image must see the same value: it sizes
+// MotionCensus and lays out MotionArbiter, so a mixed build is two classes with
+// one name and silent memory corruption.
+#ifndef NUCLEUS_KINETIC2
+#define NUCLEUS_KINETIC2 0
+#endif
+
 namespace valence {
+
+inline constexpr bool kKinetic2 = NUCLEUS_KINETIC2 != 0;
 
 // One per kinetic::AnomalyType, INCLUDING its index-0 placeholder and the
 // retired kind that holds its ordinal. The enum is append-only and the 0x1111
 // per-kind field list is indexed by it, so this number and that list move
-// together or the table re-points.
-inline constexpr uint8_t kAnomalyKinds = 11;
+// together or the table re-points. Kinetic² keeps kinds 0..10 and appends
+// KnotRefused (11).
+inline constexpr uint8_t kAnomalyKinds = kKinetic2 ? 12 : 11;
 
 // Origin of an intent. It picks the ceiling SET and the gating, nothing else.
 // The value is the SPEC 11.4 source id the hub publishes on control-owner, and
@@ -49,7 +64,9 @@ enum class MotionSource : uint8_t {
 // labels are the same strings, pinned by a static_assert in ValenceDevice.cpp.
 inline constexpr std::array<const char*, 4> kMotionSourceNames{"Jog", "Stream", "Classic", "Advanced"};
 
-// A point move, or a waveform span when duration_us is nonzero.
+// A point move, or a waveform span when duration_us is nonzero. Under Kinetic²
+// a Pattern or Advanced point is that generator's stop and renders as the
+// brake (MotionArbiter.cpp, the Kinetic² boundary): a generator moves by spans.
 struct MotionIntent {
     MotionSource source       = MotionSource::Manual;
     float        target_mm    = 0.0f;
@@ -136,8 +153,8 @@ struct MotionCensus {
     bool     stream         = false;  // a Stream intent is the live source
 
     // ---- the active plan, normalized, as 0x1110 publishes it ----
-    uint8_t  mode             = 0;   // kinetic::Mode
-    uint8_t  plan_kind        = 0;   // kinetic::PlanKind
+    uint8_t  mode             = 0;   // kinetic::Mode's ordinals, under either kernel
+    uint8_t  plan_kind        = 0;   // kinetic::PlanKind's ordinals, under either kernel
     float    plan_start       = 0.0f;
     float    plan_end         = 0.0f;
     float    plan_cur         = 0.0f;
@@ -200,6 +217,11 @@ struct MotionTuning {
     // 0x1030 home_speed, mm/s: the home cycle's approach (MotionArbiter.h,
     // homing). Not engine tuning; it rides this set to reach the motion task.
     float    home_speed        = DEFAULT_HOME_SPEED_MM_S;
+    // Kinetic² planner options (RFC-105), read only by a Kinetic² build, which
+    // static_asserts these defaults against kinetic2::Config's. Not persisted
+    // and not on a catalog card yet.
+    uint32_t lookahead_us      = 250000;
+    uint8_t  corner            = 0;   // kinetic2::Corner: 0 continuous, 1 cubic
 
     bool operator==(const MotionTuning&) const = default;
 };
@@ -220,6 +242,11 @@ inline constexpr uint32_t kMotionTaskStackBytes = 24576;
 // that just elapsed, so execution trails a stamp by one tick.
 // schedule_latency_us (RFC-059) is built on it.
 inline constexpr uint32_t kMotionTickUs = 1000;
+
+// RFC-059 schedule_latency_us of a samples grant, the one home the hub's grant
+// and the arbiter both read. Under Kinetic² it is exact, not a budget: a
+// sample is a knot this long after it arrives (RFC-105 promise 1).
+constexpr uint32_t sampleLatencyUs(const MotionTuning& t) { return t.chase_dense_us + kMotionTickUs; }
 
 // Brings up the engine, the arbiter and the motion task. The emitter is PARKED
 // until an intent is accepted. Must run BEFORE hubBegin(): the hub's boot

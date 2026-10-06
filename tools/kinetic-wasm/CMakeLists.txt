@@ -4,6 +4,8 @@
 #   emcmake cmake -S tools/kinetic-wasm -B tools/kinetic-wasm/build -G Ninja
 #   cmake --build tools/kinetic-wasm/build
 # Output: tools/kinetic-wasm/build/kinetic.wasm (gitignored, never committed).
+# The Kinetic² build is the same with -DNUCLEUS_KINETIC2=ON into its own tree
+# (tools/kinetic-wasm/build-k2 by convention).
 #
 # Every planning source is the one the P4 compiles, by path; nothing is copied.
 # The determinism rule (README.md) is the compile flags below: no FP
@@ -54,10 +56,20 @@ add_custom_target(kinetic_git_sha
     BYPRODUCTS "${SHA_HEADER}"
     VERBATIM)
 
+# The board's kernel switch (flagship_p4/src/motion/ValenceMotion.h). A Kinetic²
+# build compiles no Ruckig: the only Kinetic it reads is header types.
+option(NUCLEUS_KINETIC2 "plan with Kinetic² (kinetic2::Engine<1>) instead of Kinetic" OFF)
+if(NUCLEUS_KINETIC2)
+    set(RUCKIG_SRC "")
+endif()
+
 add_executable(kinetic
     kinetic_wasm.cpp
     "${NUCLEUS_ROOT}/flagship_p4/src/motion/MotionArbiter.cpp"
     ${RUCKIG_SRC})
+if(NUCLEUS_KINETIC2)
+    target_compile_definitions(kinetic PRIVATE NUCLEUS_KINETIC2=1)
+endif()
 add_dependencies(kinetic kinetic_git_sha)
 set_target_properties(kinetic PROPERTIES SUFFIX ".wasm")
 

@@ -7,7 +7,8 @@ machine will do. It is not a model of the planner: it is the same source.
 | Piece | Source (compiled by path, never copied) |
 |---|---|
 | Waveform shaping, Blend/Stretch, ceiling and window scan, Ruckig guard | `../Kinetic/include/kinetic/kinetic.hpp` + `../Kinetic/third_party/ruckig/src` |
-| Intent path: window clamp, limit sets, mm to engine frame, rest reseed, tuning map | `flagship_p4/src/motion/MotionArbiter.cpp` |
+| Or, in a Kinetic² build: the knot timeline, the window solver, the brake | `../Kinetic/include/kinetic2/` (no Ruckig) |
+| Intent path: window clamp, limit sets, mm to engine frame, rest reseed, tuning map, and under Kinetic² the intent-to-knot boundary | `flagship_p4/src/motion/MotionArbiter.cpp` |
 | 0x2101 sample to intent | `flagship_p4/src/motion/StreamIntent.h` |
 | Emitter (renders the steering word, every edge on time) | `sim/valencesim/src/IdealEmitter.h` |
 | Clock, tick order, the C ABI | `kinetic_wasm.cpp` (plumbing only) |
@@ -26,13 +27,31 @@ cmake --build tools/kinetic-wasm/build
 Output `tools/kinetic-wasm/build/kinetic.wasm`: standalone, zero imports, no
 filesystem, no JS glue. It is a build product and is never committed here.
 
+## The kernel switch
+
+The board's planner kernel is a build switch (`NUCLEUS_KINETIC2`,
+`flagship_p4/src/motion/ValenceMotion.h`, bd val-klo), and this build follows
+it. The Kinetic² wasm is the same build with the option on, into its own tree:
+
+```
+emcmake cmake -S tools/kinetic-wasm -B tools/kinetic-wasm/build-k2 -G Ninja -DNUCLEUS_KINETIC2=ON
+cmake --build tools/kinetic-wasm/build-k2
+```
+
+`kinetic_version()` names the kernel (`kinetic` or `kinetic2`). A consumer
+reads it before it trusts a layout: the two builds differ in
+`kinetic_tuning`'s size, in what `p`/`v`/`a` are, in which flags can rise and
+in one anomaly bit, each marked below.
+
 ## The pin rule
 
 A vendored `kinetic.wasm` is only "the machine" when it was built from the
 same Nucleus commit as the firmware it stands in for, with the sibling Valence
-checkout at `valence.pin`. `kinetic_version()` carries the proof:
-`nucleus <git describe> kinetic <engine version>`. A `-dirty` build is never
-vendored, and a consumer shows the string next to its render.
+checkout at `valence.pin` and the same kernel switch. `kinetic_version()`
+carries the proof: `nucleus <git describe> kinetic <engine version>`, or
+`nucleus <git describe> kinetic2 <engine version>` from a Kinetic² build. A
+`-dirty` build is never vendored, and a consumer shows the string next to its
+render.
 
 ## The determinism rule
 
@@ -42,7 +61,10 @@ compiles without floating-point contraction (`-ffp-contract=off`) and without
 either flag to any build that claims to match. The proof is
 `node tools/kinetic-wasm/check.mjs` against the fixture the native suite
 `test/native/test_kinetic_wasm_trace` writes to `test/fixtures/kinetic_trace.json`:
-every 1 ms sample of a 60 s script is compared bit for bit.
+every 1 ms sample of a 60 s script is compared bit for bit. The Kinetic² pair
+is the suite under `pio test -e native_kinetic2`, which writes
+`test/fixtures/kinetic2_trace.json`, and
+`node tools/kinetic-wasm/check.mjs tools/kinetic-wasm/build-k2/kinetic.wasm test/fixtures/kinetic2_trace.json`.
 
 ## Loading
 
@@ -87,14 +109,16 @@ frame of the travel window. The engine frame is that window normalized to
 A player stamps each segment ahead of its start, inside the horizon, exactly as
 it would on the wire; the engine plans a future start from where the previous
 one ends (`Engine::commit`). A segment re-sent at an earlier start replaces everything
-queued from that start on.
+queued from that start on. Under Kinetic² a segment is a knot at its start plus its
+duration, a start past the newest knot holds at rest until it, and a knot not
+after the newest is refused (KnotRefused): nothing queued is ever replaced.
 
 ### `kinetic_sample`, 64 bytes, little-endian
 
 | Offset | Field | Unit |
 |---|---|---|
 | 0 | `t_us` f64 | engine clock |
-| 8 | `p` f64 | plan position, engine frame, UNCLAMPED (the double the engine evaluates) |
+| 8 | `p` f64 | plan position, engine frame, UNCLAMPED (the double the engine evaluates; under Kinetic² its float, widened) |
 | 16 | `v` f64 | engine frame units/s |
 | 24 | `a` f64 | engine frame units/s^2 |
 | 32 | `plan_mm` f32 | plan position as the census publishes it, window-clamped, mm |
@@ -102,10 +126,10 @@ queued from that start on.
 | 40 | `accel_mm_s2` f32 | `a` times the window span (unclamped) |
 | 44 | `position_mm` f32 | the ideal emitter's count: what an on-time LP core renders |
 | 48 | `target_mm` f32 | where the active plan ends |
-| 52 | `anomalies` u32 | bit k = `kinetic::AnomalyType` k recorded since the previous step |
-| 56 | `mode` u8 | `kinetic::Mode`: 0 idle, 1 waveform, 2 chase, 3 settle |
-| 57 | `plan_kind` u8 | `kinetic::PlanKind`: 0 none, 1 quintic, 2 Ruckig, 3 cubic |
-| 58 | `flags` u8 | bit0 busy, bit1 shaped (Blend spent amplitude or shape), bit2 fallback (Ruckig guard or a stretched deadline), bit3 clamped (raw `p` outside the window), bit4 refused (a submit since the previous step) |
+| 52 | `anomalies` u32 | bit k = `kinetic::AnomalyType` k recorded since the previous step; Kinetic² keeps 0..10 and adds bit 11, KnotRefused |
+| 56 | `mode` u8 | `kinetic::Mode`: 0 idle, 1 waveform, 2 chase, 3 settle. Kinetic²: 1 toward a segment's knot, 2 toward a sample's, 3 a brake |
+| 57 | `plan_kind` u8 | `kinetic::PlanKind`: 0 none, 1 quintic, 2 Ruckig, 3 cubic. Kinetic² renders only 0 and 1 |
+| 58 | `flags` u8 | bit0 busy, bit1 shaped (Blend spent amplitude or shape), bit2 fallback (Ruckig guard or a stretched deadline; under Kinetic² only a stretch), bit3 clamped (raw `p` outside the window), bit4 refused (a submit since the previous step; under Kinetic² also a dropped or refused knot) |
 | 59 | reserved u8 | 0 |
 | 60 | `plans` u32 | successful plans since create or reset |
 
@@ -119,6 +143,24 @@ queued from that start on.
 `curve_policy` (0 follow, 1 C1, 2 C2), `infeasible_policy` (offset 48; 0
 stretch, 1 blend), `blend_steps`, and two reserved zero bytes. Start from
 `kinetic_default_tuning` and change only what the card changed.
+
+A Kinetic² build APPENDS eight bytes, 60 in all: u32 `lookahead_us` (offset
+52), u8 `corner` (offset 56; 0 continuous, 1 cubic) and three reserved zero
+bytes. A consumer sizes its buffer from the build it loaded:
+`kinetic_default_tuning` writes the whole struct. Under Kinetic² the members
+map onto `kinetic2::Config` as follows, and the rest are accepted and ignored
+(the chase is gone: a sample is a knot one latency behind, and this ABI takes
+segments only):
+
+| Member | Under Kinetic² |
+|---|---|
+| `jmax_ovr`, `vmax_ovr`, `amax_ovr` | the ceilings, as under Kinetic |
+| `infeasible_policy` | `Config::policy` (0 Stretch, 1 Blend) |
+| `amplitude_budget` | `Config::amplitude_floor`, the same floor |
+| `curve_policy` | applied at the knot boundary: 1 forces C1, 2 C2, 0 follows the segment |
+| `lookahead_us`, `corner` | `Config::lookahead_us`, `Config::corner` (the kernel at `kinetic.pin` carries `lookahead_us` unread) |
+| `chase_gain`, `chase_lookahead`, `handoff_k`, `smooth_budget`, `overshoot_guard`, `settle_grace_us`, `chase_ff`, `chase_accel_ff`, `chase_aim_extrap`, `blend_steps` | ignored |
+| `chase_dense_us` | ignored here; on the board it still sets the samples grant's `schedule_latency_us` (`sampleLatencyUs()`), which is the delay a Kinetic² sample renders at |
 
 ## What it is not
 

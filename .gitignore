@@ -43,6 +43,7 @@ tools/*
 # kinetic.wasm build output never is (a consumer vendors a pinned build).
 !tools/kinetic-wasm/
 tools/kinetic-wasm/build/
+tools/kinetic-wasm/build-*/
 
 # Claude Code config is COMMITTED (hooks/rules survive a clone, like
 # canon_lint). Only host/session-local state stays out.

@@ -395,7 +395,8 @@ void publishPlanStrip(Hub& hub, const MotionCensus& m) {
 
 // hubDropped: bundles the hub dropped whole at ingress (IngressDropTally.h).
 void publishMotionDiag(Hub& hub, const MotionCensus& m, uint32_t hubDropped) {
-    std::array<std::byte, 92> buf{};
+    // The layout ValenceCatalog.h's kinetic-diag entry sums: 48 B around one u32 per kind.
+    std::array<std::byte, 48 + 4 * kAnomalyKinds> buf{};
     size_t n = 0;
     packU32(buf, n, m.plans);
     packU32(buf, n, m.failures);
@@ -794,7 +795,7 @@ uint16_t ValenceDevice::scheduleHorizonMs(uint16_t channel_id) {
 // as a stream (chase_dense), plus the same hop.
 uint32_t ValenceDevice::scheduleLatencyUs(uint16_t channel_id) {
     if (channel_id == ch::motion_segment) return kMotionTickUs;
-    if (channel_id == ch::motion_input) return _tune.chase_dense_us + kMotionTickUs;
+    if (channel_id == ch::motion_input) return sampleLatencyUs(_tune);
     return 0;
 }
 
