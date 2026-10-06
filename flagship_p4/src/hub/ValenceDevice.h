@@ -185,10 +185,10 @@ public:
     uint8_t sourceKind(uint8_t source_id) override;
     bool sourceQuiet(uint8_t source_id) override;
     std::optional<BlobView> readBlob(uint8_t ns, uint8_t store_id, uint8_t slot) override;
-    // RFC-099 trial writes. Trialable: 0x3000 keys 1-8, 0x3030 key 4
-    // (overshoot_clamp), 0x3120 every key but 10. Never chase_dense, the
-    // horizon or the flip: each is refused on live state, so a revert could
-    // be refused too.
+    // RFC-099 trial writes. Trialable: 0x3000 keys 1-8 and 0x3120 every key
+    // but 10. Never chase_dense, the horizon or the flip: each is refused on
+    // live state, so a revert could be refused too. No 0x3030 key is
+    // trialable.
     std::optional<IntentValue> trialBaseline(uint16_t channel_id, uint8_t key) override;
     Result<IntentValueMap, NackCode> applyTrialIntent(uint16_t channel_id, const IntentValueMap& requested,
                                                       AccessLevel role, bool& cfgChanged) override;
@@ -270,9 +270,11 @@ private:
     MotionTuning _tune = motionDefaultTuning();
     // The stored 0x1030 modes beside the tuning (StoredState.h).
     StoredModes _modes{};
-    // The schedule_horizon and flipped mask bits as last published.
+    // The schedule_horizon, flipped and chase_dense_ms mask bits as last
+    // published.
     bool _horizonOpenSent = true;
     bool _flipOpenSent = false;
+    bool _latencyOpenSent = true;
     // The client-frame window 0x1000 last carried: it moves with the flip and
     // the rail, neither of which changes _cfg.
     Window _sentWindow{0.0f, 0.0f};

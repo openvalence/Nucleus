@@ -2,8 +2,9 @@
 // Constraints:
 // - See ValenceHub.h for the single-task, PSRAM and construction-order rules.
 // - Every static_assert below pins ValenceCatalog.h's hand-mirrored defaults
-//   to valence_config.h. The catalog is library-only and cannot include the
-//   config header; this TU sees both, so it is where the mirror is nailed.
+//   to valence_config.h and kinetic2::Config. The catalog is library-only and
+//   includes neither; this TU sees all three, so it is where the mirror is
+//   nailed.
 // - The delegate and every retained STATE publisher are ValenceDevice, which
 //   is hardware-free so the host twin (sim/valencesim) runs it verbatim. What
 //   stays here is what only the P4 has: NVS, PSRAM, esp_netif, the task.
@@ -72,6 +73,7 @@
 #include "system/SelfCheck.h"
 #include "system/ValenceOta.h"
 #include "valence_config.h"
+#include "kinetic2/types.hpp"
 
 namespace valence {
 
@@ -90,6 +92,10 @@ static_assert(ceiling::home_speed_min == MIN_HOME_SPEED_MM_S,      "catalog home
 static_assert(ceiling::speed_max   == MAX_SPEED_MM_S,              "catalog speed ceiling drifted");
 static_assert(ceiling::accel_max   == MAX_ACCEL_MM_S2,             "catalog accel ceiling drifted");
 static_assert(ceiling::jerk_max    == MAX_JERK_MM_S3,              "catalog jerk ceiling drifted");
+static_assert(factory::amplitude_budget == kinetic2::Config{}.amplitude_floor,
+              "catalog amplitude_budget drifted");
+static_assert(factory::corner == uint8_t(kinetic2::Config{}.corner), "catalog corner drifted");
+static_assert(factory::react_ms * 1000.0f == float(kinetic2::Config{}.react_us), "catalog react_ms drifted");
 
 namespace {
 

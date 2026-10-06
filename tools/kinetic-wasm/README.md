@@ -120,19 +120,29 @@ newest is refused (KnotRefused): nothing queued is ever replaced.
 
 ### `kinetic_tuning`, 64 bytes
 
-`MotionTuning` (`flagship_p4/src/motion/ValenceMotion.h`) as the 0x1030 /
-0x3120 cards speak it, in this order: nine f32 (`jmax_ovr`, `vmax_ovr`,
-`amax_ovr`, `chase_gain`, `chase_lookahead`, `handoff_k`, `smooth_budget`,
-`amplitude_budget`, `overshoot_guard`), two u32 (`chase_dense_us`,
-`settle_grace_us`), then u8 `chase_ff`, `chase_accel_ff`, `chase_aim_extrap`,
-`curve_policy` (0 follow, 1 C1, 2 C2), `infeasible_policy` (offset 48; 0
-stretch, 1 blend), `blend_steps`, two reserved zero bytes, u32 `lookahead_us`
-(offset 52), u8 `corner` (offset 56; 0 continuous, 1 cubic), three reserved
-zero bytes, and u32 `react_us` (offset 60; the reaction horizon, below). Start
-from `kinetic_default_tuning` and change only what the card changed. The
-members map onto `kinetic2::Config` as follows, and the rest are accepted and
-ignored (the planner has no chase: a sample becomes a knot one latency behind,
-and this ABI takes segments only):
+`MotionTuning` (`flagship_p4/src/motion/ValenceMotion.h`) as the 0x3120
+writer speaks it. The offsets are fixed; a retired member's bytes stay as
+ignored padding:
+
+| Offset | Member |
+|---|---|
+| 0, 4, 8 | f32 `jmax_ovr`, `vmax_ovr`, `amax_ovr` |
+| 12..27 | retired, ignored (four f32) |
+| 28 | f32 `amplitude_budget` |
+| 32 | retired, ignored (f32) |
+| 36 | u32 `chase_dense_us` |
+| 40..46 | retired, ignored (a u32 and three u8) |
+| 47 | u8 `curve_policy` (0 follow, 1 C1, 2 C2) |
+| 48 | u8 `infeasible_policy` (0 stretch, 1 blend) |
+| 49..51 | reserved, zero |
+| 52 | u32 `lookahead_us` |
+| 56 | u8 `corner` (0 continuous, 1 cubic) |
+| 57..59 | reserved, zero |
+| 60 | u32 `react_us` (the reaction horizon, below) |
+
+Start from `kinetic_default_tuning` and change only what the card changed.
+The members map onto `kinetic2::Config` as follows (this ABI takes segments
+only):
 
 | Member | Effect |
 |---|---|
@@ -140,9 +150,8 @@ and this ABI takes segments only):
 | `infeasible_policy` | `Config::policy` (0 Stretch, 1 Blend) |
 | `amplitude_budget` | `Config::amplitude_floor` |
 | `curve_policy` | applied at the knot boundary: 1 forces C1, 2 C2, 0 follows the segment |
-| `lookahead_us`, `corner` | `Config::lookahead_us`, `Config::corner` (the kernel at `kinetic.pin` carries `lookahead_us` unread) |
+| `lookahead_us`, `corner` | `Config::lookahead_us`, `Config::corner` (the kernel at `kinetic.pin` carries `lookahead_us` unread, and no catalog field writes it) |
 | `react_us` | `Config::react_us`, the reaction horizon in microseconds (factory 4000): a knot arriving while the carriage moves keeps the curve under it this far ahead of now, or through the next knot when that is nearer, and re-plans from the state there (RFC-105 (bb)). A longer horizon avoids re-planning inside a piece too short to change within the ceilings. A shorter horizon lets the next knot revise a plan that was based on one knot |
-| `chase_gain`, `chase_lookahead`, `handoff_k`, `smooth_budget`, `overshoot_guard`, `settle_grace_us`, `chase_ff`, `chase_accel_ff`, `chase_aim_extrap`, `blend_steps` | ignored |
 | `chase_dense_us` | ignored here; on the board it sets the samples grant's `schedule_latency_us` (`sampleLatencyUs()`), the delay a sample renders at |
 
 ## Differences from the board

@@ -75,26 +75,21 @@ struct kinetic_sample {
     uint32_t plans;          // successful plans since create or reset
 };
 
-// MotionTuning (ValenceMotion.h) as a C struct; the catalog's units.
+// MotionTuning (ValenceMotion.h) as a C struct; the catalog's units. The
+// offsets are ABI: a retired member's bytes stay as ignored padding.
 struct kinetic_tuning {
     float    jmax_ovr;          // normalized window units/s^3, 0 = derived from the mm limits
     float    vmax_ovr;          // normalized window units/s, 0 = derived
     float    amax_ovr;          // normalized window units/s^2, 0 = derived
-    float    chase_gain;
-    float    chase_lookahead;   // stream intervals
-    float    handoff_k;         // RFC-008 chord factor, 0 = guard off
-    float    smooth_budget;     // 0..1
+    float    retired0[4];       // ignored, zero from kinetic_default_tuning
     float    amplitude_budget;  // 0..1
-    float    overshoot_guard;   // 0 = disarmed
+    float    retired1;          // ignored
     uint32_t chase_dense_us;
-    uint32_t settle_grace_us;
-    uint8_t  chase_ff;          // bool
-    uint8_t  chase_accel_ff;    // bool
-    uint8_t  chase_aim_extrap;  // bool
+    uint32_t retired2;          // ignored
+    uint8_t  retired3[3];       // ignored
     uint8_t  curve_policy;      // 0 follow, 1 C1, 2 C2
     uint8_t  infeasible_policy; // 0 stretch, 1 blend
-    uint8_t  blend_steps;
-    uint8_t  reserved[2];       // zero
+    uint8_t  reserved[3];       // zero
     // Kinetic²'s planner options, appended at offset 52.
     uint32_t lookahead_us;      // the solver's lookahead window
     uint8_t  corner;            // 0 continuous, 1 cubic
@@ -108,7 +103,11 @@ static_assert(sizeof(kinetic_sample) == 64, "kinetic_sample layout is ABI");
 static_assert(offsetof(kinetic_sample, plan_mm) == 32 && offsetof(kinetic_sample, anomalies) == 52 &&
                   offsetof(kinetic_sample, mode) == 56 && offsetof(kinetic_sample, plans) == 60,
               "kinetic_sample layout is ABI");
-static_assert(sizeof(kinetic_tuning) == 64, "kinetic_tuning layout is ABI");
+static_assert(sizeof(kinetic_tuning) == 64 && offsetof(kinetic_tuning, amplitude_budget) == 28 &&
+                  offsetof(kinetic_tuning, chase_dense_us) == 36 && offsetof(kinetic_tuning, curve_policy) == 47 &&
+                  offsetof(kinetic_tuning, infeasible_policy) == 48 && offsetof(kinetic_tuning, lookahead_us) == 52 &&
+                  offsetof(kinetic_tuning, corner) == 56 && offsetof(kinetic_tuning, react_us) == 60,
+              "kinetic_tuning layout is ABI");
 
 // kinetic_sample::flags
 inline constexpr uint8_t KINETIC_FLAG_BUSY     = 1u << 0;  // the plan has motion left to render
@@ -262,20 +261,10 @@ MotionTuning fromC(const kinetic_tuning& t) {
     m.jmax_ovr          = t.jmax_ovr;
     m.vmax_ovr          = t.vmax_ovr;
     m.amax_ovr          = t.amax_ovr;
-    m.chase_ff          = t.chase_ff != 0;
-    m.chase_accel_ff    = t.chase_accel_ff != 0;
-    m.chase_gain        = t.chase_gain;
-    m.chase_lookahead   = t.chase_lookahead;
     m.chase_dense_us    = t.chase_dense_us;
-    m.chase_aim_extrap  = t.chase_aim_extrap != 0;
-    m.handoff_k         = t.handoff_k;
     m.curve_policy      = t.curve_policy;
     m.infeasible_policy = t.infeasible_policy;
-    m.smooth_budget     = t.smooth_budget;
     m.amplitude_budget  = t.amplitude_budget;
-    m.blend_steps       = t.blend_steps;
-    m.settle_grace_us   = t.settle_grace_us;
-    m.overshoot_guard   = t.overshoot_guard;
     m.lookahead_us      = t.lookahead_us;
     m.corner            = t.corner;
     m.react_us          = t.react_us;
@@ -288,20 +277,10 @@ kinetic_tuning toC(const MotionTuning& m) {
     t.jmax_ovr          = m.jmax_ovr;
     t.vmax_ovr          = m.vmax_ovr;
     t.amax_ovr          = m.amax_ovr;
-    t.chase_gain        = m.chase_gain;
-    t.chase_lookahead   = m.chase_lookahead;
-    t.handoff_k         = m.handoff_k;
-    t.smooth_budget     = m.smooth_budget;
     t.amplitude_budget  = m.amplitude_budget;
-    t.overshoot_guard   = m.overshoot_guard;
     t.chase_dense_us    = m.chase_dense_us;
-    t.settle_grace_us   = m.settle_grace_us;
-    t.chase_ff          = m.chase_ff ? 1 : 0;
-    t.chase_accel_ff    = m.chase_accel_ff ? 1 : 0;
-    t.chase_aim_extrap  = m.chase_aim_extrap ? 1 : 0;
     t.curve_policy      = m.curve_policy;
     t.infeasible_policy = m.infeasible_policy;
-    t.blend_steps       = m.blend_steps;
     t.lookahead_us      = m.lookahead_us;
     t.corner            = m.corner;
     t.react_us          = m.react_us;

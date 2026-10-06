@@ -1096,22 +1096,11 @@ EngineConfig MotionArbiter::engineConfig() {
 
 MotionTuning motionDefaultTuning() {
     MotionTuning t;
-    // Factory values of members the engine does not read. They are persisted
-    // and published on the 0x1121/0x1122 cards (wire-visible), so they never
-    // change here alone. chase_dense_us is read: it sets the samples grant's
-    // latency (sampleLatencyUs()).
-    t.chase_ff         = true;
-    t.chase_accel_ff   = true;
-    t.chase_gain       = 0.9f;
-    t.chase_lookahead  = 1.3f;
+    // Applied at the knot boundary, not by the engine: the samples grant's
+    // latency (sampleLatencyUs()) and the curve policy. Both are published
+    // with their catalog default (0x1122), so they never change here alone.
     t.chase_dense_us   = 60000;
-    t.chase_aim_extrap = true;
-    t.handoff_k        = 1.5f;
     t.curve_policy     = 0;   // follow client
-    t.smooth_budget    = 0.5f;
-    t.blend_steps      = 6;
-    t.settle_grace_us  = 30000;
-    t.overshoot_guard  = 1.0f;
     // The members the engine reads take its factory values (applyTuning()).
     // The catalog select is 0 stretch / 1 blend, so the mapping is explicit
     // rather than a cast.
