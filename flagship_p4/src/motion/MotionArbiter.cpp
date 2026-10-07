@@ -57,16 +57,6 @@ static_assert(MotionTuning{}.lookahead_us == kinetic2::Config{}.lookahead_us &&
                   MotionTuning{}.react_us == kinetic2::Config{}.react_us,
               "MotionTuning's Kinetic² defaults are kinetic2::Config's");
 
-// RFC-105 (k): a point move is a knot at the least time a rest-to-rest
-// quintic of `d` is legal under every ceiling, plus the 1 ms margin Kinetic's
-// oracle test proves it legal with (tests/test_kinetic2_oracle.cpp). A ceiling
-// of 0 or a non-finite one parks the knot 600 s out, where the solver spends it.
-uint32_t parkUs(float d, const kinetic2::Limits& L) {
-    const float t = std::fmax(std::fmax(1.875f * d / L.vmax, std::sqrt(5.7735f * d / L.amax)),
-                              std::cbrt(60.0f * d / L.jmax));
-    return !(t < 600.0f) ? 600000000u : uint32_t(t * 1e6f) + 1000u;
-}
-
 // The count from the origin at which positionMm() first reads at or past `mm`
 // outward: the least count reading at or above it (up), the greatest reading
 // at or below it (down). A fence there never cuts off a point the backstop
@@ -510,13 +500,26 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
                                       fam <= 3 ? kinetic2::Family(fam) : kinetic2::Family::Unspecified);
         _k2_chase = false;
     } else if (manual) {
-        // A jog or a return: a sample (RFC-105 (n)) whose latency is the park
-        // time from the newest knot under the jog set, at an authored rest: a
-        // free last knot keeps its secant and the engine brakes past it
-        // (RFC-105 (dd)).
+        // A jog is LIVE (operator ruling 2026-10-06, RFC-105 (n) amended): the
+        // newest target supersedes every move still queued; the motion in
+        // flight hands off at the reaction horizon (Engine::truncateAfter) and
+        // the new move chains from there. A scrub never builds a queue.
+        if (_engine.truncateAfter(now_us, now_us) > 0) {
+            const kinetic2::Knot h = _engine.newest();
+            _k2_newest_us = h.t_us;
+            _k2_newest_p  = h.p;
+            _k2_dirty = true;
+        }
+        // The knot is due as soon as possible: a C1 rest sample is the HARD
+        // junction (types.hpp junctionOf), which the engine renders as the
+        // time-optimal move to rest from the newest knot's state
+        // (Profile::point: velocity change, cruise, brake) and times itself,
+        // with no anomaly for a sample. A deadline padded here only slowed
+        // the cruise to meet it (RFC-105 (xx)).
         const uint64_t from = _k2_newest_us > now_us ? _k2_newest_us : now_us;
-        k = kinetic2::knotFromSample(p, from, parkUs(std::fabs(p - _k2_newest_p), lim));
+        k = kinetic2::knotFromSample(p, from, kMotionTickUs);
         k.has_v = true;   // v = 0
+        k.family = kinetic2::Family::C1;
         _k2_chase = false;
     } else {
         // A 0x2100 sample: one behind, at the grant's latency (RFC-105 promise

@@ -2225,3 +2225,45 @@ TEST_CASE("lease: the core is unleased until the first tick, and an e-stop parks
     CHECK(r->emitter.live);   // the tick still renews: a lease is the HP alive, not motion allowed
     CHECK(r->census().lease_lapses == 0);
 }
+
+// Operator ruling 2026-10-06 (bd val-d11): a jog is live. The newest target
+// supersedes every move queued behind the one in flight, so a scrub never
+// builds a timeline and the carriage turns toward the newest target within
+// the reaction horizon plus a tick.
+TEST_CASE("jog is live: a 20 Hz scrub never queues, redirects on receipt, nothing refused") {
+    auto r = rig();
+    r->arb.forceHome(268.0f);
+    r->arb.setWindow(92.0f, 176.0f, 268.0f);
+    r->arb.setJogLimits(200.0f, 200.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 134.0f));
+    r->run(1'500'000);
+    int late_turns = 0;
+    for (int i = 0; i < 60; ++i) {
+        const float target = (i % 2 == 0) ? 170.0f : 98.0f;
+        REQUIRE(r->submit(MotionSource::Manual, target));
+        // The redirection is the ACCELERATION, bounded by the jog set: past the
+        // reaction horizon the velocity changes toward the newest target (a
+        // reversal from 100 mm/s under 200 mm/s^2 takes half a second, so the
+        // velocity itself cannot flip within one cadence).
+        r->run(6000);
+        const float v0 = r->census().velocity_mm_s;
+        r->run(14'000);
+        const MotionCensus c = r->census();
+        const float toward = target - c.plan_mm;
+        const bool turned = std::fabs(toward) < 0.5f || (c.velocity_mm_s - v0) * toward > 0.0f
+                            || (c.velocity_mm_s * toward > 0.0f && std::fabs(c.velocity_mm_s) >= 199.0f);
+        if (!turned) ++late_turns;
+        r->run(30'000);
+    }
+    r->run(2'000'000);
+    r->arb.drainAnomalies();
+    const MotionCensus c = r->census();
+    MESSAGE("late turns ", late_turns, " of 60");
+    CHECK(late_turns == 0);
+    CHECK(c.rejected == 0);
+    CHECK(c.failures == 0);
+    CHECK(c.anom[size_t(kinetic2::AnomalyKind::KnotRefused)] == 0);
+    CHECK_FALSE(c.busy);
+    CHECK(std::fabs(c.position_mm - 98.0f) <= 2.0f * valence::kMmPerStep);
+}
