@@ -281,7 +281,7 @@ inline constexpr float home_speed  = 40.0f;       // DEFAULT_HOME_SPEED_MM_S
 // Kinetic² planner options, MIRRORS of kinetic2::Config's defaults
 // (static_asserted in ValenceHub.cpp). Times in the wire's milliseconds.
 inline constexpr float   amplitude_budget  = 0.25f;  // Config::amplitude_floor
-inline constexpr uint8_t corner            = 0;      // Config::corner, continuous
+inline constexpr uint8_t corner            = 1;      // Config::corner, cubic (operator 2026-10-06: the machine renders the author's curve)
 inline constexpr float   react_ms          = 4.0f;   // Config::react_us
 }  // namespace factory
 

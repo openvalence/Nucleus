@@ -213,7 +213,7 @@ struct MotionTuning {
     // kinetic2::Config's defaults. lookahead_us is neither persisted nor on a
     // card: the kernel at kinetic.pin does not read it (bd val-88t).
     uint32_t lookahead_us      = 250000;
-    uint8_t  corner            = 0;   // kinetic2::Corner: 0 continuous, 1 cubic
+    uint8_t  corner            = 1;   // kinetic2::Corner: 0 continuous, 1 cubic (the default: the author's own corners)
     uint32_t react_us          = 4000;   // the reaction horizon: a knot arriving mid-motion re-plans from this far ahead
 
     bool operator==(const MotionTuning&) const = default;
