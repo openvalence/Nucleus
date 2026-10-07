@@ -2267,3 +2267,67 @@ TEST_CASE("jog is live: a 20 Hz scrub never queues, redirects on receipt, nothin
     CHECK_FALSE(c.busy);
     CHECK(std::fabs(c.position_mm - 98.0f) <= 2.0f * valence::kMmPerStep);
 }
+
+// A C1 script streamed as Phosphor's funscript player sends it: one bundle per
+// span, 250 ms ahead, PCHIP slopes as end velocities, the bundle's first segment
+// superseding (RFC-087). The machine renders the author's cubics: no trim, no
+// stretch, and the plan within a step of the PCHIP curve after the first span.
+TEST_CASE("C1 script, a bundle per span: the author's cubics render with nothing spent") {
+    auto r = rig();
+    r->arb.forceHome(268.0f);
+    r->arb.setWindow(92.0f, 176.0f, 268.0f);
+    r->arb.setInputLimits(1000.0f, 50000.0f, 10000000.0f);
+    r->run(1000);
+    constexpr float kPeriodMs = 1300.0f, kKnotMs = 100.0f, kAmp = 42.0f, kMid = 134.0f;
+    constexpr int kKnots = 60;
+    float T[kKnots], P[kKnots], M[kKnots];
+    for (int i = 0; i < kKnots; ++i) { T[i] = float(i) * kKnotMs; P[i] = kMid + kAmp * std::sin(6.2831853f * T[i] / kPeriodMs); }
+    for (int i = 0; i < kKnots; ++i) {
+        if (i == 0 || i == kKnots - 1) { M[i] = 0.0f; continue; }
+        const float a = (P[i] - P[i - 1]) / kKnotMs, b = (P[i + 1] - P[i]) / kKnotMs;
+        M[i] = a * b <= 0.0f ? 0.0f : 2.0f / (1.0f / a + 1.0f / b);   // mm per ms
+    }
+    auto pchip = [&](float t_ms) {
+        int i = int(t_ms / kKnotMs); if (i < 0) i = 0; if (i > kKnots - 2) i = kKnots - 2;
+        const float h = kKnotMs, u = (t_ms - T[i]) / h;
+        const float h00 = 2*u*u*u - 3*u*u + 1, h10 = u*u*u - 2*u*u + u, h01 = -2*u*u*u + 3*u*u, h11 = u*u*u - u*u;
+        return h00 * P[i] + h10 * h * M[i] + h01 * P[i + 1] + h11 * h * M[i + 1];
+    };
+    // Move to the first knot and rest there.
+    REQUIRE(r->submit(MotionSource::Manual, P[0]));
+    r->run(1'500'000);
+    const uint64_t t0 = g_now_us + 300'000;
+    int next = 1; float worst = 0.0f; int worst_at = 0;
+    for (int ms = 0; ms < int(T[kKnots - 1]) + 300; ++ms) {
+        while (next < kKnots && uint64_t(T[next - 1] * 1000.0f) <= g_now_us + 250'000 - t0) {
+            MotionIntent in;
+            in.source = MotionSource::Stream;
+            in.target_mm = P[next];
+            in.duration_us = uint32_t(kKnotMs * 1000.0f);
+            in.has_end_vel = true;
+            in.end_vel_mm_s = M[next] * 1000.0f;
+            in.anchor_us = t0 + uint64_t(T[next - 1] * 1000.0f);
+            in.curve_family = 1;
+            in.supersede = true;
+            REQUIRE(r->arb.accept(in, g_now_us));
+            ++next;
+        }
+        r->run(1000);
+        const float t_ms = float(int64_t(g_now_us) - int64_t(t0)) * 1e-3f;
+        if (t_ms >= 2.0f * kKnotMs && t_ms <= T[kKnots - 1] - kKnotMs) {
+            const float err = std::fabs(r->census().plan_mm - pchip(t_ms));
+            if (err > worst) { worst = err; worst_at = int(t_ms); }
+        }
+    }
+    r->arb.drainAnomalies();
+    const MotionCensus c = r->census();
+    MESSAGE("worst plan error ", worst, " mm at ", worst_at, " ms; trims ", c.anom[size_t(kinetic2::AnomalyKind::WaveformScaled)],
+            " stretches ", c.anom[size_t(kinetic2::AnomalyKind::DeadlineStretched)], " failed ", c.failures, " refused ", c.rejected);
+    CHECK(c.rejected == 0);
+    CHECK(c.failures == 0);
+    // The first span from rest starts at zero acceleration where the author's
+    // cubic does not (Kinetic kin-tt8): one trim there, none after it.
+    CHECK(c.anom[size_t(kinetic2::AnomalyKind::WaveformScaled)] <= 1);
+    CHECK(c.anom[size_t(kinetic2::AnomalyKind::DeadlineStretched)] == 0);
+    CHECK(worst <= 0.5f);
+}
