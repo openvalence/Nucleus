@@ -1,8 +1,23 @@
 // lp_quad -- LP core quadrature emitter: renders edges from a velocity the HP
-// core hands it, and counts them
+// core hands it, inside a fence, while a lease the HP renews is fresh, and
+// counts them
 // Constraints:
-// - Runs free on the LP core and NEVER returns. The HP core steers it only by
-//   writing g_step_q8 and g_dir; it never commands an edge.
+// - Runs free on the LP core and NEVER returns. The HP core steers it by
+//   writing g_step_q8 and g_dir, bounds it by g_fence_lo/g_fence_hi, and keeps
+//   it rendering by renewing g_lease; it never commands an edge.
+// - THE FENCE: no edge takes g_pos below g_fence_lo or above g_fence_hi. An
+//   edge past it is withheld: no store, no count, g_fence_hits counts it, and
+//   its deadline still passes, so the period stands. A count already outside
+//   the fence may move back toward it, never further out.
+// - THE LEASE: any change of g_lease renews it. When the word has not moved
+//   for g_lease_cycles this core stores 0 to g_step_q8 (park()'s store; this
+//   core's only write to that word, only ever 0), counts g_lapses, and renders
+//   nothing until the word moves again. Unleased at start: nothing renders
+//   before the first renewal. g_lease_cycles is written by the HP before run
+//   and read once; 0 lapses on the first pass.
+// - The fence and the lease are each checked ONCE PER PASS, outside the fine
+//   wait: a pass is one edge while rendering, one poll while parked, so a
+//   lapse stops the edges at most one edge after the lease runs out.
 // - One store per edge. Gray coding changes exactly one line per transition,
 //   so every edge is a single w1ts or w1tc write, never a read-modify-write.
 // - Shared words are 32-bit ON PURPOSE. There is no lock between HP and LP and
@@ -52,6 +67,13 @@ volatile uint32_t g_catchup = 0;   // re-steers whose new period was shorter tha
                                    // NOT a missed deadline -- g_late is that, and
                                    // conflating them makes every ramp out of rest
                                    // look like an emitter that cannot keep up.
+// Open until the HP's first write: the lease holds this core still until then.
+volatile int32_t  g_fence_lo     = INT32_MIN;   // in g_pos's frame, steps
+volatile int32_t  g_fence_hi     = INT32_MAX;
+volatile uint32_t g_fence_hits   = 0;   // edges withheld at the fence
+volatile uint32_t g_lease        = 0;   // renewed by any change
+volatile uint32_t g_lease_cycles = 0;   // HP-written before run
+volatile uint32_t g_lapses       = 0;   // leases that ran out, each a stop
 
 // ---- edge table -------------------------------------------------------------
 
@@ -83,13 +105,28 @@ int main(void)
     uint32_t acc_q8 = 0;   // sub-cycle remainder, carried, never discarded
     uint32_t i      = 0;   // index of the NEXT edge, under the direction in fwd
     uint32_t fwd    = 1;
+    const uint32_t lease_cycles = g_lease_cycles;
+    uint32_t seen    = 0;      // g_lease as last read
+    uint32_t renewed = prev;   // mcycle when it last moved
+    uint32_t live    = 0;
 
     for (;;) {
+        const uint32_t now = RV_READ_CSR(mcycle);
+        const uint32_t l   = g_lease;
+        if (l != seen) {
+            seen    = l;
+            renewed = now;
+            live    = 1;
+        } else if (live && now - renewed > lease_cycles) {
+            live      = 0;
+            g_step_q8 = 0;
+            g_lapses++;
+        }
         uint32_t step = g_step_q8;
-        if (step == 0) {
+        if (step == 0 || !live) {
             // Parked. Resync so a restart does not fire a burst of stale edges
             // catching up on deadlines that passed while stopped.
-            prev   = RV_READ_CSR(mcycle);
+            prev   = now;
             acc_q8 = 0;
             continue;
         }
@@ -170,6 +207,15 @@ int main(void)
         if (step == 0) {
             prev   = RV_READ_CSR(mcycle);
             acc_q8 = 0;
+            continue;
+        }
+
+        // The fence, after the coarse wait, where the direction is final.
+        const int32_t pos = g_pos;
+        if (fwd ? pos >= g_fence_hi : pos <= g_fence_lo) {
+            g_fence_hits++;
+            prev   = deadline;
+            acc_q8 = carry & 0xFFu;
             continue;
         }
 

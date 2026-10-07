@@ -5,8 +5,10 @@
 // core renders the edges
 // Constraints:
 // - THE ARBITER IS THE SOLE CALLER of the emitter (architecture.md section 2).
-//   Nothing outside ValenceMotion.cpp writes ulp_g_step_q8 or ulp_g_dir, and
-//   no input source reaches the engine except through motionSubmit().
+//   Nothing outside ValenceMotion.cpp writes the LP core's steering, fence or
+//   lease words, except main.cpp's boot liveness burst before this path
+//   starts, and no input source reaches the engine except through
+//   motionSubmit().
 // - motionSubmit() may be called from any task. It enqueues and wakes the
 //   motion task, which plans AT INTENT ARRIVAL, not on the tick.
 // - Position truth is the LP core's signed edge count, never a number this
@@ -110,6 +112,7 @@ struct MotionCensus {
     uint32_t step_q8        = 0;   // the live steering word; 0 means PARKED
     uint32_t emitter_faults = 0;   // demands past the emitter floor: a FAULT
                                    // DETECTOR count, never a shaping knob
+    uint32_t fence_hits     = 0;   // edges the LP fence withheld (lp_quad.c)
 
     // ---- arbiter ----
     uint32_t intents        = 0;
@@ -120,6 +123,8 @@ struct MotionCensus {
     uint32_t backstops      = 0;   // position backstop engagements: the plan
                                    // left the active frame and the demand was
                                    // held at its edge (MotionArbiter.cpp)
+    uint32_t lease_lapses   = 0;   // the LP core stopped itself on a lease no
+                                   // tick renewed for kLeaseUs (MotionArbiter.h)
     uint32_t stack_free     = 0;   // motion task stack high-water headroom, bytes
     bool     homed          = false;
     bool     estop          = false;

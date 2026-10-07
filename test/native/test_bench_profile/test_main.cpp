@@ -45,6 +45,11 @@ public:
         if (q8 != 0) fwd = w.forward;
     }
     void park() override { q8 = 0; }
+    // The gate under test never reaches the frame's edge: no fence or lease
+    // model (test_motion_arbiter has them).
+    void fence(int32_t, int32_t) override {}
+    void renew() override {}
+    uint32_t lapses() const override { return 0; }
 
     void advance(double dt_s) {
         if (q8 == 0) return;

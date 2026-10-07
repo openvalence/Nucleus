@@ -21,6 +21,8 @@
 
 #include "ValenceMotion.h"
 
+#include <atomic>
+
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -57,6 +59,8 @@ uint64_t espNowUs() { return static_cast<uint64_t>(esp_timer_get_time()); }
 // (MotionArbiter::homeSenseRose()): one aligned store and one aligned load in
 // LP memory, nothing else, so neither may grow a lock, a log or a counter.
 // That interrupt is not IRAM-resident: it waits out a flash write.
+// fence() and renew() are the motion task's, the fence words' and the lease
+// word's only writers once the arbiter runs.
 class LpEmitter final : public MotionEmitter {
 public:
     int32_t count() const override { return static_cast<int32_t>(ulp_g_pos); }
@@ -79,6 +83,31 @@ public:
     }
 
     void park() override { ulp_g_step_q8 = 0; }
+
+    void fence(int32_t lo, int32_t hi) override {
+        // THE NARROWING BOUND FIRST, a memory fence after each store. The LP
+        // core reads one word per edge (hi forward, lo reverse), so between
+        // the stores it sees one old bound and one new one; storing the bound
+        // that moves inward first keeps that pair inside the old fence or the
+        // new one, and makes it their intersection whenever one bound
+        // narrows while the other widens (a shift). Never outside their union.
+        if (lo > static_cast<int32_t>(ulp_g_fence_lo)) {
+            ulp_g_fence_lo = static_cast<uint32_t>(lo);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            ulp_g_fence_hi = static_cast<uint32_t>(hi);
+        } else {
+            ulp_g_fence_hi = static_cast<uint32_t>(hi);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            ulp_g_fence_lo = static_cast<uint32_t>(lo);
+        }
+        // Before the steer that follows.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
+
+    // Any change renews; read back, so main.cpp's boot burst value is moved.
+    void renew() override { ulp_g_lease = ulp_g_lease + 1u; }
+
+    uint32_t lapses() const override { return ulp_g_lapses; }
 
     uint32_t faults() const { return _faults; }
 
@@ -222,6 +251,7 @@ void MotionTask::refreshSnapshot(uint64_t now_us) {
     c.catchups       = ulp_g_catchup;
     c.step_q8        = ulp_g_step_q8;
     c.emitter_faults = _emitter.faults();
+    c.fence_hits     = ulp_g_fence_hits;
     // IDF reports this in BYTES, not the vanilla FreeRTOS words.
     c.stack_free     = _task ? uxTaskGetStackHighWaterMark(_task) : 0;
 

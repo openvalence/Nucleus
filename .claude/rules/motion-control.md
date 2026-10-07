@@ -94,17 +94,25 @@ window is solved at the next sample, and the sampler evaluates it.
   engagements (`backstops`, a plan more than one step past, at onset) and
   sets plan.flags `clamped` while one holds
   [verified 2026-10-06 -- test_motion_arbiter, a PAUSE brake planned 65 mm
-  past the window held at its edge].
+  past the window held at its edge]. This clamp is the FIRST line; the LP
+  core's fence (below) is the second, and the only one an HP stall cannot
+  skip.
 - **A late tick is a stall, never a burst (bd val-1w8).** Every steer is
   priced over at most `kTickDtCapS`, two `kMotionTickUs`, so none exceeds the
   input vmax plus that long of the input amax; a tick later than that is
   re-anchored to the plan, steers the plan's own velocity, and is counted
-  (census `stalls`, on the status line). What this does NOT bound: between
-  ticks the LP core renders the last steer open loop, so an HP stall longer
-  than `kTickDtCapS` carries the carriage that steer times the stall. A
-  window solve on the tick is one (283 ms measured on the P4; bd val-8rt), a
-  flash write with the cache off another. The one bound independent of the
-  HP side is a fence in the LP core, a flagged doctrine change (bd val-fi5).
+  (census `stalls`, on the status line). Between ticks the LP core renders
+  the last steer open loop, so an HP stall (a window solve on the tick,
+  283 ms measured on the P4, bd val-8rt; a flash write with the cache off)
+  carries the carriage that steer for at most `kLeaseUs`, then the LP core
+  stops it (the lease, below), and never past the frame's edge (the fence).
+  The next tick counts the lapse (census `lease_lapses`, `lapses=` on the
+  status line) and never re-anchors `_p_cmd_mm` to the count: a stall inside
+  the host's drain reaches `evaluate()` with a `dt_s` measured before it, and
+  the residual as feedforward over that is an uncommanded reversal (measured
+  -600 mm/s against a 223 mm/s plan). The residual closes at the bounded kick
+  [verified 2026-10-06 -- test_motion_arbiter, a 283 ms stall moves the
+  carriage 0.896 mm at 223.5 mm/s, then steers 233 mm/s].
 - **Whichever task samples the engine first after a submit needs a deep
   stack**: the window solve copies the pending knots and runs the solver's
   fixed arrays on the calling stack, KB-scale. That is the motion task only.
@@ -115,8 +123,13 @@ window is solved at the next sample, and the sampler evaluates it.
 
 ## The LP-core emitter (`flagship_p4/ulp/`)
 
-The LP core renders edges and does nothing else. Its signed edge count IS the
-machine's position. All numbers below are measured on this stamp
+The LP core renders edges inside its fence while its lease is fresh, and
+nothing else (amended by operator ruling 2026-10-06, bd val-fi5: "there should
+be absolutely no possible way for the machine to leave the specified window
+or end of the rail under any circumstance", and "the LP core gets two bounds
+and nothing else"). Its signed edge count IS the machine's position. The
+fence and the lease are below; every other number in this section is
+measured on this stamp
 [verified 2026-09-20 -- Rigol DHO4204, single-shot captures at 8 ns and 100 ns
 per sample, decoded in numpy; board `val-091.3`].
 
@@ -147,11 +160,48 @@ per sample, decoded in numpy; board `val-091.3`].
   That is EVIDENCE, NOT PROOF: if the inner loop changes shape, re-scope it.
   The whole-build half of this fact is the `-O2` requirement in
   `build-test-deploy.md`.
-- **An HP flash write does not touch it.** The LP core runs from LP SRAM with
-  its GPIO in the LP domain [verified 2026-09-20 -- HP-side hammer erasing and
-  writing 4 KB every 100 ms, ~1.0 s of cache-off in every 5 s window: `late=0`,
-  `f_LP` unchanged, 0 illegal transitions, 0 outliers beyond the poll grid].
-  Never move edge rendering back to an HP-resident renderer.
+- **An HP flash write does not touch its timing.** The LP core runs from LP
+  SRAM with its GPIO in the LP domain [verified 2026-09-20 -- HP-side hammer
+  erasing and writing 4 KB every 100 ms, ~1.0 s of cache-off in every 5 s
+  window: `late=0`, `f_LP` unchanged, 0 illegal transitions, 0 outliers
+  beyond the poll grid]. Never move edge rendering back to an HP-resident
+  renderer. A cache-off window longer than `kLeaseUs` during motion now stops
+  the carriage by design: the motion task cannot renew the lease through it.
+- **The fence: two words, `g_fence_lo` and `g_fence_hi`, in `g_pos`'s frame.**
+  No edge takes the count below the low word or above the high one; an edge
+  past it is withheld (no store, no count, `g_fence_hits`), its deadline still
+  passes, so the period stands, and a count already outside may move back,
+  never further out. Checked once per edge, after the coarse wait and outside
+  the fine wait, reading only the word for the edge's direction. The arbiter
+  writes it (`MotionArbiter::syncFence()`) before every nonzero steer: the
+  backstop's frame in counts, rounded outward by under a step
+  (`fenceCount()`), or during a home cycle its whole search, max_rail plus a
+  safety margin and two search margins past each end. The board stores the
+  bound that narrows first, a memory fence after each store
+  (`ValenceMotion.cpp` `LpEmitter::fence()`), so the pair the core can read
+  between the stores lies inside the old fence or the new one. Open at load:
+  the lease holds the core still until the first write
+  [verified 2026-10-06 -- test_motion_arbiter, a steer a 3.9 ms stall
+  carries past the window stops with the count exactly on the fence, 13
+  edges withheld; the rig without the fence ran 13 steps past].
+- **The lease: `g_lease`, renewed by any change.** `evaluate()` renews it on
+  every tick, the seek producer's included. When it has not moved for
+  `g_lease_cycles` (`kLeaseCycles`, `kLeaseTicks` = 4 ticks = 4 ms, written by
+  the HP before the core runs and read once) the core stores 0 to
+  `g_step_q8`, counts `g_lapses`, and renders nothing until it moves again.
+  Unleased at start: nothing renders before the first renewal, so main.cpp's
+  boot liveness proof is one lease long (~40 edges at 4003 cycles per edge).
+  Checked once per pass, so a lapse stops the edges at most one edge after
+  the lease runs out.
+- **What the two bounds cost the per-edge path.** 18 instructions on the
+  common edge, 43 before and 61 after (ULP `-Os`, disassembled from
+  `ulp_main.elf`): 16 before the fine wait (the lease and fence compares),
+  one after the edge, and ONE between the fine wait's exit and the edge
+  store, a stack reload of the edge table's base that register pressure put
+  there (a constant latency, one load, on every edge alike). The fine wait
+  loop itself is unchanged, three instructions, and the edge store keeps its
+  `lw`/`sw` shape. The LP image's `.text` grew 2,428 to 2,584 bytes. The
+  DIG-694 evidence above was taken on the previous shape: re-scope it.
 - **Budget, so a rate change is checked and not guessed:** at 40 MHz and
   52.152 steps/mm, 950 mm/s is 807 cycles per edge against a 5-cycle poll
   loop. The LP core has 32 KB of LP SRAM and reaches HP SRAM and peripherals
@@ -173,11 +223,13 @@ per sample, decoded in numpy; board `val-091.3`].
   FreeRTOS call. It is not IRAM-resident, so a flash write holds it off.
 - `g_step_q8` has more than one writer only for a stop: every writer other
   than `steer()` on the motion task stores 0 (e-stop, power loss, the home
-  sense's interrupt). A steer racing an interrupt park is parked again by the
-  motion task (`homeSteer()`, a full fence between its steer and its read of
-  the seek word).
-- The HP-to-LP channel is the LP shared memory window. It carries a velocity
-  and flags, single-writer per field, never a rendered buffer. A renderer that
-  buffers ahead turns every late refill into dead air on the output, which is
-  the reason edge rendering lives on a core with nothing else to do.
+  sense's interrupt, and the LP core itself when its lease lapses). A steer
+  racing an interrupt park is parked again by the motion task (`homeSteer()`,
+  a full fence between its steer and its read of the seek word); a steer
+  racing a lapse is lost for one tick and steered again by the next.
+- The HP-to-LP channel is the LP shared memory window. It carries a velocity,
+  the fence, the lease and flags, single-writer per field (`g_step_q8` above
+  excepted), never a rendered buffer. A renderer that buffers ahead turns
+  every late refill into dead air on the output, which is the reason edge
+  rendering lives on a core with nothing else to do.
 - Task and core assignment is in `.claude/rules/subsystem-map.md` (C-1).

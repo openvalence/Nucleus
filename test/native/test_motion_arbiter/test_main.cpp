@@ -1,7 +1,8 @@
 // test_motion_arbiter -- native doctest suite for the shared MotionArbiter core
 // Constraints:
 // - Hardware-free and deterministic: a synthetic microsecond clock and an ideal
-//   emitter that renders the steering word exactly. No IDF, no FreeRTOS.
+//   emitter that renders the steering word exactly, inside the LP core's fence
+//   while its lease is live (lp_quad.c). No IDF, no FreeRTOS.
 // - Compiles flagship_p4/src/motion/MotionArbiter.cpp itself, the one copy the
 //   board and the sim both link, so a gate change is caught here before either.
 // - The arbiter plans with Kinetic² (kinetic2::Engine<1>), the only planner.
@@ -54,23 +55,54 @@ public:
         if (q8 != 0) fwd = w.forward;
     }
     void park() override { q8 = 0; ++parks; }
+    void fence(int32_t lo, int32_t hi) override {
+        fence_lo = lo;
+        fence_hi = hi;
+    }
+    void renew() override {
+        renewed_us = clock_us;
+        live = true;
+    }
+    uint32_t lapses() const override { return lapse_count; }
 
-    // With on_edge set, renders one edge at a time and calls it after each, so
-    // a park from inside it stops the render on that edge.
+    // The LP core over dt_s (lp_quad.c): it renders the word it holds while
+    // the lease is live and withholds every edge past the fence; kLeaseUs
+    // after the last renewal it stores 0 to the word and counts a lapse.
+    // Unleased until the first renewal. The core reads the lease once per
+    // pass, so its lapse lands within an edge of the instant modeled here.
     void advance(double dt_s) {
-        if (q8 == 0 || frozen) return;
+        if (frozen) return;
+        const int64_t dt_us = std::llround(dt_s * 1e6);
+        const int64_t left_us = renewed_us + int64_t(valence::kLeaseUs) - clock_us;
+        const bool lapse = live && dt_us > left_us;
+        const int64_t run_us = !live ? 0 : lapse ? std::max<int64_t>(left_us, 0) : dt_us;
+        clock_us += dt_us;
+        render(double(run_us) * 1e-6);
+        if (lapse) {
+            live = false;
+            q8 = 0;
+            phase = 0.0;
+            ++lapse_count;
+        }
+    }
+
+    // With on_edge set, calls it after each edge, so a park from inside it
+    // stops the render on that edge.
+    void render(double dt_s) {
+        if (q8 == 0 || !(dt_s > 0.0)) return;
         const double rate = double(valence::kLpClockHz) * 256.0 / double(q8);
         phase += (fwd ? rate : -rate) * dt_s;
         const double whole = std::trunc(phase);
         phase -= whole;
-        if (!on_edge) {
-            n += int32_t(whole);
-            return;
-        }
         const int32_t edges = int32_t(whole);
         const int32_t step = edges > 0 ? 1 : -1;
         for (int32_t k = 0; k != edges; k += step) {
+            if (step > 0 ? n >= fence_hi : n <= fence_lo) {
+                ++fence_hits;
+                continue;
+            }
             n += step;
+            if (!on_edge) continue;
             on_edge();
             if (q8 == 0) {
                 phase = 0.0;
@@ -84,8 +116,15 @@ public:
     bool     fwd = true;
     double   phase = 0.0;
     int      parks = 0;
-    bool     frozen = false;   // steered, never rendering: a dead emitter
+    bool     frozen = false;   // steered, never rendering, no lease: a dead emitter
     std::function<void()> on_edge;
+    int32_t  fence_lo = INT32_MIN;   // open until the arbiter writes it, as the core loads it
+    int32_t  fence_hi = INT32_MAX;
+    uint32_t fence_hits = 0;
+    int64_t  clock_us = 0;           // the core's own time, advanced by advance()
+    int64_t  renewed_us = 0;
+    bool     live = false;
+    uint32_t lapse_count = 0;
 };
 
 // Built on the heap (rig()): the arbiter holds a KB-scale engine. A rig is a
@@ -1951,7 +1990,7 @@ TEST_CASE("backstop: the incident's jog scrub, without stalls, with isolated 283
             lcg = lcg * 1664525u + 1013904223u;
             return lcg >> 8;
         };
-        uint32_t injected = 0, over_ceiling = 0, pushed_out = 0;
+        uint32_t injected = 0, over_ceiling = 0, pushed_out = 0, overran = 0;
         float lo_seen = r->arb.positionMm(), hi_seen = lo_seen;
         const uint64_t t0 = g_now_us;
         uint64_t next_move = t0;
@@ -1970,8 +2009,13 @@ TEST_CASE("backstop: the incident's jog scrub, without stalls, with isolated 283
             const bool late = mode == storm ? (at >= 3'000'000 && at < 6'000'000)
                                             : (mode == isolated && rnd() % 400 == 0);
             if (late) {
+                // The core renders the steer it holds for kLeaseUs and stops.
+                const int32_t n0 = r->emitter.n;
+                const double v0 = steeredMmS(r->emitter);
                 lateTick(*r, 283'000);
                 ++injected;
+                const double moved = std::fabs(double(r->emitter.n - n0)) * double(valence::kMmPerStep);
+                if (moved > std::fabs(v0) * double(valence::kLeaseUs) * 1e-6 + 2.0 * double(valence::kMmPerStep)) ++overran;
             } else {
                 r->run(1000);
             }
@@ -1987,24 +2031,197 @@ TEST_CASE("backstop: the incident's jog scrub, without stalls, with isolated 283
         }
         const MotionCensus c = r->census();
         MESSAGE("mode ", int(mode), ", stalls ", injected, ": carriage in [", lo_seen, ", ", hi_seen, "] mm, census stalls ", c.stalls,
-                ", backstops ", c.backstops, ", plan_us_max ", c.plan_us_max);
+                ", backstops ", c.backstops, ", lapses ", c.lease_lapses, ", fence hits ", r->emitter.fence_hits,
+                ", plan_us_max ", c.plan_us_max);
         CHECK(over_ceiling == 0);
         CHECK(pushed_out == 0);
         CHECK(c.stalls == injected);
-        if (mode == none) {
-            CHECK(lo_seen >= kIncWinLo - kStepTol);
-            CHECK(hi_seen <= kIncWinHi + kStepTol);
-        } else {
-            REQUIRE(injected > 5);
-            // Open loop through a stall the carriage covers the steer it holds
-            // times the stall, and that steer is bounded: the jog's speed plus
-            // kTickDtCapS of the input amax. Only an LP-side fence closes this
-            // (bd val-fi5); the rail is never in reach of it.
-            const float hold = (200.0f + kIncAmax * valence::kTickDtCapS) * 0.283f;
-            CHECK(lo_seen >= kIncWinLo - hold);
-            CHECK(hi_seen <= kIncWinHi + hold);
-            CHECK(lo_seen > 0.0f);
-            CHECK(hi_seen < kIncRail);
-        }
+        // Every stall lapses the lease once and renders at most kLeaseUs of
+        // the steer it held; the fence keeps the count in the window either
+        // way, rounded outward by under a step.
+        CHECK(c.lease_lapses == injected);
+        CHECK(overran == 0);
+        CHECK(lo_seen >= kIncWinLo - valence::kMmPerStep);
+        CHECK(hi_seen <= kIncWinHi + valence::kMmPerStep);
+        if (mode != none) REQUIRE(injected > 5);
     }
+}
+
+// ---- the LP fence and lease (operator ruling 2026-10-06, bd val-fi5) ----------
+
+namespace {
+
+// A fence word as the millimeters the carriage reads at that count.
+float fenceMm(Rig& r, int32_t c) { return r.arb.positionMm() + float(c - r.emitter.n) * valence::kMmPerStep; }
+
+// The fence holds [lo, hi] mm, rounded outward by under one step.
+void checkFence(Rig& r, float lo, float hi) {
+    const float flo = fenceMm(r, r.emitter.fence_lo);
+    const float fhi = fenceMm(r, r.emitter.fence_hi);
+    CAPTURE(flo);
+    CAPTURE(fhi);
+    CHECK(flo <= lo + 1e-3f);
+    CHECK(flo > lo - valence::kMmPerStep - 1e-3f);
+    CHECK(fhi >= hi - 1e-3f);
+    CHECK(fhi < hi + valence::kMmPerStep + 1e-3f);
+}
+
+}  // namespace
+
+TEST_CASE("fence: the window, the asserted rail under override and through its return, then the window again") {
+    auto r = incidentRig();
+    checkFence(*r, kIncWinLo, kIncWinHi);
+    // The jog under override reaches past the window: the fence moved to the
+    // rail before its first steer, or an edge would have been withheld.
+    r->arb.override();
+    REQUIRE(r->submit(MotionSource::Manual, 250.0f));
+    r->run(moveUs(5'000'000));
+    CHECK(r->arb.positionMm() == doctest::Approx(250.0f).epsilon(0.0001));
+    checkFence(*r, 0.0f, kIncRail);
+    REQUIRE(r->arb.returnToPause() == valence::ReturnStart::queued);
+    r->run(1000);
+    checkFence(*r, 0.0f, kIncRail);
+    r->run(moveUs(5'000'000));
+    CHECK_FALSE(r->census().override_mode);
+    checkFence(*r, kIncWinLo, kIncWinHi);
+    CHECK(r->emitter.fence_hits == 0);
+}
+
+TEST_CASE("fence: a home cycle searches inside the wide frame and is never fenced; the window follows the new frame") {
+    auto r = rig();
+    FakeSense s{r->emitter, -30.0f, 170.0f};
+    isr(*r, s);
+    r->arb.setHomeSense(s);
+    REQUIRE(r->arb.home() == HomeStart::started);
+    // max_rail plus a safety margin and two search margins past each end.
+    const float wide = DEFAULT_MAX_RAIL_MM + 2.0f * (kHomeSafetyMarginMm + 2.0f * kHomeSearchMarginMm);
+    int ticks = 0, off = 0;
+    for (int i = 0; i < 20'000; ++i) {
+        r->run(1000);
+        if (!r->census().homing) break;
+        ++ticks;
+        const float span = float(r->emitter.fence_hi - r->emitter.fence_lo) * kMmPerStep;
+        if (std::fabs(span - wide) > 2.0f * kMmPerStep) ++off;
+        if (r->emitter.n < r->emitter.fence_lo || r->emitter.n > r->emitter.fence_hi) ++off;
+    }
+    const MotionCensus c = r->census();
+    REQUIRE(c.homes == 1);
+    CHECK(ticks > 1000);
+    CHECK(off == 0);
+    CHECK(r->emitter.fence_hits == 0);
+    // The backstop's frame in the measured frame: the window held in the rail.
+    r->run(1000);
+    checkFence(*r, 0.0f, c.rail_mm);
+    r->arb.setWindow(20.0f, 150.0f, c.rail_mm);
+    r->run(2000);
+    checkFence(*r, 20.0f, 150.0f);
+    CHECK(r->emitter.fence_hits == 0);
+}
+
+TEST_CASE("fence: a steer a 3.9 ms stall carries past the window stops on the fence, the count exactly on its edge") {
+    // The backstop brake case, with a 3.9 ms stall after every tick: inside
+    // the lease, so the core renders each steer for the whole stall, and the
+    // wall bound only promised the edge within kTickDtCapS.
+    auto r = incidentRig();
+    r->arb.setInputLimits(kIncVmax, 20.0f, 10'000'000.0f);
+    REQUIRE(r->submit(MotionSource::Manual, kIncWinHi));
+    for (int i = 0; i < 5000 && r->arb.positionMm() < 145.0f; ++i) r->run(1000);
+    REQUIRE(r->census().velocity_mm_s > 20.0f);
+    r->arb.pause(true);
+    int32_t peak = r->emitter.n;
+    for (int i = 0; i < 4000; ++i) {
+        r->run(1000);
+        lateTick(*r, 3900);
+        peak = std::max(peak, r->emitter.n);
+    }
+    const MotionCensus c = r->census();
+    MESSAGE("fence hits ", r->emitter.fence_hits, ", peak count ", peak, ", fence ", r->emitter.fence_hi, ", rest ",
+            c.position_mm, " mm");
+    CHECK(r->emitter.fence_hits > 0);
+    CHECK(peak == r->emitter.fence_hi);
+    CHECK(r->emitter.n == r->emitter.fence_hi);
+    CHECK(c.stalls == 4000);
+    CHECK(c.lease_lapses == 0);
+    checkFence(*r, kIncWinLo, kIncWinHi);
+}
+
+TEST_CASE("lease: a 283 ms stall stops the core kLeaseUs after the last tick; the next tick counts it and steers no burst") {
+    auto r = incidentRig();
+    MotionIntent seg;
+    seg.source = MotionSource::Stream;
+    seg.target_mm = kIncWinHi;
+    seg.duration_us = 200'000;
+    REQUIRE(r->arb.accept(seg, g_now_us));
+    r->run(50'000);
+    const double v0 = steeredMmS(r->emitter);
+    REQUIRE(std::fabs(v0) > 100.0);
+    const float plan_before = r->census().plan_mm;
+    const int32_t n0 = r->emitter.n;
+    lateTick(*r, 283'000);
+    const double moved = double(r->emitter.n - n0) * double(kMmPerStep);
+    const double v = steeredMmS(r->emitter);
+    const MotionCensus c = r->census();
+    MESSAGE("held ", v0, " mm/s, moved ", moved, " mm through the stall, then steered ", v, " mm/s");
+    // The steer it held, for kLeaseUs, and nothing after.
+    CHECK(std::fabs(moved - v0 * double(valence::kLeaseUs) * 1e-6) <= 2.0 * double(kMmPerStep));
+    CHECK(r->emitter.lapse_count == 1);
+    CHECK(c.lease_lapses == 1);
+    CHECK(c.stalls == 1);
+    // The resume is the plan's mean velocity across the stall plus one capped
+    // kick, never the catch-up the residual asks for.
+    const double mean = double(kIncWinHi - plan_before) / 0.283;
+    CHECK(std::fabs(v) <= mean + double(kIncAmax) * double(valence::kTickDtCapS) + 1.0);
+    float worst = 0.0f;
+    for (int i = 0; i < 3000; ++i) {
+        r->run(1000);
+        worst = std::max(worst, r->arb.positionMm());
+    }
+    CHECK(worst <= kIncWinHi + kMmPerStep);
+    CHECK(r->arb.positionMm() == doctest::Approx(kIncWinHi).epsilon(0.0001));
+    CHECK(r->census().lease_lapses == 1);
+    CHECK(r->emitter.fence_hits == 0);
+}
+
+// The board's run() takes now and dt BEFORE the drain, so a stall in a solve
+// there lands in an evaluate() whose dt_s reads one tick. The residual the
+// lapse left must stay with the bounded kick: as feedforward over that dt_s
+// it is an uncommanded reversal (measured: -600 mm/s against a forward plan).
+TEST_CASE("lease: a stall inside the drain resumes along the plan, never a reversal") {
+    auto r = incidentRig();
+    MotionIntent seg;
+    seg.source = MotionSource::Stream;
+    seg.target_mm = kIncWinHi;
+    seg.duration_us = 200'000;
+    REQUIRE(r->arb.accept(seg, g_now_us));
+    r->run(50'000);
+    const double v0 = steeredMmS(r->emitter);
+    REQUIRE(v0 > 100.0);
+    const uint64_t now = g_now_us + 1000;
+    r->emitter.advance(0.284);
+    r->arb.evaluate(now, 1e-3f);
+    const double v1 = steeredMmS(r->emitter);
+    MESSAGE("held ", v0, " mm/s, first steer after the lapse ", v1, " mm/s");
+    CHECK(r->census().lease_lapses == 1);
+    CHECK(v1 > 0.0);
+    CHECK(v1 <= kSteerCeiling);
+}
+
+TEST_CASE("lease: the core is unleased until the first tick, and an e-stop parks it as before") {
+    auto r = rig();
+    CHECK_FALSE(r->emitter.live);   // begin() steers 0 and renews nothing
+    r->run(1000);
+    CHECK(r->emitter.live);
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 100.0f));
+    r->run(500'000);
+    REQUIRE(r->emitter.q8 != 0);
+    const int parks = r->emitter.parks;
+    r->arb.estop(true);
+    CHECK(r->emitter.q8 == 0);
+    CHECK(r->emitter.parks == parks + 1);
+    r->run(10'000);
+    CHECK(r->emitter.q8 == 0);
+    CHECK(r->emitter.live);   // the tick still renews: a lease is the HP alive, not motion allowed
+    CHECK(r->census().lease_lapses == 0);
 }

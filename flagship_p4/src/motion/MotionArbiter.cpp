@@ -67,6 +67,22 @@ uint32_t parkUs(float d, const kinetic2::Limits& L) {
     return !(t < 600.0f) ? 600000000u : uint32_t(t * 1e6f) + 1000u;
 }
 
+// The count from the origin at which positionMm() first reads at or past `mm`
+// outward: the least count reading at or above it (up), the greatest reading
+// at or below it (down). A fence there never cuts off a point the backstop
+// admits and never admits a whole step past one.
+int32_t fenceCount(float mm, bool up) {
+    int32_t c = int32_t(std::lround(mm * kStepsPerMm));
+    if (up) {
+        while (float(c) * kMmPerStep < mm) ++c;
+        while (float(c - 1) * kMmPerStep >= mm) --c;
+    } else {
+        while (float(c) * kMmPerStep > mm) --c;
+        while (float(c + 1) * kMmPerStep <= mm) ++c;
+    }
+    return c;
+}
+
 }  // namespace
 
 HomeSense& noHomeSense() { return g_absent_sense; }
@@ -258,6 +274,7 @@ void MotionArbiter::begin(uint64_t now_us) {
     _emitter.steer(0.0f);            // PARKED until an intent lands
     _origin    = _emitter.count();
     _odo_steps = _origin;
+    _lapses_seen = _emitter.lapses();   // the boot liveness burst's own lapse
     resetEngine(toNorm(0.0f), now_us);
     _p_cmd_mm = 0.0f;
 }
@@ -624,6 +641,22 @@ void MotionArbiter::applyTuning(const MotionTuning& t) {
 }
 
 void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
+    // A lapse is the emitter's own stop, kLeaseUs after the last renewal.
+    // NEVER re-anchor _p_cmd_mm to the count here: the residual would become
+    // feedforward over a dt_s the host measured before the stall (a stall in
+    // a solve lands in the tick it delays at ~1 ms), an uncommanded reversal.
+    // The residual closes at tick()'s bounded kick.
+    const uint32_t lapses = _emitter.lapses();
+    if (lapses != _lapses_seen) {
+        _lease_lapses += lapses - _lapses_seen;
+        _lapses_seen = lapses;
+        GLOGW_EVERY_MS(1000, kTag, "LEASE LAPSE: the LP core stopped itself at %.3f mm", double(positionMm()));
+    }
+    tick(now_us, dt_s);
+    _emitter.renew();
+}
+
+void MotionArbiter::tick(uint64_t now_us, float dt_s) {
     if (_estop) {
         _brake_req.store(false);   // park already stopped it
         _returning = false;        // estop() dropped override with it
@@ -722,7 +755,8 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     // of the window, a frame gone stale. The frame widens only to the previous
     // demand, so a carriage left outside it is never pulled in by the clamp,
     // only by a plan. A home cycle never reaches here (homeStep() above): the
-    // seek has to reach the stops.
+    // seek has to reach the stops. The LP core's fence is the second line, and
+    // the only one an HP stall cannot skip (syncFence()).
     float lo = backstopLo();
     float hi = backstopHi();
     if (_p_cmd_mm < lo) lo = _p_cmd_mm;
@@ -794,15 +828,31 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     // THE WALL BOUND. The emitter renders v open loop until the next steer, so
     // v may carry the carriage, from position truth, at most to the backstop's
     // edge within kTickDtCapS and never further outside it. Exact for any tick
-    // up to kTickDtCapS late; a longer HP stall carries the carriage v times
-    // the stall, which only an LP-side fence bounds (bd val-fi5).
+    // up to kTickDtCapS late; past it the LP core's fence holds the count in
+    // the frame, and its lease stops the steer kLeaseUs after the last tick.
     const float pos = positionMm();
     const float v_hi = std::fmax((hi - pos) / kTickDtCapS, 0.0f);
     const float v_lo = std::fmin((lo - pos) / kTickDtCapS, 0.0f);
     if (v > v_hi) v = v_hi;
     if (v < v_lo) v = v_lo;
 
+    syncFence();
     _emitter.steer(v);
+}
+
+void MotionArbiter::syncFence() {
+    // A home cycle searches a stop past each datum's safety margin by up to
+    // two search margins (MotionArbiter.h, homing), in the frame of its last
+    // relabel; otherwise the backstop's frame. The emitter orders the two
+    // stores.
+    const bool seeking = _home != HomePhase::idle;
+    const float reach = kHomeSafetyMarginMm + 2.0f * kHomeSearchMarginMm;
+    const int32_t lo = _origin + fenceCount(seeking ? -reach : backstopLo(), false);
+    const int32_t hi = _origin + fenceCount(seeking ? _max_rail + reach : backstopHi(), true);
+    if (lo == _fence_lo && hi == _fence_hi) return;
+    _emitter.fence(lo, hi);
+    _fence_lo = lo;
+    _fence_hi = hi;
 }
 
 // ---- homing -----------------------------------------------------------------
@@ -834,6 +884,7 @@ void MotionArbiter::homeLeg(HomePhase phase, float end_mm, float v_mm_s, uint64_
 
 void MotionArbiter::homeSteer(float v_mm_s) {
     _seek_v = v_mm_s;
+    syncFence();
     _emitter.steer(v_mm_s);
     // Pairs with homeSenseRose()'s fence: either this read sees the trip, or
     // the interrupt's park lands after the steer above.
@@ -1103,6 +1154,7 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.rejected       = _rejected;
     c.stalls         = _stalls;
     c.backstops      = _backstops;
+    c.lease_lapses   = _lease_lapses;
     c.homed          = _homed;
     c.estop          = _estop;
     c.motor_on       = _powered.load();

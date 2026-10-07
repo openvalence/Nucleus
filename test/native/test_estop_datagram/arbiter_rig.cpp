@@ -20,12 +20,16 @@ namespace {
 uint64_t g_nowUs = 1'000'000;
 uint64_t rigNowUs() { return g_nowUs; }
 
-// Renders nothing; counts the parks the arbiter commands.
+// Renders nothing, so neither the fence nor the lease has an edge to act on;
+// counts the parks the arbiter commands.
 class ParkCounter final : public valence::MotionEmitter {
 public:
     int32_t count() const override { return 0; }
     void steer(float) override {}
     void park() override { ++parks; }
+    void fence(int32_t, int32_t) override {}
+    void renew() override {}
+    uint32_t lapses() const override { return 0; }
     int parks = 0;
 };
 

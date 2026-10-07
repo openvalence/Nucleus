@@ -74,13 +74,17 @@ Nucleus is the firmware; Valence is the protocol it speaks.
   gate -- homed, commissioned (the first-run setup record, RFC-079: content
   sources wait until the owner has written the geometry and ceilings once),
   PAUSE with its override/return mode, e-stop, window clamping (targets at
-  accept, and the position backstop on every tick, `motion-control.md`),
-  soft-start.
-- **Core separation on the P4.** The LP core RENDERS EDGES and nothing else:
-  a phase accumulator in exact cycles, one store per edge, no allocation, no
-  branchy work. The HP core EVALUATES THE PLAN and hands the LP core a
-  velocity at its tick, and also runs the Valence hub, the network and
-  storage. The LP core's signed edge count IS position truth. The division is
+  accept, the position backstop on every tick as the first line, and the LP
+  core's fence it writes as the second, `motion-control.md`), soft-start.
+- **Core separation on the P4.** The LP core RENDERS EDGES INSIDE ITS FENCE
+  WHILE ITS LEASE IS FRESH, and nothing else (amended by operator ruling
+  2026-10-06, bd val-fi5: "the LP core gets two bounds and nothing else"): a
+  phase accumulator in exact cycles, one store per edge, one fence compare
+  and one lease compare per edge outside the fine wait, no allocation. The
+  fence is the position backstop no HP stall can skip; the lease stops the
+  last steer kLeaseUs after the HP tick stops renewing it. The HP core
+  EVALUATES THE PLAN and hands the LP core a velocity at its tick, and also
+  runs the Valence hub, the network and storage. The LP core's signed edge count IS position truth. The division is
   measured, not aesthetic: the LP core runs from LP SRAM with its GPIO in the
   LP domain, so an HP flash write does not touch it
   [verified 2026-09-20 -- HP-side flash hammer, ~1.0 s of every 5 s with the
@@ -90,10 +94,10 @@ Nucleus is the firmware; Valence is the protocol it speaks.
   Mechanism and the emitter's own rules: `.claude/rules/motion-control.md`.
 - **Cross-core data.** Anything shared between HP tasks uses FreeRTOS
   primitives (atomics, mutexes, queues). The HP-to-LP channel is the LP shared
-  memory window, single-writer per field, and it carries a velocity and flags,
-  never a rendered buffer. Callbacks from IDF event loops and drivers run on
-  the library's own task: enqueue, never mutate owner state. See
-  `.claude/rules/transport.md` T5.
+  memory window, single-writer per field, and it carries a velocity, the
+  fence, the lease and flags, never a rendered buffer. Callbacks from IDF
+  event loops and drivers run on the library's own task: enqueue, never
+  mutate owner state. See `.claude/rules/transport.md` T5.
 
 ## 3. Naming doctrine
 

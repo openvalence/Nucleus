@@ -128,6 +128,7 @@ private:
         c.edges          = _emitter.edges();
         c.step_q8        = _emitter.stepQ8();
         c.emitter_faults = _emitter.faults();
+        c.fence_hits     = _emitter.fenceHits();
         _pub = c;
     }
 

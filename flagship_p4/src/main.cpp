@@ -29,6 +29,7 @@
 #include <ulp_lp_core.h>
 #include "hub/ValenceHub.h"
 #include "hub/ValenceProvisioning.h"
+#include "motion/MotionArbiter.h"
 #include "motion/ValenceMotion.h"
 #include "patterns/ValencePattern.h"
 #include "system/ValenceDiag.h"
@@ -146,11 +147,16 @@ static bool start_lp_core() {
 
     // Steer BEFORE run so the first edge is already on cadence. The LP core
     // parks on step == 0, so ordering is a nicety, not a race.
-    // THIS CONSTANT RATE IS THE PRE-MOTION LIVENESS PROOF ONLY. motionBegin()
-    // takes the wheel a few seconds later and parks the emitter; from then on
-    // the arbiter is the sole writer of these two words (ValenceMotion.cpp).
-    ulp_g_step_q8 = kLpCyclesPerEdge << 8;
-    ulp_g_dir     = 1;
+    // THIS CONSTANT RATE IS THE PRE-MOTION LIVENESS PROOF ONLY, and it lasts
+    // ONE LEASE: the lease length is read once at the LP core's start, and
+    // this one renewal lapses kLeaseUs later (~40 edges at this rate, into an
+    // unpowered drive), with the fence still open. motionBegin() takes the
+    // wheel a few seconds later; from then on the arbiter is the sole writer
+    // of every one of these words (ValenceMotion.cpp).
+    ulp_g_step_q8      = kLpCyclesPerEdge << 8;
+    ulp_g_dir          = 1;
+    ulp_g_lease_cycles = valence::kLeaseCycles;
+    ulp_g_lease        = 1;
 
     ulp_lp_core_cfg_t cfg = {};
     cfg.wakeup_source = ULP_LP_CORE_WAKEUP_SOURCE_HP_CPU;   // start once, never sleep
@@ -181,8 +187,9 @@ static void report() {
 static void report_lp() {
     printf("\n--- LP core quadrature (ulp/lp_quad.c), 40 MHz XTAL ---\n");
     printf("pins         : A=LPG%d  B=LPG%d (QUAD_A, QUAD_B)\n", BOARD_GPIO_QUAD_A, BOARD_GPIO_QUAD_B);
-    printf("cycles/edge  : %lu exact  ->  f_LP = scope edges/s x %lu\n",
-           static_cast<unsigned long>(kLpCyclesPerEdge), static_cast<unsigned long>(kLpCyclesPerEdge));
+    printf("cycles/edge  : %lu exact for one %lu us lease  ->  f_LP = scope edges/s x %lu\n",
+           static_cast<unsigned long>(kLpCyclesPerEdge), static_cast<unsigned long>(valence::kLeaseUs),
+           static_cast<unsigned long>(kLpCyclesPerEdge));
     printf("LP image     : %u bytes embedded (reserve-sized; real program ~2.4 KB per size on ulp_main.elf)\n",
            unsigned(ulp_main_bin_end - ulp_main_bin_start));
 }
@@ -365,7 +372,7 @@ extern "C" void app_main() {
                "lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
                "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu  "
                "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu "
-               "faults=%lu stalls=%lu backstops=%lu  selfcheck=%s:%u/%u %s  msw=%s  drv=%s alm=%u rdy=%u  "
+               "faults=%lu stalls=%lu backstops=%lu lapses=%lu fence=%lu  selfcheck=%s:%u/%u %s  msw=%s  drv=%s alm=%u rdy=%u  "
                "therm=%.1fC fan=%.0f%%/%.0frpm\n",
                static_cast<unsigned long>(n * 5),
                unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
@@ -395,6 +402,8 @@ extern "C" void app_main() {
                static_cast<unsigned long>(mo.emitter_faults),
                static_cast<unsigned long>(mo.stalls),
                static_cast<unsigned long>(mo.backstops),
+               static_cast<unsigned long>(mo.lease_lapses),
+               static_cast<unsigned long>(mo.fence_hits),
                sc.allowed ? "pass" : "held", unsigned(sc.failed), unsigned(sc.skipped), sc.first,
                valence::motorswitch::stateName(msw.state),
                drv.built ? valence::aim::linkStateName(drv.link.state) : "absent",

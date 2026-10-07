@@ -10,11 +10,11 @@
 //   clock are handed IN; a host owns the task, the queues and the lock.
 // - THE ARBITER IS THE SOLE CALLER of the emitter (architecture.md section 2):
 //   steer() from begin() and evaluate(), park() from estop(), a power loss,
-//   homeSenseRose() in the home sense's interrupt, and evaluate(). Nothing
-//   else commands it. Two producers steer it, mutually exclusive by the
-//   cycle's ownership of the rail: the plan-tracking feedforward, and while a
-//   home cycle runs the seek producer (homing, below), which the engine never
-//   sees.
+//   homeSenseRose() in the home sense's interrupt, and evaluate(); fence() and
+//   renew() from evaluate(). Nothing else commands it. Two producers steer
+//   it, mutually exclusive by the cycle's ownership of the rail: the
+//   plan-tracking feedforward, and while a home cycle runs the seek producer
+//   (homing, below), which the engine never sees.
 // - OWNING-TASK methods (begin, applyTuning, accept, evaluate, drainAnomalies,
 //   snapshot) touch the engine and run on ONE task, the host's motion task.
 //   The window solve runs lazily in the first sample after a submit, on that
@@ -91,6 +91,18 @@ inline constexpr uint32_t kIntentQueueDepth = 40;
 // Also the wall bound's horizon: no steer carries the carriage past the
 // backstop's edge within this long.
 inline constexpr float kTickDtCapS = 2.0f * float(kMotionTickUs) * 1e-6f;
+
+// THE LP LEASE (operator ruling 2026-10-06, bd val-fi5): evaluate() renews it
+// on every tick, and the emitter stops itself, the store park() makes, once
+// it has not been renewed for this long. An HP stall therefore renders the
+// last steer for at most kLeaseUs. Longer than kTickDtCapS, so a tick late
+// enough to lapse it is already counted a stall.
+inline constexpr uint32_t kLeaseTicks = 4;
+inline constexpr uint32_t kLeaseUs    = kLeaseTicks * kMotionTickUs;
+// kLeaseUs in LP cycles, which the board writes to the LP core before it runs
+// (main.cpp start_lp_core()).
+inline constexpr uint32_t kLeaseCycles = kLeaseUs * uint32_t(kLpClockHz / 1.0e6f);
+static_assert(float(kLeaseUs) * 1e-6f > kTickDtCapS, "a lapse must be rarer than a stall");
 
 // ---- homing -----------------------------------------------------------------
 // Home op 1 is the arbiter's own motion path, never the planner's (operator
@@ -212,6 +224,16 @@ public:
     virtual void steer(float v_mm_s) = 0;
     // Any task: stop rendering now. One word store, no lock, no engine.
     virtual void park() = 0;
+    // Owning task only. THE FENCE: no edge takes count() below lo or above hi;
+    // an edge past it is withheld and counted, the period unchanged. Written
+    // before any steer into a new frame.
+    virtual void fence(int32_t lo, int32_t hi) = 0;
+    // Owning task only, every tick. THE LEASE: unrenewed for kLeaseUs, the
+    // emitter parks itself and counts a lapse; a renewal lets it render the
+    // next steer.
+    virtual void renew() = 0;
+    // Lapses since the emitter started. Any task.
+    virtual uint32_t lapses() const = 0;
 
 protected:
     ~MotionEmitter() = default;
@@ -367,6 +389,12 @@ private:
         uint32_t plans = 0, failures = 0;
     };
     PlanRead readPlan(uint64_t now_us);
+    // evaluate() between the lease's two ends: the gates, the producers and
+    // the steer.
+    void tick(uint64_t now_us, float dt_s);
+    // Writes the emitter's fence for the frame in force: the backstop's, or
+    // the home cycle's search while one runs. Before every nonzero steer.
+    void syncFence();
     // Forgets the plan and holds at `p_norm` from now_us. Every resetAt() goes
     // through here, so the Kinetic² boundary state resets with the engine.
     void resetEngine(float p_norm, uint64_t now_us);
@@ -499,6 +527,9 @@ private:
 
     int32_t _origin   = 0;       // the emitter count that means 0.0 mm
     float   _p_cmd_mm = 0.0f;    // the plan position at the previous tick
+    // The fence as last written, emitter counts. The LP core loads it open.
+    int32_t _fence_lo = INT32_MIN;
+    int32_t _fence_hi = INT32_MAX;
 
     volatile bool _homed  = false;
     volatile bool _estop  = false;
@@ -591,6 +622,8 @@ private:
     uint32_t _stalls    = 0;       // ticks later than kTickDtCapS
     uint32_t _backstops = 0;       // backstop engagements, counted at onset
     bool     _backstop_on = false; // an engagement is in progress
+    uint32_t _lapses_seen = 0;     // the emitter's lapses() at the last tick
+    uint32_t _lease_lapses = 0;    // lapses since begin()
     uint32_t _plan_us_last = 0;
     uint32_t _plan_us_max  = 0;
     float    _plan_us_avg  = 0.0f;

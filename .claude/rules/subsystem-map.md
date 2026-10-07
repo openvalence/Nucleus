@@ -61,8 +61,8 @@ stock hosted slave image (`architecture.md` §2).
 ## Cores and tasks
 
 The P4 has two HP RISC-V cores and one LP core. The division is doctrine
-(`architecture.md` §2): **LP renders edges, HP evaluates the plan and runs the
-hub.**
+(`architecture.md` §2): **LP renders edges inside its fence while its lease is
+fresh, HP evaluates the plan and runs the hub.**
 
 | Runner | Core | Role |
 |---|---|---|
