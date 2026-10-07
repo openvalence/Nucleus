@@ -76,9 +76,35 @@ window is solved at the next sample, and the sampler evaluates it.
 - **Safety:** the arbiter clamps every target to the window before it becomes
   a knot; the solver's referee scores every extremum of a piece against the
   ceilings and the window and never accepts an excursion; authored velocities
-  are bounded (EndVelClamped); the census output is window-clamped.
-  Exceptions are never instantiated; a non-finite knot is refused at
-  `submit()`.
+  are bounded (EndVelClamped). Exceptions are never instantiated; a
+  non-finite knot is refused at `submit()`.
+- **The position backstop (operator ruling 2026-10-06, bd val-1w8): no plan
+  moves the carriage out of its frame.** The brakes (PAUSE, a generator's
+  stop, a starved timeline) are profiles the referee never scores, so
+  `MotionArbiter::evaluate()` clamps the rendered demand on every tick to the
+  backstop's frame: the configured window held inside the rail, or the
+  asserted rail while the engine plans in the rail frame (override's jog and
+  its return). A home cycle's seek producer never reaches it. The frame
+  widens only to the previous demand, so a carriage left outside it is moved
+  back by a plan, never by the clamp. Into a held edge the feedforward
+  carries the distance to the edge and nothing past it, and every steer is
+  bounded from position truth so it carries the carriage at most to the edge
+  within `kTickDtCapS`. A held plan is a hard stop at the edge: a brake that
+  would have overrun the window ends there abruptly. The census counts
+  engagements (`backstops`, a plan more than one step past, at onset) and
+  sets plan.flags `clamped` while one holds
+  [verified 2026-10-06 -- test_motion_arbiter, a PAUSE brake planned 65 mm
+  past the window held at its edge].
+- **A late tick is a stall, never a burst (bd val-1w8).** Every steer is
+  priced over at most `kTickDtCapS`, two `kMotionTickUs`, so none exceeds the
+  input vmax plus that long of the input amax; a tick later than that is
+  re-anchored to the plan, steers the plan's own velocity, and is counted
+  (census `stalls`, on the status line). What this does NOT bound: between
+  ticks the LP core renders the last steer open loop, so an HP stall longer
+  than `kTickDtCapS` carries the carriage that steer times the stall. A
+  window solve on the tick is one (283 ms measured on the P4; bd val-8rt), a
+  flash write with the cache off another. The one bound independent of the
+  HP side is a fence in the LP core, a flagged doctrine change (bd val-fi5).
 - **Whichever task samples the engine first after a submit needs a deep
   stack**: the window solve copies the pending knots and runs the solver's
   fixed arrays on the calling stack, KB-scale. That is the motion task only.

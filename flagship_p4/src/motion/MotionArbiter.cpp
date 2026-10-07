@@ -523,6 +523,9 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
 kinetic2::State MotionArbiter::sampleEngine(uint64_t now_us) {
     // The first sample after a submit solves the window: that is the plan's
     // cost, so it is what plan_us_* times.
+    // TODO(val-8rt): the solve is unbounded and runs on the motion tick, and
+    // the emitter renders the last steer open loop meanwhile; it moves to a
+    // planner task once Kinetic offers a bounded or resumable solve.
     const bool timed = _k2_dirty;
     const uint64_t t0 = timed ? _now_us() : 0;
     // A starved stream: the last knot is due and still moving. The engine
@@ -583,7 +586,14 @@ void MotionArbiter::brakeToRest(uint64_t now_us) {
         _pause_pos_mm.store(positionMm());
         return;
     }
-    _demand_mm = toMm(_k2_brake_to_p);   // where it comes to rest
+    // Where it comes to rest: the brake's end, held by the backstop
+    // (evaluate()) when the brake would carry it past the frame's edge.
+    float rest = toMm(_k2_brake_to_p);
+    const float lo = std::fmin(backstopLo(), _p_cmd_mm);
+    const float hi = std::fmax(backstopHi(), _p_cmd_mm);
+    if (rest < lo) rest = lo;
+    if (rest > hi) rest = hi;
+    _demand_mm = rest;
     _pause_pos_mm.store(_demand_mm);
     GLOGI(kTag, "PAUSE: braking from %.1f mm/s", double(v));
 }
@@ -692,8 +702,8 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     // dry still moving (sampleEngine()).
     // PLANNED CHANGE (bd val-klo): the RFC-103 oscillator (kinetic2/oscillator.hpp)
     // is additive on this sampled state, after the planner and before the
-    // feedforward, and is not wired yet.
-    const float p_plan_mm = toMm(sampleEngine(now_us).p);
+    // backstop, and is not wired yet.
+    float p_plan_mm = toMm(sampleEngine(now_us).p);
 
     // Arrival ends the return: override drops, plain PAUSE stays.
     if (_returning && !_engine.isBusy(now_us)) {
@@ -706,9 +716,51 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     // rest.
     if (_rail_frame && !_override.load() && !_engine.isBusy(now_us)) setRailFrame(false, now_us);
 
+    // THE POSITION BACKSTOP (operator ruling 2026-10-06, bd val-1w8). The
+    // demand never leaves the backstop's frame (backstopLo()..backstopHi()),
+    // whatever the plan does: a curve that bulges, a brake that is not aware
+    // of the window, a frame gone stale. The frame widens only to the previous
+    // demand, so a carriage left outside it is never pulled in by the clamp,
+    // only by a plan. A home cycle never reaches here (homeStep() above): the
+    // seek has to reach the stops.
+    float lo = backstopLo();
+    float hi = backstopHi();
+    if (_p_cmd_mm < lo) lo = _p_cmd_mm;
+    if (_p_cmd_mm > hi) hi = _p_cmd_mm;
+    const bool held = p_plan_mm < lo || p_plan_mm > hi;
+    if (held) {
+        const float raw = p_plan_mm;
+        p_plan_mm = p_plan_mm < lo ? lo : hi;
+        // An engagement is a plan more than one step past the edge, counted
+        // once at its onset and held until the plan is back inside: a move
+        // that lands ON the edge reads a float's rounding past it every time.
+        if (!_backstop_on && std::fabs(raw - p_plan_mm) > kMmPerStep) {
+            _backstop_on = true;
+            ++_backstops;
+            GLOGW_EVERY_MS(1000, kTag, "BACKSTOP: plan at %.2f mm held at %.2f mm", double(raw), double(p_plan_mm));
+        }
+    } else {
+        _backstop_on = false;
+    }
+
+    // A LATE TICK IS A STALL, NEVER A BURST (bd val-1w8). The kick and the
+    // cap below are priced over at most kTickDtCapS, whatever the clock did;
+    // what the carriage fell behind during a stall closes at that bounded
+    // kick, never as a catch-up.
+    const bool stall = dt_s > kTickDtCapS;
+    const float dt = stall ? kTickDtCapS : dt_s;
+    if (stall) {
+        ++_stalls;
+        GLOGW_EVERY_MS(1000, kTag, "STALL: tick %.1f ms after the last, kick and cap held to kTickDtCapS",
+                       double(dt_s * 1e3f));
+    }
+
     // Feedforward: the plan's OWN mean velocity across the interval that just
     // elapsed. Summed over a move this telescopes to exactly the plan's
     // displacement, which is why the emitter needs no other position input.
+    // The mean of a legal curve is under its ceiling over any interval, so a
+    // stall renders no burst through it. Into a held edge it is the distance
+    // left to the edge, never the plan's displacement past it.
     float v = (p_plan_mm - _p_cmd_mm) / dt_s;
     _p_cmd_mm = p_plan_mm;
 
@@ -722,7 +774,7 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
         // shaped and is therefore the one term that can hand the emitter a
         // demand the machine cannot make. Its ceiling is the accel limit's own
         // answer to "how much velocity may one tick add".
-        const float kick_max = inputAmaxMm() * dt_s;
+        const float kick_max = inputAmaxMm() * dt;
         float kick = err_mm * kTrackHz;
         if (kick >  kick_max) kick =  kick_max;
         if (kick < -kick_max) kick = -kick_max;
@@ -735,9 +787,20 @@ void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
     // Deliberately NOT the bare ceiling -- at a demand that sits ON vmax, a
     // tracking correction has to be allowed above it or the residual can never
     // close (measured: 25 ms of added lag on the ceiling-limited run).
-    const float v_cap = inputVmaxMm() + inputAmaxMm() * dt_s;
+    const float v_cap = inputVmaxMm() + inputAmaxMm() * dt;
     if (v >  v_cap) v =  v_cap;
     if (v < -v_cap) v = -v_cap;
+
+    // THE WALL BOUND. The emitter renders v open loop until the next steer, so
+    // v may carry the carriage, from position truth, at most to the backstop's
+    // edge within kTickDtCapS and never further outside it. Exact for any tick
+    // up to kTickDtCapS late; a longer HP stall carries the carriage v times
+    // the stall, which only an LP-side fence bounds (bd val-fi5).
+    const float pos = positionMm();
+    const float v_hi = std::fmax((hi - pos) / kTickDtCapS, 0.0f);
+    const float v_lo = std::fmin((lo - pos) / kTickDtCapS, 0.0f);
+    if (v > v_hi) v = v_hi;
+    if (v < v_lo) v = v_lo;
 
     _emitter.steer(v);
 }
@@ -1038,6 +1101,8 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.input_amax_mm_s2 = inputAmaxMm();
     c.intents        = _intents;
     c.rejected       = _rejected;
+    c.stalls         = _stalls;
+    c.backstops      = _backstops;
     c.homed          = _homed;
     c.estop          = _estop;
     c.motor_on       = _powered.load();
@@ -1065,8 +1130,10 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     // segment so a client reads a live plan, never a stalled source.
     c.plan_hold = c.busy && s.mode == uint8_t(PlanStyle::waveform) &&
                   std::fabs(s.target - s.start) < limits::segment_dwell_span;
-    // A SETTLE brake is the engine's own plan, never a bent command.
+    // A SETTLE brake is the engine's own plan, never a bent command; the
+    // backstop holding the demand at the frame's edge is one, whatever runs.
     c.plan_flags = c.busy && s.mode != uint8_t(PlanStyle::settle) ? s.flags : 0;
+    if (_backstop_on) c.plan_flags |= plan_flags::clamped;
     c.plans          = s.plans;
     c.failures       = s.failures;
     c.anomalies      = _anomalies;

@@ -1786,3 +1786,225 @@ TEST_CASE("home: the interrupt entry does nothing while no seek is armed") {
     r->arb.homeSenseRose();   // the cycle ended: disarmed
     CHECK(r->census().home_fails == 1);
 }
+
+// ---- the position backstop and the stall rule (bd val-1w8) -------------------
+
+namespace {
+
+// The velocity the emitter holds, mm/s, signed: what it renders until the
+// next steer.
+double steeredMmS(const TestEmitter& e) {
+    if (e.q8 == 0) return 0.0;
+    const double v = double(valence::kLpClockHz) * 256.0 / double(e.q8) / double(valence::kStepsPerMm);
+    return e.fwd ? v : -v;
+}
+
+// The 2026-10-06 incident's machine: rail 268.11 mm, window [92, 176], jog
+// 200 mm/s and 200 mm/s^2, input 1000 mm/s, 50,000 mm/s^2, 10,000,000 mm/s^3,
+// the carriage parked mid-window.
+constexpr float kIncWinLo = 92.0f;
+constexpr float kIncWinHi = 176.0f;
+constexpr float kIncRail  = 268.11f;
+constexpr float kIncVmax  = 1000.0f;
+constexpr float kIncAmax  = 50000.0f;
+
+std::unique_ptr<Rig> incidentRig() {
+    auto r = rig();
+    r->arb.setWindow(kIncWinLo, kIncWinHi, kIncRail);
+    r->arb.forceHome(kIncRail);
+    r->arb.setJogLimits(200.0f, 200.0f);
+    r->arb.setInputLimits(kIncVmax, kIncAmax, 10'000'000.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 134.0f));
+    r->run(moveUs(3'000'000));
+    REQUIRE(std::fabs(r->arb.positionMm() - 134.0f) <= 2.0f * valence::kMmPerStep);
+    return r;
+}
+
+// One tick `us` after the last: the emitter renders the word it holds the
+// whole time (open loop, as the LP core does while the HP side stalls), then
+// the arbiter evaluates with the measured interval.
+void lateTick(Rig& r, uint64_t us) {
+    g_now_us += us;
+    r.emitter.advance(double(us) * 1e-6);
+    r.arb.evaluate(g_now_us, float(us) * 1e-6f);
+}
+
+// The most any single steer may ask for: vmax plus one capped tick of amax.
+constexpr double kSteerCeiling = double(kIncVmax) + double(kIncAmax) * double(valence::kTickDtCapS);
+constexpr float  kStepTol = 2.0f * valence::kMmPerStep;
+
+}  // namespace
+
+TEST_CASE("backstop: a brake that runs past the window is held at its edge, flagged, counted once") {
+    auto r = incidentRig();
+    // An input accel far under the jog's: the PAUSE brake plans at the input
+    // set (brakeToRest()) and so runs tens of mm past the window's edge. The
+    // pause lands while the jog still accelerates, so the brake starts from a
+    // decel no higher than its own ceiling and never reverses.
+    r->arb.setInputLimits(kIncVmax, 20.0f, 10'000'000.0f);
+    REQUIRE(r->submit(MotionSource::Manual, kIncWinHi));
+    for (int i = 0; i < 5000 && r->arb.positionMm() < 145.0f; ++i) r->run(1000);
+    REQUIRE(r->census().velocity_mm_s > 20.0f);
+    r->arb.pause(true);
+    float worst = 0.0f, plan_peak = 0.0f;
+    bool flagged = false;
+    for (int i = 0; i < 8000; ++i) {
+        r->run(1000);
+        worst = std::max(worst, r->arb.positionMm());
+        if (i % 20 == 0) {
+            const MotionCensus c = r->census();
+            plan_peak = std::max(plan_peak, c.plan_mm);
+            if (c.plan_flags & valence::plan_flags::clamped) flagged = true;
+        }
+    }
+    const MotionCensus c = r->census();
+    MESSAGE("plan peak ", plan_peak, " mm, carriage peak ", worst, " mm");
+    CHECK(plan_peak > kIncWinHi + 10.0f);   // the brake really ran past the edge
+    CHECK(worst <= kIncWinHi + kStepTol);
+    CHECK(c.position_mm == doctest::Approx(kIncWinHi).epsilon(0.0001));
+    CHECK(c.backstops == 1);
+    CHECK(flagged);
+    // The paused position is where the carriage rests, not where the plan does.
+    CHECK(c.demand_mm == doctest::Approx(kIncWinHi));
+}
+
+TEST_CASE("backstop: override lifts it to the asserted rail and nothing else does") {
+    auto r = incidentRig();
+    // Every source outside override ends inside the window.
+    REQUIRE(r->submit(MotionSource::Manual, 250.0f));
+    r->run(moveUs(3'000'000));
+    CHECK(r->arb.positionMm() == doctest::Approx(kIncWinHi).epsilon(0.0001));
+    REQUIRE(r->submit(MotionSource::Stream, 20.0f));
+    r->run(moveUs(3'000'000));
+    CHECK(r->arb.positionMm() == doctest::Approx(kIncWinLo).epsilon(0.0001));
+    // Under override the jog reaches past the window, and the rail ends it.
+    r->arb.override();
+    REQUIRE(r->submit(MotionSource::Manual, 250.0f));
+    r->run(moveUs(5'000'000));
+    CHECK(r->arb.positionMm() == doctest::Approx(250.0f).epsilon(0.0001));
+    REQUIRE(r->submit(MotionSource::Manual, 400.0f));
+    float worst = 0.0f;
+    for (int i = 0; i < 3000; ++i) {
+        r->run(1000);
+        worst = std::max(worst, r->arb.positionMm());
+    }
+    CHECK(worst <= kIncRail + kStepTol);
+    CHECK(r->arb.positionMm() == doctest::Approx(kIncRail).epsilon(0.0001));
+    // The return lands back in the window and override drops with it.
+    REQUIRE(r->arb.returnToPause() == valence::ReturnStart::queued);
+    r->run(moveUs(5'000'000));
+    const MotionCensus c = r->census();
+    CHECK_FALSE(c.override_mode);
+    CHECK(c.position_mm == doctest::Approx(kIncWinLo).epsilon(0.0001));
+    CHECK(c.backstops == 0);   // accept()'s target clamp held every case: no plan left its frame
+}
+
+TEST_CASE("stall: a 283 ms tick is counted and re-anchored, never a burst") {
+    auto r = incidentRig();
+    MotionIntent seg;
+    seg.source = MotionSource::Stream;
+    seg.target_mm = kIncWinHi;
+    seg.duration_us = 200'000;
+    REQUIRE(r->arb.accept(seg, g_now_us));
+    r->run(50'000);
+    REQUIRE(std::fabs(steeredMmS(r->emitter)) > 100.0);
+    // The worst residual a stall can leave: the emitter renders nothing while
+    // the plan runs to its end.
+    const float plan_before = r->census().plan_mm;
+    r->emitter.frozen = true;
+    lateTick(*r, 283'000);
+    r->emitter.frozen = false;
+    const float behind = kIncWinHi - r->arb.positionMm();
+    REQUIRE(behind > 20.0f);
+    const double v = steeredMmS(r->emitter);
+    MESSAGE("after the stall: ", behind, " mm behind the plan, steered ", v, " mm/s");
+    CHECK(r->census().stalls == 1);
+    CHECK(std::fabs(v) <= kSteerCeiling);
+    // The steer is the plan's mean velocity across the stall plus the residual
+    // kick, one capped tick of amax: never the catch-up the residual asks for.
+    const double mean = double(kIncWinHi - plan_before) / 0.283;
+    CHECK(std::fabs(v) <= mean + double(kIncAmax) * double(valence::kTickDtCapS) + 1.0);
+    const float before = r->arb.positionMm();
+    r->run(1000);
+    CHECK(std::fabs(r->arb.positionMm() - before) <= float(kSteerCeiling) * 1e-3f + kStepTol);
+    // The residual closes at the bounded kick, without passing the edge.
+    float worst = 0.0f;
+    for (int i = 0; i < 3000; ++i) {
+        r->run(1000);
+        worst = std::max(worst, r->arb.positionMm());
+    }
+    CHECK(worst <= kIncWinHi + kStepTol);
+    CHECK(r->arb.positionMm() == doctest::Approx(kIncWinHi).epsilon(0.0001));
+    CHECK(r->census().stalls == 1);
+}
+
+TEST_CASE("backstop: the incident's jog scrub, without stalls, with isolated 283 ms stalls, and in a stall storm") {
+    // storm: every tick 283 ms late for 3 s, as the P4 ran with a 283 ms
+    // solve behind every 20 Hz move.
+    enum Mode { none, isolated, storm };
+    for (const Mode mode : {none, isolated, storm}) {
+        CAPTURE(int(mode));
+        auto r = incidentRig();
+        uint32_t lcg = 20261006u;
+        auto rnd = [&lcg] {
+            lcg = lcg * 1664525u + 1013904223u;
+            return lcg >> 8;
+        };
+        uint32_t injected = 0, over_ceiling = 0, pushed_out = 0;
+        float lo_seen = r->arb.positionMm(), hi_seen = lo_seen;
+        const uint64_t t0 = g_now_us;
+        uint64_t next_move = t0;
+        while (g_now_us - t0 < 10'000'000) {
+            if (g_now_us >= next_move) {
+                // scrub.py's finger: a 1 Hz triangle across the window plus a
+                // 7 Hz wobble, at 20 Hz.
+                const double s = double(g_now_us - t0) * 1e-6;
+                const double tri = 2.0 * std::fabs(s - std::floor(s + 0.5));
+                double p = kIncWinLo + (kIncWinHi - kIncWinLo) * tri + 8.0 * std::sin(s * 2.0 * 3.14159265358979 * 7.0);
+                p = std::fmin(std::fmax(p, double(kIncWinLo)), double(kIncWinHi));
+                r->submit(MotionSource::Manual, float(p));
+                next_move += 50'000;
+            }
+            const uint64_t at = g_now_us - t0;
+            const bool late = mode == storm ? (at >= 3'000'000 && at < 6'000'000)
+                                            : (mode == isolated && rnd() % 400 == 0);
+            if (late) {
+                lateTick(*r, 283'000);
+                ++injected;
+            } else {
+                r->run(1000);
+            }
+            const float pos = r->arb.positionMm();
+            const double v = steeredMmS(r->emitter);
+            lo_seen = std::min(lo_seen, pos);
+            hi_seen = std::max(hi_seen, pos);
+            if (std::fabs(v) > kSteerCeiling) ++over_ceiling;
+            // The demand never leaves the window: a steer never carries the
+            // carriage past an edge within kTickDtCapS, nor further outside.
+            const double reach = double(pos) + v * double(valence::kTickDtCapS);
+            if ((v > 0.0 && reach > kIncWinHi + kStepTol) || (v < 0.0 && reach < kIncWinLo - kStepTol)) ++pushed_out;
+        }
+        const MotionCensus c = r->census();
+        MESSAGE("mode ", int(mode), ", stalls ", injected, ": carriage in [", lo_seen, ", ", hi_seen, "] mm, census stalls ", c.stalls,
+                ", backstops ", c.backstops, ", plan_us_max ", c.plan_us_max);
+        CHECK(over_ceiling == 0);
+        CHECK(pushed_out == 0);
+        CHECK(c.stalls == injected);
+        if (mode == none) {
+            CHECK(lo_seen >= kIncWinLo - kStepTol);
+            CHECK(hi_seen <= kIncWinHi + kStepTol);
+        } else {
+            REQUIRE(injected > 5);
+            // Open loop through a stall the carriage covers the steer it holds
+            // times the stall, and that steer is bounded: the jog's speed plus
+            // kTickDtCapS of the input amax. Only an LP-side fence closes this
+            // (bd val-fi5); the rail is never in reach of it.
+            const float hold = (200.0f + kIncAmax * valence::kTickDtCapS) * 0.283f;
+            CHECK(lo_seen >= kIncWinLo - hold);
+            CHECK(hi_seen <= kIncWinHi + hold);
+            CHECK(lo_seen > 0.0f);
+            CHECK(hi_seen < kIncRail);
+        }
+    }
+}

@@ -365,7 +365,7 @@ extern "C" void app_main() {
                "lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
                "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu  "
                "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu "
-               "faults=%lu  selfcheck=%s:%u/%u %s  msw=%s  drv=%s alm=%u rdy=%u  "
+               "faults=%lu stalls=%lu backstops=%lu  selfcheck=%s:%u/%u %s  msw=%s  drv=%s alm=%u rdy=%u  "
                "therm=%.1fC fan=%.0f%%/%.0frpm\n",
                static_cast<unsigned long>(n * 5),
                unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
@@ -393,6 +393,8 @@ extern "C" void app_main() {
                static_cast<unsigned long>(mo.rejected),
                static_cast<unsigned long>(mo.stack_free),
                static_cast<unsigned long>(mo.emitter_faults),
+               static_cast<unsigned long>(mo.stalls),
+               static_cast<unsigned long>(mo.backstops),
                sc.allowed ? "pass" : "held", unsigned(sc.failed), unsigned(sc.skipped), sc.first,
                valence::motorswitch::stateName(msw.state),
                drv.built ? valence::aim::linkStateName(drv.link.state) : "absent",

@@ -85,6 +85,13 @@ inline constexpr uint32_t kMinCyclesPerEdge = 40;
 // to live.
 inline constexpr uint32_t kIntentQueueDepth = 40;
 
+// The longest interval a steer's residual kick and velocity cap are priced
+// over: two sampler periods. A tick later than this is a STALL (evaluate()),
+// counted and steered without the catch-up the elapsed time would ask for.
+// Also the wall bound's horizon: no steer carries the carriage past the
+// backstop's edge within this long.
+inline constexpr float kTickDtCapS = 2.0f * float(kMotionTickUs) * 1e-6f;
+
 // ---- homing -----------------------------------------------------------------
 // Home op 1 is the arbiter's own motion path, never the planner's (operator
 // ruling 2026-10-06, bd val-cp5): every leg steers the emitter directly at a
@@ -248,6 +255,9 @@ public:
     void begin(uint64_t now_us);
     void applyTuning(const MotionTuning& t);
     bool accept(const MotionIntent& in, uint64_t now_us); // gates, clamp, commit
+    // dt_s: the measured interval since the previous call. Clamps the
+    // demand to the backstop's frame and steers; a dt_s past kTickDtCapS
+    // is a stall.
     void evaluate(uint64_t now_us, float dt_s);
     // Returns the kinds drained, bit k = kinetic2::AnomalyKind k.
     uint32_t drainAnomalies();
@@ -373,6 +383,11 @@ private:
     float toNorm(float mm) const { return (mm - frameLo()) / span(); }
     float toMm(float norm) const { return frameLo() + norm * span(); }
     float winSpan() const { return _win_max - _win_min; }
+    // The position backstop's frame, mm (evaluate()): the configured window
+    // held inside the rail, or the asserted rail while the engine plans in
+    // the rail frame (override's jog and its return, SPEC 11.1).
+    float backstopLo() const { return _rail_frame ? 0.0f : (_win_min > 0.0f ? _win_min : 0.0f); }
+    float backstopHi() const { return _rail_frame ? _rail : (_win_max < _rail ? _win_max : _rail); }
     // The INPUT set's ceilings as the engine plans them, in mm: the mm limit,
     // or the normalized override scaled by the CURRENT window. evaluate()'s
     // tracking cap reads the same answer, so a plan an override allowed is
@@ -573,6 +588,9 @@ private:
     // publishes only what snapshot() built, under its own lock.
     uint32_t _intents  = 0;
     uint32_t _rejected = 0;
+    uint32_t _stalls    = 0;       // ticks later than kTickDtCapS
+    uint32_t _backstops = 0;       // backstop engagements, counted at onset
+    bool     _backstop_on = false; // an engagement is in progress
     uint32_t _plan_us_last = 0;
     uint32_t _plan_us_max  = 0;
     float    _plan_us_avg  = 0.0f;

@@ -114,6 +114,12 @@ struct MotionCensus {
     // ---- arbiter ----
     uint32_t intents        = 0;
     uint32_t rejected       = 0;   // denied by a gate
+    uint32_t stalls         = 0;   // motion ticks later than kTickDtCapS
+                                   // (MotionArbiter.h): each steered without
+                                   // a catch-up burst
+    uint32_t backstops      = 0;   // position backstop engagements: the plan
+                                   // left the active frame and the demand was
+                                   // held at its edge (MotionArbiter.cpp)
     uint32_t stack_free     = 0;   // motion task stack high-water headroom, bytes
     bool     homed          = false;
     bool     estop          = false;
