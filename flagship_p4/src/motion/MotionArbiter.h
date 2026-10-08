@@ -455,6 +455,9 @@ private:
         uint32_t gen = 0;
         uint32_t plan = 0;
         float    anchor_mm = 0.0f;
+        // The gen follows a reseed (reseedEngine()): the plan runs on in mm,
+        // so the steer keeps its command and never re-anchors.
+        bool     continuous = false;
         std::array<float, kStripLen> p_mm{};
     };
     // planTick() up to the strip: false when no plan renders this tick (the
@@ -472,6 +475,9 @@ private:
     // Forgets the plan and holds at `p_norm` from now_us. Every resetAt() goes
     // through here, so the Kinetic² boundary state resets with the engine.
     void resetEngine(float p_norm, uint64_t now_us);
+    // The window moved under a plan in flight: the pending knots stay and the
+    // plan's state at now_us is restated in the new frame (bd val-17u).
+    void reseedEngine(uint64_t now_us);
     // Stops as fast as the engine's current limits allow, from its own
     // state at at_us. False when there was nothing moving to stop.
     bool brakeEngine(uint64_t at_us);
@@ -571,6 +577,11 @@ private:
     PlanStrip _strip{};
     bool      _strip_stale = true;
     float     _anchor_mm = 0.0f;
+    bool      _strip_continuous = false;
+    // The frame the engine's units were last set in (resetEngine(),
+    // reseedEngine()): a reseed restates the plan out of it.
+    float     _eng_lo = 0.0f;
+    float     _eng_span = DEFAULT_MAX_RAIL_MM;
     PlanStrip _strip_pub{};
     std::atomic<uint32_t> _strip_gen{0};
     PlanStrip _steer_strip{};
@@ -674,6 +685,9 @@ private:
     // Set by setWindow()/forceHome() on any task, consumed by planTick(),
     // read by steerTick(): the mm FRAME moved, the carriage did not.
     volatile bool _frame_moved = false;
+    // Set by forceHome() before _frame_moved: the count re-origined, so the
+    // planner resets rather than reseeds.
+    volatile bool _origin_moved = false;
 
     // The home cycle. _homing is set by home() and cleared only by the
     // planner when the cycle ends; _home_req hands the start across; pause()

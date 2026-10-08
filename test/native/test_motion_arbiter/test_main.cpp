@@ -2762,3 +2762,108 @@ TEST_CASE("jog above the input set: the steer follows the jog set's ceiling, nev
     CHECK(arrived_ms > 0);
     CHECK(arrived_ms <= 350);
 }
+
+// bd val-17u: the travel window stays writable at any time (SPEC 11). Moved
+// mid-stream, the pending knots are window shares and stay; the plan runs on
+// from its own state in the new frame and re-targets, never a reset.
+TEST_CASE("window moved mid-stream by a fifth of the rail: the plan re-targets in place, never stops, never bursts") {
+    constexpr float kRail = 400.0f;
+    float lo = 0.0f, hi = 320.0f;
+    auto r = rig();
+    r->arb.setWindow(lo, hi, kRail);
+    r->arb.forceHome(kRail);
+    r->run(1000);
+
+    // A monotone sweep, share 0.1 to 0.9 in 20 C2 segments of 100 ms, each
+    // sent 120 ms before its start with the sweep's velocity as its end
+    // velocity (the last one ends at rest). The hub maps shares through the
+    // window in force when it sends.
+    constexpr int kSegs = 20;
+    constexpr int kMoveAt = 10;
+    const float rate = 0.8f / (float(kSegs) * 0.1f);   // shares/s
+    const uint64_t first = g_now_us + 120'000;
+    const uint64_t last_knot = first + uint64_t(kSegs) * 100'000;
+    auto segment = [&](int i) {
+        MotionIntent in;
+        in.source = MotionSource::Stream;
+        in.target_mm = lo + (0.1f + rate * 0.1f * float(i + 1)) * (hi - lo);
+        in.duration_us = 100'000;
+        in.anchor_us = first + uint64_t(i) * 100'000;
+        in.curve_family = 2;
+        in.has_end_vel = true;
+        in.end_vel_mm_s = i + 1 < kSegs ? rate * (hi - lo) : 0.0f;
+        return r->arb.accept(in, g_now_us);
+    };
+
+    const double ceiling = double(DEFAULT_MAX_SPEED_MM_S) + kKickMax;
+    double worst_steer = 0.0, slowest_steer = 1e9, slowest_plan = 1e9;
+    float jump = 0.0f;
+    MotionCensus prev = r->census();
+    auto tick = [&] {
+        r->run(1000);
+        const MotionCensus c = r->census();
+        const double steer = steeredMmS(r->emitter);
+        worst_steer = std::max(worst_steer, std::fabs(steer));
+        // Moving from the first start until the stream's last segment begins.
+        if (g_now_us > first + 50'000 && g_now_us < last_knot - 100'000) {
+            slowest_steer = std::min(slowest_steer, steer);
+            slowest_plan = std::min(slowest_plan, double(c.velocity_mm_s));
+        }
+        const float carried = std::max(std::fabs(c.velocity_mm_s), std::fabs(prev.velocity_mm_s)) * 1e-3f;
+        jump = std::max(jump, std::fabs(c.plan_mm - prev.plan_mm) - carried);
+        prev = c;
+    };
+
+    for (int i = 0; i < kSegs; ++i) {
+        if (i == kMoveAt) {
+            const float was = r->arb.positionMm();
+            lo += 0.2f * kRail;
+            hi += 0.2f * kRail;
+            r->arb.setWindow(lo, hi, kRail);
+            MESSAGE("window moved at ", was, " mm, ", r->arb.engine().pending(), " knots pending");
+            REQUIRE(r->arb.engine().pending() > 0);
+        }
+        REQUIRE(segment(i));
+        for (int t = 0; t < 100; ++t) tick();
+    }
+    for (int t = 0; t < 500; ++t) tick();
+
+    const MotionCensus c = r->census();
+    const float end_mm = lo + 0.9f * (hi - lo);
+    MESSAGE("steer peak ", worst_steer, " mm/s, slowest steer ", slowest_steer, " plan ", slowest_plan,
+            " mm/s, plan jump beyond the velocity ", jump, " mm, end ", c.position_mm, " mm");
+    CHECK(slowest_plan > 1.0);
+    CHECK(slowest_steer > 1.0);
+    CHECK(worst_steer <= ceiling);
+    CHECK(jump <= 0.01f);
+    CHECK(r->arb.plannerStalls() == 0);
+    CHECK(c.emitter_faults == 0);
+    CHECK(c.rejected == 0);
+    CHECK(c.failures == 0);
+    CHECK_FALSE(c.busy);
+    CHECK(c.position_mm >= lo);
+    CHECK(c.position_mm <= hi);
+    CHECK(c.position_mm == doctest::Approx(end_mm).epsilon(1e-3));
+}
+
+TEST_CASE("window moved mid-stream with the steer ahead of the planner: parked while the flag is up, then steered from the plan, never a burst") {
+    auto r = movingRig(400.0f, 1'000'000, 100'000);
+    REQUIRE(std::fabs(steeredMmS(r->emitter)) > 100.0);
+    r->arb.setWindow(100.0f, 500.0f, 500.0f);
+    elapse(*r);
+    steerOnly(*r);
+    CHECK(r->emitter.q8 == 0);
+    planOnly(*r);
+    CHECK(r->arb.engine().pending() > 0);   // re-targeted, not reset
+    double worst = 0.0, last = 0.0;
+    for (int k = 0; k < 20; ++k) {
+        elapse(*r);
+        steerOnly(*r);
+        planOnly(*r);
+        last = steeredMmS(r->emitter);
+        worst = std::max(worst, std::fabs(last));
+    }
+    CHECK(worst <= double(DEFAULT_MAX_SPEED_MM_S) + kKickMax);
+    CHECK(last > 100.0);
+    CHECK(r->arb.plannerStalls() == 0);
+}

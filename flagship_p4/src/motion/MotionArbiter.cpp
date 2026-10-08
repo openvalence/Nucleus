@@ -239,6 +239,7 @@ float MotionArbiter::forceHome(float stroke_mm) {
     // the client's 0, which is the physical far end of the stroke.
     const int32_t far_steps = _flipped.load() ? int32_t(std::lround(stroke * kStepsPerMm)) : 0;
     _origin    = _emitter.count() - far_steps;
+    _origin_moved = true;  // before the flag: the planner resets on it, never reseeds
     _frame_moved = true;   // 0.0 mm now means a different emitter count
     _rail      = stroke;
     _homed     = true;
@@ -426,8 +427,41 @@ void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
     // The steer re-anchors its feedforward here and steers nothing from a
     // strip published before this reset (steerTick()).
     _anchor_mm   = positionMm();
+    _strip_continuous = false;
     _strip_stale = true;
     _strip_gen.fetch_add(1);
+    _eng_lo   = frameLo();
+    _eng_span = span();
+}
+
+void MotionArbiter::reseedEngine(uint64_t now_us) {
+    // The plan's own state, not the count: the strip the steer follows runs
+    // on through the reseed in mm, and the carriage's lag stays the kick's
+    // to close, as through any re-plan. Ceilings scale with the state, so the
+    // curve in flight keeps its mm ceilings until the next intent sets the
+    // new frame's.
+    const kinetic2::State was = sampleEngine(now_us);
+    const float k = _eng_span / span();
+    const float lo = _eng_lo, sp = _eng_span;
+    auto restate = [&](float p) { return (lo + p * sp - frameLo()) / span(); };
+    EngineLimits lim = _engine.config().limits;
+    lim.vmax *= k;
+    lim.amax *= k;
+    lim.jmax *= k;
+    _engine.setLimits(lim);
+    _engine.reseedAt(kinetic2::State{restate(was.p), was.v * k, was.a * k}, now_us);
+    _k2_dirty = true;
+    _k2_brake_from_p = restate(_k2_brake_from_p);
+    _k2_brake_to_p   = restate(_k2_brake_to_p);
+    if (_engine.pending() == 0) {
+        const kinetic2::Knot h = _engine.newest();
+        _k2_newest_us = h.t_us;
+        _k2_newest_p  = h.p;
+    }
+    _strip_continuous = true;
+    _strip_stale = true;
+    _eng_lo   = frameLo();
+    _eng_span = span();
 }
 
 bool MotionArbiter::brakeEngine(uint64_t at_us) {
@@ -712,18 +746,28 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // the feedforward differences that jump and demands 10^5 mm/s, the emitter
     // floor clamps it, and the emitter renders a saturated burst -- unrequested
     // travel at its maximum rate, plus thousands of missed deadlines
-    // (measured, bd val-091.13). The plan is reset at the carriage instead:
-    // the steer parks for this tick (an empty strip) and re-anchors at the
-    // reset, and the next accepted intent plans from the new frame's rest.
+    // (measured, bd val-091.13). A window change with motion planned
+    // re-targets in place (bd val-17u): the pending knots are window shares
+    // and stay, and the plan's own state is restated in the new frame
+    // (reseedEngine()), so the strip runs on in mm. force_home, a home cycle,
+    // or a carriage at rest with nothing pending resets at the carriage: the
+    // steer parks for this tick (an empty strip) and re-anchors at the reset,
+    // and the next accepted intent plans from the new frame's rest.
     // The generation moves BEFORE the flag drops, so no strip of the old
     // frame steers in between.
     if (_frame_moved) {
         _strip_gen.fetch_add(1);
         _frame_moved = false;
+        const bool origin_moved = _origin_moved;
+        _origin_moved = false;
         // A cycle counted in the old frame: its seek or backoff is void.
-        if (_homing.load()) homeEnd("the travel window changed", now_us);
-        resetEngine(toNorm(positionMm()), now_us);
-        return false;
+        const bool homing = _homing.load();
+        if (homing) homeEnd("the travel window changed", now_us);
+        if (origin_moved || homing || (_engine.pending() == 0 && !_engine.isBusy(now_us))) {
+            resetEngine(toNorm(positionMm()), now_us);
+            return false;
+        }
+        reseedEngine(now_us);
     }
 
     // A pause ends a cycle, which parks: a seek has no brake to run.
@@ -789,6 +833,7 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
     PlanStrip& s = _strip;
     s.gen = _strip_gen.load();
     s.anchor_mm = _anchor_mm;
+    s.continuous = _strip_continuous;
     constexpr uint64_t kSpanUs = uint64_t(kStripLen) * kMotionTickUs;
     if (!live) {
         s.n = 0;
@@ -861,10 +906,11 @@ void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
     const bool in = stripAt(s, now_us, p_plan_mm);
     if (s.gen != _seen_gen) {
         // An engine reset: the feedforward starts again from where the
-        // carriage stood at it, once per reset.
+        // carriage stood at it, once per reset. A reseed's plan runs on in mm
+        // from the command in flight.
         _seen_gen = s.gen;
         _seen_plan = s.plan;
-        _p_cmd_mm = s.anchor_mm;
+        if (!s.continuous) _p_cmd_mm = s.anchor_mm;
     } else if (s.plan != _seen_plan) {
         _seen_plan = s.plan;
         // A NEW PLAN IS A RESIDUAL, NEVER A BURST. A solve longer than the
