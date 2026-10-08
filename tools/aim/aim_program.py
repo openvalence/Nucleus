@@ -12,7 +12,7 @@ BAUD = aim_link.pop_baud(sys.argv)
 PORT = sys.argv[1] if len(sys.argv) > 1 else 'COM2'
 VERIFY = '--verify' in sys.argv
 SLAVE = 1
-TARGET = {0x02: 1500, 0x03: 60000, 0x04: 495, 0x05: 3000, 0x06: 10, 0x07: 3000, 0x08: 3900,
+TARGET = {0x02: 2000, 0x03: 60000, 0x04: 495, 0x05: 3000, 0x06: 10, 0x07: 3000, 0x08: 3900,
           0x09: 1, 0x0A: 4, 0x0B: 1, 0x18: 600, 0x19: 2}
 NAMES = {0x00: 'modbus enable', 0x01: 'output enable', 0x02: 'target speed rpm', 0x03: 'accel', 0x04: 'field weak', 0x05: 'speed KP',
          0x06: 'speed KI ms', 0x07: 'pos KP', 0x08: 'speed FF', 0x09: 'dir polarity', 0x0A: 'gear num', 0x0B: 'gear den',

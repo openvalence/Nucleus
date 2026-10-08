@@ -258,3 +258,25 @@ leg landed on the hub's count to 0.04 mm. The programmed gains are KP 3000
   feed-forward runs included.
 - Motion was clean up to the motor's ceiling; the operator names 1200 mm/s
   as clean.
+
+## 2026-10-08 evening: the 60AIM40F programmed with the ruled set
+
+- RS485 on COM2; the baud hunt answered at 115200 (the 60AIM40F), slave 1.
+  0x00 to 0x19 read individually; 0x1A to 0x1F give no answer.
+- Read before: gear 4/1 (0x0A 4, 0x0B 1, 8192 pulses per rev), 0x02 1500,
+  0x03 60000, 0x04 495, 0x05 3000, 0x06 10, 0x07 3000, 0x08 3900, 0x09 1,
+  0x18 600, 0x19 2, alarm 0.
+- The ruled set is those gains (position KP 3000, no feed-forward: 0x03
+  60000) with 0x02 at 2000 rpm, above the 1730 rpm the motor reaches loaded
+  on 36 V, so the clamp no longer bites before the motor does.
+  `tools/aim/aim_program.py` TARGET now carries 0x02 2000. The only register
+  written was 0x02, 1500 to 2000, through the save gate (0x00 1, 0x01 0,
+  0x02, 0x14 1 three times, 0x01 back, 0x00 506, 0x00 0). The motor was idle.
+- `aim_program.py --verify` afterwards: MATCH, alarm 0. 0x01 is a live status
+  word: it reads 7 with the arm off and 1 when written 7 while armed, so it is
+  outside the comparison.
+- The save flag on this drive does not report 2 as the 57AIM30's does: each
+  0x14 1 write is acknowledged, the flag reads 1 for about a second, then 0.
+  `aim_program.py` therefore prints NOT SAVED here. Whether 0x02 2000
+  survives a power cycle is unconfirmed until the drive is power-cycled and
+  `aim_program.py COM2 --verify` reads MATCH.
