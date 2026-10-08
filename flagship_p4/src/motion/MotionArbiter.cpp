@@ -1100,13 +1100,15 @@ MotionArbiter::PlanRead MotionArbiter::readPlan(uint64_t now_us) {
         r.elapsed_s  = now_us > _k2_brake_from_us ? float(now_us - _k2_brake_from_us) * 1e-6f : 0.0f;
     } else if (_engine.pending() > 0) {
         // The piece toward the first pending knot, as the solver decided it.
+        // The handle renderer keeps no piece start on the knot: the strip's
+        // segment runs from the live state to the knot, what is left of it.
         const kinetic2::Solved& k = _engine.solved(0, 0);
         r.mode       = uint8_t(_k2_chase ? PlanStyle::chase : PlanStyle::waveform);
         r.plan_kind  = kPlanKindQuintic;
-        r.start      = k.from.p;
+        r.start      = st.p;
         r.target     = k.p;
-        r.duration_s = float(k.t_us - k.from_us) * 1e-6f;
-        r.elapsed_s  = now_us > k.from_us ? float(now_us - k.from_us) * 1e-6f : 0.0f;
+        r.duration_s = k.t_us > now_us ? float(k.t_us - now_us) * 1e-6f : 0.0f;
+        r.elapsed_s  = 0.0f;
         // RFC-100 from the solver: fallback is never set, nothing falls back.
         if (k.share < 1.0f) r.flags |= plan_flags::shaped;
         if (k.stretched_s > 0.0f) r.flags |= plan_flags::stretched;

@@ -44,6 +44,8 @@ tools/*
 !tools/kinetic-wasm/
 tools/kinetic-wasm/build/
 tools/kinetic-wasm/build-*/
+# the lab over it (val-b7m): a page, its worker, its server and its check
+!tools/kinetic-lab/
 
 # Claude Code config is COMMITTED (hooks/rules survive a clone, like
 # canon_lint). Only host/session-local state stays out.
@@ -86,3 +88,10 @@ __pycache__/
 .beads-credential-key
 .beads/proxieddb/
 .beads.gate.lock
+
+# bench results written beside the drive tools (docs/drive-bench-2026-10-07.md)
+tools/aim/*_results.jsonl
+tools/aim/*_result.json
+tools/aim/*.json
+!tools/aim/
+!tools/aim/*.py

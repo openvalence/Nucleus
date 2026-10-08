@@ -28,9 +28,9 @@
 #endif
 
 #if NUCLEUS_BENCH_NO_MOTOR
-#define FIRMWARE_VERSION "0.1.21-p4hub-bench"
+#define FIRMWARE_VERSION "0.1.23-p4hub-bench"
 #else
-#define FIRMWARE_VERSION "0.1.21-p4hub"
+#define FIRMWARE_VERSION "0.1.23-p4hub"
 #endif
 
 // Identity strings for WELCOME key 37 (RFC-016a). Static storage, so the views
@@ -47,7 +47,11 @@
 #define MIN_HOME_SPEED_MM_S     5.0f
 
 // ---- Speed / accel / jerk: factory defaults and hard ceilings ---------------
-#define MAX_SPEED_MM_S              10000.0f
+// The LP emitter sustains about 460 kHz of quadrature edges (bench 2026-10-07,
+// docs/drive-bench-2026-10-07.md, val-d66): 2,200 mm/s at 208.6 steps/mm. A
+// plan above the emitter's rate falls behind its own count and the residual
+// closes the gap at amax x 1 ms. Do not raise this without re-measuring the LP.
+#define MAX_SPEED_MM_S              2000.0f
 #define DEFAULT_MAX_SPEED_MM_S      1000.0f
 #define DEFAULT_JOG_MAX_SPEED_MM_S  50.0f
 #define DEFAULT_JOG_ACCEL_MM_S2     200.0f

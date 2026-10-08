@@ -71,9 +71,10 @@ inline constexpr float kLpClockHz = 40.0e6f;
 // step at that rate takes 417 ms, so there is nothing under it worth steering.
 inline constexpr float kParkMmS = 0.0115f;
 
-// The emitter's own floor, ~4,790 mm/s: five times the machine's speed ceiling
-// and therefore unreachable through the engine. A demand past it is a FAULT
-// DETECTOR reading, never a shaper -- the ceilings are enforced in the engine.
+// The steer word's floor, ~4,790 mm/s, is NOT the LP's real rate: measured
+// 2026-10-07 the core sustains about 460 kHz (2,200 mm/s) and falls behind a
+// faster plan (val-d66). MAX_SPEED_MM_S (2,000) keeps every plan under that;
+// this floor stays a FAULT DETECTOR reading, never a shaper.
 inline constexpr uint32_t kMinCyclesPerEdge = 40;
 
 // Intent queue depth, for whichever queue a host puts in front of accept(). A
@@ -371,6 +372,11 @@ public:
     // (tools/kinetic-wasm): the same sample evaluate() and snapshot() take, so
     // reading it at their time changes nothing. Nothing on the board calls it.
     kinetic2::State planState(uint64_t now_us) { return sampleEngine(now_us); }
+    // Owning task. The engine itself, for host tooling only (tools/kinetic-wasm
+    // reads its pending knots as solved). Reading solved() solves a dirty
+    // window: read it after evaluate(), never between accept() and evaluate().
+    // Nothing on the board calls it.
+    MotionEngine& engine() { return _engine; }
     float winMin() const { return _win_min; }
     float winMax() const { return _win_max; }
     float rail() const { return _rail; }

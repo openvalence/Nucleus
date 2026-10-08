@@ -300,7 +300,7 @@ namespace ceiling {
 inline constexpr float rail_mm    = 2000.0f;      // configValid's max_rail bound
 inline constexpr float rail_min   = 10.0f;        // configValid's max_rail floor, MIN_RAIL_MM
 inline constexpr float speed_min  = 1.0f;
-inline constexpr float speed_max  = 10000.0f;     // MAX_SPEED_MM_S
+inline constexpr float speed_max  = 2000.0f;      // MAX_SPEED_MM_S, the LP emitter's measured rate
 inline constexpr float accel_min  = 10.0f;
 inline constexpr float accel_max  = 100000.0f;    // MAX_ACCEL_MM_S2
 inline constexpr float jerk_min   = 1000.0f;
@@ -1183,6 +1183,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "anom_knot_refused", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = card::anomalies,
                       .desc = "Points refused as late or out of order"});
+    // Appended (SPEC 5.4): kinetic2::AnomalyKind::PieceOverCeiling, kind 12.
+    c.addLayoutField({.name = "anom_piece_over_ceiling", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
+                      .group = card::anomalies,
+                      .desc = "Spans no trim could keep inside a limit"});
     c.addLayoutField({.name = "plan_us_last", .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
                       .group = card::plan_time, .desc = "Compute time of the latest plan",
                       .hasUnitId = true, .unitId = valence::unit_ids::us});

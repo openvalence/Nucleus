@@ -32,7 +32,7 @@ namespace valence {
 // reserved and retired kinds that hold their ordinals. The enum is append-only
 // and the 0x1111 per-kind field list is indexed by it, so this number and that
 // list move together or the table re-points.
-inline constexpr uint8_t kAnomalyKinds = 12;
+inline constexpr uint8_t kAnomalyKinds = 13;
 
 // Origin of an intent. It picks the ceiling SET and the gating, nothing else.
 // The value is the SPEC 11.4 source id the hub publishes on control-owner, and
