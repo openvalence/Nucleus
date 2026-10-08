@@ -13,7 +13,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('--ip', default='192.168.1.118'); ap.add_argument('--port', type=int, default=82)
 ap.add_argument('--speed', type=float, required=True); ap.add_argument('--accel', type=float, required=True)
 ap.add_argument('--lo', type=float, default=20.0); ap.add_argument('--hi', type=float, default=620.0)
-ap.add_argument('--home', type=float, default=650.0); ap.add_argument('--legs', type=int, default=4)
+ap.add_argument('--fake-home', type=float, help='bench only: fake-home this stroke (0x3101 op 2). Never on a real rail; the machine homes for real first'); ap.add_argument('--legs', type=int, default=4)
 ap.add_argument('--poll-hz', type=float, default=20.0); ap.add_argument('--com', default='COM2'); ap.add_argument('--tag', default='')
 ap.add_argument('--input-accel', type=float); ap.add_argument('--input-speed', type=float); ap.add_argument('--dump')
 a = ap.parse_args()
@@ -64,8 +64,9 @@ iid = 1
 def intent(ch, fields):
     global iid
     sp.send_frame(ws, sp.FRAME['INTENT'], ch, sp.build_intent(ch, iid, fields)); iid += 1
-intent(0x3101, [(1, sp.cb_uint(2)), (2, sp.cb_f32(a.home))])
-intent(0x3000, [(8, sp.cb_f32(a.home))]); time.sleep(0.2)
+if a.fake_home is not None:
+    intent(0x3101, [(1, sp.cb_uint(2)), (2, sp.cb_f32(a.fake_home))])
+    intent(0x3000, [(8, sp.cb_f32(a.fake_home))]); time.sleep(0.2)
 cfg = [(1, sp.cb_f32(0.0)), (2, sp.cb_f32(a.hi + 10)), (3, sp.cb_f32(a.speed)), (4, sp.cb_f32(a.accel))]
 if a.input_accel is not None: cfg.append((6, sp.cb_f32(a.input_accel)))
 if a.input_speed is not None: cfg.append((5, sp.cb_f32(a.input_speed)))

@@ -15,7 +15,7 @@ ap.add_argument('--ip', default='192.168.1.118'); ap.add_argument('--port', type
 ap.add_argument('--wave', default='sine', choices=['sine', 'tri', 'square'])
 ap.add_argument('--freq', type=float, default=1.0); ap.add_argument('--amp', type=float, default=0.45); ap.add_argument('--center', type=float, default=0.5)
 ap.add_argument('--seconds', type=float, default=8.0); ap.add_argument('--rate', type=float, default=50.0)   # the hub answers RATE_LIMITED above its grant
-ap.add_argument('--window', type=float, nargs=2, default=[0.0, 100.0]); ap.add_argument('--home', type=float, default=200.0)
+ap.add_argument('--window', type=float, nargs=2, default=[0.0, 100.0]); ap.add_argument('--fake-home', type=float, help='bench only: fake-home this stroke (0x3101 op 2). Never on a real rail')
 ap.add_argument('--speed', type=float); ap.add_argument('--accel', type=float); ap.add_argument('--jerk', type=float); ap.add_argument('--max-rail', type=float)
 ap.add_argument('--poll-hz', type=float, default=10.0); ap.add_argument('--com', default='COM2')
 ap.add_argument('--dump'); ap.add_argument('--tag', default='')
@@ -64,7 +64,8 @@ while time.time() < deadline:
 if welcome is None or not welcome.get(sp.K['granted_publishes']): raise SystemExit('no WELCOME / publish not granted')
 sp.send_frame(ws, sp.FRAME['CATALOG_READY'], 0, welcome.get(sp.K['catalog_etag'], b''))
 iid = 1
-sp.send_frame(ws, sp.FRAME['INTENT'], 0x3101, sp.build_intent(0x3101, iid, [(1, sp.cb_uint(2)), (2, sp.cb_f32(a.home))])); iid += 1
+if a.fake_home is not None:
+    sp.send_frame(ws, sp.FRAME['INTENT'], 0x3101, sp.build_intent(0x3101, iid, [(1, sp.cb_uint(2)), (2, sp.cb_f32(a.fake_home))])); iid += 1
 if a.max_rail is not None:
     sp.send_frame(ws, sp.FRAME['INTENT'], 0x3000, sp.build_intent(0x3000, iid, [(8, sp.cb_f32(a.max_rail))])); iid += 1
     time.sleep(0.2)
