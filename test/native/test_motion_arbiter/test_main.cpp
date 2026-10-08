@@ -932,14 +932,18 @@ TEST_CASE("Kinetic² RFC-100: plan_flags from the solver, fallback never, 0 with
     CHECK((blend->census().plan_flags & pf::shaped) != 0);
     CHECK((blend->census().plan_flags & pf::fallback) == 0);
 
+    // Policy 0 (stretch) reads the same: the handle renderer never gives
+    // time (Kinetic Config::policy is not read, kin-tnv), so a deadline no
+    // trim meets is trimmed, and stretched is never set.
     auto stretch = rigAtOrigin(0);
     REQUIRE(tightSegment(*stretch, 40'000));
     stretch->run(1000);
-    CHECK(stretch->census().plan_flags == pf::stretched);
+    CHECK((stretch->census().plan_flags & pf::shaped) != 0);
+    CHECK((stretch->census().plan_flags & pf::stretched) == 0);
     stretch->run(10'000'000);
     CHECK(stretch->census().plan_flags == 0);
     stretch->arb.drainAnomalies();
-    CHECK(stretch->census().anom[size_t(kinetic2::AnomalyKind::DeadlineStretched)] == 1);
+    CHECK(stretch->census().anom[size_t(kinetic2::AnomalyKind::DeadlineStretched)] == 0);
 
     // The window clamp moved the target: clamped, while that plan is the last.
     auto clamp = rigAtOrigin(1);
@@ -952,7 +956,7 @@ TEST_CASE("Kinetic² RFC-100: plan_flags from the solver, fallback never, 0 with
     CHECK((clamp->census().plan_flags & pf::clamped) != 0);
 }
 
-TEST_CASE("Kinetic² samples: one behind at the grant's latency, a stream that stops brakes past the newest, a backwards one refused as kind 11") {
+TEST_CASE("Kinetic² samples: one behind at the grant's latency, a stream that stops rests on the newest, a backwards one refused as kind 11") {
     auto r = rig();
     r->arb.forceHome(400.0f);
     r->run(1000);
@@ -969,26 +973,21 @@ TEST_CASE("Kinetic² samples: one behind at the grant's latency, a stream that s
         CHECK(r->census().mode == 2);   // chase: a sample's knot
         r->run(20'000);
     }
-    // One behind: the plan passes the first sample `latency` after it arrived.
-    // The newest is reached moving at the secant into it and nothing follows,
-    // so the engine brakes from there (RFC-105 (dd)): past the newest by at
-    // most the stop distance from that secant at the input ceilings.
+    // The chase (Kinetic kin-j6g): a run of samples renders as the fastest
+    // legal move to rest on the newest held sample, re-planned per sample.
+    // The sender stops: the plan rests on the last sample, never past it,
+    // with no brake and no spend to report.
     const float last = target;
-    const float v_end = 0.1f / 0.020f;   // mm/s
-    const float stop = v_end * v_end / (2.0f * DEFAULT_ACCEL_MM_S2) +
-                       v_end * DEFAULT_ACCEL_MM_S2 / (2.0f * DEFAULT_INPUT_MAX_JERK_MM_S3);
     float peak = 0.0f;
     for (int i = 0; i < 2000; ++i) {
         r->run(1000);
         peak = std::max(peak, r->census().plan_mm);
     }
-    CHECK(peak <= last + stop);
+    CHECK(peak <= last + 0.01f);
     CHECK_FALSE(r->census().busy);
-    CHECK(r->census().plan_mm >= last);
-    CHECK(r->census().plan_mm <= last + stop);
+    CHECK(r->census().plan_mm == doctest::Approx(last).epsilon(0.0001));
     r->arb.drainAnomalies();
-    CHECK(r->census().anomalies == 1);   // the stop is the one spend
-    CHECK(r->census().anom[size_t(kinetic2::AnomalyKind::SettleEngaged)] == 1);
+    CHECK(r->census().anomalies == 0);
 
     // Two samples in one tick share a knot time: the second goes backwards.
     REQUIRE(r->submit(MotionSource::Stream, 10.0f));
