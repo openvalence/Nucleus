@@ -30,6 +30,7 @@ FetchContent_MakeAvailable(ixwebsocket)
 
 add_executable(valencesim
     src/main.cpp
+    src/SimCore.cpp
     src/SimMotion.cpp
     src/SimMotorSwitch.cpp
     "${NUCLEUS_ROOT}/flagship_p4/src/motion/MotionArbiter.cpp"

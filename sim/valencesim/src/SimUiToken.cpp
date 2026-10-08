@@ -7,8 +7,6 @@
 #include <optional>
 #include <random>
 
-#include <ixwebsocket/IXHttpServer.h>
-
 namespace valence {
 
 namespace {
@@ -22,41 +20,12 @@ SimUiToken::SimUiToken() {
     for (auto& b : _secret) b = std::byte(rd() & 0xFF);
 }
 
-SimUiToken::~SimUiToken() { stop(); }
-
-bool SimUiToken::begin(uint16_t port, std::string& err) {
-    _server = std::make_unique<ix::HttpServer>(port, "127.0.0.1");
-    _server->setOnConnectionCallback(
-        [this](ix::HttpRequestPtr req, std::shared_ptr<ix::ConnectionState>) -> ix::HttpResponsePtr {
-            // ---- DO NOT ADD CORS HEADERS: their ABSENCE is the mechanism ----
-            ix::WebSocketHttpHeaders h;
-            h["Connection"] = "close";
-            if (req->method != "GET" || req->uri != "/uitoken") {
-                return std::make_shared<ix::HttpResponse>(404, "Not Found", ix::HttpErrorCode::Ok,
-                                                          h, std::string("not found"));
-            }
-            std::string body;
-            const int code = mint(body);
-            h["Content-Type"] = "application/json";
-            if (code == 200) h["Cache-Control"] = "no-store";
-            return std::make_shared<ix::HttpResponse>(
-                code, code == 200 ? "OK" : "Too Many Requests", ix::HttpErrorCode::Ok, h, body);
-        });
-    const auto res = _server->listen();
-    if (!res.first) {
-        err = res.second;
-        _server.reset();
-        return false;
+int SimUiToken::serve(std::string_view method, std::string_view path, std::string& body) {
+    if (method != "GET" || path != "/uitoken") {
+        body = "not found";
+        return 404;
     }
-    _server->start();
-    return true;
-}
-
-void SimUiToken::stop() {
-    if (_server) {
-        _server->stop();
-        _server.reset();
-    }
+    return mint(body);
 }
 
 int SimUiToken::mint(std::string& body) {

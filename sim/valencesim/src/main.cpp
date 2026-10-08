@@ -1,6 +1,6 @@
-// valencesim -- the Nucleus device twin on a desktop: the REAL valence::Hub,
-// the REAL device catalog and delegate (flagship_p4/src/hub/ValenceDevice),
-// and the REAL kinetic2::Engine behind a WebSocket speaking valence.v1
+// valencesim -- the native front of Integral, the Nucleus device twin: the
+// machine (src/SimCore.h) behind a WebSocket speaking valence.v1, /uitoken on
+// HTTP, UDP discovery and a wall clock
 //
 //   valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
 //              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
@@ -10,10 +10,9 @@
 //
 // Constraints:
 // - HOST-ONLY: never touches a device, never deploys, no pio.
-// - ONE hub thread. The Hub, ValenceDevice, SimMotion, SimMotorSwitch and
-//   SimPattern are called from the loop below and nowhere else (T5).
-//   IXWebSocket connection threads only feed the port's RX rings and the
-//   /uitoken slot table.
+// - ONE hub thread. SimCore is called from the loop below and nowhere else
+//   (T5). IXWebSocket connection threads only feed the port's RX rings and
+//   the /uitoken slot table.
 // - DEVICE GLOG LINES: Geiger's host platform layer (GEIGER_HOST_PLATFORM in
 //   CMakeLists.txt) is drained on the hub thread only, into the sim's own
 //   SessionLog, so a run reads as one stream, and Warn and above onto the log
@@ -32,9 +31,9 @@
 //   defaults to valencesim-state beside the exe.
 // See: sim/valencesim/README.md
 
+#include <array>
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -45,9 +44,9 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <string_view>
 #include <thread>
 
+#include <ixwebsocket/IXHttpServer.h>
 #include <ixwebsocket/IXNetSystem.h>
 
 #ifdef _WIN32
@@ -55,26 +54,10 @@
 #include <timeapi.h>
 #endif
 
-#include "SimMotion.h"
-#include "SimMotorSwitch.h"
-#include "SimPattern.h"
-#include "SimUiToken.h"
-#include "common/HostPlatform.h"
-#include "common/SessionLog.h"
-#include "geiger/geiger.h"
-#include "hub/ValenceCatalog.h"
-#include "hub/ValenceDevice.h"
+#include "SimCore.h"
 #include "hub/ValenceDiscovery.h"
 #include "hub/ValenceEstopDatagram.h"
-#include "hub/valence_config.h"
-#include "motion/MotionArbiter.h"
-#include "motion/ValenceMotion.h"
 #include "net/WsServerPort.h"
-#include "patterns/ValencePattern.h"
-#include "system/ValenceButtons.h"
-#include "system/ValenceDriveLink.h"
-#include "system/ValenceEstopInput.h"
-#include "system/ValenceMotorSwitch.h"
 
 namespace {
 
@@ -85,57 +68,13 @@ void onSignal(int) { g_stop = true; }
 // it, which is what keeps stream anchors honest (ValenceDevice.h).
 bench::HostClock g_clock;
 
-constexpr const char* kHubName = "valencesim";
-
-class GeigerToSessionLog final : public geiger::ISink {
-public:
-    explicit GeigerToSessionLog(bench::SessionLog& log) : _log(log) {}
-
-    void write(const geiger::Record& r) override {
-        const auto s = static_cast<unsigned long>(r.ms / 1000u);
-        const auto ms = static_cast<unsigned long>(r.ms % 1000u);
-        if (r.lost != 0) {
-            _log.logf(geiger::levelChar(r.level), "%7lu.%03lu %-10s %s  (+%u lost)", s, ms, r.tag,
-                      r.msg, unsigned(r.lost));
-        } else {
-            _log.logf(geiger::levelChar(r.level), "%7lu.%03lu %-10s %s", s, ms, r.tag, r.msg);
-        }
-    }
-
-private:
-    bench::SessionLog& _log;
-};
-
-// The board's ValenceLogBridge: Warn and above onto the log channel 0x0008.
-// Every drain in this binary runs on the hub thread, so no task-name gate is
-// needed here. Never logs: a GLOG from here would drain straight back in.
-class GeigerToLogChannel final : public geiger::ISink {
-public:
-    void bind(valence::Hub* hub) { _hub = hub; }
-
-    void write(const geiger::Record& r) override {
-        if (_hub == nullptr) return;
-        // geiger::Level and the registry's log_levels share one numbering.
-        _hub->publishLog(uint8_t(r.level), std::string_view(r.tag), std::string_view(r.msg));
-    }
-
-private:
-    valence::Hub* _hub = nullptr;
-};
-
 struct Options {
     uint16_t wsPort = 82;
     std::string bindHost = "0.0.0.0";   // --bind: the WS listen address
     uint16_t httpPort = 80;
-    bool homed = false;
-    bool uncommissioned = false;   // first-run hub (RFC-079); default commissioned
     int durationS = 0;
-    bool pairingWindow = false;
-    bool motorSwitch = false;
-    int mswFaultS = -1;   // --msw-fault: seconds after boot, -1 = none
     bool noEstopUdp = false;   // --no-estop-udp: RFC-053 datagrams never latch
-    std::optional<float> homeSenseAtMm;   // --home-sense-at: the home stop, boot frame
-    std::optional<float> railEndAtMm;     // --rail-end-at: the far stop, boot frame
+    valence::SimConfig sim;    // the machine's own options
     std::string statePrefix;   // empty = valencesim-state beside the exe
     bool discovery = true;
     uint16_t discoveryPort = uint16_t(valence::udp_discovery::port);
@@ -150,14 +89,14 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (!std::strcmp(a, "--bind") && hasNext) o.bindHost = argv[++i];
         else if (!std::strcmp(a, "--http") && hasNext) o.httpPort = uint16_t(std::atoi(argv[++i]));
         else if (!std::strcmp(a, "--duration") && hasNext) o.durationS = std::atoi(argv[++i]);
-        else if (!std::strcmp(a, "--homed")) o.homed = true;
-        else if (!std::strcmp(a, "--uncommissioned")) o.uncommissioned = true;
-        else if (!std::strcmp(a, "--pairing-window")) o.pairingWindow = true;
-        else if (!std::strcmp(a, "--motor-switch")) o.motorSwitch = true;
-        else if (!std::strcmp(a, "--msw-fault") && hasNext) o.mswFaultS = std::atoi(argv[++i]);
+        else if (!std::strcmp(a, "--homed")) o.sim.homed = true;
+        else if (!std::strcmp(a, "--uncommissioned")) o.sim.uncommissioned = true;
+        else if (!std::strcmp(a, "--pairing-window")) o.sim.pairingWindow = true;
+        else if (!std::strcmp(a, "--motor-switch")) o.sim.motorSwitch = true;
+        else if (!std::strcmp(a, "--msw-fault") && hasNext) o.sim.mswFaultS = std::atoi(argv[++i]);
         else if (!std::strcmp(a, "--no-estop-udp")) o.noEstopUdp = true;
-        else if (!std::strcmp(a, "--home-sense-at") && hasNext) o.homeSenseAtMm = float(std::atof(argv[++i]));
-        else if (!std::strcmp(a, "--rail-end-at") && hasNext) o.railEndAtMm = float(std::atof(argv[++i]));
+        else if (!std::strcmp(a, "--home-sense-at") && hasNext) o.sim.homeSenseAtMm = float(std::atof(argv[++i]));
+        else if (!std::strcmp(a, "--rail-end-at") && hasNext) o.sim.railEndAtMm = float(std::atof(argv[++i]));
         else if (!std::strcmp(a, "--state") && hasNext) o.statePrefix = argv[++i];
         else if (!std::strcmp(a, "--no-discovery")) o.discovery = false;
         else if (!std::strcmp(a, "--discovery-port") && hasNext) o.discoveryPort = uint16_t(std::atoi(argv[++i]));
@@ -210,59 +149,54 @@ bool saveBlob(const std::filesystem::path& p, std::span<const std::byte> blob) {
     return !ec;
 }
 
-// The P4's loadOrMintInstanceId(): minted once, never 0, kept across boots. A
-// file that is not exactly 8 nonzero bytes is replaced by a fresh mint.
-uint64_t loadOrMintInstanceId(const std::filesystem::path& p, valence::IRandom& rng,
-                              bench::SessionLog& log) {
-    std::array<std::byte, 8> raw{};
-    const std::span<const std::byte> got = loadBlob(p, raw);
-    uint64_t id = 0;
-    if (got.size() == raw.size()) {
-        for (size_t i = 0; i < raw.size(); ++i) id |= uint64_t(raw[i]) << (8 * i);
-        if (id != 0) return id;
+// A file stands in for each NVS key: PREFIX.cfg, PREFIX.presets, PREFIX.iid.
+class FileStore final : public valence::ISimStore {
+public:
+    explicit FileStore(std::filesystem::path prefix) : _prefix(std::move(prefix)) {}
+    std::span<const std::byte> load(valence::SimBlob b, std::span<std::byte> scratch) override {
+        return loadBlob(path(b), scratch);
     }
-    do {
-        id = (uint64_t(rng.nextU32()) << 32) | rng.nextU32();
-    } while (id == 0);
-    for (size_t i = 0; i < raw.size(); ++i) raw[i] = std::byte((id >> (8 * i)) & 0xFF);
-    if (!saveBlob(p, raw))
-        log.logf('W', "valencesim: persist %s failed -- identity lasts this run only",
-                 p.string().c_str());
-    log.logf('I', "valencesim: %s held no identity -- minted a new one", p.string().c_str());
-    return id;
-}
+    bool save(valence::SimBlob b, std::span<const std::byte> blob) override { return saveBlob(path(b), blob); }
+    std::string name() const { return _prefix.string() + ".{cfg,presets,iid}"; }
 
-// Heap, not stack: the catalog pools and the hub's session table are tens of
-// KB, and the Hub sits in an optional so the catalog is FILLED before the Hub
-// constructor encodes it (the same order the P4's HubBox keeps).
-struct SimBox {
-    valence::Catalog32 catalog{};
-    bench::HostRandom rng{};
-    valence::ValenceDevice device{};
-    std::optional<valence::Hub> hub{};
-    bench::ValenceBenchWsPort port{};
-    valence::SimUiToken minter{};
-    valence::ValenceDiscoveryPort discovery{};
-    std::array<std::byte, valence::PatternPresetStore::kBlobBytes> blobScratch{};
+private:
+    std::filesystem::path path(valence::SimBlob b) const {
+        std::filesystem::path p = _prefix;
+        p += b == valence::SimBlob::cfg ? ".cfg" : b == valence::SimBlob::presets ? ".presets" : ".iid";
+        return p;
+    }
+    std::filesystem::path _prefix;
 };
+
+// GET /uitoken on 127.0.0.1, routed by SimUiToken::serve. Null if the port
+// cannot bind (`err` says why).
+std::unique_ptr<ix::HttpServer> startUiTokenHttp(valence::SimUiToken& minter, uint16_t port, std::string& err) {
+    auto server = std::make_unique<ix::HttpServer>(port, "127.0.0.1");
+    server->setOnConnectionCallback(
+        [&minter](ix::HttpRequestPtr req, std::shared_ptr<ix::ConnectionState>) -> ix::HttpResponsePtr {
+            // ---- DO NOT ADD CORS HEADERS: their ABSENCE is the mechanism ----
+            ix::WebSocketHttpHeaders h;
+            h["Connection"] = "close";
+            std::string body;
+            const int code = minter.serve(req->method, req->uri, body);
+            if (code != 404) h["Content-Type"] = "application/json";
+            if (code == 200) h["Cache-Control"] = "no-store";
+            const char* reason = code == 200 ? "OK" : code == 429 ? "Too Many Requests" : "Not Found";
+            return std::make_shared<ix::HttpResponse>(code, reason, ix::HttpErrorCode::Ok, h, body);
+        });
+    const auto res = server->listen();
+    if (!res.first) {
+        err = res.second;
+        return nullptr;
+    }
+    server->start();
+    return server;
+}
 
 }  // namespace
 
 namespace valence {
 uint64_t deviceNowUs() { return g_clock.nowUs64(); }
-uint32_t deviceFreeHeapBytes() { return 0; }
-// The twin has no buttons: --pairing-window stands in for PAIR, and HOME's
-// reboot has no meaning for a desktop process.
-button::Gesture homeButtonTake() { return button::Gesture::none; }
-button::Gesture pairButtonTake() { return button::Gesture::none; }
-// The twin has no drive: DRV_ALM never asserts.
-bool driveAlarmTake() { return false; }
-// The twin has no e-stop wired: it reads present and released, always.
-estop::Reading estopInputRead() {
-    estop::Reading r;
-    r.known = true;
-    return r;
-}
 }  // namespace valence
 
 namespace geiger {
@@ -294,179 +228,50 @@ int main(int argc, char** argv) {
     timeBeginPeriod(1);
 #endif
 
-    bench::SessionLog log;
+    auto core = std::make_unique<valence::SimCore>();
+    bench::SessionLog& log = core->log;
     log.setEcho(true);
-    // Declared before the first GLOG can fire and outlives every drain below.
-    GeigerToSessionLog geigerSink(log);
-    geiger::logger().addSink(&geigerSink);
-    // Bound to the hub once it exists; outlives every drain below.
-    GeigerToLogChannel logChannel;
-    if (!geiger::logger().addSink(&logChannel, geiger::Level::Warn))
-        log.logf('W', "valencesim: log channel bridge not registered: Geiger sink table full");
-
-    auto box = std::make_unique<SimBox>();
-    if (opt.homeSenseAtMm) {
-        valence::simMotionSetHomeSenseAt(*opt.homeSenseAtMm);
-        log.logf('W', "valencesim: --home-sense-at: home stop at %.1f mm from the boot position",
-                 double(*opt.homeSenseAtMm));
-    }
-    valence::motionBegin();
-    if (opt.motorSwitch) valence::simMotorSwitchModel();
-    valence::motorSwitchBegin();
-    valence::patternBegin();
-
-    if (!valence::buildValenceCatalog(box->catalog, valence::boardFeatures())) {
-        std::fprintf(stderr, "valencesim: catalog build overflowed a Catalog32 pool\n");
-        return 1;
-    }
-    box->device.bindTokenGate(&box->minter);
-    // Stored state BEFORE the Hub, exactly as the P4's hubBegin orders it.
-    const std::filesystem::path prefix =
-        opt.statePrefix.empty() ? exeDir(argv[0]) / "valencesim-state" : std::filesystem::path(opt.statePrefix);
-    std::filesystem::path cfgPath = prefix;
-    cfgPath += ".cfg";
-    std::filesystem::path presetsPath = prefix;
-    presetsPath += ".presets";
-    std::filesystem::path iidPath = prefix;
-    iidPath += ".iid";
-    std::span<std::byte> scratch(box->blobScratch);
-    uint16_t storedGen = 0;
-    std::span<const std::byte> blob = loadBlob(cfgPath, scratch);
-    const bool haveStored = !blob.empty() && box->device.adoptConfigBlob(blob, storedGen);
-    if (!blob.empty() && !haveStored)
-        log.logf('W', "valencesim: %s rejected -- factory values stand", cfgPath.string().c_str());
-    blob = loadBlob(presetsPath, scratch);
-    if (!blob.empty() && !box->device.adoptPresetsBlob(blob))
-        log.logf('W', "valencesim: %s rejected -- preset store starts empty", presetsPath.string().c_str());
-    // The twin is a COMMISSIONED machine whatever its state file says, so every
-    // client test can stream at once; --uncommissioned is the first-run hub
-    // (RFC-079), which refuses stream and pattern motion until config-set
-    // writes have carried all eight keys.
-    box->device.setSetupWritten(opt.uncommissioned ? 0 : valence::kSetupRequiredMask);
-    if (opt.uncommissioned) log.logf('W', "valencesim: --uncommissioned: first-run hub, setup record cleared");
-    // The far stop defaults to the stored max_rail plus both safety margins
-    // from the home stop, on the other side of the boot position: a usable rail
-    // exactly as long as the setting, so a cycle stores what it found.
-    if (opt.homeSenseAtMm) {
-        const float stops = box->device.config().max_rail + 2.0f * valence::kHomeSafetyMarginMm;
-        const float farAt = opt.railEndAtMm.value_or(*opt.homeSenseAtMm < 0.0f ? *opt.homeSenseAtMm + stops
-                                                                               : *opt.homeSenseAtMm - stops);
-        valence::simMotionSetRailEndAt(farAt);
-        const float between = std::fabs(farAt - *opt.homeSenseAtMm);
-        log.logf('W', "valencesim: --rail-end-at: far stop at %.1f mm from the boot position, %.1f mm stop to stop, "
-                 "usable rail %.1f mm", double(farAt), double(between),
-                 double(between - 2.0f * valence::kHomeSafetyMarginMm));
-    }
-    box->device.pushConfigToMotion();
-
-    box->hub.emplace(box->catalog, g_clock, box->rng, box->device);
-    valence::Hub& hub = *box->hub;
-    if (hub.catalogEncodedBytes() == 0) {
-        std::fprintf(stderr, "valencesim: catalog encoded to ZERO bytes (scratch %u B)\n",
-                     unsigned(valence::Hub::catalogScratchCapacity()));
-        return 1;
-    }
-    if (haveStored) {
-        while (hub.cfgGen() != storedGen) hub.bumpConfigGeneration();
-    }
-    log.logf('I', "valencesim: state %s.{cfg,presets,iid}: config %s, cfg_gen %u",
-             prefix.string().c_str(), haveStored ? "stored" : "factory", unsigned(hub.cfgGen()));
-    hub.setIdentity(VALENCE_PRODUCT, FIRMWARE_VERSION, kHubName);
-    // No motor switch on a desktop by default: ESTOP is a halt that keeps
-    // home (SPEC 11.2). --motor-switch models the board's, which cuts power.
-    hub.setEstopCutsPower(opt.motorSwitch);
-    hub.setHubInstanceId(loadOrMintInstanceId(iidPath, box->rng, log));
-    log.logf('I', "valencesim: hub_instance_id %016llx",
-             static_cast<unsigned long long>(hub.hubInstanceId()));
+    FileStore store(opt.statePrefix.empty() ? exeDir(argv[0]) / "valencesim-state"
+                                            : std::filesystem::path(opt.statePrefix));
+    const std::string storeName = store.name();
+    opt.sim.storeName = storeName.c_str();
+    if (!core->begin(opt.sim, g_clock, store)) return 1;
+    valence::Hub& hub = core->hub();
     hub.setEndpoint(opt.wsPort, 0x7F000001u);
-    box->device.attach(hub, box->catalog);
     // RFC-053: ESTOP datagrams share the §13.8 port, wired as the board's
     // hubBegin wires them: the hub they latch, and the port's hook.
+    valence::ValenceDiscoveryPort discovery;
     valence::estopDatagramBind(&hub);
-    box->discovery.setDatagramHook(&valence::estopDatagramHook);
-    box->discovery.setReplyFlagsHook(&valence::estopDatagramReplyFlags);
+    discovery.setDatagramHook(&valence::estopDatagramHook);
+    discovery.setReplyFlagsHook(&valence::estopDatagramReplyFlags);
     if (opt.noEstopUdp) {
         valence::estopDatagramSetEnabled(false);
         log.logf('W', "valencesim: --no-estop-udp: ESTOP datagrams are dropped, never latched");
     }
-    logChannel.bind(&hub);
 
-    const auto etag = hub.catalogEtag();
-    std::array<char, 2 * 32 + 1> etagHex{};
-    for (size_t i = 0; i < etag.size() && i < 32; ++i)
-        std::snprintf(etagHex.data() + 2 * i, 3, "%02x", unsigned(etag[i]));
-    log.logf('I', "valencesim: %s %s, catalog %u entries, %u B, etag %s", VALENCE_PRODUCT,
-             FIRMWARE_VERSION, unsigned(box->catalog.count), unsigned(hub.catalogEncodedBytes()),
-             etagHex.data());
-    const valence::CatalogHeadroom room = valence::catalogHeadroom(box->catalog, hub.catalogEncodedBytes());
-    log.logf('I', "valencesim: accessory headroom: %u accessories; free %u entries, %u layout, "
-             "%u schema, %u safe, %lu B", unsigned(room.accessories), unsigned(room.entries),
-             unsigned(room.layout), unsigned(room.schema), unsigned(room.safe),
-             static_cast<unsigned long>(room.bytes));
-
-    // The board's boot hands the switch the self-check's verdict; the twin's
-    // board always passes it. Without the model this changes nothing.
-    valence::motorSwitchSetSelfCheck(true);
-    if (opt.motorSwitch)
-        log.logf('W', "valencesim: --motor-switch: switch modeled, estop_cuts_power true, enabling");
-    if (opt.motorSwitch && opt.mswFaultS >= 0) {
-        const uint64_t from = g_clock.nowUs64() + uint64_t(opt.mswFaultS) * 1000000u;
-        valence::simMotorSwitchInjectFault(from, from + 2000000u);
-        log.logf('W', "valencesim: --msw-fault: MSW_FLT_N low from +%d s for 2 s", opt.mswFaultS);
-    }
-
-    if (opt.homed) {
-        const float stroke = valence::motionForceHome(box->device.config().max_rail);
-        log.logf('W', "valencesim: --homed: force_home asserted, stroke %.1f mm", double(stroke));
-    }
-    if (opt.pairingWindow) {
-        hub.openPresenceWindow();
-        log.logf('W', "valencesim: --pairing-window: presence window open (the gesture's twin)");
-    }
-
-    if (!box->port.begin(&hub, opt.wsPort, &log, opt.bindHost)) {
+    bench::ValenceBenchWsPort port;
+    if (!port.begin(&hub, opt.wsPort, &log, opt.bindHost)) {
         std::fprintf(stderr, "valencesim: WS listen failed on %s:%u\n", opt.bindHost.c_str(), unsigned(opt.wsPort));
         return 1;
     }
     // Non-fatal, as on the P4: a port another twin holds only costs discovery.
-    if (opt.discovery) box->discovery.begin(opt.discoveryPort, kHubName, FIRMWARE_VERSION, opt.wsPort);
+    if (opt.discovery) discovery.begin(opt.discoveryPort, valence::SimCore::kHubName, FIRMWARE_VERSION, opt.wsPort);
     std::string err;
-    if (!box->minter.begin(opt.httpPort, err)) {
+    std::unique_ptr<ix::HttpServer> http = startUiTokenHttp(core->minter(), opt.httpPort, err);
+    if (!http) {
         // Non-fatal, as on the P4: watch-tier and paired clients still work.
-        log.logf('W', "valencesim: /uitoken unavailable on :%u -- %s", unsigned(opt.httpPort),
-                 err.c_str());
+        log.logf('W', "valencesim: /uitoken unavailable on :%u -- %s", unsigned(opt.httpPort), err.c_str());
     } else {
         log.logf('I', "valencesim: GET /uitoken on 127.0.0.1:%u", unsigned(opt.httpPort));
     }
 
+    const auto pump = [&](uint32_t nowMs) {
+        port.loop(nowMs);
+        discovery.poll(hub, nowMs);
+    };
     const auto start = std::chrono::steady_clock::now();
-    uint32_t lastHubMs = 0;
     while (!g_stop) {
-        const uint64_t nowUs = g_clock.nowUs64();
-        const uint32_t nowMs = uint32_t(nowUs / 1000);
-        // Generator first, so a stroke it emits is planned on this same pass,
-        // as the P4's motion task plans at arrival.
-        valence::simPatternTick(nowUs);
-        valence::simMotorSwitchTick(nowUs);
-        valence::simMotionTick(nowUs);
-        if (uint32_t(nowMs - lastHubMs) >= 5u) {
-            lastHubMs = nowMs;
-            box->port.loop(nowMs);
-            hub.update(g_clock.nowUs());
-            const uint8_t due = box->device.tick(nowMs);
-            box->discovery.poll(hub, nowMs);
-            geiger::drainToSinks();
-            if (due & valence::kPersistConfig) {
-                const size_t n = box->device.encodeConfigBlob(scratch, hub.cfgGen());
-                if (!saveBlob(cfgPath, scratch.first(n)))
-                    log.logf('W', "valencesim: persist %s failed", cfgPath.string().c_str());
-            }
-            if (due & valence::kPersistPresets) {
-                const size_t n = box->device.encodePresetsBlob(scratch);
-                if (!saveBlob(presetsPath, scratch.first(n)))
-                    log.logf('W', "valencesim: persist %s failed", presetsPath.string().c_str());
-            }
-        }
+        core->pass(g_clock.nowUs64(), pump);
         if (opt.durationS > 0 &&
             std::chrono::steady_clock::now() - start > std::chrono::seconds(opt.durationS)) {
             break;
@@ -475,9 +280,9 @@ int main(int argc, char** argv) {
     }
 
     geiger::drainToSinks();
-    box->minter.stop();
-    box->discovery.end();
-    box->port.stop();
+    if (http) http->stop();
+    discovery.end();
+    port.stop();
 #ifdef _WIN32
     timeEndPeriod(1);
 #endif
