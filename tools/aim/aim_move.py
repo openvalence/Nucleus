@@ -5,11 +5,13 @@ alarm. Arms 0x00=1 for the moves (pulses are deaf meanwhile) and leaves by 506 t
 python aim_move.py COM2 --rpm 3000 --revs 50
 """
 import argparse, struct, sys, time
-import numpy as np, serial
+import numpy as np
+import aim_link
 
 ap = argparse.ArgumentParser()
 ap.add_argument('port'); ap.add_argument('--rpm', type=int, required=True); ap.add_argument('--revs', type=float, default=50.0)
 ap.add_argument('--restore-rpm', type=int, default=1500); ap.add_argument('--tag', default='')
+ap.add_argument('--baud', type=int, help='drive baud; hunts 19200 then 115200 when absent')
 ap.add_argument('--fw', type=int, help='field weakening 0x04 for this run (restored after)'); ap.add_argument('--ramp', type=int, help='accel 0x03 for this run (restored after)')
 a = ap.parse_args()
 MM_PER_REV = 39.27; CPR = 32768.0
@@ -20,7 +22,7 @@ def crc16(d):
         c ^= b
         for _ in range(8): c = (c >> 1) ^ 0xA001 if c & 1 else c >> 1
     return c
-ser = serial.Serial(a.port, 19200, timeout=0.03)
+ser = aim_link.open_drive(a.port, a.baud, timeout=0.03)
 def xfer(fc, payload, nreply, timeout=0.08):
     f = bytes([1, fc]) + payload; ser.reset_input_buffer(); ser.write(f + struct.pack('<H', crc16(f)))
     t0 = time.time(); buf = b''

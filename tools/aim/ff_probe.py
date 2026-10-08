@@ -6,12 +6,14 @@ Per leg: the drive's following lag against the hub's emitted count (encoder poll
 python ff_probe.py --speed 1000 --accel 100000 --regs 0x03=60000,0x08=3900 --tag base
 """
 import argparse, os, json, os, struct, sys, threading, time
-import numpy as np, serial
+import numpy as np
+import aim_link
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'Valence', 'tools')))  # the sibling Valence checkout
 import valence_probe as sp, websocket
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--ip', default='192.168.1.118'); ap.add_argument('--com', default='COM2')
+ap.add_argument('--baud', type=int, help='drive baud; hunts 19200 then 115200 when absent')
 ap.add_argument('--speed', type=float, default=1000.0); ap.add_argument('--accel', type=float, default=100000.0)
 ap.add_argument('--lo', type=float, default=20.0); ap.add_argument('--hi', type=float, default=620.0); ap.add_argument('--legs', type=int, default=4)
 ap.add_argument('--regs', default='', help='comma list addr=value, hex addr ok'); ap.add_argument('--tag', default='')
@@ -25,7 +27,7 @@ def crc16(d):
         c ^= b
         for _ in range(8): c = (c >> 1) ^ 0xA001 if c & 1 else c >> 1
     return c
-lock = threading.Lock(); ser = serial.Serial(a.com, 19200, timeout=0.03)
+lock = threading.Lock(); ser = aim_link.open_drive(a.com, a.baud, timeout=0.03)
 def xfer(fc, payload, nreply, timeout=0.08):
     with lock:
         f = bytes([1, fc]) + payload; ser.reset_input_buffer(); ser.write(f + struct.pack('<H', crc16(f)))

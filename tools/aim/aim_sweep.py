@@ -1,11 +1,12 @@
 """AIM drive register sweep over Modbus RTU: READS ONLY (FC 0x03 and read-class
 function codes). Finds every holding-register address the firmware answers,
 and which function codes it honors. Never writes.
-Usage: python aim_sweep.py COM2 [slave]
+Usage: python aim_sweep.py COM2 [slave] [--baud N]
 """
 import struct, sys, time, json
-import serial
+import aim_link
 
+BAUD = aim_link.pop_baud(sys.argv)
 PORT = sys.argv[1] if len(sys.argv) > 1 else 'COM2'
 SLAVE = int(sys.argv[2]) if len(sys.argv) > 2 else 1
 
@@ -42,18 +43,8 @@ def read_regs(ser, addr, n=1):
         return list(struct.unpack('>' + 'H' * n, r[1][1:1 + 2 * n]))
     return r
 
-def autobaud():
-    for baud in (19200, 115200, 9600, 38400, 57600):
-        ser = serial.Serial(PORT, baud, timeout=0.02)
-        time.sleep(0.05)
-        r = read_regs(ser, 0x15, 1)
-        if isinstance(r, list):
-            print('baud', baud, 'device address register 0x15 =', r[0])
-            return ser, baud
-        ser.close()
-    raise SystemExit('no answer at any baud on ' + PORT)
-
-ser, baud = autobaud()
+ser = aim_link.open_drive(PORT, BAUD, timeout=0.02, slave=SLAVE)
+baud = ser.baudrate
 out = {'port': PORT, 'baud': baud, 'slave': SLAVE}
 
 # 1. the documented block, every value

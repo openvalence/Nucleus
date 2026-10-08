@@ -3,11 +3,12 @@ The save gate (bench-verified): 0x00=1, 0x01=0 (output off), write, 0x14=1 last
 x3 polling 0x14 for 2, 0x01 back to what it read, then leave the Modbus door
 with 0x00=506 then 0x00=0. 0x19 engages at power-on from the SAVED value.
 Never writes 0x0A=0, never touches the baud envelope.
-Usage: python aim_program.py COM2 [--verify]
+Usage: python aim_program.py COM2 [--verify] [--baud N]
 """
 import struct, sys, time
-import serial
+import aim_link
 
+BAUD = aim_link.pop_baud(sys.argv)
 PORT = sys.argv[1] if len(sys.argv) > 1 else 'COM2'
 VERIFY = '--verify' in sys.argv
 SLAVE = 1
@@ -52,10 +53,10 @@ def dump(ser):
     v = read(ser, 0x00, 26)
     return dict(enumerate(v)) if v else None
 
-ser = serial.Serial(PORT, 19200, timeout=0.02)
+ser = aim_link.open_drive(PORT, BAUD, timeout=0.02)
 time.sleep(0.1)
 before = dump(ser)
-if not before: raise SystemExit('no answer on ' + PORT + ' at 19200')
+if not before: raise SystemExit('no answer on %s at %d' % (PORT, ser.baudrate))
 print('before:', {('0x%02X' % k): v for k, v in before.items()})
 diff = {a: (before[a], t) for a, t in TARGET.items() if before[a] != t}
 if VERIFY:

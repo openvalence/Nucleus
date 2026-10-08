@@ -18,6 +18,8 @@ decisions are on the board (val-d66, val-sgj).
 - The drive's RS485 goes to the PC (COM2, 19200 8N1, slave 1). The motor's
   truth is the drive's own encoder (0x16/0x17, 32768 counts per rev) read
   before and after each move, and polled at 75 to 90 Hz during moves.
+- The machine's 60AIM40F answers at 115200, the bench 57AIM30 at 19200; the
+  tools/aim scripts hunt both unless --baud is given.
 - Moves came two ways: hub jogs (0x3100 point moves at jog_speed and
   jog_accel, a clean trapezoid), and the drive's own moves over Modbus
   (FC 0x10 delta to 0x0C/0x0D with 0x00 armed), which take the hub out

@@ -6,7 +6,8 @@ in a thread at --poll-hz. Reports swing, peak speed, lag, following error, drift
 python ceiling.py --wave square --freq 1 --amp 0.45 --speed 3000 --accel 100000 --poll-hz 10
 """
 import argparse, os, json, math, os, struct, sys, threading, time
-import numpy as np, serial
+import numpy as np
+import aim_link
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'Valence', 'tools')))  # the sibling Valence checkout
 import valence_probe as sp, websocket
 
@@ -18,6 +19,7 @@ ap.add_argument('--seconds', type=float, default=8.0); ap.add_argument('--rate',
 ap.add_argument('--window', type=float, nargs=2, default=[0.0, 100.0]); ap.add_argument('--fake-home', type=float, help='bench only: fake-home this stroke (0x3101 op 2). Never on a real rail')
 ap.add_argument('--speed', type=float); ap.add_argument('--accel', type=float); ap.add_argument('--jerk', type=float); ap.add_argument('--max-rail', type=float)
 ap.add_argument('--poll-hz', type=float, default=10.0); ap.add_argument('--com', default='COM2')
+ap.add_argument('--baud', type=int, help='drive baud; hunts 19200 then 115200 when absent')
 ap.add_argument('--dump'); ap.add_argument('--tag', default='')
 a = ap.parse_args()
 lo, hi = a.window; span = hi - lo
@@ -32,8 +34,7 @@ def crc16(b):
     return c
 drive = []   # (t, alarm, cur, spd, volt, temp, r13, enc_counts)
 stop = threading.Event()
-def poller():
-    ser = serial.Serial(a.com, 19200, timeout=0.05)
+def poller(ser):
     req = bytes([1, 3]) + struct.pack('>HH', 0x0E, 10); req += struct.pack('<H', crc16(req))
     period = 1.0 / a.poll_hz
     while not stop.is_set():
@@ -45,7 +46,7 @@ def poller():
         if dt > 0: time.sleep(dt)
     ser.close()
 if a.poll_hz > 0:
-    th = threading.Thread(target=poller, daemon=True); th.start()
+    th = threading.Thread(target=poller, args=(aim_link.open_drive(a.com, a.baud, timeout=0.05),), daemon=True); th.start()
 
 # ---- hub session --------------------------------------------------------------
 token = None

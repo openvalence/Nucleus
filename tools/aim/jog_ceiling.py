@@ -5,7 +5,8 @@ before and after), leg time, drive speed/current peaks, alarm.
 python jog_ceiling.py --speed 1000 --accel 100000 --legs 4
 """
 import argparse, os, json, os, struct, sys, threading, time
-import numpy as np, serial
+import numpy as np
+import aim_link
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'Valence', 'tools')))  # the sibling Valence checkout
 import valence_probe as sp, websocket
 
@@ -15,6 +16,7 @@ ap.add_argument('--speed', type=float, required=True); ap.add_argument('--accel'
 ap.add_argument('--lo', type=float, default=20.0); ap.add_argument('--hi', type=float, default=620.0)
 ap.add_argument('--fake-home', type=float, help='bench only: fake-home this stroke (0x3101 op 2). Never on a real rail; the machine homes for real first'); ap.add_argument('--legs', type=int, default=4)
 ap.add_argument('--poll-hz', type=float, default=20.0); ap.add_argument('--com', default='COM2'); ap.add_argument('--tag', default='')
+ap.add_argument('--baud', type=int, help='drive baud; hunts 19200 then 115200 when absent')
 ap.add_argument('--input-accel', type=float); ap.add_argument('--input-speed', type=float); ap.add_argument('--dump')
 a = ap.parse_args()
 
@@ -26,7 +28,7 @@ def crc16(b):
         for _ in range(8): c = (c >> 1) ^ 0xA001 if c & 1 else c >> 1
     return c
 lock = threading.Lock(); drive = []; stop = threading.Event()
-ser = serial.Serial(a.com, 19200, timeout=0.05)
+ser = aim_link.open_drive(a.com, a.baud, timeout=0.05)
 REQ = bytes([1, 3]) + struct.pack('>HH', 0x0E, 10); REQ += struct.pack('<H', crc16(REQ))
 def read_drive():
     with lock:
