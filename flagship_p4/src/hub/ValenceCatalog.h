@@ -1378,7 +1378,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectField({.name = "flipped", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = card::motion_behavior,
-                      .desc = "Rail mounted reversed, position 0 at the far end",
+                      .desc = "Position 0 at the far end",
                       .role = roles::axis_flipped,
                       .settingKey = 8, .hasSettingKey = true,
                       .hasRank = true, .rank = valence::ui_ranks::control},
@@ -1492,7 +1492,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasRank = true, .rank = valence::ui_ranks::control});
     c.addSelectField({.name = "curve_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0), .group = card::curve,
-                      .desc = "Keep the sender's curve or force a smoothness class",
+                      .desc = "Sender's curve or a forced smoothness class",
                       .settingKey = 13, .hasSettingKey = true},
                      {"follow client", "force C1", "force C2"});
     // A SELECT'S WIRE VALUE IS ITS INDEX (SPEC, catalog.hpp addSelectField), so
@@ -1582,7 +1582,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 60098.0f,
                       .dflt = SettingDefault::ofInt(0), .group = "Servo drive",
                       // Below 60000 the drive ramps on its own and lags the planner.
-                      .desc = "Drive ramp, 0 auto, 60000 none, 60001+ feedforward %",
+                      .desc = "Ramp: 0 auto, 60000 none, 60001+ feedforward %",
                       .step = 1.0f, .settingKey = 1,
                       .hasSettingKey = true, .hasStep = true});
     // READBACK, no setting_key, so these render as readouts. What the DRIVE
