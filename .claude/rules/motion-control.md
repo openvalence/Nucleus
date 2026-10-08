@@ -14,8 +14,6 @@ sole-caller rule, the two-chip split, HP-evaluates / LP-renders) lives in
 **The planner is Kinetic² (operator ruling 2026-10-06, bd val-z1k).**
 `kinetic2::Engine<1, 64>` inside MotionArbiter is the one planner of every
 Nucleus build: the P4 image, valencesim, kinetic-wasm and the native suites.
-The Kinetic repo's `include/kinetic/` engine and its `third_party/` are that
-repo's own test oracle and are never compiled here.
 
 Every intent becomes knots at one boundary (MotionArbiter.cpp, "the Kinetic²
 boundary"): a segment is a knot at its start plus its duration, a gap before

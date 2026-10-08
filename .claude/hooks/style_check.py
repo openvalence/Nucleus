@@ -11,8 +11,6 @@ import tempfile
 SKIP_PATHS = (
     "/.beads/", "/node_modules/", "/managed_components/", "/site/",
     "license", "/vectors/",
-    # vendored third-party trees; inert in the spec repo
-    "/lib/ruckig/",
 )
 
 # Fallback only. codespell's en-GB dictionary is preferred when installed

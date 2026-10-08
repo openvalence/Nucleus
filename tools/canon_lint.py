@@ -65,7 +65,7 @@ FROZEN_SHA256_SIBLING = {
 # checked: a tracked Kinetic file can only include one by showing dirty itself.
 KINETIC_SIBLING = ROOT.parent / "Kinetic"
 KINETIC_PIN_FILE = ROOT / "kinetic.pin"
-KINETIC_CONSUMED_PATHS = ("include", "third_party", "tests/test_kinetic.cpp")
+KINETIC_CONSUMED_PATHS = ("include", "library.json", "tests/test_kinetic2.cpp")
 
 VENDORED_PREFIXES = ("lib/valence/", "managed_components/")
 BINARY_SUFFIXES = (".bin", ".png", ".jpg", ".webp", ".ico", ".pdf",

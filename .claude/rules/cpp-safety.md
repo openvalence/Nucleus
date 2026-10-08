@@ -10,8 +10,7 @@ this file wins.
 
 **Scope, and it is deliberate.** These rules bind `flagship_*/src/`,
 `flagship_*/ulp/`, and the first-party libraries `lib/geiger`, `lib/flux`,
-and Kinetic (`../Kinetic/include`). They do NOT bind Kinetic's
-`third_party/ruckig`, ESP-IDF, or anything the
+and Kinetic (`../Kinetic/include`). They do NOT bind ESP-IDF or anything the
 component manager fetches into `managed_components/`. That code is
 third-party, is re-vendored from upstream, and is full of constructs the safe
 subset rejects. Enforcing there would mean choosing between a permanently red
