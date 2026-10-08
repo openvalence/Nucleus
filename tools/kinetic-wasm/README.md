@@ -62,7 +62,7 @@ k._initialize();                       // static constructors, once
 const h = k.kinetic_create(1000, 50000, 2000000, 500, 0);
 const out = k.malloc(64);
 k.kinetic_set_window(h, 100, 400);
-k.kinetic_submit_segment(h, 7500, 250, -32768, 120000, 1);
+k.kinetic_submit_segment(h, 7500, 250, -32768, 120000);
 k.kinetic_step(h, 0.001, out);         // read the struct below at `out`
 ```
 
@@ -78,7 +78,7 @@ frame of the travel window. The engine frame is that window normalized to
 | `kinetic_create(vmax_mm_s, amax_mm_s2, jmax_mm_s3, rail_mm, horizon_ms)` | The input ceiling set, the rail, and the grant's schedule horizon (0 = `max_future_schedule_ms`, 250). Homed at 0 mm, window = the whole rail, factory tuning. Null on a non-finite or non-positive limit. |
 | `kinetic_set_window(h, lo_mm, hi_mm)` | 1 applied, 0 refused. Like the board, the next tick parks and reseeds at rest. |
 | `kinetic_default_tuning(out)` / `kinetic_set_tuning(h, t)` | The factory set, and a whole set applied before the next segment (`kinetic_tuning` below). |
-| `kinetic_submit_segment(h, pos_e4, dur_ms, end_vel_e3, start_us, curve_family)` | One 0x2101 segment, planned at the current clock. 1 accepted, 0 refused by the planner, -1 zero duration (dropped, as the hub drops it). |
+| `kinetic_submit_segment(h, pos_e4, dur_ms, end_vel_e3, start_us)` | One 0x2101 segment, planned at the current clock. 1 accepted, 0 refused by the planner, -1 zero duration (dropped, as the hub drops it). |
 | `kinetic_step(h, dt_s, out)` | Advances the clock by `dt_s`, rounded to whole microseconds, evaluates, and writes one `kinetic_sample`. The board ticks at 1 ms. |
 | `kinetic_reset(h)` | Back to the create state at t = 0, keeping limits, window and tuning. |
 | `kinetic_now_us(h)`, `kinetic_destroy(h)`, `kinetic_version()` | The clock; release; the identity string (static storage). |
@@ -91,7 +91,6 @@ frame of the travel window. The engine frame is that window normalized to
 | 2 | `dur_ms` u16 | milliseconds, nonzero |
 | 3 | `end_vel_e3` i16 | 1e-3 window per second; -32768 = unspecified (SPEC 5.4) |
 | 4 | `start_us` f64 | the segment's start on the engine clock, whole microseconds. A start in the past is due now; one beyond `horizon_ms` is clamped to it (SPEC 5.4) |
-| 5 | `curve_family` u8 | the GRANTED family (registry `curve_families`: 0 unspecified, 1 c1_cubic, 2 c2_quintic) |
 
 A player stamps each segment ahead of its start, inside the horizon, exactly as
 it would on the wire. A segment is a knot at its start plus its duration, a
@@ -111,34 +110,27 @@ newest is refused (KnotRefused): nothing queued is ever replaced.
 | 40 | `accel_mm_s2` f32 | `a` times the window span (unclamped) |
 | 44 | `position_mm` f32 | the ideal emitter's count: what an on-time LP core renders |
 | 48 | `target_mm` f32 | where the active plan ends |
-| 52 | `anomalies` u32 | bit k = `kinetic2::AnomalyKind` k recorded since the previous step (11 is KnotRefused; 12 is PieceOverCeiling, a piece no trim keeps inside a limit, rendered at its least-over trim, never a drop) |
+| 52 | `anomalies` u32 | bit k = `kinetic2::AnomalyKind` k recorded since the previous step, the motion-anomaly kinds (3 is KnotTrimmed; 5 is KnotRefused; 6 is PieceOverCeiling, a piece no trim keeps inside a limit, rendered at its least-over trim, never a drop) |
 | 56 | `mode` u8 | 0 idle, 1 toward a segment's knot, 2 toward a sample's, 3 a brake (the 0x1111 `mode` select's ordinals) |
-| 57 | `plan_kind` u8 | 0 none, 1 quintic (the 0x1111 `plan_kind` select's ordinals; 2 and 3 are never rendered) |
-| 58 | `flags` u8 | bit0 busy, bit1 shaped (a knot trimmed toward its predecessor), bit2 fallback (a stretched deadline; Kinetic² never sets it), bit3 clamped (raw `p` outside the window), bit4 refused (a submit since the previous step, or a dropped or refused knot) |
+| 57 | `plan_kind` u8 | 0 none, 1 bezier (the 0x1111 `plan_kind` select's ordinals) |
+| 58 | `flags` u8 | bit0 busy, bit1 shaped (a knot trimmed toward its predecessor), bit2 clamped (raw `p` outside the window), bit3 refused (a submit since the previous step, or a refused knot) |
 | 59 | reserved u8 | 0 |
 | 60 | `plans` u32 | successful plans since create or reset |
 
-### `kinetic_tuning`, 64 bytes
+### `kinetic_tuning`, 32 bytes
 
 `MotionTuning` (`flagship_p4/src/motion/ValenceMotion.h`) as the 0x3120
-writer speaks it. The offsets are fixed; a retired member's bytes stay as
-ignored padding:
+writer speaks it, Kinetic²'s set (Valence RFC-108 item 7). The offsets are
+fixed:
 
 | Offset | Member |
 |---|---|
 | 0, 4, 8 | f32 `jmax_ovr`, `vmax_ovr`, `amax_ovr` |
-| 12..27 | retired, ignored (four f32) |
-| 28 | f32 `amplitude_budget` |
-| 32 | retired, ignored (f32) |
-| 36 | u32 `chase_dense_us` |
-| 40..46 | retired, ignored (a u32 and three u8) |
-| 47 | u8 `curve_policy` (0 follow, 1 C1, 2 C2) |
-| 48 | u8 `infeasible_policy` (0 stretch, 1 blend) |
-| 49..51 | reserved, zero |
-| 52 | u32 `lookahead_us` |
-| 56 | u8 `corner` (0 continuous, 1 cubic) |
-| 57..59 | reserved, zero |
-| 60 | u32 `react_us` (the reaction horizon, below) |
+| 12 | u32 `chase_dense_us` |
+| 16 | u32 `react_us` (the reaction horizon, below) |
+| 20 | f32 `smoothness` (0 crisp .. 1 smooth) |
+| 24 | f32 `handle_floor` (0.05..0.33) |
+| 28 | f32 `trim_max` (0.1..1) |
 
 Start from `kinetic_default_tuning` and change only what the card changed.
 The members map onto `kinetic2::Config` as follows (this ABI takes segments
@@ -147,9 +139,7 @@ only):
 | Member | Effect |
 |---|---|
 | `jmax_ovr`, `vmax_ovr`, `amax_ovr` | the ceilings |
-| `infeasible_policy`, `amplitude_budget`, `corner` | `Config::policy`, `Config::amplitude_floor`, `Config::corner`; the handle renderer reads none of them (Kinetic `types.hpp`) |
-| `curve_policy` | applied at the knot boundary: 1 forces C1, 2 C2, 0 follows the segment |
-| `lookahead_us` | `Config::lookahead_us`; no catalog field writes it |
+| `smoothness`, `handle_floor`, `trim_max` | `Config::smoothness`, `Config::handle_floor`, `Config::trim_max`: how free knots render, the shortest handle a ceiling fit may leave (share of the piece), and the farthest a knot is trimmed toward its predecessor (share of the window span) |
 | `react_us` | `Config::react_us`, the reaction horizon in microseconds (factory 4000): a knot arriving while the carriage moves keeps the curve under it this far ahead of now, or through the next knot when that is nearer, and re-plans from the state there (RFC-105 (bb)). A longer horizon avoids re-planning inside a piece too short to change within the ceilings. A shorter horizon lets the next knot revise a plan that was based on one knot |
 | `chase_dense_us` | ignored here; on the board it sets the samples grant's `schedule_latency_us` (`sampleLatencyUs()`), the delay a sample renders at |
 
@@ -166,7 +156,7 @@ the hub adds to a segment, and reads the solver's decisions:
 
 | Call | What |
 |---|---|
-| `kinetic_submit_segment2(h, pos_e4, dur_ms, end_vel_e3, start_us, family, supersede)` | `kinetic_submit_segment` with the RFC-087 supersede flag the hub sets on the first segment of a bundle the motion path takes (`ValenceDevice::onStreamBundle`) |
+| `kinetic_submit_segment2(h, pos_e4, dur_ms, end_vel_e3, start_us, supersede)` | `kinetic_submit_segment` with the RFC-087 supersede flag the hub sets on the first segment of a bundle the motion path takes (`ValenceDevice::onStreamBundle`) |
 | `kinetic_submit_manual(h, target_mm)` | a Manual point, the jog as the hub submits it: window-held, the jog set, live |
 | `kinetic_advance(h, dt_s)`, `kinetic_evaluate(h, out)` | `kinetic_step` split at the board's wake (`MotionTask::run`): the clock moves, the intents that arrived by then are accepted at that reading, then the tick evaluates |
 | `kinetic_pending(h)`, `kinetic_solved(h, i, out)` | the knots still ahead and the i-th as the solver placed it, a 40 B `kinetic_knot` (time, p, v, a, the share a trim kept, a live jog's seconds late, the worst ceiling ratio, clamped; dropped and the pins are always 0). Read after `kinetic_evaluate`: a read between a submit and the tick solves early |

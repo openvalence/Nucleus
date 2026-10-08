@@ -84,9 +84,9 @@ inline constexpr uint16_t machine_modes    = 0x1030;  // STATE·machine, family 
 // channels may name the same INTENT channel as long as their keys do not
 // collide: one coherent write path however many cards the knobs need.
 // 0x1121 (kinetic-chase) is RETIRED and its id is never re-used (SPEC 5.4,
-// 4.4); its one setting the planner reads moved to 0x1122's tail.
+// 4.4).
 inline constexpr uint16_t kinetic_limits   = 0x1120;  // STATE·motion, family 2 member 0 (master; was 0x1103)
-inline constexpr uint16_t kinetic_waveform = 0x1122;  // STATE·motion, family 2 member 2 (was 0x1105)
+inline constexpr uint16_t kinetic_planner  = 0x1122;  // STATE·motion, family 2 member 2, kinetic-planner (was 0x1105)
 // ---- Servo drive registers, its own family: these configure the DRIVE, not --
 // the planner. Family 2 is kinetic's; a drive register that happens to be
 // spelled "acceleration" is a different subsystem and gets its own writer.
@@ -98,8 +98,8 @@ inline constexpr uint16_t drive_tune       = 0x1130;  // STATE·motion, family 3
 // fully-annotated 50-field entry encodes to ~8-10 KB (catalog_max_entry_bytes);
 // fitting in kMaxFields (64) and being affordable in one entry are different
 // constraints, so this splits by subsystem — one channel per base control's
-// modifier (6 fields each, well under the 8-bit enabled_mask) — same
-// principle as the kinetic_limits/kinetic_waveform split.
+// modifier (6 fields each) — same principle as the kinetic_limits /
+// kinetic_planner split.
 inline constexpr uint16_t pattern_advanced          = 0x1210;  // STATE·pattern, family 1 member 0 (master; was 0x1201) — 9 base controls + running
 // The eight fray-d modulators (RFC-066): ONE family (domain=pattern, family=1),
 // members 1-8. Member order is speed-in/out, accel-in/out, depth-1/2, then the
@@ -203,7 +203,7 @@ inline constexpr std::string_view motion_behavior  = "Tuning / Motion behavior";
 inline constexpr std::string_view streaming        = "Tuning / Streaming";
 inline constexpr std::string_view sample_streams   = "Tuning / Sample streams";
 inline constexpr std::string_view curve            = "Tuning / Curve";
-inline constexpr std::string_view infeasible_moves = "Tuning / Infeasible moves";
+inline constexpr std::string_view ceilings         = "Tuning / Ceilings";
 inline constexpr std::string_view replanning       = "Tuning / Re-planning";
 inline constexpr std::string_view pattern_presets  = "Library / Pattern presets";
 }  // namespace card
@@ -280,8 +280,9 @@ inline constexpr float home_speed  = 40.0f;       // DEFAULT_HOME_SPEED_MM_S
 // field's setting_key first.
 // Kinetic² planner options, MIRRORS of kinetic2::Config's defaults
 // (static_asserted in ValenceHub.cpp). Times in the wire's milliseconds.
-inline constexpr float   amplitude_budget  = 0.25f;  // Config::amplitude_floor
-inline constexpr uint8_t corner            = 1;      // Config::corner, cubic (operator 2026-10-06: the machine renders the author's curve)
+inline constexpr float   smoothness        = 0.0f;   // Config::smoothness
+inline constexpr float   handle_floor      = 0.15f;  // Config::handle_floor
+inline constexpr float   trim_max          = 1.0f;   // Config::trim_max
 inline constexpr float   react_ms          = 4.0f;   // Config::react_us
 }  // namespace factory
 
@@ -1048,7 +1049,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                         .group = card::active_plan,
                         .desc = "How the planner bent the current plan",
                         .role = roles::plan_flags},
-                       {"shaped", "stretched", "fallback", "clamped"});
+                       {"shaped", "stretched", "clamped"});
     };
 
     // ---- "power" — STATE, background, 10 Hz ---------------------------------
@@ -1101,14 +1102,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // Plan counts, the per-kind anomaly breakdown, the on-device plan-time
     // bench, and the Valence stream-ingress counters.
     //
-    // The per-kind counters are twelve NAMED fields rather than one array: a
+    // The per-kind counters are six NAMED fields rather than one array: a
     // generic client renders named fields with no per-device knowledge.
-    // Their order is kinetic2::AnomalyKind's own, which is APPEND-ONLY
-    // upstream, so a new engine kind appends a field to the END OF THIS
-    // BLOCK — shifting every offset after it. The catalog's own layout is
-    // what a client decodes against and the etag moves with it, so that is
-    // a resync, not a break — before the v1.0 tag. After it, a new kind
-    // wants its own channel rather than a reshuffled 0x0088.
+    // Their order is kinetic2::AnomalyKind's own from kind 1 (kind 0 is
+    // never counted), so a new engine kind appends a field to the END OF
+    // THIS BLOCK, shifting every offset after it. Before the v1.0 tag that
+    // is a resync (the etag moves); after it, a new kind wants its own
+    // channel (SPEC 5.4).
     //
     // Channel role anomaly.summary (RFC-065): the latched counters twin of
     // motion-anomaly's events.anomaly, so a client binds log and counters
@@ -1118,7 +1118,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // increments it, so EVERY subscriber sees the reset happened, not only
     // the session that asked for it. Without it a client watching the
     // counters cannot tell a reset from a reboot from a wrap.
-    //   [3*4 + 12*4 + 12 + 5*4 + 2 + 1 + 1 = 96 B]
+    //   [3*4 + 1 + 1 + 6*4 + 3*4 + 5*4 + 2 = 72 B]
     auto addMotionDiag = [&]() {
     c.addEntry({.id = ch::motion_diag, .name = "kinetic-diag",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1137,53 +1137,23 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectField({.name = "mode",      .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .group = card::planner, .desc = "Planning mode of the motion core"},
                      {"idle", "waveform", "chase", "settle"});
-    // Option ordinals are wire values and the list is APPEND-ONLY; the planner
-    // renders only none and quintic (MotionArbiter.cpp kPlanKindQuintic).
-    // Ordinals 2 and 3 are retired: never published, labeled "retired", never
-    // re-used.
+    // Option ordinals are wire values (MotionArbiter.cpp kPlanKindBezier).
     c.addSelectField({.name = "plan_kind", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .group = card::planner, .desc = "Curve type of the active plan"},
-                     {"none", "quintic", "retired", "retired"});
-    // Per-kind breakdown — names are kinetic2::AnomalyKind's, index 0 is
-    // the engine's own "none" placeholder and is never counted, so it is
-    // rank hidden: a permanent zero is padding, not a gauge.
-    c.addLayoutField({.name = "anom_none",        .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = card::anomalies, .desc = "Placeholder slot, never counts",
-                      .hasRank = true, .rank = valence::ui_ranks::hidden});
-    c.addLayoutField({.name = "anom_plan_failed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = card::anomalies, .desc = "Commands that could not be planned"});
+                     {"none", "bezier"});
+    // Per-kind breakdown, kinetic2::AnomalyKind 1..6 in order.
     c.addLayoutField({.name = "anom_settle",      .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = card::anomalies, .desc = "Moves braked to rest after the stream stopped"});
     c.addLayoutField({.name = "anom_endvel_clamped", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = card::anomalies, .desc = "Handoff speed cut to stay inside the window"});
-    c.addLayoutField({.name = "anom_deadline_stretched", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = card::anomalies, .desc = "Moves stretched past their given time"});
-    // Kinds the planner never emits (kinetic2::AnomalyKind 5, 7, 8, 9): each
-    // counter keeps its position in the per-kind table and is rank hidden, so
-    // no renderer draws a permanent zero.
-    c.addLayoutField({.name = "anom_waveform_fallback",  .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = card::anomalies, .desc = "Sender curves reshaped for breaking a limit",
-                      .hasRank = true, .rank = valence::ui_ranks::hidden});
-    c.addLayoutField({.name = "anom_waveform_scaled",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = card::anomalies, .desc = "Strokes shortened to finish on time"});
-    c.addLayoutField({.name = "anom_waveform_centered",   .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = card::anomalies, .desc = "Shortened strokes re-centered on their midpoint",
-                      .hasRank = true, .rank = valence::ui_ranks::hidden});
-    c.addLayoutField({.name = "anom_handoff_bounded",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = card::anomalies,
-                      .desc = "Arrival speeds bounded for the next segment",
-                      .hasRank = true, .rank = valence::ui_ranks::hidden});
-    c.addLayoutField({.name = "anom_waveform_smoothed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = card::anomalies,
-                      .desc = "Curves flattened to keep timing and stroke",
-                      .hasRank = true, .rank = valence::ui_ranks::hidden});
+                      .group = card::anomalies, .desc = "Authored speeds held to the ceiling or the wall"});
+    c.addLayoutField({.name = "anom_knot_trimmed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
+                      .group = card::anomalies, .desc = "Knots trimmed to fit the ceilings"});
     c.addLayoutField({.name = "anom_dwell_zeroed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = card::anomalies,
                       .desc = "Stale arrival speeds ignored on held positions"});
     c.addLayoutField({.name = "anom_knot_refused", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = card::anomalies,
                       .desc = "Points refused as late or out of order"});
-    // Appended (SPEC 5.4): kinetic2::AnomalyKind::PieceOverCeiling, kind 12.
     c.addLayoutField({.name = "anom_piece_over_ceiling", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = card::anomalies,
                       .desc = "Spans no trim could keep inside a limit"});
@@ -1223,9 +1193,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // catalog's body-map grammar exists to prevent.
     //
     // The kind rides the frame's event_kind (33) and is labeled by this entry's
-    // event_kinds table (RFC-065), index-aligned with kinetic2::AnomalyKind and
-    // APPEND-ONLY: a released kind is never relabeled, a retired one keeps its
-    // label. Body key 1 mirrors the value (SPEC 9.4 MAY) and carries no labels,
+    // event_kinds table (RFC-065), index-aligned with kinetic2::AnomalyKind;
+    // a new kind appends. Body key 1 mirrors the value (SPEC 9.4 MAY) and carries no labels,
     // because the table is their one home. The entry's events.anomaly role is
     // how a client finds the anomaly feed without a name.
     //
@@ -1241,9 +1210,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasCategory = true, .category = valence::ui_categories::motion,
                 .hasRank = true, .rank = valence::ui_ranks::diagnostic,
                 .role = valence::channel_roles::events_anomaly});
-    c.setEventKinds({"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
-                     "waveform_fallback", "waveform_scaled", "waveform_centered",
-                     "handoff_bounded", "waveform_smoothed", "dwell_zeroed", "knot_refused", "piece_over_ceiling"});
+    c.setEventKinds({"none", "settle", "endvel_clamped", "knot_trimmed", "dwell_zeroed", "knot_refused",
+                     "piece_over_ceiling"});
     c.addSchemaField({.key = anom_body::kind, .name = "kind", .type = CborFieldType::uint_t, .unit = "",
                       .group = card::anomalies, .desc = "Anomaly kind, same as the event kind"});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",
@@ -1415,18 +1383,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // ---- "kinetic-*" — STATE, motion, section Tuning ----------------------
     // The motion engine's live-tune surface. No controls outside Valence.
     //
-    // TWO CHANNELS, TWO TABS. A settings channel is capped at 8 settings
-    // because its enabled_mask is a bitfield8 and bit i gates the i-th
-    // setting of ITS layout, a WIRE limit the user never sees: SPEC §8.8
-    // ("a category spans channels") lets a later card join the waveform
-    // card's category motion and section Tuning (RFC-094, `card::`).
-    // kinetic-limits holds the planner CEILINGS, which are commissioning
-    // (RFC-079), so it alone carries category setup.
+    // TWO CHANNELS, TWO TABS, split by category, not by size: bit i of an
+    // enabled_mask gates the i-th setting of ITS layout, and a channel past
+    // eight settings carries a second mask pair (SPEC §8.8). kinetic-limits
+    // holds the planner CEILINGS, which are commissioning (RFC-079), so it
+    // alone carries category setup; kinetic-planner is category motion,
+    // section Tuning (RFC-094, `card::`).
     //
-    // ONE SHARED WRITER (0x0105). `settingChannel` is per-entry and
+    // ONE SHARED WRITER (kinetic-set). `settingChannel` is per-entry and
     // `setting_key` is a key WITHIN that writer, so several STATE channels
     // may name the same INTENT channel provided their keys never collide.
-    // Keys are allocated across the cards and are never reused.
+    // Keys run 1..8 across the two cards, contiguous.
     //
     // Applied live and persisted with 0x1000 and cfg_gen in one blob
     // (StoredState.h). The `default` annotations stay the FACTORY values
@@ -1473,94 +1440,71 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                        {"jmax_ovr", "vmax_ovr", "amax_ovr"});
     };
 
-    // The planner's own options, for segments and samples alike. RETIRED
-    // fields keep their bytes as rank hidden padding with no setting_key and
-    // are published 0 (SPEC 5.4: a released field is never removed); their
-    // INTENT keys are permanent gaps. The planner reads every setting here.
-    //   [1 + 1 + 4 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 = 26 B]
-    auto addKineticWaveform = [&]() {
-    c.addEntry({.id = ch::kinetic_waveform, .name = "kinetic-waveform",
+    // Kinetic²'s planner options (RFC-108), for segments and samples alike:
+    // the engine reads every setting here (kinetic2::Config of the same
+    // names), chase_dense_ms excepted, which the arbiter applies at the knot
+    // boundary (sampleLatencyUs()).
+    //   [4 + 4 + 4 + 4 + 4 + 1 + 1 = 22 B]
+    auto addKineticPlanner = [&]() {
+    c.addEntry({.id = ch::kinetic_planner, .name = "kinetic-planner",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
                 .hasCategory = true, .category = valence::ui_categories::motion,
                 .hasSettingChannel = true, .settingChannel = ch::kinetic_set,
-                // Rank control: the curve and infeasible-move policies are
-                // everyday settings, so the card stays visible without an
-                // advanced-affordance gate; the planner options carry
-                // setting_flags::advanced field by field.
+                // Rank control: smoothness is an everyday setting, so the card
+                // stays visible without an advanced-affordance gate; the other
+                // options carry setting_flags::advanced field by field.
                 .hasRank = true, .rank = valence::ui_ranks::control});
-    c.addSelectField({.name = "curve_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(0), .group = card::curve,
-                      .desc = "Sender's curve or a forced smoothness class",
-                      .settingKey = 13, .hasSettingKey = true},
-                     {"follow client", "force C1", "force C2"});
-    // A SELECT'S WIRE VALUE IS ITS INDEX (SPEC, catalog.hpp addSelectField), so
-    // this list is the stored ordinal: 0 = stretch, 1 = blend. The engine's own
-    // enum keeps Blend = 5 and the host maps between them
-    // (include/motion/EngineConfigMap.h), which is also what runs the four
-    // ordinals of policies deleted 2026-09-02 as blend.
-    c.addSelectField({.name = "infeasible_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(1), .group = card::infeasible_moves,
-                      .desc = "Handling for moves that cannot finish in time",
-                      .settingKey = 14, .hasSettingKey = true},
-                     {"stretch", "blend"});
-    c.addLayoutField({.name = "smooth_budget_reserved", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
-                      .desc = "Retired padding, always 0",
-                      .hasRank = true, .rank = valence::ui_ranks::hidden});
-    // Blend's one knob: kinetic2::Config::amplitude_floor.
-    c.addLayoutField({.name = "amplitude_budget", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
+    c.addLayoutField({.name = "smoothness", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
-                      .dflt = SettingDefault::ofFloat(factory::amplitude_budget), .group = card::infeasible_moves,
-                      .desc = "Least share of a stroke Blend keeps",
-                      .step = 0.05f, .settingKey = 17, .hasSettingKey = true, .hasStep = true});
-    c.addLayoutField({.name = "blend_steps_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .desc = "Retired padding, always 0",
-                      .hasRank = true, .rank = valence::ui_ranks::hidden});
-    c.addLayoutField({.name = "settle_grace_reserved", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .desc = "Retired padding, always 0",
-                      .hasRank = true, .rank = valence::ui_ranks::hidden});
-    // Bit i gates the i-th setting-annotated field; the reserved fields carry
-    // none, and the appended settings take the next bits in layout order.
-    c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
-                        .scale = 1.0f, .desc = "Settings the machine accepts right now",
-                        .role = roles::meta_enabled_mask,
-                        .hasRank = true, .rank = valence::ui_ranks::detail},
-                       {"curve_policy", "infeasible_policy", "amplitude_budget",
-                        "chase_dense_ms", "corner", "react_ms"});
-    // RFC-099, append-only. chase_dense_ms is never trialable (ValenceDevice.cpp).
-    c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
-                        .scale = 1.0f, .desc = "Settings on trial, not stored yet",
-                        .role = roles::meta_trial_pending,
-                        .hasRank = true, .rank = valence::ui_ranks::detail},
-                       {"curve_policy", "infeasible_policy", "amplitude_budget",
-                        "chase_dense_ms", "corner", "react_ms"});
-    // Appended after trial_mask (SPEC 5.4). The samples grant's
-    // schedule_latency_us less the motion tick: a sample becomes a knot this
-    // long after it arrives (RFC-105 promise 1). Refused INTERLOCK, and its
-    // enabled_mask bit low, while a samples grant is live.
+                      .dflt = SettingDefault::ofFloat(factory::smoothness), .group = card::curve,
+                      .desc = "Crisp at 0, smooth at 1",
+                      .step = 0.05f, .settingKey = 4, .hasSettingKey = true, .hasStep = true});
+    c.addLayoutField({.name = "handle_floor", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.05f, .max = 0.33f,
+                      .dflt = SettingDefault::ofFloat(factory::handle_floor), .group = card::curve,
+                      .desc = "Shortest handle the fit may use",
+                      .step = 0.01f, .settingKey = 5, .flags = valence::setting_flags::advanced,
+                      .hasSettingKey = true, .hasStep = true});
+    // Below 1 a piece no trim within it makes legal renders over a ceiling
+    // (piece_over_ceiling); the 0.1 floor keeps a slider from switching trims off.
+    c.addLayoutField({.name = "trim_max", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.1f, .max = 1.0f,
+                      .dflt = SettingDefault::ofFloat(factory::trim_max), .group = card::ceilings,
+                      .desc = "Farthest a knot moves to fit the ceilings",
+                      .step = 0.05f, .settingKey = 6, .flags = valence::setting_flags::advanced,
+                      .hasSettingKey = true, .hasStep = true});
+    // The samples grant's schedule_latency_us less the motion tick: a sample
+    // becomes a knot this long after it arrives (RFC-105 promise 1). Refused
+    // INTERLOCK, and its enabled_mask bit low, while a samples grant is live;
+    // never trialable.
     c.addLayoutField({.name = "chase_dense_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 10.0f, .max = 500.0f,
                       .dflt = SettingDefault::ofFloat(60.0f), .group = card::sample_streams,
                       .desc = "Delay a streamed sample renders behind",
-                      .settingKey = 10, .flags = valence::setting_flags::advanced,
+                      .settingKey = 7, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true});
-    // RFC-105 planner option `corner`: how an authored C1 knot with a nonzero
-    // velocity renders (kinetic2::Corner). Option ordinals are the enum's.
-    c.addSelectField({.name = "corner", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(factory::corner), .group = card::curve,
-                      .desc = "How a moving C1 corner renders",
-                      .settingKey = 21, .flags = valence::setting_flags::advanced,
-                      .hasSettingKey = true},
-                     {"continuous", "cubic"});
     // RFC-105 (bb): the curve this far ahead of now is committed when a knot
     // arrives mid-motion; the re-plan starts there (kinetic2::Config::react_us).
     c.addLayoutField({.name = "react_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(factory::react_ms), .group = card::replanning,
                       .desc = "Committed curve ahead of a re-plan",
-                      .step = 0.5f, .settingKey = 22, .flags = valence::setting_flags::advanced,
+                      .step = 0.5f, .settingKey = 8, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
+    // Bit i gates the i-th setting-annotated field.
+    c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f, .desc = "Settings the machine accepts right now",
+                        .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
+                       {"smoothness", "handle_floor", "trim_max", "chase_dense_ms", "react_ms"});
+    // RFC-099. chase_dense_ms is never trialable (ValenceDevice.cpp).
+    c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f, .desc = "Settings on trial, not stored yet",
+                        .role = roles::meta_trial_pending,
+                        .hasRank = true, .rank = valence::ui_ranks::detail},
+                       {"smoothness", "handle_floor", "trim_max", "chase_dense_ms", "react_ms"});
     };
 
     // ---- "drive-tune" -- STATE, the AIM drive's own registers ---------------
@@ -2100,13 +2044,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "kinetic-set" — INTENT, control, 5 Hz ---------------------------
-    // The single writer behind both kinetic-* cards. Keys are allocated across
-    // those cards and never collide; every key optional, only the keys PRESENT
-    // are applied, and each echoes the value the machine actually took after
-    // its own clamp. RELEASED keys are never reused: 4, 5, 15 and 19
-    // (2026-09-02), and 6, 7, 8, 9, 11, 12, 16, 18 and 20, the settings the
-    // planner does not read (bd val-68v). A request carrying only released
-    // keys NACKs INVALID_VALUE.
+    // The single writer behind both kinetic-* cards: keys 1..8, contiguous,
+    // 1-3 kinetic-limits' and 4-8 kinetic-planner's (RFC-108). Every key
+    // optional, only the keys PRESENT are applied, and each echoes the value
+    // the machine actually took after its own clamp. A request carrying none
+    // of them NACKs INVALID_VALUE.
     //
     // Bounds mirror the engine's own clamps exactly, so a client that validates
     // locally gets the same answer the hub would NACK with. Times are
@@ -2122,17 +2064,15 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 20.0f});
     c.addSchemaField({.key = 3, .name = "amax_ovr", .type = CborFieldType::f32_t, .unit = "1/s2",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 500.0f});
-    c.addSchemaField({.key = 10, .name = "chase_dense_ms", .type = CborFieldType::f32_t, .unit = "ms",
+    c.addSchemaField({.key = 4, .name = "smoothness", .type = CborFieldType::f32_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
+    c.addSchemaField({.key = 5, .name = "handle_floor", .type = CborFieldType::f32_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.05f, .max = 0.33f});
+    c.addSchemaField({.key = 6, .name = "trim_max", .type = CborFieldType::f32_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.1f, .max = 1.0f});
+    c.addSchemaField({.key = 7, .name = "chase_dense_ms", .type = CborFieldType::f32_t, .unit = "ms",
                       .hasMin = true, .hasMax = true, .min = 10.0f, .max = 500.0f});
-    c.addSchemaField({.key = 13, .name = "curve_policy", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2.0f});
-    c.addSchemaField({.key = 14, .name = "infeasible_policy", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
-    c.addSchemaField({.key = 17, .name = "amplitude_budget", .type = CborFieldType::f32_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
-    c.addSchemaField({.key = 21, .name = "corner", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
-    c.addSchemaField({.key = 22, .name = "react_ms", .type = CborFieldType::f32_t, .unit = "ms",
+    c.addSchemaField({.key = 8, .name = "react_ms", .type = CborFieldType::f32_t, .unit = "ms",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     };
 
@@ -2299,7 +2239,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         addPlanStrip();          // 0x1110 STATE·motion, family 1 member 0
         addMotionDiag();         // 0x1111 STATE·motion, family 1 member 1
         addKineticLimits();      // 0x1120 STATE·motion, family 2 member 0
-        addKineticWaveform();    // 0x1122 STATE·motion, family 2 member 2
+        addKineticPlanner();     // 0x1122 STATE·motion, family 2 member 2
     }
     if (feat.has_drive) addDriveTune();   // 0x1130 STATE·motion, family 3 member 0
     if (feat.has_pattern) {

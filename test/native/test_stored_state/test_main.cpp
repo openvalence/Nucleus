@@ -37,7 +37,9 @@ namespace {
 // defaults, so a member an older layout lacks is seen to come from here.
 MotionTuning factoryTune() {
     MotionTuning t;
-    t.corner = 1;
+    t.smoothness = 0.3f;
+    t.handle_floor = 0.2f;
+    t.trim_max = 0.7f;
     t.react_us = 7000;
     return t;
 }
@@ -53,11 +55,10 @@ MotionTuning sampleTuning() {
     t.vmax_ovr = 3.5f;
     t.amax_ovr = 42.0f;
     t.chase_dense_us = 35000;
-    t.curve_policy = 2;
-    t.infeasible_policy = 1;
-    t.amplitude_budget = 0.6f;
     t.home_speed = 25.0f;
-    t.corner = 1;
+    t.smoothness = 0.45f;
+    t.handle_floor = 0.25f;
+    t.trim_max = 0.5f;
     t.react_us = 6500;
     return t;
 }
@@ -106,19 +107,20 @@ TEST_CASE("config blob: cfg_gen 65535 and 0, either side of the counter's wrap, 
 }
 
 // Offsets per StoredState.h: header 7 B, the eight 0x1000 f32, then the
-// tuning: jmax, vmax, amax, four retired f32, amplitude_budget, chase_dense_us,
-// a retired u32, three retired u8, curve_policy, infeasible_policy, a retired
-// u8 and the retired overshoot_clamp byte.
+// tuning: jmax, vmax, amax, five retired f32, chase_dense_us, a retired u32
+// and seven retired u8; after the modes and home_speed, the retired v7 u8.
 TEST_CASE("config blob: retired slots are written zero and never read or checked") {
     auto b = encodedConfig();
     constexpr size_t kTune = 7 + 8 * 4;
     // Relative to the tuning block, which ends at 47.
-    auto retired = [](size_t off) { return (off >= 12 && off < 28) || (off >= 36 && off < 43) || off == 45 || off == 46; };
+    auto retired = [](size_t off) { return (off >= 12 && off < 32) || (off >= 36 && off < 47); };
     for (size_t off = 0; off < 47; ++off)
         if (retired(off)) CHECK(b[kTune + off] == std::byte{0});
+    CHECK(b[stored::kConfigV6Bytes] == std::byte{0});
     // Garbage an older firmware's knobs could have left there is ignored.
     for (size_t off = 0; off < 47; ++off)
         if (retired(off)) b[kTune + off] = std::byte{0xFF};
+    b[stored::kConfigV6Bytes] = std::byte{0xFF};
     StoredConfig c;
     MotionTuning t;
     uint16_t gen = 0;
@@ -126,36 +128,64 @@ TEST_CASE("config blob: retired slots are written zero and never read or checked
     CHECK(t == sampleTuning());
 }
 
-TEST_CASE("config blob: v7 carries corner and react_us; a v6 blob migrates to the factory's") {
+TEST_CASE("config blob: v8 carries smoothness, handle_floor and trim_max; a v7 blob drops its retired values and takes the factory's") {
     const auto b = encodedConfig(30);
     StoredConfig c;
     MotionTuning t;
     valence::StoredModes got;
     uint16_t gen = 0;
     REQUIRE(stored::decodeConfig(b, kFactory, c, t, got, gen));
-    CHECK(t.corner == 1);
+    CHECK(t.smoothness == 0.45f);
+    CHECK(t.handle_floor == 0.25f);
+    CHECK(t.trim_max == 0.5f);
     CHECK(t.react_us == 6500);
 
+    // A v7 blob as 0.1.30 wrote it: its retired settings set (amplitude
+    // budget 0.6, curve policy 2, infeasible policy 1, corner 1).
+    std::array<std::byte, stored::kConfigV7Bytes> v7{};
+    std::memcpy(v7.data(), b.data(), v7.size());
+    v7[4] = std::byte{7};
+    constexpr size_t kTune = 7 + 8 * 4;
+    const float amp = 0.6f;
+    std::memcpy(v7.data() + kTune + 28, &amp, 4);
+    v7[kTune + 43] = std::byte{2};
+    v7[kTune + 44] = std::byte{1};
+    v7[stored::kConfigV6Bytes] = std::byte{1};
+    MotionTuning want = sampleTuning();
+    want.smoothness = kFactory.smoothness;
+    want.handle_floor = kFactory.handle_floor;
+    want.trim_max = kFactory.trim_max;
+    REQUIRE(stored::decodeConfig(v7, kFactory, c, t, got, gen));
+    CHECK(t == want);
+    CHECK(c == sampleConfig());
+    CHECK(gen == 30);
+    // Re-encoded, it is a v8 blob carrying the seeded values.
+    std::array<std::byte, stored::kConfigBlobBytes> v8{};
+    REQUIRE(stored::encodeConfig(v8, c, t, got, gen) == v8.size());
+    CHECK(v8[4] == std::byte{stored::kConfigVersion});
+    MotionTuning back;
+    REQUIRE(stored::decodeConfig(v8, MotionTuning{}, c, back, got, gen));
+    CHECK(back == want);
+
+    // A v6 blob takes the factory's reaction horizon too.
     std::array<std::byte, stored::kConfigV6Bytes> v6{};
     std::memcpy(v6.data(), b.data(), v6.size());
     v6[4] = std::byte{6};
-    MotionTuning want = sampleTuning();
-    want.corner = kFactory.corner;
     want.react_us = kFactory.react_us;
     REQUIRE(stored::decodeConfig(v6, kFactory, c, t, got, gen));
     CHECK(t == want);
-    CHECK(gen == 30);
 
-    // Out of its bounds, rejected whole: a corner past the enum, a horizon
-    // past react_ms_max.
-    auto bad = b;
-    bad[stored::kConfigV6Bytes] = std::byte{2};
-    CHECK_FALSE(stored::decodeConfig(bad, kFactory, c, t, got, gen));
-    MotionTuning longReact = sampleTuning();
-    longReact.react_us = 100001;
-    std::array<std::byte, stored::kConfigBlobBytes> f{};
-    REQUIRE(stored::encodeConfig(f, sampleConfig(), longReact, valence::StoredModes{}, 1) == f.size());
-    CHECK_FALSE(stored::decodeConfig(f, kFactory, c, t, got, gen));
+    // Out of its bounds, rejected whole.
+    for (const auto bend : {+[](MotionTuning& x) { x.smoothness = 1.5f; },
+                            +[](MotionTuning& x) { x.handle_floor = 0.01f; },
+                            +[](MotionTuning& x) { x.trim_max = 0.05f; },
+                            +[](MotionTuning& x) { x.react_us = 100001; }}) {
+        MotionTuning off = sampleTuning();
+        bend(off);
+        std::array<std::byte, stored::kConfigBlobBytes> f{};
+        REQUIRE(stored::encodeConfig(f, sampleConfig(), off, valence::StoredModes{}, 1) == f.size());
+        CHECK_FALSE(stored::decodeConfig(f, kFactory, c, t, got, gen));
+    }
 }
 
 TEST_CASE("config blob: every rejection leaves the factory values standing") {
@@ -218,7 +248,7 @@ TEST_CASE("config blob: every rejection leaves the factory values standing") {
     }
     SUBCASE("out-of-range tuning is rejected whole, never clamped") {
         MotionTuning t = sampleTuning();
-        t.infeasible_policy = 2;
+        t.trim_max = 0.05f;
         std::array<std::byte, stored::kConfigBlobBytes> b{};
         REQUIRE(stored::encodeConfig(b, sampleConfig(), t, valence::StoredModes{}, 1) == b.size());
         expectRejected(b, Reject::BadTuning);
@@ -491,8 +521,10 @@ TEST_CASE("config blob: a 0.1.5 blob decodes whole, its generation and commissio
     wantC.max_rail = 300.0f;
     MotionTuning wantT = sampleTuning();
     wantT.home_speed = valence::factory::home_speed;   // v6's, absent from v5
-    wantT.corner = kFactory.corner;                    // v7's
-    wantT.react_us = kFactory.react_us;
+    wantT.react_us = kFactory.react_us;                // v7's
+    wantT.smoothness = kFactory.smoothness;            // v8's
+    wantT.handle_floor = kFactory.handle_floor;
+    wantT.trim_max = kFactory.trim_max;
     valence::StoredModes wantM;
     wantM.horizon = 2;
     wantM.flipped = true;
@@ -510,15 +542,13 @@ TEST_CASE("config blob: a 0.1.5 blob decodes whole, its generation and commissio
     for (float v : {wantC.window_min, wantC.window_max, wantC.jog_speed, wantC.jog_accel,
                     wantC.input_speed, wantC.input_accel, wantC.input_jerk, wantC.max_rail})
         put(v);
-    // jmax, vmax, amax, four retired slots, amplitude_budget
-    for (float v : {wantT.jmax_ovr, wantT.vmax_ovr, wantT.amax_ovr, 0.9f, 1.3f, 1.5f, 0.5f,
-                    wantT.amplitude_budget})
+    // jmax, vmax, amax, five retired slots
+    for (float v : {wantT.jmax_ovr, wantT.vmax_ovr, wantT.amax_ovr, 0.9f, 1.3f, 1.5f, 0.5f, 0.6f})
         put(v);
     put(uint32_t(wantT.chase_dense_us));
     put(uint32_t(30000));        // retired slot
-    // three retired slots, curve_policy, infeasible_policy, two retired slots
-    for (uint8_t v : {uint8_t(1), uint8_t(1), uint8_t(1), wantT.curve_policy, wantT.infeasible_policy, uint8_t(6),
-                      uint8_t(1)})
+    // seven retired slots
+    for (uint8_t v : {uint8_t(1), uint8_t(1), uint8_t(1), uint8_t(2), uint8_t(1), uint8_t(6), uint8_t(1)})
         put(v);
     put(uint8_t(wantM.horizon));
     put(uint8_t(1));             // flipped

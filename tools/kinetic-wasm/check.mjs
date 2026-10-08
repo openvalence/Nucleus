@@ -18,8 +18,6 @@ const k = instance.exports;
 k._initialize?.();
 
 const SAMPLE = 64;           // sizeof(kinetic_sample)
-const TUNE = fx.tuning_bytes ?? 64;   // sizeof(kinetic_tuning)
-const TUNE_POLICY = 48;      // offsetof(kinetic_tuning, infeasible_policy)
 const OFFSET = 0xcbf29ce484222325n;
 const PRIME = 0x100000001b3n;
 
@@ -44,7 +42,6 @@ const h = k.kinetic_create(vmax, amax, jmax, rail, horizon);
 if (!h) throw new Error('kinetic_create refused the fixture limits');
 if (k.kinetic_set_window(h, fx.window[0], fx.window[1]) !== 1) throw new Error('window refused');
 const out = k.malloc(SAMPLE);
-const tune = k.malloc(TUNE);
 
 let next = 0;
 let hash = OFFSET;
@@ -56,13 +53,7 @@ let badTrace = 0;
 for (let tick = 0; tick < fx.steps; tick++) {
   for (; next < fx.events.length && fx.events[next][0] === tick; next++) {
     const e = fx.events[next];
-    if (e[1] === 'tune') {
-      k.kinetic_default_tuning(tune);
-      bytes()[tune + TUNE_POLICY] = e[2];
-      k.kinetic_set_tuning(h, tune);
-    } else if (k.kinetic_submit_segment(h, e[2], e[3], e[4], e[5], e[6]) === 1) {
-      accepted++;
-    }
+    if (k.kinetic_submit_segment(h, e[2], e[3], e[4], e[5]) === 1) accepted++;
   }
   k.kinetic_step(h, fx.dt_s, out);
   const s = bytes().subarray(out, out + SAMPLE);

@@ -429,7 +429,7 @@ private:
 
     // The active plan as the census reads it, in the engine frame. mode and
     // plan_kind are the 0x1111 selects' option ordinals (MotionArbiter.cpp
-    // PlanStyle, kPlanKindQuintic).
+    // PlanStyle, kPlanKindBezier).
     struct PlanRead {
         float    pos = 0.0f, vel = 0.0f, start = 0.0f, target = 0.0f;
         float    duration_s = 0.0f, elapsed_s = 0.0f;
@@ -614,11 +614,7 @@ private:
     // that brake's end to take the jog set's cap; 0 when none.
     uint64_t _jog_after_us = 0;
     uint32_t _k2_plans = 0, _k2_failures = 0;
-    // From applyTuning(): the tuning's policy (a Manual move overrides it
-    // with Stretch), the curve policy (0 follow, 1 C1, 2 C2) and the samples
-    // grant's latency (sampleLatencyUs()).
-    kinetic2::Policy _k2_policy = kinetic2::Config{}.policy;
-    uint8_t  _k2_curve_policy = 0;
+    // From applyTuning(): the samples grant's latency (sampleLatencyUs()).
     uint32_t _k2_latency_us   = sampleLatencyUs(motionDefaultTuning());
 
     float _win_min = 0.0f;

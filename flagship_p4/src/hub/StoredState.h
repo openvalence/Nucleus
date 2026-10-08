@@ -21,9 +21,12 @@
 // - A TUNING FIELD APPENDED LATER takes its factory value when an older blob
 //   lacks it: the engine's (passed in as factoryTune) or the catalog's
 //   (factory::home_speed), never a zero.
-// - A RETIRED SETTING KEEPS ITS SLOT: the bytes the retired 0x1121 card,
-//   0x1122's retired fields and overshoot_clamp held are written zero and
-//   never read or checked, so every older layout still decodes positionally.
+// - A RETIRED SETTING KEEPS ITS SLOT: the bytes of settings no card carries
+//   any more are written zero and never read or checked, so every older
+//   layout still decodes positionally.
+// - v8 (RFC-108): the Kinetic² tuning set. An older blob's values for the
+//   settings 0x1122 no longer carries are dropped, and smoothness,
+//   handle_floor and trim_max take factoryTune's values.
 // - THE FIRST-RUN RECORD SURVIVES MIGRATION: every layout from v5 on carries
 //   setup_written and decode keeps it, because losing it re-gates content
 //   motion on an upgraded machine (RFC-079). Older blobs have no record and
@@ -98,10 +101,11 @@ inline constexpr float    vmax_ovr_max      = 20.0f;
 inline constexpr float    amax_ovr_max      = 500.0f;
 inline constexpr float    dense_ms_min      = 10.0f;
 inline constexpr float    dense_ms_max      = 500.0f;
-inline constexpr uint8_t  curve_policy_max  = 2;
-inline constexpr uint8_t  infeasible_max    = 1;
-inline constexpr float    budget_max        = 1.0f;
-inline constexpr uint8_t  corner_max        = 1;
+inline constexpr float    smoothness_max    = 1.0f;
+inline constexpr float    handle_floor_min  = 0.05f;
+inline constexpr float    handle_floor_max  = 0.33f;
+inline constexpr float    trim_max_min      = 0.1f;
+inline constexpr float    trim_max_max      = 1.0f;
 inline constexpr float    react_ms_max      = 100.0f;
 inline constexpr float    home_speed_min    = ceiling::home_speed_min;
 inline constexpr float    home_speed_max    = ceiling::speed_max;
@@ -112,20 +116,22 @@ inline constexpr float    home_speed_max    = ceiling::speed_max;
 namespace stored {
 
 inline constexpr uint32_t kConfigMagic   = 0x56434647u;  // "VCFG"
-inline constexpr uint8_t  kConfigVersion = 7;            // bump on ANY layout change
+inline constexpr uint8_t  kConfigVersion = 8;            // bump on ANY layout change
 // v1, the 40 B struct dump this codec replaced (u16 version), is retired:
 // refused, never migrated.
 inline constexpr uint8_t  kConfigOldestVersion = 2;
 // v2: magic 4, version 1, cfg_gen 2, config 8 x f32, tuning 8 x f32 + 2 x u32 + 7 x u8
 inline constexpr size_t   kConfigV2Bytes = 4 + 1 + 2 + 32 + 32 + 8 + 7;
 // v3 appends the schedule_horizon ordinal (u8), v4 the flip (u8, 0/1), v5
-// the setup_written mask (u8), v6 the home speed (f32, mm/s), v7 the corner
-// (u8) and the reaction horizon (u32, us).
+// the setup_written mask (u8), v6 the home speed (f32, mm/s), v7 a retired
+// u8 and the reaction horizon (u32, us), v8 smoothness, handle_floor and
+// trim_max (3 x f32).
 inline constexpr size_t   kConfigV3Bytes = kConfigV2Bytes + 1;
 inline constexpr size_t   kConfigV4Bytes = kConfigV3Bytes + 1;
 inline constexpr size_t   kConfigV5Bytes = kConfigV4Bytes + 1;
 inline constexpr size_t   kConfigV6Bytes = kConfigV5Bytes + 4;
-inline constexpr size_t   kConfigBlobBytes = kConfigV6Bytes + 1 + 4;
+inline constexpr size_t   kConfigV7Bytes = kConfigV6Bytes + 1 + 4;
+inline constexpr size_t   kConfigBlobBytes = kConfigV7Bytes + 3 * 4;
 
 // 0 for a version this firmware cannot read.
 inline constexpr size_t configBytesFor(uint8_t version) {
@@ -134,7 +140,8 @@ inline constexpr size_t configBytesFor(uint8_t version) {
          : version == 4 ? kConfigV4Bytes
          : version == 5 ? kConfigV5Bytes
          : version == 6 ? kConfigV6Bytes
-         : version == 7 ? kConfigBlobBytes : 0;
+         : version == 7 ? kConfigV7Bytes
+         : version == 8 ? kConfigBlobBytes : 0;
 }
 
 static_assert([] {
@@ -203,10 +210,9 @@ inline bool tuningValid(const MotionTuning& t) {
         && in(t.vmax_ovr, 0.0f, b::vmax_ovr_max)
         && in(t.amax_ovr, 0.0f, b::amax_ovr_max)
         && in(float(t.chase_dense_us) / 1000.0f, b::dense_ms_min, b::dense_ms_max)
-        && t.curve_policy <= b::curve_policy_max
-        && t.infeasible_policy <= b::infeasible_max
-        && in(t.amplitude_budget, 0.0f, b::budget_max)
-        && t.corner <= b::corner_max
+        && in(t.smoothness, 0.0f, b::smoothness_max)
+        && in(t.handle_floor, b::handle_floor_min, b::handle_floor_max)
+        && in(t.trim_max, b::trim_max_min, b::trim_max_max)
         && in(float(t.react_us) / 1000.0f, 0.0f, b::react_ms_max)
         && in(t.home_speed, b::home_speed_min, b::home_speed_max);
 }
@@ -226,19 +232,19 @@ inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
                     c.input_speed, c.input_accel, c.input_jerk, c.max_rail})
         put(out, n, v);
     // A 0.0f or 0 below is a retired slot.
-    for (float v : {t.jmax_ovr, t.vmax_ovr, t.amax_ovr, 0.0f, 0.0f, 0.0f, 0.0f, t.amplitude_budget})
+    for (float v : {t.jmax_ovr, t.vmax_ovr, t.amax_ovr, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f})
         put(out, n, v);
     put(out, n, t.chase_dense_us);
     put(out, n, uint32_t(0));
-    for (uint8_t v : {uint8_t(0), uint8_t(0), uint8_t(0), t.curve_policy, t.infeasible_policy, uint8_t(0),
-                      uint8_t(0)})
-        put(out, n, v);
+    for (int i = 0; i < 7; ++i) put(out, n, uint8_t(0));
     put(out, n, m.horizon);
     put(out, n, uint8_t(m.flipped));
     put(out, n, m.setup_written);
     put(out, n, t.home_speed);
-    put(out, n, t.corner);
+    put(out, n, uint8_t(0));
     put(out, n, t.react_us);
+    for (float v : {t.smoothness, t.handle_floor, t.trim_max})
+        put(out, n, v);
     return n;
 }
 
@@ -271,13 +277,9 @@ inline std::expected<void, ConfigReject> decodeConfig(std::span<const std::byte>
     MotionTuning t = factoryTune;
     for (float* f : {&t.jmax_ovr, &t.vmax_ovr, &t.amax_ovr})
         *f = get<float>(in, n);
-    n += 4 * sizeof(float);   // retired slots
-    t.amplitude_budget  = get<float>(in, n);
-    t.chase_dense_us    = get<uint32_t>(in, n);
-    n += sizeof(uint32_t) + 3;   // retired slots
-    t.curve_policy      = get<uint8_t>(in, n);
-    t.infeasible_policy = get<uint8_t>(in, n);
-    n += 2;   // retired slots
+    n += 5 * sizeof(float);   // retired slots
+    t.chase_dense_us = get<uint32_t>(in, n);
+    n += sizeof(uint32_t) + 7;   // retired slots
 
     StoredModes m;
     if (version >= 3) m.horizon = get<uint8_t>(in, n);
@@ -289,9 +291,12 @@ inline std::expected<void, ConfigReject> decodeConfig(std::span<const std::byte>
     if (version >= 5) m.setup_written = get<uint8_t>(in, n);
     t.home_speed = version >= 6 ? get<float>(in, n) : factory::home_speed;
     if (version >= 7) {
-        t.corner   = get<uint8_t>(in, n);
+        n += 1;   // retired slot
         t.react_us = get<uint32_t>(in, n);
     }
+    if (version >= 8)
+        for (float* f : {&t.smoothness, &t.handle_floor, &t.trim_max})
+            *f = get<float>(in, n);
 
     if (!configValid(c)) return Err(ConfigReject::BadConfig);
     if (!tuningValid(t)) return Err(ConfigReject::BadTuning);

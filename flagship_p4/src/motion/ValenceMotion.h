@@ -29,11 +29,10 @@
 
 namespace valence {
 
-// One per kinetic2::AnomalyKind, INCLUDING its index-0 placeholder and the
-// reserved and retired kinds that hold their ordinals. The enum is append-only
-// and the 0x1111 per-kind field list is indexed by it, so this number and that
-// list move together or the table re-points.
-inline constexpr uint8_t kAnomalyKinds = 13;
+// One per kinetic2::AnomalyKind, INCLUDING its index-0 placeholder. The
+// 0x1111 per-kind fields and the motion-anomaly kinds are indexed by it, so
+// this number and those lists move together or the table re-points.
+inline constexpr uint8_t kAnomalyKinds = 7;
 
 // Origin of an intent. It picks the ceiling SET and the gating, nothing else.
 // The value is the SPEC 11.4 source id the hub publishes on control-owner, and
@@ -66,9 +65,6 @@ struct MotionIntent {
     // commit out of the rendered geometry; the engine bounds both the lead and
     // how many anchored plans may be parked at once.
     uint64_t     anchor_us    = 0;
-    // RFC-030 declared curve family, registry curve_families numbering.
-    // 0 = unspecified. Read only on the waveform path.
-    uint8_t      curve_family = 0;
     // RFC-087 supersede (SPEC "Supersede, the segments flush"): set on the
     // first segment of a c2h segments bundle only. The arbiter replaces every
     // knot queued at or after its start before planning it. Read only on the
@@ -204,17 +200,14 @@ struct MotionTuning {
     // The samples grant's schedule_latency_us, less the motion tick
     // (sampleLatencyUs()).
     uint32_t chase_dense_us    = 0;
-    uint8_t  curve_policy      = 0;   // catalog ordinal: 0 follow, 1 C1, 2 C2
-    uint8_t  infeasible_policy = 0;   // catalog ordinal: 0 stretch, 1 blend
-    float    amplitude_budget  = 0.0f;   // kinetic2::Config::amplitude_floor
     // 0x1030 home_speed, mm/s: the home cycle's approach (MotionArbiter.h,
     // homing). Not engine tuning; it rides this set to reach the planner.
     float    home_speed        = DEFAULT_HOME_SPEED_MM_S;
-    // Kinetic² planner options (RFC-105), static_asserted against
-    // kinetic2::Config's defaults. lookahead_us is neither persisted nor on a
-    // card: the kernel at kinetic.pin does not read it (bd val-88t).
-    uint32_t lookahead_us      = 250000;
-    uint8_t  corner            = 1;   // kinetic2::Corner: 0 continuous, 1 cubic (the default: the author's own corners)
+    // Kinetic² planner options (RFC-108), kinetic2::Config's members of the
+    // same names, static_asserted against its defaults.
+    float    smoothness        = 0.0f;   // free knots: 0 crisp .. 1 smooth
+    float    handle_floor      = 0.15f;  // shortest handle a ceiling fit may leave, share of the piece
+    float    trim_max          = 1.0f;   // farthest a knot is trimmed, share of the window span
     uint32_t react_us          = 4000;   // the reaction horizon: a knot arriving mid-motion re-plans from this far ahead
 
     bool operator==(const MotionTuning&) const = default;

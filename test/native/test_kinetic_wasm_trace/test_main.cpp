@@ -56,26 +56,23 @@ constexpr int16_t  kUnspec = int16_t(valence::limits::segment_end_vel_unspecifie
 
 struct Event {
     uint32_t tick;      // submitted at this many ms, before the step that follows it
-    bool     tune;      // true: set the infeasible policy to `pos`
     uint16_t pos;
     uint16_t dur;
     int16_t  endv;
     uint32_t start_ms;
-    uint8_t  fam;
 };
 
 uint16_t posAt(double x) { return uint16_t(std::lround(x < 0.0 ? 0.0 : x > 10000.0 ? 10000.0 : x)); }
 
-void segment(std::vector<Event>& ev, uint32_t start_ms, uint16_t pos, uint16_t dur, int16_t endv,
-             uint8_t fam) {
-    ev.push_back({start_ms - kLeadMs, false, pos, dur, endv, start_ms, fam});
+void segment(std::vector<Event>& ev, uint32_t start_ms, uint16_t pos, uint16_t dur, int16_t endv) {
+    ev.push_back({start_ms - kLeadMs, pos, dur, endv, start_ms});
 }
 
-// Moderate swings at 250 ms (C1 cubic declared), one re-steer mid-segment, a
-// 1.5 s gap after a segment that ends moving (the settle brake), then
-// quintic swings with full-window strokes the ceilings cannot meet (trimmed,
-// and a piece no trim makes legal: PieceOverCeiling), then the same after the
-// policy is set to Stretch, which Kinetic² does not read: time never gives.
+// Moderate swings at 250 ms, some with authored end velocities, one re-steer
+// mid-segment, a 1.5 s gap after a segment that ends moving (the settle
+// brake), then swings with full-window strokes the ceilings cannot meet
+// (trimmed, and a piece no trim makes legal: PieceOverCeiling), then
+// alternating near-full strokes: time never gives.
 std::vector<Event> script() {
     std::vector<Event> ev;
     for (uint32_t i = 0; i < 80; ++i) {
@@ -84,20 +81,19 @@ std::vector<Event> script() {
         int16_t endv = kUnspec;
         if (i % 3 == 1) endv = int16_t(std::lround((at(i + 1) - at(i - 1)) / 5.0));
         if (i == 79) endv = 400;   // ends moving into the gap
-        segment(ev, s, posAt(at(i)), 250, endv, 1);
-        if (i == 40) segment(ev, s + 125, 9000, 250, kUnspec, 1);   // the re-steer
+        segment(ev, s, posAt(at(i)), 250, endv);
+        if (i == 40) segment(ev, s + 125, 9000, 250, kUnspec);   // the re-steer
     }
     for (uint32_t i = 0; i < 112; ++i) {
         const uint32_t s = 22000 + 250 * i;
         double x = 5000.0 + 3500.0 * std::sin(0.9 * i);
         if (i % 8 == 6) x = 0.0;
         if (i % 8 == 7) x = 10000.0;
-        segment(ev, s, posAt(x), 250, i % 4 == 0 ? int16_t(0) : kUnspec, 0);
+        segment(ev, s, posAt(x), 250, i % 4 == 0 ? int16_t(0) : kUnspec);
     }
-    ev.push_back({50000, true, 0, 0, 0, 0, 0});
     for (uint32_t i = 0; i < 38; ++i) {
         const uint32_t s = 50200 + 250 * i;
-        segment(ev, s, posAt(i % 2 == 0 ? 500.0 : 9500.0), 250, kUnspec, 1);
+        segment(ev, s, posAt(i % 2 == 0 ? 500.0 : 9500.0), 250, kUnspec);
     }
     return ev;
 }
@@ -144,14 +140,7 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
     for (uint32_t k = 0; k < kSteps; ++k) {
         for (; next < ev.size() && ev[next].tick == k; ++next) {
             const Event& e = ev[next];
-            if (e.tune) {
-                kinetic_tuning t;
-                kinetic_default_tuning(&t);
-                t.infeasible_policy = uint8_t(e.pos);
-                kinetic_set_tuning(h, &t);
-                continue;
-            }
-            const int r = kinetic_submit_segment(h, e.pos, e.dur, e.endv, double(e.start_ms) * 1000.0, e.fam);
+            const int r = kinetic_submit_segment(h, e.pos, e.dur, e.endv, double(e.start_ms) * 1000.0);
             (r == 1 ? accepted : refused) += 1;
         }
         kinetic_step(h, 0.001, &s);
@@ -179,22 +168,20 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
 
     // The script reached what it exists to reach (T10: assert the load landed).
     CHECK(refused == 0);
-    CHECK(accepted == ev.size() - 1);
-    CHECK(kinds[valence::kPlanKindQuintic] > 0);
+    CHECK(accepted == ev.size());
+    CHECK(kinds[valence::kPlanKindBezier] > 0);
     CHECK(settled > 0);
     CHECK((flags_seen & KINETIC_FLAG_SHAPED) != 0);
-    CHECK((flags_seen & KINETIC_FLAG_FALLBACK) == 0);
     CHECK((anom_mask & (1u << uint8_t(kinetic2::AnomalyKind::PieceOverCeiling))) != 0);
-    CHECK((flags_seen & KINETIC_FLAG_REFUSED) == 0);   // kind 12 renders: never a drop
+    CHECK((flags_seen & KINETIC_FLAG_REFUSED) == 0);   // PieceOverCeiling renders: never a drop
     kinetic_destroy(h);
 
     std::string events;
     for (const Event& e : ev) {
         if (!events.empty()) events += ",\n";
-        events += e.tune ? "[" + std::to_string(e.tick) + ",\"tune\"," + std::to_string(e.pos) + "]"
-                         : "[" + std::to_string(e.tick) + ",\"seg\"," + std::to_string(e.pos) + "," +
-                               std::to_string(e.dur) + "," + std::to_string(e.endv) + "," +
-                               std::to_string(e.start_ms * 1000ull) + "," + std::to_string(e.fam) + "]";
+        events += "[" + std::to_string(e.tick) + ",\"seg\"," + std::to_string(e.pos) + "," +
+                  std::to_string(e.dur) + "," + std::to_string(e.endv) + "," +
+                  std::to_string(e.start_ms * 1000ull) + "]";
     }
     std::string hex;
     for (const uint64_t x : hashes) hex += (hex.empty() ? "\"" : ",\"") + hex64(x) + "\"";
@@ -228,27 +215,26 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
 // contract: SPEC 5.4's sentinel, the zero-duration drop, the window mapping.
 TEST_CASE("StreamIntent: one wire sample to one intent") {
     using valence::MotionSource;
-    const auto seg = valence::segmentIntent(5000, 250, kUnspec, 100.0f, 300.0f, 1, 777);
+    const auto seg = valence::segmentIntent(5000, 250, kUnspec, 100.0f, 300.0f, 777);
     REQUIRE(seg.has_value());
     CHECK(seg->source == MotionSource::Stream);
     CHECK(seg->target_mm == 250.0f);
     CHECK(seg->duration_us == 250000u);
     CHECK(seg->anchor_us == 777u);
-    CHECK(seg->curve_family == 1);
     CHECK_FALSE(seg->has_end_vel);
 
-    const auto rest = valence::segmentIntent(10000, 40, 0, 100.0f, 300.0f, 0, 0);
+    const auto rest = valence::segmentIntent(10000, 40, 0, 100.0f, 300.0f, 0);
     REQUIRE(rest.has_value());
     CHECK(rest->target_mm == 400.0f);
     CHECK(rest->has_end_vel);              // 0 is a real slope: arrive at rest
     CHECK(rest->end_vel_mm_s == 0.0f);
 
-    const auto fast = valence::segmentIntent(0, 100, -2000, 100.0f, 300.0f, 0, 0);
+    const auto fast = valence::segmentIntent(0, 100, -2000, 100.0f, 300.0f, 0);
     REQUIRE(fast.has_value());
     CHECK(fast->target_mm == 100.0f);
     CHECK(fast->end_vel_mm_s == -600.0f);  // -2 window/s over a 300 mm window
 
-    CHECK_FALSE(valence::segmentIntent(5000, 0, kUnspec, 100.0f, 300.0f, 1, 0).has_value());
+    CHECK_FALSE(valence::segmentIntent(5000, 0, kUnspec, 100.0f, 300.0f, 0).has_value());
 
     const auto pt = valence::pointIntent(2500, 0, 100.0f, 300.0f, 5);
     CHECK(pt.target_mm == 175.0f);

@@ -92,9 +92,9 @@ static_assert(ceiling::home_speed_min == MIN_HOME_SPEED_MM_S,      "catalog home
 static_assert(ceiling::speed_max   == MAX_SPEED_MM_S,              "catalog speed ceiling drifted");
 static_assert(ceiling::accel_max   == MAX_ACCEL_MM_S2,             "catalog accel ceiling drifted");
 static_assert(ceiling::jerk_max    == MAX_JERK_MM_S3,              "catalog jerk ceiling drifted");
-static_assert(factory::amplitude_budget == kinetic2::Config{}.amplitude_floor,
-              "catalog amplitude_budget drifted");
-static_assert(factory::corner == uint8_t(kinetic2::Config{}.corner), "catalog corner drifted");
+static_assert(factory::smoothness   == kinetic2::Config{}.smoothness,   "catalog smoothness drifted");
+static_assert(factory::handle_floor == kinetic2::Config{}.handle_floor, "catalog handle_floor drifted");
+static_assert(factory::trim_max     == kinetic2::Config{}.trim_max,     "catalog trim_max drifted");
 static_assert(factory::react_ms * 1000.0f == float(kinetic2::Config{}.react_us), "catalog react_ms drifted");
 
 namespace {

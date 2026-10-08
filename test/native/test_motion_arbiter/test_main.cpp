@@ -955,15 +955,11 @@ TEST_CASE("RFC-095: a dwell lands as a hold segment, a live plan at rest on the 
     CHECK(r->census().anom[size_t(kinetic2::AnomalyKind::DwellZeroed)] == 0);
 }
 
-// Homed at 0 mm and asked for 280 mm in 330 ms: Blend holds the deadline by
-// shortening the stroke, Stretch holds the stroke past the deadline.
-std::unique_ptr<Rig> rigAtOrigin(uint8_t infeasible_policy) {
+// Homed at 0 mm, the window 100..300 mm, under the factory tuning.
+std::unique_ptr<Rig> rigAtOrigin() {
     auto r = rig();
     r->arb.forceHome(400.0f);
     r->arb.setWindow(100.0f, 300.0f, 400.0f);
-    valence::MotionTuning t = valence::motionDefaultTuning();
-    t.infeasible_policy = infeasible_policy;
-    r->arb.applyTuning(t);
     r->run(1000);
     return r;
 }
@@ -981,7 +977,7 @@ bool tightSegment(Rig& r, uint32_t duration_us) {
 // ---- Kinetic² (bd val-klo) ------------------------------------------------------
 // The knot boundary: what an intent becomes, and what the census reads back.
 
-TEST_CASE("Kinetic² RFC-100: plan_flags from the solver, fallback never, 0 with nothing in flight") {
+TEST_CASE("Kinetic² RFC-100: plan_flags from the solver, 0 with nothing in flight") {
     namespace pf = valence::plan_flags;
     auto r = rig();
     r->arb.forceHome(400.0f);
@@ -1000,27 +996,20 @@ TEST_CASE("Kinetic² RFC-100: plan_flags from the solver, fallback never, 0 with
     REQUIRE_FALSE(r->census().busy);
     CHECK(r->census().plan_flags == 0);
 
-    auto blend = rigAtOrigin(1);
-    REQUIRE(tightSegment(*blend, 40'000));
-    blend->run(1000);
-    CHECK((blend->census().plan_flags & pf::shaped) != 0);
-    CHECK((blend->census().plan_flags & pf::fallback) == 0);
-
-    // Policy 0 (stretch) reads the same: the handle renderer never gives
-    // time (Kinetic Config::policy is not read, kin-tnv), so a deadline no
-    // trim meets is trimmed, and stretched is never set.
-    auto stretch = rigAtOrigin(0);
-    REQUIRE(tightSegment(*stretch, 40'000));
-    stretch->run(1000);
-    CHECK((stretch->census().plan_flags & pf::shaped) != 0);
-    CHECK((stretch->census().plan_flags & pf::stretched) == 0);
-    stretch->run(10'000'000);
-    CHECK(stretch->census().plan_flags == 0);
-    stretch->arb.drainAnomalies();
-    CHECK(stretch->census().anom[size_t(kinetic2::AnomalyKind::DeadlineStretched)] == 0);
+    // The handle renderer never gives a segment time: a deadline the
+    // ceilings cannot meet is trimmed (shaped), and stretched is never set.
+    auto tight = rigAtOrigin();
+    REQUIRE(tightSegment(*tight, 40'000));
+    tight->run(1000);
+    CHECK((tight->census().plan_flags & pf::shaped) != 0);
+    CHECK((tight->census().plan_flags & pf::stretched) == 0);
+    tight->run(10'000'000);
+    CHECK(tight->census().plan_flags == 0);
+    tight->arb.drainAnomalies();
+    CHECK(tight->census().anom[size_t(kinetic2::AnomalyKind::KnotTrimmed)] >= 1);
 
     // The window clamp moved the target: clamped, while that plan is the last.
-    auto clamp = rigAtOrigin(1);
+    auto clamp = rigAtOrigin();
     MotionIntent past;
     past.source = MotionSource::Stream;
     past.target_mm = 350.0f;
@@ -1030,7 +1019,7 @@ TEST_CASE("Kinetic² RFC-100: plan_flags from the solver, fallback never, 0 with
     CHECK((clamp->census().plan_flags & pf::clamped) != 0);
 }
 
-TEST_CASE("Kinetic² samples: one behind at the grant's latency, a stream that stops rests on the newest, a backwards one refused as kind 11") {
+TEST_CASE("Kinetic² samples: one behind at the grant's latency, a stream that stops rests on the newest, a backwards one refused as kind 5") {
     auto r = rig();
     r->arb.forceHome(400.0f);
     r->run(1000);
@@ -1187,7 +1176,7 @@ TEST_CASE("Kinetic² continuity: a segment or a sample arriving mid-piece never 
         prev = c;
     };
 
-    SUBCASE("250 ms C2 segments, each arriving 120 ms before its start") {
+    SUBCASE("250 ms segments, each arriving 120 ms before its start") {
         uint64_t start = g_now_us + 120'000;
         for (int i = 0; i < 12; ++i) {
             MotionIntent in;
@@ -1195,7 +1184,6 @@ TEST_CASE("Kinetic² continuity: a segment or a sample arriving mid-piece never 
             in.target_mm = 200.0f + 120.0f * std::sin(0.8f * float(i + 1));
             in.duration_us = 250'000;
             in.anchor_us = start;
-            in.curve_family = 2;
             REQUIRE(submit(in));
             for (int t = 0; t < 250; ++t) tick();
             start += 250'000;
@@ -1261,7 +1249,6 @@ TEST_CASE("Kinetic² RFC-087 supersede: a bundle 40 ms out replaces the queue fr
         in.target_mm = mm;
         in.duration_us = dur_us;
         in.anchor_us = start;
-        in.curve_family = 2;
         in.supersede = first;   // what onStreamBundle sets on a bundle's first segment
         const float before = r->census().plan_mm;
         const bool ok = r->arb.accept(in, g_now_us);
@@ -2381,7 +2368,6 @@ TEST_CASE("C1 script, a bundle per span: the author's cubics render with nothing
             in.has_end_vel = true;
             in.end_vel_mm_s = M[next] * 1000.0f;
             in.anchor_us = t0 + uint64_t(T[next - 1] * 1000.0f);
-            in.curve_family = 1;
             in.supersede = true;
             REQUIRE(r->arb.accept(in, g_now_us));
             ++next;
@@ -2395,14 +2381,13 @@ TEST_CASE("C1 script, a bundle per span: the author's cubics render with nothing
     }
     r->arb.drainAnomalies();
     const MotionCensus c = r->census();
-    MESSAGE("worst plan error ", worst, " mm at ", worst_at, " ms; trims ", c.anom[size_t(kinetic2::AnomalyKind::WaveformScaled)],
-            " stretches ", c.anom[size_t(kinetic2::AnomalyKind::DeadlineStretched)], " failed ", c.failures, " refused ", c.rejected);
+    MESSAGE("worst plan error ", worst, " mm at ", worst_at, " ms; trims ", c.anom[size_t(kinetic2::AnomalyKind::KnotTrimmed)],
+            " failed ", c.failures, " refused ", c.rejected);
     CHECK(c.rejected == 0);
     CHECK(c.failures == 0);
     // The first span from rest starts at zero acceleration where the author's
     // cubic does not (Kinetic kin-tt8): one trim there, none after it.
-    CHECK(c.anom[size_t(kinetic2::AnomalyKind::WaveformScaled)] <= 1);
-    CHECK(c.anom[size_t(kinetic2::AnomalyKind::DeadlineStretched)] == 0);
+    CHECK(c.anom[size_t(kinetic2::AnomalyKind::KnotTrimmed)] <= 1);
     CHECK(worst <= 0.5f);
 }
 
@@ -2425,7 +2410,7 @@ TEST_CASE("a segment stream whose starts miss the newest knot by microseconds re
                             {90, 150, -300}, {45, 150, 0}, {90, 150, 300}, {135, 150, 0}, {90, 150, -300}, {45, 150, 0}};
     const int64_t skews[] = {-3, 3, -30, 30, -3, 900, -900, 3, -3, 0, 7, -7};
     for (const Span* script : {adsr, through}) {
-        for (const uint8_t fam : {uint8_t(0), uint8_t(1)}) {
+        {
             auto r = rig();
             r->arb.forceHome(268.0f);
             r->arb.setWindow(40.0f, 140.0f, 268.0f);
@@ -2448,7 +2433,6 @@ TEST_CASE("a segment stream whose starts miss the newest knot by microseconds re
                     in.duration_us = script[next].ms * 1000u;
                     in.has_end_vel = true;
                     in.end_vel_mm_s = script[next].v;
-                    in.curve_family = fam;
                     in.anchor_us = uint64_t(int64_t(start) + skews[next]);
                     in.supersede = true;
                     REQUIRE(r->arb.accept(in, g_now_us));
@@ -2464,7 +2448,6 @@ TEST_CASE("a segment stream whose starts miss the newest knot by microseconds re
             const MotionCensus c = r->census();
             auto added = [&](kinetic2::AnomalyKind k) { return c.anom[size_t(k)] - before.anom[size_t(k)]; };
             CAPTURE(script == adsr);
-            CAPTURE(int(fam));
             MESSAGE("plan ", lo, "..", hi, " mm; over ceiling ", added(kinetic2::AnomalyKind::PieceOverCeiling), ", refused ",
                     added(kinetic2::AnomalyKind::KnotRefused), ", backstops ", c.backstops - before.backstops);
             CHECK(hi <= 135.0f + 0.1f);
@@ -2774,7 +2757,7 @@ TEST_CASE("window moved mid-stream by a fifth of the rail: the plan re-targets i
     r->arb.forceHome(kRail);
     r->run(1000);
 
-    // A monotone sweep, share 0.1 to 0.9 in 20 C2 segments of 100 ms, each
+    // A monotone sweep, share 0.1 to 0.9 in 20 segments of 100 ms, each
     // sent 120 ms before its start with the sweep's velocity as its end
     // velocity (the last one ends at rest). The hub maps shares through the
     // window in force when it sends.
@@ -2789,7 +2772,6 @@ TEST_CASE("window moved mid-stream by a fifth of the rail: the plan re-targets i
         in.target_mm = lo + (0.1f + rate * 0.1f * float(i + 1)) * (hi - lo);
         in.duration_us = 100'000;
         in.anchor_us = first + uint64_t(i) * 100'000;
-        in.curve_family = 2;
         in.has_end_vel = true;
         in.end_vel_mm_s = i + 1 < kSegs ? rate * (hi - lo) : 0.0f;
         return r->arb.accept(in, g_now_us);

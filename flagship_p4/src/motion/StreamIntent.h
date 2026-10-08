@@ -37,8 +37,7 @@ inline MotionIntent pointIntent(uint16_t pos_e4, int16_t vel_e3, float lo_mm, fl
 
 // nullopt for a zero duration: durationless points belong on 0x2100.
 inline std::optional<MotionIntent> segmentIntent(uint16_t pos_e4, uint16_t dur_ms, int16_t end_vel_e3,
-                                                 float lo_mm, float span_mm, uint8_t curve_family,
-                                                 uint64_t anchor_us) {
+                                                 float lo_mm, float span_mm, uint64_t anchor_us) {
     if (dur_ms == 0) return std::nullopt;
     const float norm = float(pos_e4) / 10000.0f;
     MotionIntent in;
@@ -46,7 +45,6 @@ inline std::optional<MotionIntent> segmentIntent(uint16_t pos_e4, uint16_t dur_m
     in.target_mm    = lo_mm + norm * span_mm;
     in.anchor_us    = anchor_us;
     in.duration_us  = uint32_t(dur_ms) * 1000u;
-    in.curve_family = curve_family;
     // SPEC 5.4 `unspecified`: 0 is a real slope (a reversal ends AT rest), so
     // absence is the registry's sentinel. Unspecified leaves has_end_vel
     // false and the engine resolves it (SPEC 9.6).

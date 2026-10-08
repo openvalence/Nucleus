@@ -85,13 +85,19 @@ window is solved at the next sample, and the sampler evaluates it.
   paths are dirty. An engine change lands in Kinetic first, then the operator
   moves the pin. A namespace rename is gated on the native suite, never a
   blind sed pass.
-- **Deadlines and amplitude.** A segment's knot holds its commanded duration
-  under Blend by trimming the stroke, never below `amplitude_floor` (the
-  0x1122 `amplitude_budget`); Stretch keeps the stroke and moves the knot
-  later. Amplitude is the one quantity a ceiling may shape; this is the
-  operator-ratified exception (2026-09-02) to "ceilings are clamps, never
-  targets". A sample is never trimmed, only stretched. A Manual move always
-  plans under Stretch: a jog that lands short is a wrong answer.
+- **Deadlines and amplitude.** A segment's knot always holds its commanded
+  time: the renderer fits the ceilings by shortening the knot's handles,
+  never below `handle_floor` of the piece, then by trimming the knot toward
+  its predecessor, never farther than `trim_max` of the window span; a piece
+  no trim within that makes legal renders over the ceiling at its least-over
+  trim (PieceOverCeiling). Free knots render by `smoothness` (0x1122, Kinetic
+  `handles.hpp`). Amplitude is the one quantity a ceiling may shape; this is
+  the operator-ratified exception (2026-09-02) to "ceilings are clamps, never
+  targets". A run of samples renders as one fastest legal move to rest on the
+  newest, stretched, never trimmed; a run whose move leaves the window renders
+  as knots, which trim (Kinetic `solver.hpp` chaseRun). A jog is a HARD knot,
+  the fastest move to rest, stretched, never trimmed: a jog that lands short
+  is a wrong answer.
 - **One activity clock (operator ruling 2026-09-02).** Every "is the stream
   alive" question keys on ONE reference in the engine's own clock: under
   Kinetic² the timeline itself, alive while a knot is pending. Two mechanisms

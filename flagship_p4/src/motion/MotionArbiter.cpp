@@ -42,7 +42,7 @@ static_assert(kAnomalyKinds <= 32, "drainAnomalies() reports the kinds as one wo
 // Option ordinals of the 0x1110 style and 0x1111 mode selects and of the
 // 0x1111 plan_kind select (ValenceCatalog.h). Wire values: never renumber.
 enum class PlanStyle : uint8_t { idle = 0, waveform = 1, chase = 2, settle = 3 };
-constexpr uint8_t kPlanKindQuintic = 1;
+constexpr uint8_t kPlanKindBezier = 1;
 
 class AbsentHomeSense final : public HomeSense {
 public:
@@ -53,8 +53,9 @@ public:
 
 AbsentHomeSense g_absent_sense;
 
-static_assert(MotionTuning{}.lookahead_us == kinetic2::Config{}.lookahead_us &&
-                  MotionTuning{}.corner == uint8_t(kinetic2::Config{}.corner) &&
+static_assert(MotionTuning{}.smoothness == kinetic2::Config{}.smoothness &&
+                  MotionTuning{}.handle_floor == kinetic2::Config{}.handle_floor &&
+                  MotionTuning{}.trim_max == kinetic2::Config{}.trim_max &&
                   MotionTuning{}.react_us == kinetic2::Config{}.react_us,
               "MotionTuning's Kinetic² defaults are kinetic2::Config's");
 
@@ -489,13 +490,10 @@ bool MotionArbiter::brakeEngine(uint64_t at_us) {
 bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLimits& lim, uint64_t now_us) {
     const bool manual = in.source == MotionSource::Manual;
     // The engine solves its whole pending window under the config it holds at
-    // the next sample, so these limits and this policy apply to every knot
-    // still pending, not to this one alone. A Manual move never trims its
-    // amplitude: a jog that lands short of its target is a wrong answer, so it
-    // stretches.
+    // the next sample, so these limits apply to every knot still pending, not
+    // to this one alone.
     kinetic2::Config cfg = _engine.config();
     cfg.limits = lim;
-    cfg.policy = manual ? kinetic2::Policy::Stretch : _k2_policy;
     _engine.setConfig(cfg);
 
     // At rest the state is the emitter's count and nothing else: a reseed from
@@ -541,15 +539,11 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
             hold.p      = _k2_newest_p;
             hold.has_v  = true;
             hold.v      = 0.0f;
-            hold.family = kinetic2::Family::C2;
             if (!_engine.submit(hold, now_us)) return false;
             _k2_newest_us = start;
             _k2_dirty = true;
         }
-        // The curve policy (0 follow, 1 C1, 2 C2) overrides the sender's family.
-        const uint8_t fam = _k2_curve_policy == 1 ? 1 : _k2_curve_policy == 2 ? 2 : in.curve_family;
-        k = kinetic2::knotFromSegment(p, in.duration_us, in.has_end_vel, in.end_vel_mm_s / span(), start,
-                                      fam <= 3 ? kinetic2::Family(fam) : kinetic2::Family::Unspecified);
+        k = kinetic2::knotFromSegment(p, in.duration_us, in.has_end_vel, in.end_vel_mm_s / span(), start);
         _k2_chase = false;
     } else if (manual) {
         // Motion the jog set did not plan (a stream, a pattern, segments) is
@@ -575,16 +569,16 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
             _k2_newest_p  = h.p;
             _k2_dirty = true;
         }
-        // The knot is due as soon as possible: a C1 rest sample is the HARD
+        // The knot is due as soon as possible: a sample at rest is the HARD
         // junction (types.hpp junctionOf), which the engine renders as the
         // time-optimal move to rest from the newest knot's state
-        // (Profile::point: velocity change, cruise, brake) and times itself,
+        // (Profile::point: velocity change, cruise, brake), stretched, never
+        // trimmed: a jog that lands short is a wrong answer. It times itself,
         // with no anomaly for a sample. A deadline padded here only slowed
         // the cruise to meet it (RFC-105 (xx)).
         const uint64_t from = _k2_newest_us > now_us ? _k2_newest_us : now_us;
         k = kinetic2::knotFromSample(p, from, kMotionTickUs);
         k.has_v = true;   // v = 0
-        k.family = kinetic2::Family::C1;
         _k2_chase = false;
     } else {
         // A 0x2100 sample: one behind, at the grant's latency (RFC-105 promise
@@ -685,22 +679,17 @@ void MotionArbiter::brakeToRest(uint64_t now_us) {
 
 void MotionArbiter::applyTuning(const MotionTuning& t) {
     // A COPY of the live config with the tuning fields replaced, so the
-    // limits accept() last set ride through untouched. The engine reads the
-    // policy, the amplitude floor (amplitude_budget), the lookahead, the
-    // corner and the reaction horizon; the curve policy and the samples
-    // latency stay here, at the knot boundary. Every other member is accepted
-    // and unread. Takes effect at the next solve, which re-plans every pending
-    // knot under it.
+    // limits accept() last set ride through untouched. The engine reads
+    // smoothness, handle_floor, trim_max and the reaction horizon; the samples
+    // latency stays here, at the knot boundary. Takes effect at the next
+    // solve, which re-plans every knot not yet committed under it.
     kinetic2::Config c = _engine.config();
-    c.policy          = t.infeasible_policy == 0 ? kinetic2::Policy::Stretch : kinetic2::Policy::Blend;
-    c.amplitude_floor = t.amplitude_budget;
-    c.lookahead_us    = t.lookahead_us;
-    c.corner          = t.corner == 1 ? kinetic2::Corner::Cubic : kinetic2::Corner::Continuous;
-    c.react_us        = t.react_us;
+    c.smoothness   = t.smoothness;
+    c.handle_floor = t.handle_floor;
+    c.trim_max     = t.trim_max;
+    c.react_us     = t.react_us;
     _engine.setConfig(c);
-    _k2_policy       = c.policy;
-    _k2_curve_policy = t.curve_policy;
-    _k2_latency_us   = sampleLatencyUs(t);
+    _k2_latency_us = sampleLatencyUs(t);
     _ovr_v = t.vmax_ovr;
     _ovr_a = t.amax_ovr;
     _ovr_j = t.jmax_ovr;
@@ -1299,9 +1288,8 @@ uint32_t MotionArbiter::drainAnomalies() {
             kinds |= 1u << a.kind;
         }
         ++_anomalies;
-        // A failure is a dropped knot or a refused one.
-        if (a.kind == uint8_t(kinetic2::AnomalyKind::PlanFailed) || a.kind == uint8_t(kinetic2::AnomalyKind::KnotRefused))
-            ++_k2_failures;
+        // A failure is a refused knot.
+        if (a.kind == uint8_t(kinetic2::AnomalyKind::KnotRefused)) ++_k2_failures;
     }
     return kinds;
 }
@@ -1327,12 +1315,12 @@ MotionArbiter::PlanRead MotionArbiter::readPlan(const kinetic2::State& st, uint6
         uint64_t seg_us = 0;
         const kinetic2::State seg = _engine.segStart(0, &seg_us);
         r.mode       = uint8_t(_k2_chase ? PlanStyle::chase : PlanStyle::waveform);
-        r.plan_kind  = kPlanKindQuintic;
+        r.plan_kind  = kPlanKindBezier;
         r.start      = seg.p;
         r.target     = k.p;
         r.duration_s = k.t_us > seg_us ? float(k.t_us - seg_us) * 1e-6f : 0.0f;
         r.elapsed_s  = now_us > seg_us ? std::fmin(float(now_us - seg_us) * 1e-6f, r.duration_s) : 0.0f;
-        // RFC-100 from the solver: fallback is never set, nothing falls back.
+        // RFC-100 from the solver (registry plan_flags).
         if (k.share < 1.0f) r.flags |= plan_flags::shaped;
         if (k.stretched_s > 0.0f) r.flags |= plan_flags::stretched;
         if (k.clamped || _k2_window_clamped) r.flags |= plan_flags::clamped;
@@ -1459,19 +1447,15 @@ EngineConfig MotionArbiter::engineConfig() {
 MotionTuning motionDefaultTuning() {
     MotionTuning t;
     // Applied at the knot boundary, not by the engine: the samples grant's
-    // latency (sampleLatencyUs()) and the curve policy. Both are published
-    // with their catalog default (0x1122), so they never change here alone.
-    t.chase_dense_us   = 60000;
-    t.curve_policy     = 0;   // follow client
+    // latency (sampleLatencyUs()), published with its catalog default
+    // (0x1122), so it never changes here alone.
+    t.chase_dense_us = 60000;
     // The members the engine reads take its factory values (applyTuning()).
-    // The catalog select is 0 stretch / 1 blend, so the mapping is explicit
-    // rather than a cast.
     const kinetic2::Config k2{};
-    t.infeasible_policy = k2.policy == kinetic2::Policy::Stretch ? 0 : 1;
-    t.amplitude_budget  = k2.amplitude_floor;
-    t.lookahead_us      = k2.lookahead_us;
-    t.corner            = uint8_t(k2.corner);
-    t.react_us          = k2.react_us;
+    t.smoothness   = k2.smoothness;
+    t.handle_floor = k2.handle_floor;
+    t.trim_max     = k2.trim_max;
+    t.react_us     = k2.react_us;
     return t;
 }
 

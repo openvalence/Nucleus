@@ -235,7 +235,7 @@ struct Rig {
         client->addSubscriptionWish(ch::pattern_adv_mod_crest, 0.0f, Priority::normal);
         // The STATE every writer moves, so a refused write is seen to move none.
         for (const uint16_t id : {ch::machine_config, ch::machine_modes, ch::kinetic_limits,
-                                  ch::kinetic_waveform, ch::pattern_state, ch::pattern_presets_roster})
+                                  ch::kinetic_planner, ch::pattern_state, ch::pattern_presets_roster})
             REQUIRE(client->addSubscriptionWish(id, 0.0f, Priority::normal));
         REQUIRE(client->connect());
         step(200);
@@ -746,7 +746,7 @@ void expectNotANumberRefused(Rig& rig, uint16_t channel, const IntentValueMap& b
                              IntentValue finite, const std::string& detail) {
     rig.step();
     const Snapshot before = snapshot(rig);
-    for (const uint16_t id : {ch::machine_config, ch::machine_modes, ch::kinetic_waveform, ch::pattern_state,
+    for (const uint16_t id : {ch::machine_config, ch::machine_modes, ch::kinetic_planner, ch::pattern_state,
                               ch::pattern_advanced, ch::pattern_presets_roster})
         REQUIRE(before.state.count(id) == 1);
     const int echoes = rig.del.echoes;
@@ -789,8 +789,8 @@ TEST_CASE("VD-22: NaN and infinity are refused INVALID_VALUE naming the field, a
                                 "home_speed: not a number");
     }
     SUBCASE("kinetic-set") {
-        expectNotANumberRefused(*rig, ch::kinetic_set, base, 17, IntentValue::ofF32(0.37f),
-                                "amplitude_budget: not a number");
+        expectNotANumberRefused(*rig, ch::kinetic_set, base, 6, IntentValue::ofF32(0.37f),
+                                "trim_max: not a number");
     }
     SUBCASE("pattern-cmd number") {
         expectNotANumberRefused(*rig, ch::pattern_cmd, base, 3, IntentValue::ofF32(37.0f), "speed: not a number");
@@ -871,10 +871,10 @@ IntentValueMap oneKey(uint8_t key, IntentValue v) {
 
 // One f32 of the config blob the persist would write now. Read raw: the fake
 // engine's tuning is all zeros, which decodeConfig() rightly refuses.
-// Offsets per StoredState.h: header 7 B, then the eight 0x1000 values, then
-// jmax, vmax, amax, four retired f32, amplitude_budget.
+// Offsets per StoredState.h: header 7 B, then the eight 0x1000 values; the
+// v8 tail is smoothness, handle_floor, trim_max.
 constexpr size_t kBlobJogSpeed = 7 + 2 * 4;
-constexpr size_t kBlobAmplitude = 7 + 8 * 4 + 7 * 4;
+constexpr size_t kBlobTrimMax = stored::kConfigV7Bytes + 2 * 4;
 float storedF32(Rig& rig, size_t offset) {
     std::array<std::byte, stored::kConfigBlobBytes> blob{};
     REQUIRE(rig.device.encodeConfigBlob(blob, rig.hub->cfgGen()) == blob.size());
@@ -935,25 +935,25 @@ TEST_CASE("VD-TR-1: a trial jog speed is live, marked, never stored, and commit 
 
 TEST_CASE("VD-TR-2: revert and a session's end restore the kinetic baseline") {
     auto rig = std::make_unique<Rig>();
-    const float amp0 = storedF32(*rig, kBlobAmplitude);
-    REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(17, IntentValue::ofF32(0.6f)), std::nullopt, false,
+    const float trim0 = storedF32(*rig, kBlobTrimMax);
+    REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(6, IntentValue::ofF32(0.6f)), std::nullopt, false,
                                     true).has_value());
     rig->step();
     REQUIRE(rig->del.nacks.empty());
     CHECK(rig->hub->trialCount() == 1);
-    CHECK(stateU8(*rig, ch::kinetic_waveform, 16) == 0x04);   // bit 2: amplitude_budget
-    CHECK(storedF32(*rig, kBlobAmplitude) == doctest::Approx(amp0));
-    CHECK(stateF32(*rig, ch::kinetic_waveform, 6) == doctest::Approx(0.6f));
+    CHECK(stateU8(*rig, ch::kinetic_planner, 21) == 0x04);   // bit 2: trim_max
+    CHECK(storedF32(*rig, kBlobTrimMax) == doctest::Approx(trim0));
+    CHECK(stateF32(*rig, ch::kinetic_planner, 8) == doctest::Approx(0.6f));
 
     REQUIRE(rig->client->sendIntent(channels::settings_trial, oneKey(1, IntentValue::ofU64(trial_ops::revert)))
                 .has_value());
     rig->step();
     CHECK(rig->hub->trialCount() == 0);
-    CHECK(stateF32(*rig, ch::kinetic_waveform, 6) == doctest::Approx(amp0));
-    CHECK(stateU8(*rig, ch::kinetic_waveform, 16) == 0x00);
+    CHECK(stateF32(*rig, ch::kinetic_planner, 8) == doctest::Approx(trim0));
+    CHECK(stateU8(*rig, ch::kinetic_planner, 21) == 0x00);
 
     // A session that goes away takes its trial with it.
-    REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(17, IntentValue::ofF32(0.5f)), std::nullopt, false,
+    REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(6, IntentValue::ofF32(0.5f)), std::nullopt, false,
                                     true).has_value());
     rig->step();
     CHECK(rig->hub->trialCount() == 1);
@@ -961,12 +961,12 @@ TEST_CASE("VD-TR-2: revert and a session's end restore the kinetic baseline") {
     rig->step(50);
     CHECK(rig->hub->trialCount() == 0);
     // The client is gone, so the live value is read where a baseline is.
-    CHECK(rig->device.trialBaseline(ch::kinetic_set, 17)->f32_val == doctest::Approx(amp0));
+    CHECK(rig->device.trialBaseline(ch::kinetic_set, 6)->f32_val == doctest::Approx(trim0));
 }
 
 TEST_CASE("VD-TR-3: keys gated on live state refuse a trial; the flip waits for a window trial") {
     auto rig = std::make_unique<Rig>();
-    REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(10, IntentValue::ofF32(40.0f)), std::nullopt, false,
+    REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(7, IntentValue::ofF32(40.0f)), std::nullopt, false,
                                     true).has_value());
     REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(8, IntentValue::ofU64(1)), std::nullopt, false, true)
                 .has_value());
@@ -1257,7 +1257,7 @@ TEST_CASE("VD-K2-1: the catalog advertises only settings the planner reads") {
     // Every setting on the two kinetic cards is a 0x3120 key, and every 0x3120
     // key a setting on exactly one of them.
     std::vector<uint8_t> settings;
-    for (const uint16_t id : {ch::kinetic_limits, ch::kinetic_waveform}) {
+    for (const uint16_t id : {ch::kinetic_limits, ch::kinetic_planner}) {
         const CatalogEntry* e = rig->catalog.find(id);
         REQUIRE(e != nullptr);
         for (const LayoutField& f : rig->catalog.layoutFields(*e))
@@ -1269,25 +1269,34 @@ TEST_CASE("VD-K2-1: the catalog advertises only settings the planner reads") {
     for (const SchemaField& f : rig->catalog.schemaFields(*w)) schema.push_back(f.key);
     std::sort(settings.begin(), settings.end());
     std::sort(schema.begin(), schema.end());
-    CHECK(settings == std::vector<uint8_t>{1, 2, 3, 10, 13, 14, 17, 21, 22});
+    CHECK(settings == std::vector<uint8_t>{1, 2, 3, 4, 5, 6, 7, 8});
     CHECK(schema == settings);
 
-    // The retired bytes stay, hidden, with no setting_key; the factory default
-    // is Kinetic²'s.
-    const CatalogEntry* k = rig->catalog.find(ch::kinetic_waveform);
+    // kinetic-planner is Kinetic²'s set in mask order, every field a setting
+    // but the mask pair; the factory defaults are kinetic2::Config's.
+    const CatalogEntry* k = rig->catalog.find(ch::kinetic_planner);
     REQUIRE(k != nullptr);
+    CHECK(k->name == "kinetic-planner");
+    std::vector<std::string> names;
     for (const LayoutField& f : rig->catalog.layoutFields(*k)) {
-        if (f.name.ends_with("_reserved")) {
-            CHECK_FALSE(f.hasSettingKey);
-            CHECK(f.rank == valence::ui_ranks::hidden);
-        }
-        if (f.name == "amplitude_budget") CHECK(f.dflt.asFloat() == doctest::Approx(0.25f));
+        names.emplace_back(f.name);
+        if (f.name == "smoothness") CHECK(f.dflt.asFloat() == 0.0f);
+        if (f.name == "handle_floor") CHECK(f.dflt.asFloat() == doctest::Approx(0.15f));
+        if (f.name == "trim_max") CHECK(f.dflt.asFloat() == 1.0f);
     }
+    CHECK(names == std::vector<std::string>{"smoothness", "handle_floor", "trim_max", "chase_dense_ms", "react_ms",
+                                            "enabled_mask", "trial_mask"});
     const size_t bytes = layoutWireSize(rig->catalog.layoutFields(*k));
-    CHECK(bytes == 26);
-    REQUIRE(rig->del.lastState.count(ch::kinetic_waveform) == 1);
-    CHECK(rig->del.lastState[ch::kinetic_waveform].size() == bytes);
-    CHECK(stateU8(*rig, ch::kinetic_waveform, 15) == 0x3F);   // six settings, no samples grant
+    CHECK(bytes == 22);
+    REQUIRE(rig->del.lastState.count(ch::kinetic_planner) == 1);
+    CHECK(rig->del.lastState[ch::kinetic_planner].size() == bytes);
+    CHECK(stateU8(*rig, ch::kinetic_planner, 20) == 0x1F);   // five settings, no samples grant
+    CHECK(stateF32(*rig, ch::kinetic_planner, 4) == doctest::Approx(0.15f));
+    CHECK(stateF32(*rig, ch::kinetic_planner, 8) == 1.0f);
+    // kinetic-diag: one counter per kinetic2::AnomalyKind but none (RFC-108).
+    const CatalogEntry* diag = rig->catalog.find(ch::motion_diag);
+    REQUIRE(diag != nullptr);
+    CHECK(layoutWireSize(rig->catalog.layoutFields(*diag)) == 72);
 
     // overshoot_clamp's byte stays on 0x1030, its key 4 on 0x3030 is a gap.
     const CatalogEntry* modes = rig->catalog.find(ch::modes_set);
@@ -1300,45 +1309,56 @@ TEST_CASE("VD-K2-1: the catalog advertises only settings the planner reads") {
     CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
 }
 
-TEST_CASE("VD-K2-2: corner and react_ms write on kinetic-set keys 21 and 22, clamped, published, stored") {
+TEST_CASE("VD-K2-2: smoothness, handle_floor, trim_max and react_ms write on kinetic-set keys 4, 5, 6 and 8, clamped, published, stored") {
     auto rig = std::make_unique<Rig>();
     persistBitsOver(*rig, 2500);
     const uint16_t gen = rig->hub->cfgGen();
     IntentValueMap m{};
-    m = plus(m, 21, IntentValue::ofU64(1));
-    m = plus(m, 22, IntentValue::ofF32(12.5f));
+    m = plus(m, 4, IntentValue::ofF32(0.5f));
+    m = plus(m, 5, IntentValue::ofF32(0.25f));
+    m = plus(m, 6, IntentValue::ofF32(0.75f));
+    m = plus(m, 8, IntentValue::ofF32(12.5f));
     REQUIRE(rig->client->sendIntent(ch::kinetic_set, m).has_value());
     rig->step();
     REQUIRE(rig->del.nacks.empty());
-    REQUIRE(echoed(rig->del.lastEcho, 21) != nullptr);
-    CHECK(echoed(rig->del.lastEcho, 21)->u64_val == 1);
-    REQUIRE(echoed(rig->del.lastEcho, 22) != nullptr);
-    CHECK(echoed(rig->del.lastEcho, 22)->f32_val == 12.5f);
+    for (const auto& [key, want] : {std::pair{4, 0.5f}, std::pair{5, 0.25f}, std::pair{6, 0.75f}, std::pair{8, 12.5f}}) {
+        CAPTURE(key);
+        REQUIRE(echoed(rig->del.lastEcho, uint8_t(key)) != nullptr);
+        CHECK(echoed(rig->del.lastEcho, uint8_t(key))->f32_val == want);
+    }
     CHECK(rig->hub->cfgGen() == uint16_t(gen + 1));
-    // 0x1122: corner at 21, react_ms as u32 microseconds at 22.
-    CHECK(stateU8(*rig, ch::kinetic_waveform, 21) == 1);
+    // 0x1122: the three f32 at 0, 4, 8, react_ms as u32 microseconds at 16.
+    CHECK(stateF32(*rig, ch::kinetic_planner, 0) == 0.5f);
+    CHECK(stateF32(*rig, ch::kinetic_planner, 4) == 0.25f);
+    CHECK(stateF32(*rig, ch::kinetic_planner, 8) == 0.75f);
     uint32_t react = 0;
-    std::memcpy(&react, rig->del.lastState[ch::kinetic_waveform].data() + 22, 4);
+    std::memcpy(&react, rig->del.lastState[ch::kinetic_planner].data() + 16, 4);
     CHECK(react == 12500);
-    // The v7 tail of the blob.
+    // The blob: react_ms in the v7 tail, the three in the v8 tail.
     std::array<std::byte, stored::kConfigBlobBytes> blob{};
     REQUIRE(rig->device.encodeConfigBlob(blob, rig->hub->cfgGen()) == blob.size());
-    CHECK(blob[stored::kConfigV6Bytes] == std::byte{1});
     std::memcpy(&react, blob.data() + stored::kConfigV6Bytes + 1, 4);
     CHECK(react == 12500);
+    CHECK(storedF32(*rig, stored::kConfigV7Bytes) == 0.5f);
+    CHECK(storedF32(*rig, stored::kConfigV7Bytes + 4) == 0.25f);
+    CHECK(storedF32(*rig, kBlobTrimMax) == 0.75f);
     CHECK((persistBitsOver(*rig, 2500) & kPersistConfig) != 0);
 
     // Clamped into the engine-mirroring bounds, echoed as taken.
     m = IntentValueMap{};
-    m = plus(m, 21, IntentValue::ofU64(5));
-    m = plus(m, 22, IntentValue::ofF32(500.0f));
+    m = plus(m, 4, IntentValue::ofF32(3.0f));
+    m = plus(m, 5, IntentValue::ofF32(0.0f));
+    m = plus(m, 6, IntentValue::ofF32(0.0f));
+    m = plus(m, 8, IntentValue::ofF32(500.0f));
     REQUIRE(rig->client->sendIntent(ch::kinetic_set, m).has_value());
     rig->step();
-    CHECK(echoed(rig->del.lastEcho, 21)->u64_val == 1);
-    CHECK(echoed(rig->del.lastEcho, 22)->f32_val == 100.0f);
+    CHECK(echoed(rig->del.lastEcho, 4)->f32_val == 1.0f);
+    CHECK(echoed(rig->del.lastEcho, 5)->f32_val == 0.05f);
+    CHECK(echoed(rig->del.lastEcho, 6)->f32_val == 0.1f);
+    CHECK(echoed(rig->del.lastEcho, 8)->f32_val == 100.0f);
 
-    // A released key alone applies nothing.
-    REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(8, IntentValue::ofF32(0.5f))).has_value());
+    // A key outside the schema alone applies nothing.
+    REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(9, IntentValue::ofF32(0.5f))).has_value());
     rig->step();
     REQUIRE(rig->del.nacks.size() == 1);
     CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);

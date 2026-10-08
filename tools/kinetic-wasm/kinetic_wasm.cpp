@@ -75,26 +75,17 @@ struct kinetic_sample {
     uint32_t plans;          // successful plans since create or reset
 };
 
-// MotionTuning (ValenceMotion.h) as a C struct; the catalog's units. The
-// offsets are ABI: a retired member's bytes stay as ignored padding.
+// MotionTuning (ValenceMotion.h) as a C struct, Kinetic²'s set (RFC-108
+// item 7); the catalog's units. The offsets are ABI.
 struct kinetic_tuning {
     float    jmax_ovr;          // normalized window units/s^3, 0 = derived from the mm limits
     float    vmax_ovr;          // normalized window units/s, 0 = derived
     float    amax_ovr;          // normalized window units/s^2, 0 = derived
-    float    retired0[4];       // ignored, zero from kinetic_default_tuning
-    float    amplitude_budget;  // 0..1
-    float    retired1;          // ignored
-    uint32_t chase_dense_us;
-    uint32_t retired2;          // ignored
-    uint8_t  retired3[3];       // ignored
-    uint8_t  curve_policy;      // 0 follow, 1 C1, 2 C2
-    uint8_t  infeasible_policy; // 0 stretch, 1 blend
-    uint8_t  reserved[3];       // zero
-    // Kinetic²'s planner options, appended at offset 52.
-    uint32_t lookahead_us;      // the solver's lookahead window
-    uint8_t  corner;            // 0 continuous, 1 cubic
-    uint8_t  reserved2[3];      // zero
+    uint32_t chase_dense_us;    // ignored here: the samples grant's latency on the board
     uint32_t react_us;          // the reaction horizon
+    float    smoothness;        // 0 crisp .. 1 smooth
+    float    handle_floor;      // 0.05..0.33, share of the piece
+    float    trim_max;          // 0.1..1, share of the window span
 };
 
 // One pending knot as the solver placed it, 40 bytes (the same layout as
@@ -123,18 +114,16 @@ static_assert(sizeof(kinetic_knot) == 40 && offsetof(kinetic_knot, share) == 20 
 static_assert(offsetof(kinetic_sample, plan_mm) == 32 && offsetof(kinetic_sample, anomalies) == 52 &&
                   offsetof(kinetic_sample, mode) == 56 && offsetof(kinetic_sample, plans) == 60,
               "kinetic_sample layout is ABI");
-static_assert(sizeof(kinetic_tuning) == 64 && offsetof(kinetic_tuning, amplitude_budget) == 28 &&
-                  offsetof(kinetic_tuning, chase_dense_us) == 36 && offsetof(kinetic_tuning, curve_policy) == 47 &&
-                  offsetof(kinetic_tuning, infeasible_policy) == 48 && offsetof(kinetic_tuning, lookahead_us) == 52 &&
-                  offsetof(kinetic_tuning, corner) == 56 && offsetof(kinetic_tuning, react_us) == 60,
+static_assert(sizeof(kinetic_tuning) == 32 && offsetof(kinetic_tuning, chase_dense_us) == 12 &&
+                  offsetof(kinetic_tuning, react_us) == 16 && offsetof(kinetic_tuning, smoothness) == 20 &&
+                  offsetof(kinetic_tuning, handle_floor) == 24 && offsetof(kinetic_tuning, trim_max) == 28,
               "kinetic_tuning layout is ABI");
 
 // kinetic_sample::flags
 inline constexpr uint8_t KINETIC_FLAG_BUSY     = 1u << 0;  // the plan has motion left to render
-inline constexpr uint8_t KINETIC_FLAG_SHAPED   = 1u << 1;  // a deadline was held by spending amplitude or shape (Blend)
-inline constexpr uint8_t KINETIC_FLAG_FALLBACK = 1u << 2;  // a deadline stretched
-inline constexpr uint8_t KINETIC_FLAG_CLAMPED  = 1u << 3;  // raw p is outside the window: the output backstop is acting
-inline constexpr uint8_t KINETIC_FLAG_REFUSED  = 1u << 4;  // a submit since the previous step was refused
+inline constexpr uint8_t KINETIC_FLAG_SHAPED   = 1u << 1;  // a knot was trimmed toward its predecessor
+inline constexpr uint8_t KINETIC_FLAG_CLAMPED  = 1u << 2;  // raw p is outside the window: the output backstop is acting
+inline constexpr uint8_t KINETIC_FLAG_REFUSED  = 1u << 3;  // a submit since the previous step was refused
 
 // Named, not anonymous: kinetic_handle (global, the ABI's) holds a Host.
 namespace kinetic_wasm {
@@ -147,10 +136,9 @@ using AnomalyType = kinetic2::AnomalyKind;
 
 constexpr uint32_t kindBit(AnomalyType k) { return 1u << uint8_t(k); }
 
-constexpr uint32_t kShapedMask   = kindBit(AnomalyType::WaveformScaled) | kindBit(AnomalyType::WaveformSmoothed);
-constexpr uint32_t kFallbackMask = kindBit(AnomalyType::WaveformFallback) | kindBit(AnomalyType::DeadlineStretched);
+constexpr uint32_t kShapedMask   = kindBit(AnomalyType::KnotTrimmed);
 // PieceOverCeiling renders at its least-over trim: never in a mask here.
-constexpr uint32_t kRefusedMask  = kindBit(AnomalyType::PlanFailed) | kindBit(AnomalyType::KnotRefused);
+constexpr uint32_t kRefusedMask  = kindBit(AnomalyType::KnotRefused);
 static_assert(valence::kAnomalyKinds <= 32, "the anomaly mask is one word");
 
 // The window solve is timed against this clock for the census; offline that cost is
@@ -198,14 +186,13 @@ public:
 
     // The hub's anchor rule (SPEC 5.4, ValenceDevice::onStreamBundle): a start
     // in the past is due now, one beyond the horizon is clamped to it.
-    int submit(uint16_t pos_e4, uint16_t dur_ms, int16_t end_vel_e3, double start_us, uint8_t family,
-               bool supersede) {
+    int submit(uint16_t pos_e4, uint16_t dur_ms, int16_t end_vel_e3, double start_us, bool supersede) {
         double lead = start_us - double(_now_us);
         if (!(lead > 0.0)) lead = 0.0;
         if (lead > double(_params.horizon_us)) lead = double(_params.horizon_us);
         const uint64_t anchor = _now_us + uint64_t(lead);
         auto in = valence::segmentIntent(pos_e4, dur_ms, end_vel_e3, _params.lo,
-                                         _params.hi - _params.lo, family, anchor);
+                                         _params.hi - _params.lo, anchor);
         if (!in) return -1;
         // RFC-087: the hub sets it on the first segment of a bundle the motion
         // path takes (ValenceDevice::onStreamBundle); the caller decides.
@@ -288,7 +275,6 @@ public:
         uint8_t flags = 0;
         if (c.busy) flags |= KINETIC_FLAG_BUSY;
         if (mask & kShapedMask) flags |= KINETIC_FLAG_SHAPED;
-        if (mask & kFallbackMask) flags |= KINETIC_FLAG_FALLBACK;
         if (p < lo || p > hi) flags |= KINETIC_FLAG_CLAMPED;
         if (_refused || (mask & kRefusedMask)) flags |= KINETIC_FLAG_REFUSED;
         _refused = false;
@@ -328,32 +314,28 @@ private:
 
 MotionTuning fromC(const kinetic_tuning& t) {
     MotionTuning m;
-    m.jmax_ovr          = t.jmax_ovr;
-    m.vmax_ovr          = t.vmax_ovr;
-    m.amax_ovr          = t.amax_ovr;
-    m.chase_dense_us    = t.chase_dense_us;
-    m.curve_policy      = t.curve_policy;
-    m.infeasible_policy = t.infeasible_policy;
-    m.amplitude_budget  = t.amplitude_budget;
-    m.lookahead_us      = t.lookahead_us;
-    m.corner            = t.corner;
-    m.react_us          = t.react_us;
+    m.jmax_ovr       = t.jmax_ovr;
+    m.vmax_ovr       = t.vmax_ovr;
+    m.amax_ovr       = t.amax_ovr;
+    m.chase_dense_us = t.chase_dense_us;
+    m.react_us       = t.react_us;
+    m.smoothness     = t.smoothness;
+    m.handle_floor   = t.handle_floor;
+    m.trim_max       = t.trim_max;
     return m;
 }
 
 kinetic_tuning toC(const MotionTuning& m) {
     kinetic_tuning t;
     std::memset(&t, 0, sizeof(t));
-    t.jmax_ovr          = m.jmax_ovr;
-    t.vmax_ovr          = m.vmax_ovr;
-    t.amax_ovr          = m.amax_ovr;
-    t.amplitude_budget  = m.amplitude_budget;
-    t.chase_dense_us    = m.chase_dense_us;
-    t.curve_policy      = m.curve_policy;
-    t.infeasible_policy = m.infeasible_policy;
-    t.lookahead_us      = m.lookahead_us;
-    t.corner            = m.corner;
-    t.react_us          = m.react_us;
+    t.jmax_ovr       = m.jmax_ovr;
+    t.vmax_ovr       = m.vmax_ovr;
+    t.amax_ovr       = m.amax_ovr;
+    t.chase_dense_us = m.chase_dense_us;
+    t.react_us       = m.react_us;
+    t.smoothness     = m.smoothness;
+    t.handle_floor   = m.handle_floor;
+    t.trim_max       = m.trim_max;
     return t;
 }
 
@@ -412,23 +394,22 @@ KINETIC_API void kinetic_set_tuning(kinetic_handle* h, const kinetic_tuning* t) 
 
 // One 0x2101 sample, wire units: pos_e4 1e-4 of the window, dur_ms, end_vel_e3
 // 1e-3 window/s (-32768 = unspecified), start_us the segment's start on the
-// engine clock, curve_family the GRANTED family (registry curve_families).
-// Planned at the current clock, before the next step. 1 accepted, 0 refused by
-// the planner, -1 zero duration (dropped, as the hub drops it).
+// engine clock. Planned at the current clock, before the next step. 1
+// accepted, 0 refused by the planner, -1 zero duration (dropped, as the hub
+// drops it).
 KINETIC_API int kinetic_submit_segment(kinetic_handle* h, uint16_t pos_e4, uint16_t dur_ms,
-                                       int16_t end_vel_e3, double start_us, uint8_t curve_family) {
+                                       int16_t end_vel_e3, double start_us) {
     if (h == nullptr) return 0;
-    return h->host.submit(pos_e4, dur_ms, end_vel_e3, start_us, curve_family, false);
+    return h->host.submit(pos_e4, dur_ms, end_vel_e3, start_us, false);
 }
 
 // kinetic_submit_segment with the RFC-087 supersede flag: nonzero on the first
 // segment of a bundle flushes every knot queued at or after its start, as the
 // hub does (ValenceDevice::onStreamBundle).
 KINETIC_API int kinetic_submit_segment2(kinetic_handle* h, uint16_t pos_e4, uint16_t dur_ms,
-                                        int16_t end_vel_e3, double start_us, uint8_t curve_family,
-                                        uint8_t supersede) {
+                                        int16_t end_vel_e3, double start_us, uint8_t supersede) {
     if (h == nullptr) return 0;
-    return h->host.submit(pos_e4, dur_ms, end_vel_e3, start_us, curve_family, supersede != 0);
+    return h->host.submit(pos_e4, dur_ms, end_vel_e3, start_us, supersede != 0);
 }
 
 // A Manual point, mm: the jog as the hub submits it (window-held, jog set,
