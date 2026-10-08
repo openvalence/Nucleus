@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kinetic² lab</title>
+<link rel="stylesheet" href="lab.css">
+<script type="module" src="lab.js"></script>
+</head>
+<body>
+<header class="top">
+  <h1>Kinetic² lab</h1>
+  <p class="meta">The board's planner (<span id="version" class="mono">loading kinetic.wasm</span>) fed by Phosphor's funscript player, locally. Change anything; the plot re-renders.</p>
+</header>
+
+<main class="layout">
+  <section class="stage">
+    <div class="bar">
+      <span class="seg" id="view" role="group" aria-label="View"></span>
+      <button id="pin" class="btn" title="Keep this plan as a ghost to compare against">Pin ghost</button>
+      <button id="unpin" class="btn" title="Drop the ghost">Clear ghost</button>
+      <button id="fit" class="btn" title="Show the whole run (Home)">Fit</button>
+      <button id="save" class="btn" title="Download what the hub received, replayable here">Save recording</button>
+      <span class="grow"></span>
+      <span id="runstate" class="mono muted"></span>
+    </div>
+    <div class="plotwrap" id="plotbox">
+      <canvas id="plot"></canvas>
+      <canvas id="overlay"></canvas>
+    </div>
+    <p id="readout" class="readout mono">&nbsp;</p>
+    <ul class="legend">
+      <li><i style="background:#8A8F99"></i>actions</li>
+      <li><i style="background:#A78BFA"></i>curve (the player's line)</li>
+      <li><i style="background:#4DA6FF"></i>plan</li>
+      <li><i style="background:#FF5CB3"></i>error</li>
+      <li><i style="background:#F5A524"></i>trimmed</li>
+      <li><i style="background:#FF4D4D"></i>stretched</li>
+      <li><i style="background:#E05BFF"></i>refused / failed</li>
+      <li><i style="background:#2F7A3A"></i>bundle arrived</li>
+    </ul>
+    <section class="card stats">
+      <h2>This run</h2>
+      <dl id="stats" class="kv mono"></dl>
+    </section>
+    <section class="card">
+      <h2>Spends and anomalies <span id="ancount" class="muted"></span></h2>
+      <div class="tablewrap"><table id="anoms"><thead><tr><th>script t</th><th>what</th><th>detail</th></tr></thead><tbody></tbody></table></div>
+    </section>
+  </section>
+
+  <aside class="side">
+    <section class="card">
+      <h2>Script</h2>
+      <div class="row2">
+        <select id="builtin" aria-label="Built-in script"></select>
+        <button id="open" class="btn">Open…</button>
+        <input id="file" type="file" accept=".funscript,.json,application/json" hidden>
+      </div>
+      <div id="gen" class="grid3"></div>
+      <p id="scriptinfo" class="muted small"></p>
+      <p class="muted small">Drop a .funscript or a saved recording anywhere on the page.</p>
+    </section>
+    <section class="card" id="curve"></section>
+    <section class="card">
+      <h2>Range</h2>
+      <div id="range" class="grid3"></div>
+    </section>
+    <section class="card">
+      <h2>Machine</h2>
+      <div id="machine" class="grid3"></div>
+    </section>
+    <section class="card">
+      <h2>Planner tuning</h2>
+      <div id="tuning" class="grid3"></div>
+      <button id="defaults" class="btn">Factory</button>
+    </section>
+    <section class="card">
+      <h2>Link</h2>
+      <div id="link" class="grid3"></div>
+    </section>
+  </aside>
+</main>
+
+<footer class="keys">
+  <span><kbd>wheel</kbd> zoom</span> <span><kbd>drag</kbd> pan</span> <span><kbd>Home</kbd> fit</span>
+  <span><kbd>click</kbd> cursor</span> <span><kbd>[</kbd> <kbd>]</kbd> previous / next spend</span>
+</footer>
+<p id="status" class="status" role="status"></p>
+</body>
+</html>

@@ -111,10 +111,10 @@ newest is refused (KnotRefused): nothing queued is ever replaced.
 | 40 | `accel_mm_s2` f32 | `a` times the window span (unclamped) |
 | 44 | `position_mm` f32 | the ideal emitter's count: what an on-time LP core renders |
 | 48 | `target_mm` f32 | where the active plan ends |
-| 52 | `anomalies` u32 | bit k = `kinetic2::AnomalyKind` k recorded since the previous step (11 is KnotRefused) |
+| 52 | `anomalies` u32 | bit k = `kinetic2::AnomalyKind` k recorded since the previous step (11 is KnotRefused; 12 is PieceOverCeiling, a piece no trim keeps inside a limit, rendered at its least-over trim, never a drop) |
 | 56 | `mode` u8 | 0 idle, 1 toward a segment's knot, 2 toward a sample's, 3 a brake (the 0x1111 `mode` select's ordinals) |
 | 57 | `plan_kind` u8 | 0 none, 1 quintic (the 0x1111 `plan_kind` select's ordinals; 2 and 3 are never rendered) |
-| 58 | `flags` u8 | bit0 busy, bit1 shaped (Blend trimmed amplitude), bit2 fallback (a stretched deadline), bit3 clamped (raw `p` outside the window), bit4 refused (a submit since the previous step, or a dropped or refused knot) |
+| 58 | `flags` u8 | bit0 busy, bit1 shaped (a knot trimmed toward its predecessor), bit2 fallback (a stretched deadline; Kinetic² never sets it), bit3 clamped (raw `p` outside the window), bit4 refused (a submit since the previous step, or a dropped or refused knot) |
 | 59 | reserved u8 | 0 |
 | 60 | `plans` u32 | successful plans since create or reset |
 
@@ -147,10 +147,9 @@ only):
 | Member | Effect |
 |---|---|
 | `jmax_ovr`, `vmax_ovr`, `amax_ovr` | the ceilings |
-| `infeasible_policy` | `Config::policy` (0 Stretch, 1 Blend) |
-| `amplitude_budget` | `Config::amplitude_floor` |
+| `infeasible_policy`, `amplitude_budget`, `corner` | `Config::policy`, `Config::amplitude_floor`, `Config::corner`; the handle renderer reads none of them (Kinetic `types.hpp`) |
 | `curve_policy` | applied at the knot boundary: 1 forces C1, 2 C2, 0 follows the segment |
-| `lookahead_us`, `corner` | `Config::lookahead_us`, `Config::corner` (the kernel at `kinetic.pin` carries `lookahead_us` unread, and no catalog field writes it) |
+| `lookahead_us` | `Config::lookahead_us`; no catalog field writes it |
 | `react_us` | `Config::react_us`, the reaction horizon in microseconds (factory 4000): a knot arriving while the carriage moves keeps the curve under it this far ahead of now, or through the next knot when that is nearer, and re-plans from the state there (RFC-105 (bb)). A longer horizon avoids re-planning inside a piece too short to change within the ceilings. A shorter horizon lets the next knot revise a plan that was based on one knot |
 | `chase_dense_us` | ignored here; on the board it sets the samples grant's `schedule_latency_us` (`sampleLatencyUs()`), the delay a sample renders at |
 
@@ -159,3 +158,18 @@ only):
 The emitter is ideal and the tick is exact, so the board's task wake-up jitter
 and the LP core's edge quantization are not modeled. The plan is identical to
 the board's.
+
+## The lab's calls
+
+`tools/kinetic-lab` drives the twin in the board's own wake order, with what
+the hub adds to a segment, and reads the solver's decisions:
+
+| Call | What |
+|---|---|
+| `kinetic_submit_segment2(h, pos_e4, dur_ms, end_vel_e3, start_us, family, supersede)` | `kinetic_submit_segment` with the RFC-087 supersede flag the hub sets on the first segment of a bundle the motion path takes (`ValenceDevice::onStreamBundle`) |
+| `kinetic_submit_manual(h, target_mm)` | a Manual point, the jog as the hub submits it: window-held, the jog set, live |
+| `kinetic_advance(h, dt_s)`, `kinetic_evaluate(h, out)` | `kinetic_step` split at the board's wake (`MotionTask::run`): the clock moves, the intents that arrived by then are accepted at that reading, then the tick evaluates |
+| `kinetic_pending(h)`, `kinetic_solved(h, i, out)` | the knots still ahead and the i-th as the solver placed it, a 40 B `kinetic_knot` (time, p, v, a, the share a trim kept, a live jog's seconds late, the worst ceiling ratio, clamped; dropped and the pins are always 0). Read after `kinetic_evaluate`: a read between a submit and the tick solves early |
+
+`kinetic_step` is unchanged (`advance` then `evaluate`), so a consumer that
+submits on the tick renders the same bits as before.

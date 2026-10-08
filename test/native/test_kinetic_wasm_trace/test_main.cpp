@@ -73,8 +73,9 @@ void segment(std::vector<Event>& ev, uint32_t start_ms, uint16_t pos, uint16_t d
 
 // Moderate swings at 250 ms (C1 cubic declared), one re-steer mid-segment, a
 // 1.5 s gap after a segment that ends moving (the settle brake), then
-// quintic swings with full-window strokes the ceilings cannot meet (Blend),
-// then the same under Stretch (the stretched deadline).
+// quintic swings with full-window strokes the ceilings cannot meet (trimmed,
+// and a piece no trim makes legal: PieceOverCeiling), then the same after the
+// policy is set to Stretch, which Kinetic² does not read: time never gives.
 std::vector<Event> script() {
     std::vector<Event> ev;
     for (uint32_t i = 0; i < 80; ++i) {
@@ -182,7 +183,9 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
     CHECK(kinds[valence::kPlanKindQuintic] > 0);
     CHECK(settled > 0);
     CHECK((flags_seen & KINETIC_FLAG_SHAPED) != 0);
-    CHECK((flags_seen & KINETIC_FLAG_FALLBACK) != 0);
+    CHECK((flags_seen & KINETIC_FLAG_FALLBACK) == 0);
+    CHECK((anom_mask & (1u << uint8_t(kinetic2::AnomalyKind::PieceOverCeiling))) != 0);
+    CHECK((flags_seen & KINETIC_FLAG_REFUSED) == 0);   // kind 12 renders: never a drop
     kinetic_destroy(h);
 
     std::string events;

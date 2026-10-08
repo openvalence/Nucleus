@@ -97,9 +97,29 @@ struct kinetic_tuning {
     uint32_t react_us;          // the reaction horizon
 };
 
+// One pending knot as the solver placed it, 40 bytes (the same layout as
+// Kinetic's own kinetic2_knot). Read after kinetic_evaluate.
+struct kinetic_knot {
+    double   t_us;        // solved time (a corner's ramp end; a live jog may land later)
+    float    p;           // engine frame, 0..1 of the window
+    float    v;           // the junction velocity the solver chose or kept
+    float    a;           // the junction acceleration
+    float    share;       // the share of the stroke a trim kept, 1 = whole
+    float    stretched_s; // a live jog's seconds past its time; else 0
+    float    worst;       // the incoming piece's worst ceiling ratio after the trim
+    uint8_t  dropped;     // always 0: a knot is never dropped
+    uint8_t  clamped;     // an authored velocity was cut
+    uint8_t  pin_v;       // always 0; ABI field
+    uint8_t  pin_a;       // always 0; ABI field
+    uint8_t  reserved[4]; // zero
+};
+
 }  // extern "C"
 
 static_assert(sizeof(kinetic_sample) == 64, "kinetic_sample layout is ABI");
+static_assert(sizeof(kinetic_knot) == 40 && offsetof(kinetic_knot, share) == 20 &&
+                  offsetof(kinetic_knot, dropped) == 32,
+              "kinetic_knot layout is ABI");
 static_assert(offsetof(kinetic_sample, plan_mm) == 32 && offsetof(kinetic_sample, anomalies) == 52 &&
                   offsetof(kinetic_sample, mode) == 56 && offsetof(kinetic_sample, plans) == 60,
               "kinetic_sample layout is ABI");
@@ -129,6 +149,7 @@ constexpr uint32_t kindBit(AnomalyType k) { return 1u << uint8_t(k); }
 
 constexpr uint32_t kShapedMask   = kindBit(AnomalyType::WaveformScaled) | kindBit(AnomalyType::WaveformSmoothed);
 constexpr uint32_t kFallbackMask = kindBit(AnomalyType::WaveformFallback) | kindBit(AnomalyType::DeadlineStretched);
+// PieceOverCeiling renders at its least-over trim: never in a mask here.
 constexpr uint32_t kRefusedMask  = kindBit(AnomalyType::PlanFailed) | kindBit(AnomalyType::KnotRefused);
 static_assert(valence::kAnomalyKinds <= 32, "the anomaly mask is one word");
 
@@ -177,24 +198,73 @@ public:
 
     // The hub's anchor rule (SPEC 5.4, ValenceDevice::onStreamBundle): a start
     // in the past is due now, one beyond the horizon is clamped to it.
-    int submit(uint16_t pos_e4, uint16_t dur_ms, int16_t end_vel_e3, double start_us, uint8_t family) {
+    int submit(uint16_t pos_e4, uint16_t dur_ms, int16_t end_vel_e3, double start_us, uint8_t family,
+               bool supersede) {
         double lead = start_us - double(_now_us);
         if (!(lead > 0.0)) lead = 0.0;
         if (lead > double(_params.horizon_us)) lead = double(_params.horizon_us);
         const uint64_t anchor = _now_us + uint64_t(lead);
-        const auto in = valence::segmentIntent(pos_e4, dur_ms, end_vel_e3, _params.lo,
-                                               _params.hi - _params.lo, family, anchor);
+        auto in = valence::segmentIntent(pos_e4, dur_ms, end_vel_e3, _params.lo,
+                                         _params.hi - _params.lo, family, anchor);
         if (!in) return -1;
+        // RFC-087: the hub sets it on the first segment of a bundle the motion
+        // path takes (ValenceDevice::onStreamBundle); the caller decides.
+        in->supersede = supersede;
         if (_arb.accept(*in, _now_us)) return 1;
         _refused = true;
         return 0;
     }
 
-    // The board's tick order (ValenceMotion.cpp MotionTask::run): the emitter
-    // has rendered up to now, then evaluate, then the census.
-    void step(double dt_s, kinetic_sample& out) {
+    // A Manual point (the jog): held inside the window, planned at the jog
+    // set, live (the newest target supersedes the queue). No override here:
+    // the gates are the hub's.
+    int submitManual(float target_mm) {
+        valence::MotionIntent in;
+        in.source    = valence::MotionSource::Manual;
+        in.target_mm = target_mm;
+        if (_arb.accept(in, _now_us)) return 1;
+        _refused = true;
+        return 0;
+    }
+
+    uint32_t pending() { return uint32_t(_arb.engine().pending(0)); }
+
+    int solved(uint32_t i, kinetic_knot& out) {
+        auto& e = _arb.engine();
+        if (i >= e.pending(0)) return 0;
+        const kinetic2::Solved& s = e.solved(0, i);
+        std::memset(&out, 0, sizeof(out));
+        out.t_us        = double(s.t_us);
+        out.p           = s.p;
+        out.v           = s.v;
+        out.a           = s.a;
+        out.share       = s.share;
+        out.stretched_s = s.stretched_s;
+        out.worst       = s.worst;
+        out.dropped     = s.dropped ? 1 : 0;
+        out.clamped     = s.clamped ? 1 : 0;
+        out.pin_v       = s.pin_v ? 1 : 0;
+        out.pin_a       = s.pin_a ? 1 : 0;
+        return 1;
+    }
+
+    // The board's wake order (ValenceMotion.cpp MotionTask::run): the clock
+    // reads, the queued intents are accepted at that reading, then the tick
+    // evaluates. advance() is the clock; a submit between is an intent that
+    // woke the task; evaluate() is the tick: the emitter has rendered up to
+    // now, then evaluate, then the census. step() is both for a caller whose
+    // intents ride the tick.
+    void advance(double dt_s) {
         const double whole_us = std::round(dt_s * 1e6);
         if (whole_us > 0.0) _now_us += uint64_t(whole_us);
+    }
+
+    void step(double dt_s, kinetic_sample& out) {
+        advance(dt_s);
+        evaluate(out);
+    }
+
+    void evaluate(kinetic_sample& out) {
         _emitter.advance(_now_us);
         const float dt_f = float(_now_us - _prev_us) * 1e-6f;
         if (dt_f > 0.0f) {
@@ -348,7 +418,45 @@ KINETIC_API void kinetic_set_tuning(kinetic_handle* h, const kinetic_tuning* t) 
 KINETIC_API int kinetic_submit_segment(kinetic_handle* h, uint16_t pos_e4, uint16_t dur_ms,
                                        int16_t end_vel_e3, double start_us, uint8_t curve_family) {
     if (h == nullptr) return 0;
-    return h->host.submit(pos_e4, dur_ms, end_vel_e3, start_us, curve_family);
+    return h->host.submit(pos_e4, dur_ms, end_vel_e3, start_us, curve_family, false);
+}
+
+// kinetic_submit_segment with the RFC-087 supersede flag: nonzero on the first
+// segment of a bundle flushes every knot queued at or after its start, as the
+// hub does (ValenceDevice::onStreamBundle).
+KINETIC_API int kinetic_submit_segment2(kinetic_handle* h, uint16_t pos_e4, uint16_t dur_ms,
+                                        int16_t end_vel_e3, double start_us, uint8_t curve_family,
+                                        uint8_t supersede) {
+    if (h == nullptr) return 0;
+    return h->host.submit(pos_e4, dur_ms, end_vel_e3, start_us, curve_family, supersede != 0);
+}
+
+// A Manual point, mm: the jog as the hub submits it (window-held, jog set,
+// live). 1 accepted, 0 refused.
+KINETIC_API int kinetic_submit_manual(kinetic_handle* h, float target_mm) {
+    if (h == nullptr) return 0;
+    return h->host.submitManual(target_mm);
+}
+
+// kinetic_step in the board's wake order: kinetic_advance moves the clock by
+// dt_s, the caller submits what arrived by then, kinetic_evaluate ticks.
+KINETIC_API void kinetic_advance(kinetic_handle* h, double dt_s) {
+    if (h != nullptr) h->host.advance(dt_s);
+}
+
+KINETIC_API void kinetic_evaluate(kinetic_handle* h, kinetic_sample* out) {
+    if (h == nullptr || out == nullptr) return;
+    h->host.evaluate(*out);
+}
+
+// Knots still ahead on the timeline and the i-th as the solver placed it.
+// Read after kinetic_evaluate (a read between a submit and the tick solves
+// early). 1 written, 0 when i is out of range.
+KINETIC_API uint32_t kinetic_pending(kinetic_handle* h) { return h != nullptr ? h->host.pending() : 0; }
+
+KINETIC_API int kinetic_solved(kinetic_handle* h, uint32_t i, kinetic_knot* out) {
+    if (h == nullptr || out == nullptr) return 0;
+    return h->host.solved(i, *out);
 }
 
 // Advances the clock by dt_s (rounded to whole microseconds) and evaluates.
