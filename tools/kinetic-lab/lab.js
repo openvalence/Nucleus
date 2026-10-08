@@ -15,10 +15,10 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const fmt = (v, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : '-');
 const ms = (t) => (Math.abs(t) >= 10000 ? (t / 1000).toFixed(2) + ' s' : Math.round(t) + ' ms');
 
-// kinetic2::AnomalyKind by number; reserved kinds are blank. 12 renders: never a drop.
-const ANOMALY = ['', 'plan failed (knot dropped)', 'settle (ran dry, braked)', 'end velocity clamped', 'stretched', '', 'trimmed', '', '', '', 'dwell zeroed', 'knot refused', 'piece over a ceiling (least-over trim)'];
-const ANOMALY_COLOR = { 1: '#E05BFF', 2: '#E05BFF', 3: '#F5A524', 4: '#FF4D4D', 6: '#F5A524', 10: '#F5A524', 11: '#E05BFF', 12: '#FF4D4D' };
-const FLAG = { busy: 1, shaped: 2, fallback: 4, clamped: 8, refused: 16 };
+// kinetic2::AnomalyKind by number. 6 renders: never a drop.
+const ANOMALY = ['', 'settle (ran dry, braked)', 'end velocity clamped', 'trimmed', 'dwell zeroed', 'knot refused', 'piece over a ceiling (least-over trim)'];
+const ANOMALY_COLOR = { 1: '#E05BFF', 2: '#F5A524', 3: '#F5A524', 4: '#F5A524', 5: '#E05BFF', 6: '#FF4D4D' };
+const FLAG = { busy: 1, shaped: 2, clamped: 4, refused: 8 };
 
 // ---- state ------------------------------------------------------------------------------------------
 const st = {
@@ -28,7 +28,7 @@ const st = {
   machine: { rail: 500, lo: 0, hi: 500, vmax: 1200, amax: 100000, jmax: 20000000 },
   tuning: {},                    // member -> value, seeded from the twin's factory set
   defaults: {},
-  link: { exact: 0, family: 1, netMs: 5, clockErrMs: 0, playerTickMs: 16.667, horizonMs: 250, low: 0 },
+  link: { exact: 0, netMs: 5, clockErrMs: 0, playerTickMs: 16.667, horizonMs: 250, low: 0 },
   gen: { kind: 'sine', periodMs: 1300, amp: 0.3, knotMs: 100, seconds: 20 },
   view: 'position',
   run: null, ghost: null, cursorMs: null,
@@ -95,12 +95,10 @@ const MACHINE = [
   { key: 'jmax', label: 'input jerk', unit: 'mm/s³', min: 0, step: 100000 },
 ];
 const TUNE = [
-  { key: 'infeasible_policy', label: 'policy', options: [[0, 'stretch (keep the stroke)'], [1, 'blend (keep the deadline)']] },
-  { key: 'amplitude_budget', label: 'amplitude floor', unit: 'share', min: 0, max: 1, step: 0.05, title: 'Blend never trims a stroke below this share of it' },
-  { key: 'corner', label: 'corner', options: [[1, 'cubic (author\'s corners)'], [0, 'continuous']] },
-  { key: 'curve_policy', label: 'curve policy', options: [[0, 'follow the sender'], [1, 'C1'], [2, 'C2']] },
+  { key: 'smoothness', label: 'smoothness', unit: 'share', min: 0, max: 1, step: 0.05, title: 'Crisp at 0, smooth at 1' },
+  { key: 'handle_floor', label: 'handle floor', unit: 'share', min: 0.05, max: 0.33, step: 0.01, title: 'Shortest handle the fit may use' },
+  { key: 'trim_max', label: 'max trim', unit: 'share', min: 0.1, max: 1, step: 0.05, title: 'Farthest a knot moves to fit the ceilings' },
   { key: 'react_us', label: 'react', unit: 'µs', min: 0, step: 500, title: 'the reaction horizon: a knot arriving mid-motion re-plans from this far ahead' },
-  { key: 'lookahead_us', label: 'lookahead', unit: 'µs', min: 0, step: 10000 },
   { key: 'chase_dense_us', label: 'chase dense', unit: 'µs', min: 0, step: 1000 },
   { key: 'vmax_ovr', label: 'vmax override', unit: 'w/s', min: 0, step: 0.1, title: 'window units per second; 0 derives from the mm limits' },
   { key: 'amax_ovr', label: 'amax override', unit: 'w/s²', min: 0, step: 1 },
@@ -108,7 +106,6 @@ const TUNE = [
 ];
 const LINK = [
   { key: 'exact', label: 'sender', options: [[0, 'Phosphor\'s scheduler'], [1, 'exact knots (no cap, no merge)']], title: 'the scheduler caps end velocities (knotSlope) and merges knots within the dwell span (dwellMerge); exact sends the author\'s knots as they are' },
-  { key: 'family', label: 'family wish', options: [[1, 'C1 cubic (the player\'s)'], [2, 'C2 quintic'], [0, 'unspecified']] },
   { key: 'horizonMs', label: 'horizon', options: [[250, '250 ms'], [500, '500 ms'], [1000, '1000 ms']] },
   { key: 'netMs', label: 'network', unit: 'ms', min: 0, step: 1, title: 'one-way, client to hub' },
   { key: 'clockErrMs', label: 'clock error', unit: 'ms', step: 1, title: 'the client\'s hub-clock estimate minus the hub\'s clock' },
@@ -185,8 +182,8 @@ function loadText(text, name) {
   try {
     const doc = JSON.parse(text);
     if (doc && Array.isArray(doc.events) && !doc.actions) {
-      // The lab's recording, or the Nucleus trace fixture (tick index = arrival ms, tune = policy).
-      const events = doc.events.map((e) => (e[1] === 'tune' && typeof e[2] === 'number' ? [e[0], 'tune', { infeasible_policy: e[2] }] : e));
+      // The lab's recording, or the Nucleus trace fixture (tick index = arrival ms).
+      const { events } = doc;
       if (doc.create) { const [vmax, amax, jmax, rail, horizon] = doc.create; Object.assign(st.machine, { vmax, amax, jmax, rail }); if (horizon) st.link.horizonMs = horizon; }
       if (doc.window) { st.machine.lo = doc.window[0]; st.machine.hi = doc.window[1]; }
       if (doc.machine) Object.assign(st.machine, doc.machine);
@@ -223,8 +220,8 @@ function stats() {
   const counts = {};
   for (const [, kind] of r.anomalies) counts[kind] = (counts[kind] || 0) + 1;
   // Flag counts over the script's own span: the preroll from the machine's rest (outside the window) is not a clamp.
-  let shaped = 0, stretched = 0, clampedTicks = 0;
-  for (let i = Math.ceil(r.playAtMs); i < r.flags.length; i++) { const f = r.flags[i]; if (f & FLAG.shaped) shaped++; if (f & FLAG.fallback) stretched++; if (f & FLAG.clamped) clampedTicks++; }
+  let shaped = 0, clampedTicks = 0;
+  for (let i = Math.ceil(r.playAtMs); i < r.flags.length; i++) { const f = r.flags[i]; if (f & FLAG.shaped) shaped++; if (f & FLAG.clamped) clampedTicks++; }
   if (r.ref) {
     const i0 = Math.ceil(r.playAtMs), i1 = Math.min(r.plan.length, Math.floor(r.playAtMs + (st.source.script.at[st.source.script.at.length - 1] || 0)));
     let sum = 0, sq = 0, mx = 0, at = 0, n = 0;
@@ -253,7 +250,7 @@ function stats() {
   row('bundles', `${r.bundles.length} bundles, ${recs} segments: ${acc} accepted, ${drop} dropped` + (r.refused ? `, ${r.refused} refused` : ''), drop || r.refused ? 'bad' : '');
   const spends = Object.entries(counts).filter(([k]) => ANOMALY[k]).map(([k, n]) => `${ANOMALY[k]} ×${n}`).join(', ') || 'none';
   row('anomalies', spends, Object.keys(counts).length ? 'warn' : '');
-  row('ticks', `${r.plan.length} ms: shaped ${shaped}, stretched ${stretched}, window-clamped ${clampedTicks}`);
+  row('ticks', `${r.plan.length} ms: shaped ${shaped}, window-clamped ${clampedTicks}`);
   if (r.capped && r.capped.length) row('handoff cap', `${r.capped.length} end velocities sent below the curve's slope (scheduler.js knotSlope, 1.5 × the lesser chord): the plan leaves those knots slower than the purple line`, 'warn');
   row('play', `preroll ${ms(r.playAtMs)}, then ${ms(r.endMs - r.playAtMs - 1500)} of script`);
   // The table: every anomaly and every knot the solver spent on, by script time.
@@ -268,9 +265,9 @@ function stats() {
     seen.add(key);
     const what = kn.dropped ? 'knot dropped' : kn.stretched_s > 0 ? 'knot stretched' : kn.clamped ? 'end velocity cut' : 'stroke trimmed';
     const detail = kn.stretched_s > 0 ? `+${(kn.stretched_s * 1000).toFixed(1)} ms` : kn.share < 0.999 ? `share ${kn.share.toFixed(2)}` : '';
-    rows.push({ t: kn.t_us / 1000 - r.playAtMs, what, detail: detail + (kn.worst ? `, worst ratio ${kn.worst.toFixed(2)}` : ''), kind: kn.dropped ? 1 : kn.stretched_s > 0 ? 4 : 6, knot: kn });
+    rows.push({ t: kn.t_us / 1000 - r.playAtMs, what, detail: detail + (kn.worst ? `, worst ratio ${kn.worst.toFixed(2)}` : ''), kind: kn.dropped ? 5 : kn.stretched_s > 0 ? 6 : 3, knot: kn });
   }
-  for (const [t, sent, want] of r.capped || []) rows.push({ t, what: 'end velocity capped by the player', detail: `sent ${fmt(sent, 0)} mm/s, the curve's slope ${fmt(want, 0)} mm/s`, kind: 3 });
+  for (const [t, sent, want] of r.capped || []) rows.push({ t, what: 'end velocity capped by the player', detail: `sent ${fmt(sent, 0)} mm/s, the curve's slope ${fmt(want, 0)} mm/s`, kind: 2 });
   rows.sort((a, b) => a.t - b.t);
   st.events = rows;
   $('ancount').textContent = rows.length ? `(${rows.length})` : '';

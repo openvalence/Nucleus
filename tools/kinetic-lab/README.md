@@ -53,7 +53,7 @@ the preroll or the tail.
 ## Recordings
 
 "Save recording" writes what the hub received: `[arrival ms, "seg", pos_e4,
-dur_ms, end_vel_e3, start_us, family, supersede]` per segment, plus the
+dur_ms, end_vel_e3, start_us, supersede]` per segment, plus the
 machine, link and tuning. Loading one replays it without the player (the curve
 is then unknown; the plan, spends and anomalies still show). The
 `test/fixtures/kinetic_trace.json` shape loads the same way. A board-side

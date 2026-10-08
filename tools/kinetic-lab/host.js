@@ -56,13 +56,12 @@ function exactScheduler(wired, T, submit, now) {
 }
 
 // ---- the ABI (tools/kinetic-wasm/kinetic_wasm.cpp) -----------------------------------------------
-const SAMPLE = 64, KNOT = 40, TUNE = 64;
+const SAMPLE = 64, KNOT = 40, TUNE = 32;
 const S = { p: 8, v: 16, a: 24, plan_mm: 32, velocity_mm_s: 36, accel_mm_s2: 40, position_mm: 44, target_mm: 48,
   anomalies: 52, mode: 56, plan_kind: 57, flags: 58, plans: 60 };
-// kinetic_tuning members the lab binds, by offset: f float32, u uint32, b uint8.
-export const TUNING = [['jmax_ovr', 0, 'f'], ['vmax_ovr', 4, 'f'], ['amax_ovr', 8, 'f'], ['amplitude_budget', 28, 'f'],
-  ['chase_dense_us', 36, 'u'], ['curve_policy', 47, 'b'], ['infeasible_policy', 48, 'b'], ['lookahead_us', 52, 'u'],
-  ['corner', 56, 'b'], ['react_us', 60, 'u']];
+// kinetic_tuning members the lab binds, by offset: f float32, u uint32.
+export const TUNING = [['jmax_ovr', 0, 'f'], ['vmax_ovr', 4, 'f'], ['amax_ovr', 8, 'f'], ['chase_dense_us', 12, 'u'],
+  ['react_us', 16, 'u'], ['smoothness', 20, 'f'], ['handle_floor', 24, 'f'], ['trim_max', 28, 'f']];
 
 // ---- the registry numbers the door uses (Valence spec/registry/registry.yaml) ----------------------
 const LIMITS = { bundle_max_samples: 32, min_transport_payload: 242, segment_t_off_unit_us: 100,
@@ -156,7 +155,7 @@ function machine(req) {
 
 /**
  * Run one request. source.kind 'script': {script: {at, pos}, interp, T, spanMm}; 'events': {events}
- * in the recording shape [arrivalMs, 'seg', pos_e4, dur_ms, end_vel_e3, start_us, family, supersede]
+ * in the recording shape [arrivalMs, 'seg', pos_e4, dur_ms, end_vel_e3, start_us, supersede]
  * | [ms, 'manual', target_mm] | [ms, 'tune', {member: value}]. Yields between chunks.
  */
 function* run(req) {
@@ -164,7 +163,7 @@ function* run(req) {
   const out = k.malloc(SAMPLE), kb = k.malloc(KNOT), tb = k.malloc(TUNE);
   const link = req.link, m = req.machine;
   const horizonMs = m.horizonMs || LIMITS.max_future_schedule_ms;
-  const family = link.family | 0, netUs = Math.round((link.netMs || 0) * 1000), clockErrUs = Math.round((link.clockErrMs || 0) * 1000);
+  const netUs = Math.round((link.netMs || 0) * 1000), clockErrUs = Math.round((link.clockErrMs || 0) * 1000);
   const queue = [];        // bundles in flight, by arrival: {sendUs, arriveUs, tBaseUs, offs, recs}
   const bundles = [];      // what the hub received: the recording
   const events = [];       // 'events' kind: the recording, by arrival
@@ -220,13 +219,13 @@ function* run(req) {
   // Grid samples, index = engine ms: plan_mm, position_mm, vel, acc, raw p, flags, plan kind.
   const planA = [], posA = [], velA = [], accA = [], rawA = [], flagA = [], kindA = [];
 
-  const deliverSeg = (tUs, pos_e4, dur_ms, vel_e3, stampUs, fam, supersede) => {
+  const deliverSeg = (tUs, pos_e4, dur_ms, vel_e3, stampUs, supersede) => {
     // ValenceDevice::onStreamBundle: delta against the hub's clock, clamped to the lead cap and to now.
     let delta = stampUs - tUs;
     if (delta > horizonMs * 1000) delta = horizonMs * 1000;
     if (delta < 0) delta = 0;
     const anchor = tUs + delta;
-    const r = k.kinetic_submit_segment2(h, pos_e4, dur_ms, vel_e3, anchor, fam, supersede ? 1 : 0);
+    const r = k.kinetic_submit_segment2(h, pos_e4, dur_ms, vel_e3, anchor, supersede ? 1 : 0);
     if (r === 1) accepted++; else if (r === 0) refused++; else dropped++;
     return { r, anchor };
   };
@@ -303,15 +302,15 @@ function* run(req) {
       const recs = [];
       for (let i = 0; i < b.recs.length; i++) {
         const [pos, dur, vel] = b.recs[i];
-        const { r, anchor } = deliverSeg(t, pos, dur, vel, b.tBaseUs + b.offs[i], family, !flushed);
+        const { r, anchor } = deliverSeg(t, pos, dur, vel, b.tBaseUs + b.offs[i], !flushed);
         if (r === 1) { flushed = true; acc++; } else drop++;
-        recs.push([pos, dur, vel, anchor, family, r === 1 && acc === 1 ? 1 : 0]);
+        recs.push([pos, dur, vel, anchor, r === 1 && acc === 1 ? 1 : 0]);
       }
       bundles.push({ sendMs: b.sendUs / 1000, arriveMs: t / 1000, tBaseUs: b.tBaseUs, n: b.recs.length, accepted: acc, dropped: drop, recs });
       woke = true;
     }
     for (const e of due) {
-      if (e[1] === 'seg') { const { r } = deliverSeg(t, e[2], e[3], e[4], e[5], e[6] | 0, !!e[7]); bundles.push({ sendMs: NaN, arriveMs: t / 1000, tBaseUs: e[5], n: 1, accepted: r === 1 ? 1 : 0, dropped: r === 1 ? 0 : 1, recs: [[e[2], e[3], e[4], e[5], e[6] | 0, e[7] ? 1 : 0]] }); }
+      if (e[1] === 'seg') { const { r } = deliverSeg(t, e[2], e[3], e[4], e[5], !!e[6]); bundles.push({ sendMs: NaN, arriveMs: t / 1000, tBaseUs: e[5], n: 1, accepted: r === 1 ? 1 : 0, dropped: r === 1 ? 0 : 1, recs: [[e[2], e[3], e[4], e[5], e[6] ? 1 : 0]] }); }
       else if (e[1] === 'manual') { if (k.kinetic_submit_manual(h, e[2]) === 1) accepted++; else refused++; }
       else if (e[1] === 'tune') { writeTuning(tb, { ...(req.tuning || {}), ...e[2] }); k.kinetic_set_tuning(h, tb); }
       woke = true;
