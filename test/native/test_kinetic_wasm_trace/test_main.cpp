@@ -48,6 +48,7 @@ constexpr float    kRail = 500.0f;
 constexpr float    kWinLo = 100.0f;
 constexpr float    kWinHi = 400.0f;
 constexpr uint32_t kHorizonMs = 250;
+constexpr uint32_t kExpectMs = 500;      // the hub's quiet window at this horizon (kinetic_expect)
 constexpr uint32_t kSteps = 60000;       // 60 s at 1 ms
 constexpr uint32_t kLeadMs = 120;        // the player stamps each start this far ahead
 constexpr uint32_t kBlock = 100;         // samples per hash
@@ -71,7 +72,7 @@ void segment(std::vector<Event>& ev, uint32_t start_ms, uint16_t pos, uint16_t d
 // Moderate swings at 250 ms, some with authored end velocities, one re-steer
 // mid-segment, a 1.5 s gap after a segment that ends moving (the settle
 // brake), then swings with full-window strokes the ceilings cannot meet
-// (trimmed, and a piece no trim makes legal: PieceOverCeiling), then
+// (each fits by its trim: no piece renders over a ceiling), then
 // alternating near-full strokes: time never gives.
 std::vector<Event> script() {
     std::vector<Event> ev;
@@ -126,6 +127,7 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
     kinetic_handle* h = kinetic_create(kVmax, kAmax, kJmax, kRail, kHorizonMs);
     REQUIRE(h != nullptr);
     REQUIRE(kinetic_set_window(h, kWinLo, kWinHi) == 1);
+    kinetic_expect(h, kExpectMs);
     const std::vector<Event> ev = script();
     REQUIRE(std::is_sorted(ev.begin(), ev.end(),
                            [](const Event& a, const Event& b) { return a.tick < b.tick; }));
@@ -172,8 +174,8 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
     CHECK(kinds[valence::kPlanKindBezier] > 0);
     CHECK(settled > 0);
     CHECK((flags_seen & KINETIC_FLAG_SHAPED) != 0);
-    CHECK((anom_mask & (1u << uint8_t(kinetic2::AnomalyKind::PieceOverCeiling))) != 0);
-    CHECK((flags_seen & KINETIC_FLAG_REFUSED) == 0);   // PieceOverCeiling renders: never a drop
+    CHECK((anom_mask & (1u << uint8_t(kinetic2::AnomalyKind::PieceOverCeiling))) == 0);
+    CHECK((flags_seen & KINETIC_FLAG_REFUSED) == 0);   // nothing dropped
     kinetic_destroy(h);
 
     std::string events;
@@ -196,6 +198,7 @@ TEST_CASE("kinetic.wasm trace: the 60 s script, recorded for the wasm twin") {
       << "\"create\": [" << num(kVmax) << "," << num(kAmax) << "," << num(kJmax) << "," << num(kRail) << ","
       << kHorizonMs << "],\n"
       << "\"window\": [" << num(kWinLo) << "," << num(kWinHi) << "],\n"
+      << "\"expect_ms\": " << kExpectMs << ",\n"
       // check.mjs sizes its kinetic_tuning buffer from this.
       << "\"tuning_bytes\": " << sizeof(kinetic_tuning) << ",\n"
       << "\"dt_s\": 0.001,\n\"steps\": " << kSteps << ",\n\"block\": " << kBlock << ",\n"

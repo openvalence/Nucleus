@@ -20,6 +20,7 @@
 // - SINGLE-THREADED per handle. One handle is one machine.
 // See: README.md (units, field order, the pin rule), SPEC 5.4, SPEC 9.6
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -150,6 +151,7 @@ struct Params {
     float    lo, hi;
     uint32_t horizon_us;
     MotionTuning tuning;
+    uint32_t expect_us;   // MotionIntent::expect_us on every segment
 };
 
 // One machine. Heap-allocated per handle: the engine is KB-scale.
@@ -184,6 +186,8 @@ public:
         _arb.applyTuning(t);
     }
 
+    void setExpect(uint32_t window_ms) { _params.expect_us = window_ms * 1000u; }
+
     // The hub's anchor rule (SPEC 5.4, ValenceDevice::onStreamBundle): a start
     // in the past is due now, one beyond the horizon is clamped to it.
     int submit(uint16_t pos_e4, uint16_t dur_ms, int16_t end_vel_e3, double start_us, bool supersede) {
@@ -197,6 +201,7 @@ public:
         // RFC-087: the hub sets it on the first segment of a bundle the motion
         // path takes (ValenceDevice::onStreamBundle); the caller decides.
         in->supersede = supersede;
+        in->expect_us = _params.expect_us;
         if (_arb.accept(*in, _now_us)) return 1;
         _refused = true;
         return 0;
@@ -361,8 +366,10 @@ KINETIC_API kinetic_handle* kinetic_create(float vmax_mm_s, float amax_mm_s2, fl
     if (!(positive(vmax_mm_s) && positive(amax_mm_s2) && positive(jmax_mm_s3) && positive(rail_mm)))
         return nullptr;
     const uint32_t h_ms = horizon_ms != 0 ? horizon_ms : uint32_t(valence::limits::max_future_schedule_ms);
+    // The hub's quiet window for a segments grant (ValenceDevice::onStreamBundle).
+    const uint32_t quiet_ms = std::max<uint32_t>(valence::limits::stream_quiet_release_ms, h_ms);
     const Params p{vmax_mm_s, amax_mm_s2, jmax_mm_s3, rail_mm, 0.0f, rail_mm, h_ms * 1000u,
-                   valence::motionDefaultTuning()};
+                   valence::motionDefaultTuning(), quiet_ms * 1000u};
     return new (std::nothrow) kinetic_handle(p);
 }
 
@@ -401,6 +408,14 @@ KINETIC_API int kinetic_submit_segment(kinetic_handle* h, uint16_t pos_e4, uint1
                                        int16_t end_vel_e3, double start_us) {
     if (h == nullptr) return 0;
     return h->host.submit(pos_e4, dur_ms, end_vel_e3, start_us, false);
+}
+
+// The window every later segment expects successors for (MotionIntent::
+// expect_us, Kinetic Engine::expect), ms. Create sets the hub's: the larger
+// of stream_quiet_release_ms and the horizon. 0 renders every free knot at
+// rest. Kept by kinetic_reset.
+KINETIC_API void kinetic_expect(kinetic_handle* h, uint32_t window_ms) {
+    if (h != nullptr) h->host.setExpect(window_ms);
 }
 
 // kinetic_submit_segment with the RFC-087 supersede flag: nonzero on the first

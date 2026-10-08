@@ -41,6 +41,7 @@ const [vmax, amax, jmax, rail, horizon] = fx.create;
 const h = k.kinetic_create(vmax, amax, jmax, rail, horizon);
 if (!h) throw new Error('kinetic_create refused the fixture limits');
 if (k.kinetic_set_window(h, fx.window[0], fx.window[1]) !== 1) throw new Error('window refused');
+k.kinetic_expect(h, fx.expect_ms);
 const out = k.malloc(SAMPLE);
 
 let next = 0;

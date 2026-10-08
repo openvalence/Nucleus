@@ -77,6 +77,7 @@ frame of the travel window. The engine frame is that window normalized to
 |---|---|
 | `kinetic_create(vmax_mm_s, amax_mm_s2, jmax_mm_s3, rail_mm, horizon_ms)` | The input ceiling set, the rail, and the grant's schedule horizon (0 = `max_future_schedule_ms`, 250). Homed at 0 mm, window = the whole rail, factory tuning. Null on a non-finite or non-positive limit. |
 | `kinetic_set_window(h, lo_mm, hi_mm)` | 1 applied, 0 refused. Like the board, the next tick parks and reseeds at rest. |
+| `kinetic_expect(h, window_ms)` | The window each later segment expects successors for (`MotionIntent::expect_us`, Kinetic `Engine::expect`): its free knot renders through toward a provisional successor instead of at rest. Create sets the hub's, the larger of `stream_quiet_release_ms` (500) and the horizon; 0 renders every free knot at rest. Kept by `kinetic_reset`. |
 | `kinetic_default_tuning(out)` / `kinetic_set_tuning(h, t)` | The factory set, and a whole set applied before the next segment (`kinetic_tuning` below). |
 | `kinetic_submit_segment(h, pos_e4, dur_ms, end_vel_e3, start_us)` | One 0x2101 segment, planned at the current clock. 1 accepted, 0 refused by the planner, -1 zero duration (dropped, as the hub drops it). |
 | `kinetic_step(h, dt_s, out)` | Advances the clock by `dt_s`, rounded to whole microseconds, evaluates, and writes one `kinetic_sample`. The board ticks at 1 ms. |
@@ -147,7 +148,8 @@ only):
 
 The emitter is ideal and the tick is exact, so the board's task wake-up jitter
 and the LP core's edge quantization are not modeled. The plan is identical to
-the board's.
+the board's. The hub's quiet release, which re-solves a stream's pending knots
+without the expectation when its session drops, has no call here.
 
 ## The lab's calls
 
