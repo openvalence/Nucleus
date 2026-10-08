@@ -70,6 +70,10 @@ struct MotionIntent {
     // knot queued at or after its start before planning it. Read only on the
     // segment path.
     bool         supersede    = false;
+    // A Stream segment only: more segments are expected for this long after
+    // its arrival, the grant's quiet window (SPEC 11.4, RFC-098), so its free
+    // knot renders through (Kinetic Engine::expect). 0 = none.
+    uint32_t     expect_us    = 0;
 };
 
 // One cross-task snapshot of the whole motion plane, refreshed on the motion

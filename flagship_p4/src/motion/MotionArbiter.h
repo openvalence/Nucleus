@@ -362,6 +362,9 @@ public:
     // log channel. Its stop releases it, a no-op unless `generator` holds it.
     // A released generator's own brake still lands until the other acquires.
     // Any source but Pattern or Advanced is refused.
+    // releaseRail(Stream) is the hub's quiet release of the stream (SPEC
+    // 11.4, RFC-098): the planner drops the stream's expectation and, with
+    // knots still pending, re-solves them so the newest lands at rest.
     bool acquireRail(MotionSource generator);
     void releaseRail(MotionSource generator);
     // The hub's estop_cuts_power declaration (SPEC 11.2): true, the motor is
@@ -419,6 +422,9 @@ public:
     // window: read it after evaluate(), never between accept() and evaluate().
     // Nothing on the board calls it.
     MotionEngine& engine() { return _engine; }
+    // Planner task. The expectation the engine holds (Engine::expect), engine
+    // clock; 0 when none. For host tests; nothing on the board calls it.
+    uint64_t expectUntil() const { return _k2_expect_us; }
     float winMin() const { return _win_min; }
     float winMax() const { return _win_max; }
     float rail() const { return _rail; }
@@ -481,6 +487,9 @@ private:
     // Stops as fast as the engine's current limits allow, from its own
     // state at at_us. False when there was nothing moving to stop.
     bool brakeEngine(uint64_t at_us);
+    // Engine::expect on axis 0, mirrored for expectUntil(). Every submit sets
+    // it (a Stream segment's horizon, else 0), and a brake clears it.
+    void setExpect(uint64_t until_us);
     void notePlanCost(uint32_t us);
 
     // The engine's frame: its normalized 0..1 is the travel window, or the
@@ -606,6 +615,9 @@ private:
     bool     _k2_chase = false;           // the newest knot is a sample's
     bool     _k2_window_clamped = false;  // the last plan's target was window-clamped
     bool     _k2_dirty = false;           // submitted since the last sample: it solves
+    uint64_t _k2_expect_us = 0;           // the engine's expectation (setExpect())
+    // The hub released the stream (releaseRail(Stream)); the planner consumes it.
+    std::atomic<bool> _stream_quiet{false};
     // The plan in flight was planned under the jog set (a Manual move, the
     // RETURN): set by plan(), cleared once the engine is idle. Planner the
     // writer, steerTick() the reader.

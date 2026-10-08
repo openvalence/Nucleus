@@ -1407,6 +1407,10 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
     // (RFC-087); samples the registry's max_future_schedule_ms.
     const int32_t leadCapUs = int32_t(isSegment ? scheduleHorizonMs(channel_id)
                                                 : limits::max_future_schedule_ms) * 1000;
+    // A segment's expectation (MotionIntent::expect_us) is the hub's quiet
+    // window for this stream, the same max the library releases it on.
+    const uint32_t expectUs =
+        std::max<uint32_t>(limits::stream_quiet_release_ms, scheduleHorizonMs(channel_id)) * 1000u;
 
     // Normalized samples map onto the client-frame window (RFC-088); the
     // arbiter mirrors the result to the physical rail.
@@ -1436,6 +1440,7 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
                                       int16_t(getU16(sample.subspan(4, 2))), w.lo, span, anchor)
                       : pointIntent(pos, int16_t(getU16(sample.subspan(2, 2))), w.lo, span, anchor);
         if (in && !flushed) in->supersede = true;
+        if (in && isSegment) in->expect_us = expectUs;
         if (!in || !motionSubmit(*in)) {
             ++dropped;
             continue;
@@ -1471,6 +1476,8 @@ void ValenceDevice::onSourceOwnership(uint8_t source_id, uint32_t owner_session,
     if (source_id < _owner.size()) _owner[source_id] = owner_session;
     if (owner_session != 0) return;
     const auto gen = MotionSource(source_id);
+    // The stream's release ends its expectation (MotionArbiter::releaseRail).
+    if (gen == MotionSource::Stream) motionReleaseRail(gen);
     if (gen != MotionSource::Pattern && gen != MotionSource::Advanced) return;
     bool& run = gen == MotionSource::Advanced ? _pat.adv_running : _pat.running;
     const char* name = kMotionSourceNames[source_id];

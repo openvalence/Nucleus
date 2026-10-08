@@ -26,6 +26,17 @@ free last knot keeps its secant and is braked past, RFC-105 (dd)), stretched,
 never trimmed; a generator's stop and PAUSE are the arbiter's brake, which
 refuses a knot due before its end; a timeline that runs dry still moving is
 the engine's own brake, which a new knot re-plans from (RFC-105 (dd)).
+A Stream segment arms the engine's expectation (`Engine::expect`) until its
+arrival plus the hub's quiet window, the larger of `stream_quiet_release_ms`
+and the grant's schedule horizon (`MotionIntent::expect_us`), so its free knot
+renders through toward a provisional successor instead of at rest; every
+other intent, a brake and a reset end it, and the hub's quiet release
+(`releaseRail(Stream)`) ends it and re-solves the knots still pending, so the
+newest lands at rest. A stream that stops before its release passes its last
+free knot moving and the engine's brake stops past it, by the brake distance
+from the chord speed (bd val-g62) [verified 2026-10-08 -- test_motion_arbiter,
+free knots 125 ms ahead pass at 0.99..1.02 of the chord, 0.90..1.22 without;
+a release with the last knot pending rests on it within 0.05 mm].
 Kinetic² has no chase heuristics and no dwell rule; a point move is a
 quintic, up to 1.875 times a cruise.
 

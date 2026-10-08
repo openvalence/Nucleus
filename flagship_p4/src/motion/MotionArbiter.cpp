@@ -135,6 +135,10 @@ bool MotionArbiter::acquireRail(MotionSource generator) {
 }
 
 void MotionArbiter::releaseRail(MotionSource generator) {
+    if (generator == MotionSource::Stream) {
+        _stream_quiet.store(true);
+        return;
+    }
     uint8_t held = uint8_t(generator);
     _rail_gen.compare_exchange_strong(held, kRailFree);
 }
@@ -416,7 +420,8 @@ void MotionArbiter::notePlanCost(uint32_t us) {
 }
 
 void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
-    _engine.resetAt(p_norm, now_us);
+    _engine.resetAt(p_norm, now_us);   // clears the expectation
+    _k2_expect_us   = 0;
     _k2_newest_us   = now_us;
     _k2_newest_p    = p_norm;
     _k2_brake_to_us = 0;
@@ -472,6 +477,7 @@ bool MotionArbiter::brakeEngine(uint64_t at_us) {
     const kinetic2::State s = _engine.stateAt(0, at_us);
     const kinetic2::Profile pr = kinetic2::Profile::brake(s, at_us, _engine.config().limits);
     _engine.brake(at_us);
+    setExpect(0);
     _k2_dirty = true;
     _k2_brake_from_us = at_us;
     _k2_brake_from_p  = s.p;
@@ -481,6 +487,11 @@ bool MotionArbiter::brakeEngine(uint64_t at_us) {
     _k2_newest_us     = _k2_brake_to_us;
     _k2_newest_p      = _k2_brake_to_p;
     return pr.n > 0;
+}
+
+void MotionArbiter::setExpect(uint64_t until_us) {
+    _engine.expect(0, until_us);
+    _k2_expect_us = until_us;
 }
 
 // ---- the Kinetic² boundary ----------------------------------------------------
@@ -501,6 +512,13 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     // residue into the next one. pending() first: isBusy() solves, and a
     // bundle must not solve once per sample.
     if (_engine.pending() == 0 && !_engine.isBusy(now_us)) resetEngine(toNorm(positionMm()), now_us);
+
+    // Engine::expect, after the reset above (a reset clears it): a Stream
+    // segment's free knot renders through while more segments are expected;
+    // every other intent (a sample, a jog, a generator taking the rail) ends
+    // the expectation. Never a sample's: the kernel ignores samples.
+    const bool streamed = in.source == MotionSource::Stream && in.duration_us > 0 && in.expect_us > 0;
+    setExpect(streamed ? now_us + in.expect_us : 0);
 
     // A generator's stop arrives as a point at its braking distance; it
     // renders as the brake itself.
@@ -762,6 +780,14 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // A pause ends a cycle, which parks: a seek has no brake to run.
     if (_home_abort.exchange(false) && _homing.load()) homeEnd("paused", now_us);
     if (_brake_req.exchange(false)) brakeToRest(now_us);
+    // The stream's quiet release: nothing more is coming. An expectation
+    // already rendered into a pending knot is fixed at its solve, so the
+    // window re-solves without it and the newest knot lands at rest instead
+    // of being passed moving and braked past.
+    if (_stream_quiet.exchange(false) && _k2_expect_us != 0) {
+        setExpect(0);
+        if (_engine.pending() > 0) reseedEngine(now_us);
+    }
     // While a cycle runs the seek producer is the emitter's one steerer and
     // renews its lease here; the steer stands aside (steerTick()).
     if (_home_req.exchange(false)) homeStart(now_us);

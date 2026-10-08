@@ -2849,3 +2849,177 @@ TEST_CASE("window moved mid-stream with the steer ahead of the planner: parked w
     CHECK(last > 100.0);
     CHECK(r->arb.plannerStalls() == 0);
 }
+
+// ---- the stream's expectation (Kinetic Engine::expect, bd val-g62) -----------
+// A Stream segment carries the hub's quiet window (MotionIntent::expect_us), so
+// its free knot renders through toward a provisional successor; the hub's
+// quiet release, a brake, an e-stop and any other intent end it.
+
+namespace {
+
+constexpr float    kKnotTol = 0.05f;      // mm, about ten steps
+constexpr uint32_t kQuietUs = 500'000;    // registry stream_quiet_release_ms
+constexpr uint32_t kSpanUs  = 100'000;
+constexpr float    kStepMm  = 10.0f;      // per span
+constexpr float    kChord   = kStepMm / (float(kSpanUs) * 1e-6f);   // 100 mm/s
+
+// A homed 268 mm rail, the window 40..240, resting at 50 mm.
+std::unique_ptr<Rig> streamRig() {
+    auto r = rig();
+    r->arb.forceHome(268.0f);
+    r->arb.setWindow(40.0f, 240.0f, 268.0f);
+    r->arb.setInputLimits(1000.0f, 20000.0f, 2e7f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 50.0f));
+    r->run(1'500'000);
+    return r;
+}
+
+// The plan's velocity through the stream's middle: from its third knot to
+// its second-to-last, past the start from rest and before the end.
+struct Through {
+    float at_knot = 1e9f;   // the slowest at a knot's time
+    float least   = 1e9f;   // the slowest anywhere
+    float most    = 0.0f;
+};
+
+// `knots` free same-direction segments from 50 mm, one per bundle, each sent
+// 125 ms before its start, with expect_us as given; then `tail_us` more.
+// at_last() runs right after the last submit.
+Through streamUp(Rig& r, int knots, uint32_t expect_us, uint64_t tail_us,
+                 const std::function<void()>& at_last = nullptr) {
+    Through th;
+    const uint64_t t0 = g_now_us + 200'000;
+    const uint64_t from = t0 + 3 * kSpanUs, to = t0 + uint64_t(knots - 1) * kSpanUs;
+    auto tick = [&] {
+        r.run(1000);
+        if (g_now_us < from || g_now_us > to) return;
+        const float v = r.census().velocity_mm_s;
+        if ((g_now_us - t0) % kSpanUs == 0) th.at_knot = std::fmin(th.at_knot, v);
+        th.least = std::fmin(th.least, v);
+        th.most = std::fmax(th.most, v);
+    };
+    int next = 0;
+    while (next < knots) {
+        const uint64_t start = t0 + uint64_t(next) * kSpanUs;
+        if (start > g_now_us + 125'000) {
+            tick();
+            continue;
+        }
+        MotionIntent in;
+        in.source = MotionSource::Stream;
+        in.target_mm = 50.0f + kStepMm * float(next + 1);
+        in.duration_us = kSpanUs;
+        in.anchor_us = start;
+        in.supersede = true;
+        in.expect_us = expect_us;
+        REQUIRE(r.arb.accept(in, g_now_us));
+        if (++next == knots && at_last) at_last();
+    }
+    for (uint64_t t = 0; t < tail_us; t += 1000) tick();
+    return th;
+}
+
+}  // namespace
+
+TEST_CASE("expect: free same-direction knots streamed 125 ms ahead pass at chord speed; without it the stream surges and sags") {
+    constexpr int kKnots = 12;
+    Through with, without;
+    {
+        auto r = streamRig();
+        with = streamUp(*r, kKnots, kQuietUs, 1'000'000);
+        r->arb.drainAnomalies();
+        const MotionCensus c = r->census();
+        CHECK(c.rejected == 0);
+        CHECK(c.anom[size_t(kinetic2::AnomalyKind::PieceOverCeiling)] == 0);
+    }
+    {
+        auto r = streamRig();
+        without = streamUp(*r, kKnots, 0, 1'000'000);
+    }
+    MESSAGE("with expect: ", with.at_knot / kChord, " of the chord at the slowest knot, ", with.least / kChord, "..",
+            with.most / kChord, " between; without: ", without.at_knot / kChord, ", ", without.least / kChord, "..",
+            without.most / kChord);
+    CHECK(with.at_knot >= 0.95f * kChord);
+    CHECK(with.least >= 0.95f * kChord);
+    CHECK(with.most <= 1.05f * kChord);
+    CHECK(without.least < 0.95f * kChord);
+}
+
+TEST_CASE("expect: the quiet release with the last knot pending re-solves it to land at rest, never braked past") {
+    constexpr int kKnots = 8;
+    const float last = 50.0f + kStepMm * float(kKnots);
+    auto r = streamRig();
+    // A session dropping mid-stream: the hub releases the stream while its
+    // last segment is still ahead.
+    streamUp(*r, kKnots, kQuietUs, 1'500'000, [&] {
+        CHECK(r->arb.expectUntil() == g_now_us + kQuietUs);
+        r->arb.releaseRail(MotionSource::Stream);
+    });
+    CHECK(r->arb.expectUntil() == 0);
+    const MotionCensus c = r->census();
+    CHECK_FALSE(c.busy);
+    CHECK(std::fabs(c.plan_mm - last) <= kKnotTol);
+    CHECK(std::fabs(c.position_mm - last) <= kKnotTol);
+
+    // The same stream simply ending: its last knot is passed moving and the
+    // engine's brake stops past it; the release comes after it played out.
+    auto s = streamRig();
+    streamUp(*s, kKnots, kQuietUs, 1'500'000);
+    MESSAGE("a stream that ends before its release rests ", s->census().plan_mm - last, " mm past its last knot");
+    s->arb.releaseRail(MotionSource::Stream);
+    s->run(1000);
+    CHECK(s->arb.expectUntil() == 0);
+}
+
+TEST_CASE("expect: PAUSE, ESTOP, a jog and a sample end it; a Stream segment without expect_us sets none") {
+    auto streaming = [](Rig& r) {
+        MotionIntent in;
+        in.source = MotionSource::Stream;
+        in.target_mm = 120.0f;
+        in.duration_us = 400'000;
+        in.expect_us = kQuietUs;
+        REQUIRE(r.arb.accept(in, g_now_us));
+        r.run(50'000);
+        REQUIRE(r.arb.expectUntil() != 0);
+    };
+    {
+        auto r = streamRig();
+        streaming(*r);
+        r->arb.pause(true);
+        r->run(1000);
+        CHECK(r->arb.expectUntil() == 0);
+    }
+    {
+        auto r = streamRig();
+        streaming(*r);
+        r->arb.estop(true);
+        r->run(1000);
+        CHECK(r->arb.expectUntil() == 0);
+    }
+    {
+        auto r = streamRig();
+        streaming(*r);
+        REQUIRE(r->submit(MotionSource::Manual, 60.0f));
+        CHECK(r->arb.expectUntil() == 0);
+    }
+    {
+        auto r = streamRig();
+        streaming(*r);
+        MotionIntent in;   // a 0x2100 sample, ahead of the segment's knot
+        in.source = MotionSource::Stream;
+        in.target_mm = 130.0f;
+        in.anchor_us = g_now_us + 400'000;
+        REQUIRE(r->arb.accept(in, g_now_us));
+        CHECK(r->arb.expectUntil() == 0);
+    }
+    {
+        auto r = streamRig();
+        MotionIntent in;
+        in.source = MotionSource::Stream;
+        in.target_mm = 120.0f;
+        in.duration_us = 400'000;
+        REQUIRE(r->arb.accept(in, g_now_us));
+        CHECK(r->arb.expectUntil() == 0);
+    }
+}
