@@ -58,7 +58,7 @@ struct SimConfig {
 
 class SimCore {
 public:
-    static constexpr const char* kHubName = "valencesim";
+    static constexpr const char* kHubName = "Virtual";
 
     // False on a catalog that overflows or encodes to zero (logged to stderr).
     bool begin(const SimConfig& cfg, IClock& clock, ISimStore& store);
