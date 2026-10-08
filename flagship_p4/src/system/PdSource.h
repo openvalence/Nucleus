@@ -269,17 +269,18 @@ inline constexpr float kMovingMassKg    = 2.0f;    // carriage, payload, rotor r
 inline constexpr float kDriveEfficiency = 0.75f;   // drive and motor at a peak
 inline constexpr float kIdleW           = 15.0f;   // logic, fan, drive standby, accessories
 
-// Evaluated at the factory speed ceiling (1000 mm/s), the highest input accel
+// Evaluated at the factory speed ceiling (1200 mm/s), the highest input accel
 // each contract carries:
 //   contract           budget    accel ceiling carried
-//   24 V x 3 A         64.8 W    19,600 mm/s^2
-//   36 V x 3 A         97.2 W    32,400 mm/s^2
-//   24 V x 5 A        108.0 W    36,700 mm/s^2
-//   28 V x 5 A        126.0 W    43,800 mm/s^2
-//   36 V x 5 A        162.0 W    58,000 mm/s^2
-//   48 V x 5 A, buck  205.2 W    75,000 mm/s^2
-// The factory ceilings (1000 mm/s, 50,000 mm/s^2) peak at 148.3 W: a 36 V or a
-// 48 V source at 5 A carries them, a 28 V one does not.
+//   24 V x 3 A         64.8 W    15,500 mm/s^2
+//   36 V x 3 A         97.2 W    25,600 mm/s^2
+//   24 V x 5 A        108.0 W    29,000 mm/s^2
+//   28 V x 5 A        126.0 W    34,600 mm/s^2
+//   36 V x 5 A        162.0 W    45,900 mm/s^2
+//   48 V x 5 A, buck  205.2 W    59,400 mm/s^2
+// The factory ceilings (1200 mm/s, 100,000 mm/s^2) peak at 335 W: no contract
+// carries them, so a PD build refuses motor power until input_speed or
+// input_accel comes down, or until kMovingMassKg is fitted (val-091.69).
 
 struct Ceilings {
     float vmax_mm_s  = 0.0f;

@@ -52,7 +52,7 @@ pd::Reading ready(uint32_t pdo, uint32_t rdo) {
 
 pd::Reading absent() { return pd::Reading{}; }
 
-constexpr pd::Ceilings kFactory{950.0f, 50000.0f};   // valence_config.h DEFAULT_*
+constexpr pd::Ceilings kSet950{950.0f, 50000.0f};   // a fixture, not the factory set (PdSource.h)
 
 // Wider than the reason column, so a line that would be cut is measured whole.
 std::string text(const pd::Assessment& a) {
@@ -191,17 +191,17 @@ TEST_CASE("profile: a contract over 36 V is the 48 V build behind its buck") {
     CHECK(p48.budget_w == doctest::Approx(205.2));   // 240 W x 0.95 x 0.9
 }
 
-TEST_CASE("peak: the factory ceilings draw 141.7 W, idle alone 15 W") {
-    CHECK(pd::peakWatts(kFactory) == doctest::Approx(141.667).epsilon(1e-4));
+TEST_CASE("peak: 950 mm/s and 50,000 mm/s^2 draw 141.7 W, idle alone 15 W") {
+    CHECK(pd::peakWatts(kSet950) == doctest::Approx(141.667).epsilon(1e-4));
     CHECK(pd::peakWatts(pd::Ceilings{}) == doctest::Approx(15.0));
     CHECK(std::isinf(pd::peakWatts({std::numeric_limits<float>::quiet_NaN(), 50000.0f})));
     CHECK(std::isinf(pd::peakWatts({950.0f, -1.0f})));
 }
 
-TEST_CASE("refusal: the factory ceilings ride 36 V and 48 V at 5 A, never 28 V") {
-    CHECK(pd::assess(ready(kPdoFixed36, kRdoFixed36), kFactory).verdict == Verdict::carries);
-    CHECK(pd::assess(ready(kPdoFixed48, kRdoFixed48), kFactory).verdict == Verdict::carries);
-    const pd::Assessment a28 = pd::assess(ready(kPdoFixed28, kRdoFixed28), kFactory);
+TEST_CASE("refusal: 950 mm/s and 50,000 mm/s^2 ride 36 V and 48 V at 5 A, never 28 V") {
+    CHECK(pd::assess(ready(kPdoFixed36, kRdoFixed36), kSet950).verdict == Verdict::carries);
+    CHECK(pd::assess(ready(kPdoFixed48, kRdoFixed48), kSet950).verdict == Verdict::carries);
+    const pd::Assessment a28 = pd::assess(ready(kPdoFixed28, kRdoFixed28), kSet950);
     CHECK(a28.verdict == Verdict::over_budget);
     CHECK_FALSE(a28.motorAllowed());
 }
@@ -223,7 +223,7 @@ TEST_CASE("refusal boundary: 28 V x 5 A at 950 mm/s carries 43,800 mm/s^2, refus
 TEST_CASE("refusal: a NaN ceiling, no contract, or a contract under 24 V never carries") {
     const pd::Reading r36 = ready(kPdoFixed36, kRdoFixed36);
     CHECK(pd::assess(r36, {std::numeric_limits<float>::quiet_NaN(), 1.0f}).verdict == Verdict::over_budget);
-    CHECK(pd::assess(ready(0, 0), kFactory).verdict == Verdict::no_contract);
+    CHECK(pd::assess(ready(0, 0), kSet950).verdict == Verdict::no_contract);
     CHECK(pd::assess(ready(0xC1A42164, 0x5007D03C), pd::Ceilings{}).verdict == Verdict::under_floor);
     // A request for 0 A is no usable contract either.
     CHECK(pd::assess(ready(kPdoFixed36, 0x90000000), pd::Ceilings{}).verdict == Verdict::no_contract);
@@ -232,7 +232,7 @@ TEST_CASE("refusal: a NaN ceiling, no contract, or a contract under 24 V never c
 // ---- the absent board and the other non-ready presences ---------------------
 
 TEST_CASE("absent: a silent 0x21 is a DC-input build, motor power allowed, the absence named") {
-    const pd::Assessment a = pd::assess(absent(), kFactory);
+    const pd::Assessment a = pd::assess(absent(), kSet950);
     CHECK(a.verdict == Verdict::absent);
     CHECK(a.motorAllowed());
     CHECK(text(a) == "no PD daughterboard (0x21 silent): DC input");
@@ -255,11 +255,11 @@ TEST_CASE("presence: a bus error, a stranger at 0x21 or a controller not in APP 
 }
 
 TEST_CASE("describe: the contract named, every line inside the reason column") {
-    CHECK(text(pd::assess(ready(kPdoFixed36, kRdoFixed36), kFactory)) ==
+    CHECK(text(pd::assess(ready(kPdoFixed36, kRdoFixed36), kSet950)) ==
           "36.0V 5.00A fixed #9: peak 142 W within 162 W budget");
-    CHECK(text(pd::assess(ready(kPdoFixed28, kRdoFixed28), kFactory)) ==
+    CHECK(text(pd::assess(ready(kPdoFixed28, kRdoFixed28), kSet950)) ==
           "28.0V 5.00A fixed #8: peak 142 W over 126 W budget");
-    CHECK(text(pd::assess(ready(kPdoFixed48, kRdoFixed48), kFactory)) ==
+    CHECK(text(pd::assess(ready(kPdoFixed48, kRdoFixed48), kSet950)) ==
           "48.0V 5.00A fixed #10 via buck: peak 142 W within 205 W budget");
     // The widest line at the catalog's ceiling bounds (10,000 mm/s, 100,000
     // mm/s^2: a four-digit peak) still fits the column with its terminator.
@@ -272,26 +272,26 @@ TEST_CASE("describe: the contract named, every line inside the reason column") {
 
 TEST_CASE("self-check: absent PASSES naming the absence, an over-budget contract FAILS") {
     sc::Table t;
-    sc::judgePdSource(t, pd::assess(absent(), kFactory));
+    sc::judgePdSource(t, pd::assess(absent(), kSet950));
     CHECK(t.entry(sc::Check::pd_source).result == sc::Result::pass);
     CHECK(std::string(t.entry(sc::Check::pd_source).reason.data()) ==
           "no PD daughterboard (0x21 silent): DC input");
-    sc::judgePdSource(t, pd::assess(ready(kPdoFixed28, kRdoFixed28), kFactory));
+    sc::judgePdSource(t, pd::assess(ready(kPdoFixed28, kRdoFixed28), kSet950));
     CHECK(t.entry(sc::Check::pd_source).result == sc::Result::fail);
-    sc::judgePdSource(t, pd::assess(ready(kPdoFixed36, kRdoFixed36), kFactory));
+    sc::judgePdSource(t, pd::assess(ready(kPdoFixed36, kRdoFixed36), kSet950));
     CHECK(t.entry(sc::Check::pd_source).result == sc::Result::pass);
     CHECK(std::string(sc::name(sc::Check::pd_source)) == "pd-source");
     CHECK(size_t(sc::Check::pd_source) < size_t(sc::Check::bus_window));
 }
 
 TEST_CASE("bus window: no daughterboard keeps 24-36 V, a contract narrows it to its bus") {
-    const sc::BusWindowMv dc = sc::busWindowFor(pd::assess(absent(), kFactory));
+    const sc::BusWindowMv dc = sc::busWindowFor(pd::assess(absent(), kSet950));
     CHECK(dc.min_mv == 21600);
     CHECK(dc.max_mv == 39600);
-    const sc::BusWindowMv w28 = sc::busWindowFor(pd::assess(ready(kPdoFixed28, kRdoFixed28), kFactory));
+    const sc::BusWindowMv w28 = sc::busWindowFor(pd::assess(ready(kPdoFixed28, kRdoFixed28), kSet950));
     CHECK(w28.min_mv == 25200);
     CHECK(w28.max_mv == 30800);
-    const sc::BusWindowMv w48 = sc::busWindowFor(pd::assess(ready(kPdoFixed48, kRdoFixed48), kFactory));
+    const sc::BusWindowMv w48 = sc::busWindowFor(pd::assess(ready(kPdoFixed48, kRdoFixed48), kSet950));
     CHECK(w48.min_mv == 32400);   // the buck's 36 V, not the contract's 48
     CHECK(w48.max_mv == 39600);
 

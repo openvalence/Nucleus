@@ -41,7 +41,7 @@ namespace {
 
 // ---- the script -------------------------------------------------------------
 
-constexpr float    kVmax = 1000.0f;      // valence_config.h factory input set
+constexpr float    kVmax = 1000.0f;      // the set kinetic_trace.json was recorded at, not the factory set
 constexpr float    kAmax = 50000.0f;
 constexpr float    kJmax = 2000000.0f;
 constexpr float    kRail = 500.0f;

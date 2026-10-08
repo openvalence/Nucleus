@@ -25,7 +25,7 @@ const st = {
   source: null,                  // {kind: 'script', script, name} | {kind: 'events', events, name}
   interp: { ...INTERP, mode: 'pchip' },
   T: { lo: 0, hi: 1, invert: 0 },
-  machine: { rail: 500, lo: 0, hi: 500, vmax: 1000, amax: 50000, jmax: 5000000 },
+  machine: { rail: 500, lo: 0, hi: 500, vmax: 1200, amax: 100000, jmax: 20000000 },
   tuning: {},                    // member -> value, seeded from the twin's factory set
   defaults: {},
   link: { exact: 0, family: 1, netMs: 5, clockErrMs: 0, playerTickMs: 16.667, horizonMs: 250, low: 0 },

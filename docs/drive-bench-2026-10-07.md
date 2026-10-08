@@ -125,11 +125,15 @@ write, 0x01 back, 0x00 506, 0x00 0) and revert on power cycle; a save needs
   ceiling with it (`flagship_p4/src/hub/valence_config.h`,
   `ValenceCatalog.h`): no setting can ask the LP for more than it sustains.
   val-d66.
-- The planner's accel default (50,000) is three times what the as-programmed
-  drive delivers and 1.7 times the best register tune; the drive rounds every
-  reversal late. Loaded, the 60AIM40F and its toy take 100,000 at
-  1000 mm/s cleanly with the programmed gains (the last section); whether
-  the default moves is the operator's ruling. val-sgj.
+- Ruled 2026-10-08 (val-sgj): the factory input set is 1200 mm/s,
+  100,000 mm/s2 and 2e7 mm/s3 (`valence_config.h`, `ValenceCatalog.h`),
+  because at 1000 mm/s with the programmed drive gains a 100,000 mm/s2 plan
+  followed with 13 mm following error, 0.08 mm overshoot, a 21 ms settle and
+  no buzz, the motor's 36 V ceiling of about 1130 mm/s makes 1200 ask
+  slightly more than it delivers while the drive buffers the difference
+  losslessly, and a jerk of 2e7 reaches full accel in 5 ms, under the
+  drive's own ramp, so the planner trims only when the speed or accel
+  ceilings bite.
 - The drive tune that was clean unloaded, position KP 8000 and 0x03
   feed-forward 40 to 60, was tried loaded (the last section): KP 8000 and
   feed-forward 60 are not worth it; feed-forward 40 is the one trade left.
@@ -160,8 +164,9 @@ Same wiring (RS485 to the PC, the P4 emitting), carriage and a toy on.
 4. `python tools/aim/ff_probe.py --speed 1000 --accel 100000 --legs 4 --regs
    0x07=8000` and the 0x03 60040 / 60060 variants: accel, decel, following
    error, overshoot, rest jitter; the operator's ear decides buzz.
-5. `python tools/aim/hub_config.py` puts the hub's eight limits back to
-   factory after any run that changed them.
+5. `python tools/aim/hub_config.py` resets config-set keys 1 to 7 (window
+   0 to 100, the factory jog and input limits) after any run that changed
+   them; it never touches max_rail unless given an eighth argument (val-3kd).
 
 Every script restores the registers it changed; `aim_program.py --verify`
 confirms it. Results append to `*_results.jsonl` beside the scripts

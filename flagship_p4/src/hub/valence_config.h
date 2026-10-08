@@ -51,13 +51,17 @@
 // docs/drive-bench-2026-10-07.md, val-d66): 2,200 mm/s at 208.6 steps/mm. A
 // plan above the emitter's rate falls behind its own count and the residual
 // closes the gap at amax x 1 ms. Do not raise this without re-measuring the LP.
+// DEFAULT_MAX_SPEED_MM_S, DEFAULT_ACCEL_MM_S2 and DEFAULT_INPUT_MAX_JERK_MM_S3
+// are the operator's ruling of 2026-10-08 on the loaded 60AIM40F
+// (docs/drive-bench-2026-10-07.md, val-sgj): move them only on a new loaded
+// measurement. No PD contract carries this set's peak (system/PdSource.h).
 #define MAX_SPEED_MM_S              2000.0f
-#define DEFAULT_MAX_SPEED_MM_S      1000.0f
+#define DEFAULT_MAX_SPEED_MM_S      1200.0f
 #define DEFAULT_JOG_MAX_SPEED_MM_S  50.0f
 #define DEFAULT_JOG_ACCEL_MM_S2     200.0f
-#define DEFAULT_ACCEL_MM_S2         50000.0f
+#define DEFAULT_ACCEL_MM_S2         100000.0f
 #define MAX_ACCEL_MM_S2             100000.0f
-#define DEFAULT_INPUT_MAX_JERK_MM_S3 5000000.0f
+#define DEFAULT_INPUT_MAX_JERK_MM_S3 20000000.0f
 #define MAX_JERK_MM_S3              50000000.0f
 
 #ifdef __cplusplus
