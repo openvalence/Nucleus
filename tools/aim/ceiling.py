@@ -14,7 +14,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('--ip', default='192.168.1.118'); ap.add_argument('--port', type=int, default=82)
 ap.add_argument('--wave', default='sine', choices=['sine', 'tri', 'square'])
 ap.add_argument('--freq', type=float, default=1.0); ap.add_argument('--amp', type=float, default=0.45); ap.add_argument('--center', type=float, default=0.5)
-ap.add_argument('--seconds', type=float, default=8.0); ap.add_argument('--rate', type=float, default=100.0)
+ap.add_argument('--seconds', type=float, default=8.0); ap.add_argument('--rate', type=float, default=50.0)   # the hub answers RATE_LIMITED above its grant
 ap.add_argument('--window', type=float, nargs=2, default=[0.0, 100.0]); ap.add_argument('--home', type=float, default=200.0)
 ap.add_argument('--speed', type=float); ap.add_argument('--accel', type=float); ap.add_argument('--jerk', type=float); ap.add_argument('--max-rail', type=float)
 ap.add_argument('--poll-hz', type=float, default=10.0); ap.add_argument('--com', default='COM2')
