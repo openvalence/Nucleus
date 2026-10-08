@@ -50,6 +50,7 @@ class TestEmitter final : public MotionEmitter {
 public:
     int32_t count() const override { return n; }
     void steer(float v_mm_s) override {
+        ++steers;
         const valence::SteerWord w = valence::steerWord(v_mm_s);
         q8 = w.step_q8;
         if (q8 != 0) fwd = w.forward;
@@ -116,6 +117,7 @@ public:
     bool     fwd = true;
     double   phase = 0.0;
     int      parks = 0;
+    int      steers = 0;
     bool     frozen = false;   // steered, never rendering, no lease: a dead emitter
     std::function<void()> on_edge;
     int32_t  fence_lo = INT32_MIN;   // open until the arbiter writes it, as the core loads it
@@ -2329,4 +2331,290 @@ TEST_CASE("C1 script, a bundle per span: the author's cubics render with nothing
     CHECK(c.anom[size_t(kinetic2::AnomalyKind::WaveformScaled)] <= 1);
     CHECK(c.anom[size_t(kinetic2::AnomalyKind::DeadlineStretched)] == 0);
     CHECK(worst <= 0.5f);
+}
+
+// ---- the planner and the steer (bd val-8rt) ----------------------------------
+// The board runs planTick() and steerTick() on two tasks; evaluate() is both on
+// one. These cases drive the halves apart, as a long solve or a late planner
+// lays them out on the board.
+
+namespace {
+
+// One millisecond: the emitter renders the word it holds, the clock moves.
+void elapse(Rig& r) {
+    g_now_us += 1000;
+    r.emitter.advance(1e-3);
+}
+void planOnly(Rig& r) { r.arb.planTick(g_now_us, 1e-3f); }
+void steerOnly(Rig& r) { r.arb.steerTick(g_now_us, 1e-3f); }
+
+// A homed rig moving a Stream segment toward `target` over `us`, `run_us` in.
+std::unique_ptr<Rig> movingRig(float target, uint32_t us, uint64_t run_us) {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    MotionIntent seg;
+    seg.source = MotionSource::Stream;
+    seg.target_mm = target;
+    seg.duration_us = us;
+    REQUIRE(r->arb.accept(seg, g_now_us));
+    r->run(run_us);
+    return r;
+}
+
+// The kick's bound, one tick of the input accel: what a steer may carry with
+// no feedforward in it.
+constexpr double kKickMax = double(DEFAULT_ACCEL_MM_S2) * 1e-3;
+
+}  // namespace
+
+TEST_CASE("strip: filled once, it steers the next 5 ms as the single-threaded path does") {
+    // Through a knot: the segment ends 3 ms after the strip is filled.
+    const uint64_t start = g_now_us;
+    double one[5] = {}, two[5] = {};
+    {
+        auto r = movingRig(120.0f, 30'000, 27'000);
+        for (double& v : one) {
+            r->run(1000);
+            v = steeredMmS(r->emitter);
+        }
+    }
+    g_now_us = start;
+    {
+        auto r = movingRig(120.0f, 30'000, 27'000);
+        for (double& v : two) {
+            elapse(*r);
+            steerOnly(*r);
+            v = steeredMmS(r->emitter);
+        }
+    }
+    for (int i = 0; i < 5; ++i) {
+        CAPTURE(i);
+        CHECK(std::fabs(one[i]) > 1.0);
+        CHECK(std::fabs(one[i] - two[i]) <= 1e-4);
+    }
+}
+
+TEST_CASE("strip: a planner later than the strip holds its last entry, no feedforward, one stall counted") {
+    auto r = movingRig(400.0f, 1'000'000, 100'000);
+    REQUIRE(std::fabs(steeredMmS(r->emitter)) > 100.0);
+    // The strip's whole length with the planner silent: the plan renders.
+    for (size_t k = 1; k < valence::kStripLen; ++k) {
+        elapse(*r);
+        steerOnly(*r);
+    }
+    CHECK(std::fabs(steeredMmS(r->emitter)) > 100.0);
+    CHECK(r->arb.plannerStalls() == 0);
+    // Past its end the last entry holds: what is left is the kick back to it.
+    for (int k = 0; k < 3; ++k) {
+        elapse(*r);
+        steerOnly(*r);
+        CAPTURE(k);
+        CHECK(std::fabs(steeredMmS(r->emitter)) <= kKickMax + 1.0);
+    }
+    CHECK(r->arb.plannerStalls() == 1);
+    CHECK(r->census().stalls == 0);   // the steer itself was never late
+    // The planner back: the plan renders again, nothing more counted.
+    for (int k = 0; k < 20; ++k) {
+        elapse(*r);
+        planOnly(*r);
+        steerOnly(*r);
+    }
+    CHECK(std::fabs(steeredMmS(r->emitter)) > 100.0);
+    CHECK(r->arb.plannerStalls() == 1);
+}
+
+TEST_CASE("strip: a reset re-anchors the next steer, never a burst (frame move, e-stop, power)") {
+    SUBCASE("a frame move mid-move: the steer sees the flag before the planner") {
+        auto r = movingRig(300.0f, 400'000, 100'000);
+        REQUIRE(std::fabs(steeredMmS(r->emitter)) > 100.0);
+        r->arb.forceHome(500.0f);
+        elapse(*r);
+        steerOnly(*r);
+        CHECK(r->emitter.q8 == 0);
+        planOnly(*r);
+        elapse(*r);
+        steerOnly(*r);
+        CHECK(r->emitter.q8 == 0);
+        planOnly(*r);
+        elapse(*r);
+        steerOnly(*r);
+        CHECK(std::fabs(steeredMmS(r->emitter)) <= kKickMax);
+        // Held where the reset found the carriage: the tick it coasted before
+        // the park, and nothing after.
+        const float held = r->arb.positionMm();
+        r->run(100'000);
+        CHECK(std::fabs(r->arb.positionMm() - held) <= 2.0f * valence::kMmPerStep);
+        CHECK(r->census().plan_mm == doctest::Approx(r->census().position_mm).epsilon(0.001));
+    }
+    SUBCASE("an e-stop and its release, both inside one planner silence") {
+        auto r = movingRig(300.0f, 400'000, 100'000);
+        REQUIRE(std::fabs(steeredMmS(r->emitter)) > 100.0);
+        r->arb.estop(true);
+        for (int k = 0; k < 3; ++k) {
+            elapse(*r);
+            steerOnly(*r);
+            CHECK(r->emitter.q8 == 0);
+        }
+        r->arb.estop(false);
+        // The planner never saw it: the strip still carries the plan, which
+        // went on while the emitter was parked. That is residual, not
+        // feedforward.
+        elapse(*r);
+        steerOnly(*r);
+        CHECK(std::fabs(steeredMmS(r->emitter)) <= kKickMax + 1.0);
+    }
+    SUBCASE("an e-stop the planner resets for, released into PAUSE") {
+        auto r = movingRig(300.0f, 400'000, 100'000);
+        r->arb.estop(true);
+        elapse(*r);
+        planOnly(*r);
+        steerOnly(*r);
+        r->arb.estop(false);
+        elapse(*r);
+        planOnly(*r);
+        steerOnly(*r);
+        CHECK(std::fabs(steeredMmS(r->emitter)) <= kKickMax);
+        CHECK(r->census().paused);
+    }
+    SUBCASE("motor power lost and restored") {
+        auto r = movingRig(300.0f, 400'000, 100'000);
+        r->arb.setMotorPowered(false);
+        elapse(*r);
+        steerOnly(*r);
+        planOnly(*r);
+        elapse(*r);
+        planOnly(*r);
+        steerOnly(*r);
+        r->arb.setMotorPowered(true);
+        elapse(*r);
+        steerOnly(*r);
+        CHECK(r->emitter.q8 == 0);   // the planner's strip is still the empty one
+        planOnly(*r);
+        elapse(*r);
+        steerOnly(*r);
+        CHECK(std::fabs(steeredMmS(r->emitter)) <= kKickMax);
+    }
+}
+
+TEST_CASE("strip: a plan published after the steer passed its reaction horizon lands as a residual, counted") {
+    auto r = movingRig(200.0f, 200'000, 0);
+    const uint64_t t_a = g_now_us;
+    r->run(100'000);
+    // A successor frees the first segment's end: past the reaction horizon the
+    // curve no longer comes to rest there.
+    MotionIntent next;
+    next.source = MotionSource::Stream;
+    next.target_mm = 300.0f;
+    next.duration_us = 200'000;
+    next.anchor_us = t_a + 200'000;
+    REQUIRE(r->arb.accept(next, g_now_us));
+    // A 60 ms solve: the steer renders the strip it holds, the old plan.
+    double v_prev = 0.0;
+    for (int k = 0; k < 60; ++k) {
+        elapse(*r);
+        steerOnly(*r);
+        v_prev = steeredMmS(r->emitter);
+    }
+    elapse(*r);
+    planOnly(*r);
+    steerOnly(*r);
+    const double v = steeredMmS(r->emitter);
+    MESSAGE("steered ", v_prev, " then ", v, " mm/s at the new plan; late plans ", r->arb.latePlans());
+    CHECK(r->arb.latePlans() == 1);
+    // One tick of the plan's own accel and the kick: never the gap over 1 ms.
+    CHECK(std::fabs(v - v_prev) <= double(DEFAULT_ACCEL_MM_S2) * 1e-3 + kKickMax + 1.0);
+    r->run(400'000);
+    CHECK(r->census().position_mm == doctest::Approx(300.0f).epsilon(0.001));
+}
+
+// Measured on the machine 2026-10-08 (0.1.27, the solve on the tick): a
+// funscript play logged STALL lines nearly every second and LEASE LAPSE lines
+// through the dense parts; the lease expired behind a 2 to 28 ms solve and the
+// emitter stopped mid-stroke. With the solve on the planner the steer renews
+// and steers every tick, and a slow planner is never a steer stall.
+TEST_CASE("strip: a planTick longer than the lease leaves the steer renewing and steering, nothing counted") {
+    auto r = movingRig(400.0f, 600'000, 100'000);
+    REQUIRE(std::fabs(steeredMmS(r->emitter)) > 100.0);
+    MotionIntent next;
+    next.source = MotionSource::Stream;
+    next.target_mm = 100.0f;
+    next.duration_us = 300'000;
+    next.anchor_us = g_now_us + 500'000;
+    REQUIRE(r->arb.accept(next, g_now_us));
+    // The planner's 3 * kLeaseUs solve: the steer runs every tick meanwhile.
+    const MotionCensus before = r->census();
+    int parked = 0;
+    for (uint32_t k = 0; k < 3 * valence::kLeaseTicks; ++k) {
+        elapse(*r);
+        steerOnly(*r);
+        CHECK(r->emitter.live);
+        if (r->emitter.q8 == 0) ++parked;
+    }
+    elapse(*r);
+    planOnly(*r);
+    steerOnly(*r);
+    const MotionCensus c = r->census();
+    CHECK(parked == 0);
+    CHECK(r->emitter.lapse_count == 0);
+    CHECK(c.lease_lapses == before.lease_lapses);
+    CHECK(c.stalls == before.stalls);   // the planner was slow, the steer never late
+    CHECK(r->arb.plannerStalls() == 0);   // nor did the strip run dry
+    CHECK(std::fabs(steeredMmS(r->emitter)) > 100.0);
+}
+
+TEST_CASE("home: the steer never steers while the seek producer owns the emitter, and the cycle completes") {
+    auto r = rig();
+    FakeSense s{r->emitter, -30.0f, 170.0f};
+    isr(*r, s);
+    r->arb.setHomeSense(s);
+    REQUIRE(r->arb.home() == HomeStart::started);
+    int cycle_ticks = 0, steered_in_cycle = 0;
+    for (int ms = 0; ms < 20'000; ++ms) {
+        elapse(*r);
+        planOnly(*r);
+        const bool cycle = r->census().homing;
+        const int before = r->emitter.steers;
+        steerOnly(*r);
+        if (cycle) {
+            ++cycle_ticks;
+            if (r->emitter.steers != before) ++steered_in_cycle;
+        }
+        if (!cycle && ms > 0) break;
+    }
+    MESSAGE("cycle ticks ", cycle_ticks);
+    CHECK(cycle_ticks > 100);
+    CHECK(steered_in_cycle == 0);
+    const MotionCensus c = r->census();
+    CHECK(c.homed);
+    CHECK(c.home_fails == 0);
+    CHECK(c.lease_lapses == 0);   // the planner renewed the seek's lease
+}
+
+// Measured on the machine 2026-10-08: the steer's cap was the input set's for
+// every plan, so a 1500 mm/s jog under a 1000 mm/s input set rendered at
+// 1050 mm/s, fell behind its plan, and closed the rest at the kick: 227 mm
+// in 1.05 s.
+TEST_CASE("jog above the input set: the steer follows the jog set's ceiling, never a crawl at the kick") {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->arb.setInputLimits(1000.0f, 50000.0f, 5'000'000.0f);
+    r->arb.setJogLimits(1500.0f, 20000.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 227.0f));
+    double peak = 0.0;
+    int arrived_ms = 0;
+    for (int ms = 1; ms <= 1500 && arrived_ms == 0; ++ms) {
+        r->run(1000);
+        peak = std::max(peak, std::fabs(steeredMmS(r->emitter)));
+        if (std::fabs(r->arb.positionMm() - 227.0f) <= 2.0f * valence::kMmPerStep && !r->census().busy) arrived_ms = ms;
+    }
+    // The point move's own time: 227 mm at 1500 mm/s is 151 ms of cruise, a
+    // point move up to 1.875 times that (RFC-105 (k)), then the settle; the
+    // input set's cap took 1,050 ms.
+    MESSAGE("peak ", peak, " mm/s, arrived at ", arrived_ms, " ms");
+    CHECK(peak >= 1450.0);
+    CHECK(peak <= 1500.0 + kKickMax + 1.0);
+    CHECK(arrived_ms > 0);
+    CHECK(arrived_ms <= 350);
 }

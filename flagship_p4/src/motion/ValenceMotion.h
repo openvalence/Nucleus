@@ -10,7 +10,8 @@
 //   starts, and no input source reaches the engine except through
 //   motionSubmit().
 // - motionSubmit() may be called from any task. It enqueues and wakes the
-//   motion task, which plans AT INTENT ARRIVAL, not on the tick.
+//   planner task, which plans AT INTENT ARRIVAL, not on the tick; the steer
+//   task renders the plan every tick (ValenceMotion.cpp, the two tasks).
 // - Position truth is the LP core's signed edge count, never a number this
 //   side integrates. motionCensus().position_mm is that count in millimeters.
 // - Millimeters everywhere on this interface. The engine's normalized 0..1
@@ -117,7 +118,7 @@ struct MotionCensus {
     // ---- arbiter ----
     uint32_t intents        = 0;
     uint32_t rejected       = 0;   // denied by a gate
-    uint32_t stalls         = 0;   // motion ticks later than kTickDtCapS
+    uint32_t stalls         = 0;   // steer ticks later than kTickDtCapS
                                    // (MotionArbiter.h): each steered without
                                    // a catch-up burst
     uint32_t backstops      = 0;   // position backstop engagements: the plan
@@ -125,7 +126,7 @@ struct MotionCensus {
                                    // held at its edge (MotionArbiter.cpp)
     uint32_t lease_lapses   = 0;   // the LP core stopped itself on a lease no
                                    // tick renewed for kLeaseUs (MotionArbiter.h)
-    uint32_t stack_free     = 0;   // motion task stack high-water headroom, bytes
+    uint32_t stack_free     = 0;   // planner task stack high-water headroom, bytes
     bool     homed          = false;
     bool     estop          = false;
     bool     motor_on       = false;  // the motor switch is `on`, as the switch reports it
@@ -207,7 +208,7 @@ struct MotionTuning {
     uint8_t  infeasible_policy = 0;   // catalog ordinal: 0 stretch, 1 blend
     float    amplitude_budget  = 0.0f;   // kinetic2::Config::amplitude_floor
     // 0x1030 home_speed, mm/s: the home cycle's approach (MotionArbiter.h,
-    // homing). Not engine tuning; it rides this set to reach the motion task.
+    // homing). Not engine tuning; it rides this set to reach the planner.
     float    home_speed        = DEFAULT_HOME_SPEED_MM_S;
     // Kinetic² planner options (RFC-105), static_asserted against
     // kinetic2::Config's defaults. lookahead_us is neither persisted nor on a
@@ -219,10 +220,11 @@ struct MotionTuning {
     bool operator==(const MotionTuning&) const = default;
 };
 
-// The motion task's stack, in bytes, and the ONE home for that number (C-1):
-// the create site and main.cpp's high-water watch table both read it here, so
-// the reported total can never drift from the allocated one. Not yet measured
-// under Kinetic² (bd val-4q1); never size it down without that measurement.
+// Each motion task's stack (the planner's and the steer's), in bytes, and the
+// ONE home for that number (C-1): the create sites and main.cpp's high-water
+// watch table read it here, so the reported total can never drift from the
+// allocated one. Neither is measured under Kinetic² (bd val-4q1); never size
+// one down without that measurement.
 inline constexpr uint32_t kMotionTaskStackBytes = 24576;
 
 // The sampler period, microseconds, and the ONE home for it (C-1). The S3
@@ -241,7 +243,7 @@ inline constexpr uint32_t kMotionTickUs = 1000;
 // this long after it arrives (RFC-105 promise 1).
 constexpr uint32_t sampleLatencyUs(const MotionTuning& t) { return t.chase_dense_us + kMotionTickUs; }
 
-// Brings up the engine, the arbiter and the motion task. The emitter is PARKED
+// Brings up the engine, the arbiter and both motion tasks. The emitter is PARKED
 // until an intent is accepted. Must run BEFORE hubBegin(): the hub's boot
 // publish of every motion STATE channel reads motionCensus().
 bool motionBegin();
@@ -264,7 +266,7 @@ void motionSetMotorPowered(bool on);
 void motionSetCommissioned(bool on);
 // SPEC 11.1 PAUSE. Any task, never blocks: on refuses every intent from this
 // call on, then brakes the plan in flight to rest at the input decel on the
-// motion task. off is `resume`, the only clear.
+// planner. off is `resume`, the only clear.
 void motionPause(bool on);
 // RFC-093: a generator's start acquires the rail and its stop releases it
 // (MotionArbiter::acquireRail()). False is SOURCE_CONFLICT: the other
@@ -279,7 +281,7 @@ void motionSetEstopCutsPower(bool cuts);
 // What a `return` request did (MotionArbiter::returnToPause()).
 enum class ReturnStart : uint8_t {
     none,        // no override latched: nothing to return from
-    queued,      // the jog-set move back is planned on the motion task
+    queued,      // the jog-set move back is planned on the planner
     arrived,     // unpowered, already at the paused position: override dropped
                  // and returns counted on the spot
     unpowered,   // unpowered and away from the paused position: refused,
@@ -287,7 +289,7 @@ enum class ReturnStart : uint8_t {
 };
 // What a home request did (MotionArbiter::home()).
 enum class HomeStart : uint8_t {
-    started,     // the cycle is queued on the motion task, or already running
+    started,     // the cycle is queued on the planner, or already running
     no_sense,    // this build has no home sense line (BoardPins.h)
     undriven,    // nothing drives the sense line: its source is unwired or down
     sense_high,  // the sense already reads a stall: no seek can find the stop
@@ -338,12 +340,15 @@ void motionNoteStream(uint32_t bundles, uint32_t samples, uint32_t dropped);
 float motionForceHome(float stroke_mm);
 
 MotionCensus motionCensus();
+// The steer task's stack high-water headroom, bytes; the planner's is the
+// census's stack_free. 0 before motionBegin(). Any task.
+uint32_t motionSteerStackFree();
 
 // The engine's factory tuning, read from a default-constructed kinetic Config.
 // Pure: touches no engine and no task, so any task may call it.
 MotionTuning motionDefaultTuning();
 
-// Hands a whole tuning set to the motion task, which applies it before it
+// Hands a whole tuning set to the planner, which applies it before it
 // plans the next intent. Any task; never blocks (a newer set overwrites an
 // unapplied older one, which is the only one that matters). Values arrive
 // already clamped to the catalog bounds, which mirror the engine's own clamps.

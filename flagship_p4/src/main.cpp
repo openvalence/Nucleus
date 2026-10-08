@@ -209,7 +209,8 @@ struct StackWatch {
 };
 StackWatch g_stacks[] = {
     {"ValenceHub",  valence::kHubTaskStackBytes},
-    {"Motion",   valence::kMotionTaskStackBytes},
+    {"Motion",   valence::kMotionTaskStackBytes},   // the steer
+    {"Planner",  valence::kMotionTaskStackBytes},
     {"Pattern",  valence::kPatternTaskStackBytes},
     {"app_main", uint32_t(CONFIG_ESP_MAIN_TASK_STACK_SIZE)},
     {"MotorSw",  valence::kMotorSwitchTaskStackBytes},
@@ -359,12 +360,13 @@ extern "C" void app_main() {
         // (.claude/rules/memory-budget.md T21).
         const valence::MotionCensus mo = valence::motionCensus();
         note_stack(0, census.stackFree);
-        note_stack(1, mo.stack_free);
-        note_stack(2, valence::patternStackFree());
-        note_stack(3, uint32_t(uxTaskGetStackHighWaterMark(nullptr)));
-        note_stack(4, valence::motorSwitchStackFree());
-        note_stack(5, valence::boardIoStackFree());
-        note_stack(6, valence::driveLinkStackFree());
+        note_stack(1, valence::motionSteerStackFree());
+        note_stack(2, mo.stack_free);
+        note_stack(3, valence::patternStackFree());
+        note_stack(4, uint32_t(uxTaskGetStackHighWaterMark(nullptr)));
+        note_stack(5, valence::motorSwitchStackFree());
+        note_stack(6, valence::boardIoStackFree());
+        note_stack(7, valence::driveLinkStackFree());
         const valence::MotorSwitchStatus msw = valence::motorSwitchStatus();
         const valence::DriveLinkStatus drv = valence::driveLinkStatus();
         const valence::FanStatus fan = valence::fanStatus();

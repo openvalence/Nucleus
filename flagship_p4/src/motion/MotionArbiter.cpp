@@ -4,12 +4,13 @@
 // - HARDWARE-FREE (MotionArbiter.h). Geiger is the log path and binds its own
 //   platform layer; on a host it is mute, never a second log path.
 // - An intent becomes knots AT ARRIVAL, continuing from the engine's actual
-//   (p, v, a); the window is solved at the next sample, and the tick only
-//   EVALUATES it. Nothing here plans on a clock.
+//   (p, v, a); the window is solved at the next sample, on the planner, and
+//   the steer only reads the strip. Nothing here plans on a clock.
 // See: MotionArbiter.h, .claude/rules/motion-control.md, bd val-091.4, bd val-z1k
 
 #include "MotionArbiter.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "geiger/geiger.h"
@@ -110,7 +111,7 @@ void MotionArbiter::estop(bool on) {
     }
     _estop = true;
     // Park on the CALLING task. The ENGINE is not touched here: it belongs to
-    // the owning task, which resets it on the next tick (see evaluate()).
+    // the planner, which resets it on its next tick (planStep()).
     _rail_gen.store(kRailClosed);   // releasing the latch never restarts a generator
     _emitter.park();
     // A power cut leaves the carriage limp wherever it coasted: the position
@@ -177,7 +178,7 @@ ReturnStart MotionArbiter::returnToPause() {
     }
     // Nothing renders while the gate is shut, so there is no plan to wait
     // for: the emitter count is still (any task), and so is the paused
-    // position, which evaluate() records at rest even while unpowered.
+    // position, which planTick() records at rest even while unpowered.
     const float dist = std::fabs(positionMm() - _pause_pos_mm.load());
     if (dist > kMmPerStep) {
         GLOGW(kTag, "RETURN refused: motor power off, %.2f mm from the paused position", double(dist));
@@ -397,6 +398,8 @@ bool MotionArbiter::plan(float target, const MotionIntent& in, const EngineLimit
     _k2_window_clamped = target != in.target_mm;
     _demand_mm = target;
     _stream    = in.source == MotionSource::Stream;
+    // The ceiling set the plan in flight was planned under: steerTick()'s cap.
+    _plan_manual.store(in.source == MotionSource::Manual);
     return true;
 }
 
@@ -413,6 +416,11 @@ void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
     _k2_brake_to_us = 0;
     _k2_starved     = false;
     _k2_chase       = false;
+    // The steer re-anchors its feedforward here and steers nothing from a
+    // strip published before this reset (steerTick()).
+    _anchor_mm   = positionMm();
+    _strip_stale = true;
+    _strip_gen.fetch_add(1);
 }
 
 bool MotionArbiter::brakeEngine(uint64_t at_us) {
@@ -453,10 +461,7 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     // the engine's own idea of where it stopped carries every move's sub-step
     // residue into the next one. pending() first: isBusy() solves, and a
     // bundle must not solve once per sample.
-    if (_engine.pending() == 0 && !_engine.isBusy(now_us)) {
-        resetEngine(toNorm(positionMm()), now_us);
-        _p_cmd_mm = positionMm();
-    }
+    if (_engine.pending() == 0 && !_engine.isBusy(now_us)) resetEngine(toNorm(positionMm()), now_us);
 
     // A generator's stop arrives as a point at its braking distance; it
     // renders as the brake itself.
@@ -542,11 +547,10 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
 
 kinetic2::State MotionArbiter::sampleEngine(uint64_t now_us) {
     // The first sample after a submit solves the window: that is the plan's
-    // cost, so it is what plan_us_* times.
-    // TODO(val-8rt): the solve is unbounded and runs on the motion tick, and
-    // the emitter renders the last steer open loop meanwhile; it moves to a
-    // planner task once Kinetic offers a bounded or resumable solve.
+    // cost, so it is what plan_us_* times. The plan changed: the strip
+    // refills whole.
     const bool timed = _k2_dirty;
+    if (timed) _strip_stale = true;
     const uint64_t t0 = timed ? _now_us() : 0;
     // A starved stream: the last knot is due and still moving. The engine
     // brakes from it at its own time and a knot arriving meanwhile re-plans
@@ -579,7 +583,6 @@ kinetic2::State MotionArbiter::sampleEngine(uint64_t now_us) {
 void MotionArbiter::setRailFrame(bool on, uint64_t now_us) {
     _rail_frame = on;
     resetEngine(toNorm(positionMm()), now_us);
-    _p_cmd_mm = positionMm();
 }
 
 EngineLimits MotionArbiter::limitsFor(bool manual) const {
@@ -591,9 +594,9 @@ EngineLimits MotionArbiter::limitsFor(bool manual) const {
     return lim;
 }
 
-// ---- the tick ---------------------------------------------------------------
+// ---- the planner's tick -----------------------------------------------------
 
-// SPEC 11.1 PAUSE, owning task only: the engine's own brake, planned from the
+// SPEC 11.1 PAUSE, planner task only: the engine's own brake, planned from the
 // plan's (p, v, a) -- continuous with what the emitter is rendering, unlike a
 // census read -- at the input decel, and never a reversal. It also drops every
 // pending knot (Engine::brake).
@@ -607,7 +610,8 @@ void MotionArbiter::brakeToRest(uint64_t now_us) {
         return;
     }
     // Where it comes to rest: the brake's end, held by the backstop
-    // (evaluate()) when the brake would carry it past the frame's edge.
+    // (steerTick()) when the brake would carry it past the frame's edge.
+    // _p_cmd_mm is the steer's, read as one word.
     float rest = toMm(_k2_brake_to_p);
     const float lo = std::fmin(backstopLo(), _p_cmd_mm);
     const float hi = std::fmax(backstopHi(), _p_cmd_mm);
@@ -643,26 +647,13 @@ void MotionArbiter::applyTuning(const MotionTuning& t) {
     _home_speed = !(t.home_speed >= MIN_HOME_SPEED_MM_S) ? MIN_HOME_SPEED_MM_S : t.home_speed;
 }
 
-void MotionArbiter::evaluate(uint64_t now_us, float dt_s) {
-    // A lapse is the emitter's own stop, kLeaseUs after the last renewal.
-    // NEVER re-anchor _p_cmd_mm to the count here: the residual would become
-    // feedforward over a dt_s the host measured before the stall (a stall in
-    // a solve lands in the tick it delays at ~1 ms), an uncommanded reversal.
-    // The residual closes at tick()'s bounded kick.
-    const uint32_t lapses = _emitter.lapses();
-    if (lapses != _lapses_seen) {
-        _lease_lapses += lapses - _lapses_seen;
-        _lapses_seen = lapses;
-        GLOGW_EVERY_MS(1000, kTag, "LEASE LAPSE: the LP core stopped itself at %.3f mm", double(positionMm()));
-    }
-    tick(now_us, dt_s);
-    _emitter.renew();
-}
+void MotionArbiter::planTick(uint64_t now_us, float dt_s) { fillStrip(now_us, planStep(now_us, dt_s)); }
 
-void MotionArbiter::tick(uint64_t now_us, float dt_s) {
+bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     if (_estop) {
         _brake_req.store(false);   // park already stopped it
         _returning = false;        // estop() dropped override with it
+        // The steer parks too while the latch holds: the same store twice.
         _emitter.park();
         if (_homing.load()) homeEnd("ESTOP", now_us);
         // ONCE per latch, and on the task that owns the engine: without it the
@@ -670,10 +661,9 @@ void MotionArbiter::tick(uint64_t now_us, float dt_s) {
         // exactly that -- would never let the latch drop (SPEC 11.2).
         if (!_estop_settled) {
             resetEngine(toNorm(positionMm()), now_us);
-            _p_cmd_mm = positionMm();
             _estop_settled = true;
         }
-        return;
+        return false;
     }
 
     // Unpowered: parked, and the abandoned plan reset ONCE per loss on this
@@ -685,11 +675,8 @@ void MotionArbiter::tick(uint64_t now_us, float dt_s) {
         _returning = false;
         _emitter.park();
         if (_homing.load()) homeEnd("motor power off", now_us);
-        if (!_power_settled.exchange(true)) {
-            resetEngine(toNorm(positionMm()), now_us);
-            _p_cmd_mm = positionMm();
-        }
-        return;
+        if (!_power_settled.exchange(true)) resetEngine(toNorm(positionMm()), now_us);
+        return false;
     }
 
     // A FRAME MOVE IS NOT MOTION. force_home re-origins the count and a window
@@ -698,26 +685,31 @@ void MotionArbiter::tick(uint64_t now_us, float dt_s) {
     // the feedforward differences that jump and demands 10^5 mm/s, the emitter
     // floor clamps it, and the emitter renders a saturated burst -- unrequested
     // travel at its maximum rate, plus thousands of missed deadlines
-    // (measured, bd val-091.13). Re-anchor the plan and the feedforward's own
-    // previous sample instead, and park for this one tick: the next accepted
-    // intent plans from the new frame's rest.
+    // (measured, bd val-091.13). The plan is reset at the carriage instead:
+    // the steer parks for this tick (an empty strip) and re-anchors at the
+    // reset, and the next accepted intent plans from the new frame's rest.
+    // The generation moves BEFORE the flag drops, so no strip of the old
+    // frame steers in between.
     if (_frame_moved) {
+        _strip_gen.fetch_add(1);
         _frame_moved = false;
         // A cycle counted in the old frame: its seek or backoff is void.
         if (_homing.load()) homeEnd("the travel window changed", now_us);
         resetEngine(toNorm(positionMm()), now_us);
-        _p_cmd_mm = positionMm();
-        _emitter.steer(0.0f);
-        return;
+        return false;
     }
 
     // A pause ends a cycle, which parks: a seek has no brake to run.
     if (_home_abort.exchange(false) && _homing.load()) homeEnd("paused", now_us);
     if (_brake_req.exchange(false)) brakeToRest(now_us);
     // While a cycle runs the seek producer is the emitter's one steerer and
-    // the plan-tracking path below never runs: the cycle owns the rail.
+    // renews its lease here; the steer stands aside (steerTick()).
     if (_home_req.exchange(false)) homeStart(now_us);
-    if (_home != HomePhase::idle) return homeStep(now_us, dt_s);
+    if (_home != HomePhase::idle) {
+        homeStep(now_us, dt_s);
+        if (_home != HomePhase::idle) _emitter.renew();
+        return false;
+    }
 
     // RETURN (SPEC 11.1): an ordinary Manual plan at the jog set, planned here
     // because the engine is this task's. The rail clamp still applies.
@@ -735,14 +727,18 @@ void MotionArbiter::tick(uint64_t now_us, float dt_s) {
 
     // The one side-effecting sample per tick: it solves the window after a
     // submit and records the brake the engine takes when the timeline runs
-    // dry still moving (sampleEngine()).
+    // dry still moving (sampleEngine()). The strip (fillStrip()) reads the
+    // plan after it without side effects.
     // PLANNED CHANGE (bd val-klo): the RFC-103 oscillator (kinetic2/oscillator.hpp)
     // is additive on this sampled state, after the planner and before the
     // backstop, and is not wired yet.
-    float p_plan_mm = toMm(sampleEngine(now_us).p);
+    (void)sampleEngine(now_us);
+    const bool busy = _engine.isBusy(now_us);
+    // The jog set's ceiling holds until the plan planned under it has ended.
+    if (!busy) _plan_manual.store(false);
 
     // Arrival ends the return: override drops, plain PAUSE stays.
-    if (_returning && !_engine.isBusy(now_us)) {
+    if (_returning && !busy) {
         _returning = false;
         _override.store(false);
         _returns.fetch_add(1);
@@ -750,14 +746,151 @@ void MotionArbiter::tick(uint64_t now_us, float dt_s) {
     }
     // Override gone (return, resume or ESTOP): back to the window frame, at
     // rest.
-    if (_rail_frame && !_override.load() && !_engine.isBusy(now_us)) setRailFrame(false, now_us);
+    if (_rail_frame && !_override.load() && !busy) setRailFrame(false, now_us);
+    return true;
+}
+
+void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
+    PlanStrip& s = _strip;
+    s.gen = _strip_gen.load();
+    s.anchor_mm = _anchor_mm;
+    constexpr uint64_t kSpanUs = uint64_t(kStripLen) * kMotionTickUs;
+    if (!live) {
+        s.n = 0;
+    } else if (_strip_stale || s.n == 0 || now_us < s.t0_us || now_us - s.t0_us >= kSpanUs) {
+        // A whole refill: one walk of the window, one piece per knot interval.
+        _strip_stale = false;
+        s.t0_us = now_us;
+        s.n = uint16_t(kStripLen);
+        ++s.plan;
+        _engine.peek(0, now_us, kMotionTickUs, kStripLen, s.p_mm.data());
+        for (float& p : s.p_mm) p = toMm(p);
+    } else if (const size_t k = size_t((now_us - s.t0_us) / kMotionTickUs); k > 0) {
+        // The same plan, advanced by the ticks elapsed: only the new tail is
+        // read from the engine.
+        std::copy(s.p_mm.begin() + k, s.p_mm.end(), s.p_mm.begin());
+        s.t0_us += uint64_t(k) * kMotionTickUs;
+        float* tail = s.p_mm.data() + (kStripLen - k);
+        _engine.peek(0, s.t0_us + uint64_t(kStripLen - k) * kMotionTickUs, kMotionTickUs, k, tail);
+        for (size_t i = 0; i < k; ++i) tail[i] = toMm(tail[i]);
+    }
+    // ponytail: the whole strip is copied under the lock every tick (~0.5 KB);
+    // a ring with a published head is the upgrade if the copy ever shows.
+    if (_lock) _lock(true);
+    _strip_pub = s;
+    if (_lock) _lock(false);
+}
+
+bool MotionArbiter::stripAt(const PlanStrip& s, uint64_t t_us, float& p_mm) {
+    if (s.n == 0) return false;
+    if (t_us < s.t0_us) {
+        p_mm = s.p_mm[0];
+        return false;
+    }
+    const uint64_t at = t_us - s.t0_us;
+    const uint64_t k = at / kMotionTickUs;
+    const uint64_t last = uint64_t(s.n) - 1;
+    if (k >= last) {
+        p_mm = s.p_mm[last];
+        return k == last && at % kMotionTickUs == 0;
+    }
+    // On a grid point: the entry itself, bit for bit.
+    const float f = float(at % kMotionTickUs) / float(kMotionTickUs);
+    p_mm = s.p_mm[k] + (s.p_mm[k + 1] - s.p_mm[k]) * f;
+    return true;
+}
+
+// ---- the steer's tick -------------------------------------------------------
+
+void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
+    // A lapse is the emitter's own stop, kLeaseUs after the last renewal.
+    // NEVER re-anchor _p_cmd_mm to the count here: the residual would become
+    // feedforward over a dt_s measured before the stall, an uncommanded
+    // reversal. The residual closes at the bounded kick below.
+    const uint32_t lapses = _emitter.lapses();
+    if (lapses != _lapses_seen) {
+        _lease_lapses += lapses - _lapses_seen;
+        _lapses_seen = lapses;
+        GLOGW_EVERY_MS(1000, kTag, "LEASE LAPSE: the LP core stopped itself at %.3f mm", double(positionMm()));
+    }
+
+    // The newest strip, after reading where the one it replaces put the plan
+    // now.
+    float p_was = 0.0f;
+    const bool was_in = stripAt(_steer_strip, now_us, p_was);
+    if (_lock) _lock(true);
+    _steer_strip = _strip_pub;
+    if (_lock) _lock(false);
+    const PlanStrip& s = _steer_strip;
+    float p_plan_mm = 0.0f;
+    const bool in = stripAt(s, now_us, p_plan_mm);
+    if (s.gen != _seen_gen) {
+        // An engine reset: the feedforward starts again from where the
+        // carriage stood at it, once per reset.
+        _seen_gen = s.gen;
+        _seen_plan = s.plan;
+        _p_cmd_mm = s.anchor_mm;
+    } else if (s.plan != _seen_plan) {
+        _seen_plan = s.plan;
+        // A NEW PLAN IS A RESIDUAL, NEVER A BURST. A solve longer than the
+        // reaction horizon lands a plan the carriage has already left: the
+        // previous command moves by the gap between the two plans now, so
+        // the feedforward keeps the old plan's velocity for this tick and the
+        // bounded kick closes the gap. The move never widens the backstop's
+        // frame.
+        if (was_in && in) {
+            const float d = p_plan_mm - p_was;
+            if (std::fabs(d) > kMmPerStep) {
+                ++_late_plans;
+                GLOGW_EVERY_MS(1000, kTag, "LATE PLAN: %.3f mm off the strip in flight, closed by the kick", double(d));
+            }
+            const float lo = std::fmin(backstopLo(), _p_cmd_mm);
+            const float hi = std::fmax(backstopHi(), _p_cmd_mm);
+            _p_cmd_mm = std::fmin(std::fmax(_p_cmd_mm + d, lo), hi);
+        }
+    }
+
+    // The gates. The planner applies the same ones on its own tick; these
+    // hold the emitter until it has.
+    if (_estop || !powerGateOpen()) {
+        _emitter.park();   // the planner parks too: the same store twice
+        _steer_gap = true;
+        _emitter.renew();
+        return;
+    }
+    // A home cycle's seek producer steers, fences and renews on the planner:
+    // two producers never steer in one tick.
+    if (_home != HomePhase::idle) {
+        _steer_gap = true;
+        return;
+    }
+    // A frame move, an engine reset the planner has not published yet, or no
+    // plan: parked for this tick.
+    if (_frame_moved || s.n == 0 || s.gen != _strip_gen.load()) {
+        _emitter.steer(0.0f);
+        _steer_gap = true;
+        _emitter.renew();
+        return;
+    }
+    // Past the strip's end the planner is late: the last entry holds, so the
+    // carriage stops there.
+    if (!in && now_us > s.t0_us) {
+        if (!_strip_starved) {
+            _strip_starved = true;
+            ++_planner_stalls;
+        }
+        GLOGW_EVERY_MS(1000, kTag, "PLANNER STALL: the strip ended %.1f ms ago, holding at %.2f mm",
+                       double(now_us - s.t0_us - uint64_t(s.n - 1) * kMotionTickUs) * 1e-3, double(p_plan_mm));
+    } else {
+        _strip_starved = false;
+    }
 
     // THE POSITION BACKSTOP (operator ruling 2026-10-06, bd val-1w8). The
     // demand never leaves the backstop's frame (backstopLo()..backstopHi()),
     // whatever the plan does: a curve that bulges, a brake that is not aware
     // of the window, a frame gone stale. The frame widens only to the previous
     // demand, so a carriage left outside it is never pulled in by the clamp,
-    // only by a plan. A home cycle never reaches here (homeStep() above): the
+    // only by a plan. A home cycle never reaches here (the gate above): the
     // seek has to reach the stops. The LP core's fence is the second line, and
     // the only one an HP stall cannot skip (syncFence()).
     float lo = backstopLo();
@@ -778,6 +911,12 @@ void MotionArbiter::tick(uint64_t now_us, float dt_s) {
         }
     } else {
         _backstop_on = false;
+    }
+    // The first steer after a gated tick starts from the plan itself: what
+    // the plan did while the emitter was held is residual, never feedforward.
+    if (_steer_gap) {
+        _steer_gap = false;
+        _p_cmd_mm = p_plan_mm;
     }
 
     // A LATE TICK IS A STALL, NEVER A BURST (bd val-1w8). The kick and the
@@ -805,13 +944,13 @@ void MotionArbiter::tick(uint64_t now_us, float dt_s) {
     // the ramp out of rest: the opening velocity is small, so the first edge
     // period is long, and the emitter cannot render the plan's first steps on
     // time however often it is re-steered.
+    // BOUNDED, because the residual is proportional to an error no ceiling
+    // shaped and is therefore the one term that can hand the emitter a
+    // demand the machine cannot make. Its ceiling is the accel limit's own
+    // answer to "how much velocity may one tick add".
+    const float kick_max = inputAmaxMm() * dt;
     const float err_mm = p_plan_mm - positionMm();
     if (std::fabs(err_mm) > kMmPerStep) {
-        // BOUNDED, because the residual is proportional to an error no ceiling
-        // shaped and is therefore the one term that can hand the emitter a
-        // demand the machine cannot make. Its ceiling is the accel limit's own
-        // answer to "how much velocity may one tick add".
-        const float kick_max = inputAmaxMm() * dt;
         float kick = err_mm * kTrackHz;
         if (kick >  kick_max) kick =  kick_max;
         if (kick < -kick_max) kick = -kick_max;
@@ -819,12 +958,16 @@ void MotionArbiter::tick(uint64_t now_us, float dt_s) {
     }
     // The emitter floor is a FAULT DETECTOR, never a shaper (architecture.md
     // section 2), so the arbiter holds its own last word. The bound is the sum
-    // of the two terms that make it: the plan, under the speed ceiling by
-    // construction, plus a correction already capped at one tick of accel.
+    // of the two terms that make it: the plan, under the speed ceiling it was
+    // planned under (the jog set's for a Manual plan, the input set's
+    // otherwise), plus the correction, capped at one tick of accel above.
     // Deliberately NOT the bare ceiling -- at a demand that sits ON vmax, a
     // tracking correction has to be allowed above it or the residual can never
-    // close (measured: 25 ms of added lag on the ceiling-limited run).
-    const float v_cap = inputVmaxMm() + inputAmaxMm() * dt;
+    // close (measured: 25 ms of added lag on the ceiling-limited run). Never
+    // the input set's alone under a jog planned above it: a 1500 mm/s jog
+    // under a 1000 mm/s input set rendered at 1050 mm/s and crawled the rest
+    // at the kick (measured 2026-10-08: 227 mm in 1.05 s).
+    const float v_cap = (_plan_manual.load() ? _jog_v : inputVmaxMm()) + kick_max;
     if (v >  v_cap) v =  v_cap;
     if (v < -v_cap) v = -v_cap;
 
@@ -841,6 +984,7 @@ void MotionArbiter::tick(uint64_t now_us, float dt_s) {
 
     syncFence();
     _emitter.steer(v);
+    _emitter.renew();
 }
 
 void MotionArbiter::syncFence() {
@@ -859,7 +1003,7 @@ void MotionArbiter::syncFence() {
 }
 
 // ---- homing -----------------------------------------------------------------
-// Owning task only, except homeSenseRose(). The seek producer: every leg is a
+// Planner task only, except homeSenseRose(). The seek producer: every leg is a
 // constant velocity steered straight onto the emitter, ended by a count or a
 // stall, and the engine holds at the count until the cycle ends and is reset
 // there. The plan-tracking path, its velocity cap and its residual kick never
@@ -874,7 +1018,6 @@ void MotionArbiter::syncFence() {
 void MotionArbiter::homeOrigin(int32_t count, float at_mm, uint64_t now_us) {
     _origin = count - int32_t(std::lround(at_mm * kStepsPerMm));
     resetEngine(toNorm(positionMm()), now_us);
-    _p_cmd_mm = positionMm();
 }
 
 void MotionArbiter::homeLeg(HomePhase phase, float end_mm, float v_mm_s, uint64_t now_us) {
@@ -1056,8 +1199,8 @@ void MotionArbiter::homeEnd(const char* why, uint64_t now_us) {
         _emitter.park();
         _seek_v = 0.0f;
         resetEngine(toNorm(positionMm()), now_us);
-        _p_cmd_mm = positionMm();
     }
+    // After the reset: the steer stands aside until its strip is published.
     _home = HomePhase::idle;
     _home_req.store(false);
     _homing.store(false);

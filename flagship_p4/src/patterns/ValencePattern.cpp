@@ -8,8 +8,9 @@
 //   crosses out, active(), is a relaxed atomic bool nothing orders against.
 // - Both generators tick on this one task, each submitting its own source's
 //   intents; the arbiter keeps all but the rail holder's off it (RFC-093).
-// - Core 1 at priority 4: below the motion task (6), which must never wait on
-//   a stroke, and below the hub (5), whose task watchdog buys OTA rollback.
+// - Core 1 at priority 4: below both motion tasks (the steer 6, the planner
+//   5), which must never wait on a stroke, and below the hub (5), whose task
+//   watchdog buys OTA rollback.
 //   The work per wake is a few float operations and one queue send.
 // - The generators and the task stack are INTERNAL RAM: the generators live
 //   in a file-scope static and the stack is a plain xTaskCreatePinnedToCore

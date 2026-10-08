@@ -1,5 +1,5 @@
-// ValenceMotion -- the arbiter's board host: the motion task, its queues, the
-// census lock, and the LP core's steering words
+// ValenceMotion -- the arbiter's board host: the planner and steer tasks, the
+// queues, the census and strip locks, and the LP core's steering words
 // Constraints:
 // - EVERY GATE LIVES IN MotionArbiter (hardware-free, shared with the host
 //   twin). Nothing here decides whether an intent moves the machine; a gate
@@ -7,14 +7,21 @@
 // - ONE DOOR OUT: LpEmitter is the only writer of the emitter's shared words,
 //   it is private to this file, and only the arbiter calls it. That is the
 //   MotionArbiter sole-caller rule in code (architecture.md section 2).
-// - The engine (inside the arbiter) and the task stack live in INTERNAL RAM,
-//   never PSRAM: the HP side is unreachable while the flash cache is off, and
-//   the sampler must not fault during an OTA write. Only the LP core is immune.
+// - The engine (inside the arbiter) and both task stacks live in INTERNAL
+//   RAM, never PSRAM: the HP side is unreachable while the flash cache is off,
+//   and neither task may fault during an OTA write. Only the LP core is immune.
+// - TWO TASKS ON CORE 1 (bd val-8rt). The planner ("Planner", priority 5, the
+//   hub's) drains the queues, plans, solves and publishes the strip and the
+//   census. The steer ("Motion", priority 6) reads the strip and steers every
+//   tick, so no solve delays a steer. The steer's priority over the planner
+//   on one core is what keeps the two producers apart (MotionArbiter.h):
+//   never move either task to core 0, which keeps app_main and esp_hosted.
 // - The window solve puts KB-scale temporaries on the CALLING stack (a copy of
 //   the pending knots and the solver's fixed arrays), so the engine is sampled
-//   on the motion task and nowhere else (T1, memory-budget.md T21).
-// - THE ENGINE IS TOUCHED BY THE MOTION TASK ONLY. Every cross-task reader
-//   goes through _pub, a plain POD the tick refreshes under _mux; census()
+//   on the planner and nowhere else (T1, memory-budget.md T21).
+// - THE ENGINE IS TOUCHED BY THE PLANNER ONLY. The steer reads the plan as the
+//   arbiter's strip under g_strip_mux. Every other cross-task reader goes
+//   through _pub, a plain POD the planner refreshes under _mux; census()
 //   copies it under the same lock and calls nothing.
 // See: ValenceMotion.h, MotionArbiter.h, .claude/rules/motion-control.md,
 // bd val-091.4
@@ -59,8 +66,9 @@ uint64_t espNowUs() { return static_cast<uint64_t>(esp_timer_get_time()); }
 // (MotionArbiter::homeSenseRose()): one aligned store and one aligned load in
 // LP memory, nothing else, so neither may grow a lock, a log or a counter.
 // That interrupt is not IRAM-resident: it waits out a flash write.
-// fence() and renew() are the motion task's, the fence words' and the lease
-// word's only writers once the arbiter runs.
+// steer(), fence() and renew() run on the steer task, or on the planner while
+// a home cycle runs, never on both in one tick (MotionArbiter::steerTick()):
+// one writer at a time for the direction, fence and lease words.
 class LpEmitter final : public MotionEmitter {
 public:
     int32_t count() const override { return static_cast<int32_t>(ulp_g_pos); }
@@ -112,12 +120,23 @@ public:
     uint32_t faults() const { return _faults; }
 
 private:
-    uint32_t _faults = 0;   // motion task only: steer() is its one writer
+    uint32_t _faults = 0;   // steer() is its one writer, on whichever task steers
 };
 
-// ---- the motion task --------------------------------------------------------
-// The arbiter's host: the queues in front of it, the task that owns it, and
-// the lock the census crosses tasks under. Every gate lives in MotionArbiter.
+// The strip's lock (MotionArbiter::Lock): held for one PlanStrip copy on either
+// motion task, never anything else.
+portMUX_TYPE g_strip_mux = portMUX_INITIALIZER_UNLOCKED;
+void stripLock(bool hold) {
+    if (hold) portENTER_CRITICAL(&g_strip_mux);
+    else portEXIT_CRITICAL(&g_strip_mux);
+}
+
+static_assert(configTICK_RATE_HZ >= 1000000 / kMotionTickUs, "a one-tick wait must be at most kMotionTickUs");
+
+// ---- the motion tasks -------------------------------------------------------
+// The arbiter's host: the queues in front of it, the two tasks that own it,
+// and the locks the census and the strip cross tasks under. Every gate lives
+// in MotionArbiter.
 
 class MotionTask {
 public:
@@ -131,10 +150,13 @@ public:
     MotionCensus census() const;
     MotionArbiter& arbiter() { return _arb; }
     void wakeFromIsr();                      // the home sense's rise
+    uint32_t steerStackFree() const { return _steer ? uint32_t(uxTaskGetStackHighWaterMark(_steer)) : 0; }
 
 private:
-    static void taskTrampoline(void* self) { static_cast<MotionTask*>(self)->run(); }
-    void run();
+    static void planTrampoline(void* self) { static_cast<MotionTask*>(self)->planRun(); }
+    static void steerTrampoline(void* self) { static_cast<MotionTask*>(self)->steerRun(); }
+    void planRun();
+    void steerRun();
     void drain(uint64_t now_us);
     void refreshSnapshot(uint64_t now_us);
 
@@ -142,16 +164,19 @@ private:
     // Both are members so they land in this object's storage, which is a
     // file-scope static in internal RAM. Never move it to PSRAM.
     LpEmitter     _emitter;
-    MotionArbiter _arb{_emitter, &espNowUs};
+    MotionArbiter _arb{_emitter, &espNowUs, &stripLock};
 
-    TaskHandle_t  _task = nullptr;
+    // Every wake (an intent, a request, the home sense) is the planner's; the
+    // steer only runs on the tick.
+    TaskHandle_t  _planner = nullptr;
+    TaskHandle_t  _steer = nullptr;
     QueueHandle_t _queue = nullptr;
     // Depth ONE, written with xQueueOverwrite: the newest tuning set is the
-    // only one worth applying, and the writer never waits on the motion task.
+    // only one worth applying, and the writer never waits on the planner.
     QueueHandle_t _tuneQueue = nullptr;
 
-    // THE cross-task snapshot. Written by refreshSnapshot() on the motion
-    // task, read by census() on any task, both under _mux.
+    // THE cross-task snapshot. Written by refreshSnapshot() on the planner,
+    // read by census() on any task, both under _mux.
     mutable portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
     MotionCensus _pub{};
 };
@@ -159,14 +184,15 @@ private:
 MotionTask g_motion;
 
 // The home sense's interrupt, in this order: the arbiter parks an armed seek,
-// then the task is woken to read it.
+// then the planner is woken to read it: the seek producer, homeStep(), runs
+// there, and the steer has nothing to do with a rise.
 void parkSeekFromIsr() { g_motion.arbiter().homeSenseRose(); }
 void wakeMotionFromIsr() { g_motion.wakeFromIsr(); }
 
 // Before begin() has created the task the handle is null and nothing wakes.
 void MotionTask::wakeFromIsr() {
     BaseType_t woken = pdFALSE;
-    if (_task != nullptr) vTaskNotifyGiveFromISR(_task, &woken);
+    if (_planner != nullptr) vTaskNotifyGiveFromISR(_planner, &woken);
     portYIELD_FROM_ISR(woken);
 }
 
@@ -175,19 +201,24 @@ bool MotionTask::begin() {
     if (_queue == nullptr) return false;
     _tuneQueue = xQueueCreate(1, sizeof(MotionTuning));
     if (_tuneQueue == nullptr) return false;
-    // The task does not exist yet, so this caller is the arbiter's one owner.
+    // Neither task exists yet, so this caller is the arbiter's one owner.
     _arb.setHomeSense(homeSenseBegin(&parkSeekFromIsr, &wakeMotionFromIsr));
     _arb.begin(espNowUs());
     refreshSnapshot(espNowUs());
-    // Core 1 with the hub, at a higher priority than it: the tick is a
-    // polynomial evaluation and two 32-bit stores, and the window solve runs
-    // only in the first sample after an intent arrives. Core 0 keeps app_main and
-    // the esp_hosted SDIO service. kMotionTaskStackBytes is not yet measured
-    // under Kinetic² (bd val-4q1): size it only on a high-water mark taken
-    // under a real motion workload, never an idle one.
-    const BaseType_t ok = xTaskCreatePinnedToCore(&MotionTask::taskTrampoline, "Motion",
-                                                  kMotionTaskStackBytes, this, 6, &_task, 1);
-    if (ok != pdPASS) return false;
+    // Both on core 1 with the hub; core 0 keeps app_main and the esp_hosted
+    // SDIO service. The planner AT the hub's priority, never above it: a
+    // window solve time-slices with the hub instead of starving it. The steer
+    // above both: a strip copy, an interpolation and two 32-bit stores per
+    // tick. Each stack is kMotionTaskStackBytes, the planner's carrying the
+    // solve; neither is measured under Kinetic² (bd val-4q1): size them only
+    // on a high-water mark taken under a real motion workload, never an idle
+    // one.
+    if (xTaskCreatePinnedToCore(&MotionTask::planTrampoline, "Planner", kMotionTaskStackBytes, this, 5, &_planner, 1) !=
+        pdPASS)
+        return false;
+    if (xTaskCreatePinnedToCore(&MotionTask::steerTrampoline, "Motion", kMotionTaskStackBytes, this, 6, &_steer, 1) !=
+        pdPASS)
+        return false;
     GLOGI(kTag, "motion path up: window %.1f..%.1f mm, rail %.1f mm, %.3f steps/mm, %lu us tick",
           double(_arb.winMin()), double(_arb.winMax()), double(_arb.rail()), double(kStepsPerMm),
           static_cast<unsigned long>(kMotionTickUs));
@@ -200,38 +231,38 @@ bool MotionTask::submit(const MotionIntent& in) {
         GLOGW_EVERY_MS(1000, kTag, "DROP: intent queue full");
         return false;
     }
-    // On arrival, never on a tick: the task is woken now and plans now.
-    if (_task != nullptr) xTaskNotifyGive(_task);
+    // On arrival, never on a tick: the planner is woken now and plans now.
+    if (_planner != nullptr) xTaskNotifyGive(_planner);
     return true;
 }
 
 void MotionTask::pause(bool on) {
     _arb.pause(on);
     // Brakes at arrival, not on the tick.
-    if (on && _task != nullptr) xTaskNotifyGive(_task);
+    if (on && _planner != nullptr) xTaskNotifyGive(_planner);
 }
 
 void MotionTask::override() {
     _arb.override();
-    if (_task != nullptr) xTaskNotifyGive(_task);
+    if (_planner != nullptr) xTaskNotifyGive(_planner);
 }
 
 ReturnStart MotionTask::returnToPause() {
     const ReturnStart r = _arb.returnToPause();
-    if (r == ReturnStart::queued && _task != nullptr) xTaskNotifyGive(_task);
+    if (r == ReturnStart::queued && _planner != nullptr) xTaskNotifyGive(_planner);
     return r;
 }
 
 HomeStart MotionTask::home() {
     const HomeStart r = _arb.home();
-    if (r == HomeStart::started && _task != nullptr) xTaskNotifyGive(_task);
+    if (r == HomeStart::started && _planner != nullptr) xTaskNotifyGive(_planner);
     return r;
 }
 
 void MotionTask::setTuning(const MotionTuning& t) {
     if (_tuneQueue == nullptr) return;
     xQueueOverwrite(_tuneQueue, &t);
-    if (_task != nullptr) xTaskNotifyGive(_task);
+    if (_planner != nullptr) xTaskNotifyGive(_planner);
 }
 
 void MotionTask::drain(uint64_t now_us) {
@@ -252,33 +283,49 @@ void MotionTask::refreshSnapshot(uint64_t now_us) {
     c.step_q8        = ulp_g_step_q8;
     c.emitter_faults = _emitter.faults();
     c.fence_hits     = ulp_g_fence_hits;
-    // IDF reports this in BYTES, not the vanilla FreeRTOS words.
-    c.stack_free     = _task ? uxTaskGetStackHighWaterMark(_task) : 0;
+    // The planner's: the stack the solve runs on. IDF reports this in BYTES,
+    // not the vanilla FreeRTOS words.
+    c.stack_free     = _planner ? uxTaskGetStackHighWaterMark(_planner) : 0;
 
     portENTER_CRITICAL(&_mux);
     _pub = c;
     portEXIT_CRITICAL(&_mux);
 }
 
-void MotionTask::run() {
+void MotionTask::planRun() {
     uint64_t prev_us = espNowUs();
     uint64_t next_pub_us = prev_us;
     for (;;) {
-        // Wakes on an intent OR on the tick, whichever comes first. dt is
-        // MEASURED, so an early wake costs nothing and an intent never waits
-        // out the tick to be planned.
+        // Wakes on an intent, a request or the home sense, OR on the tick,
+        // whichever comes first. dt is MEASURED, so an early wake costs
+        // nothing and an intent never waits out the tick to be planned.
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kMotionTickUs / 1000));
         const uint64_t now_us = espNowUs();
         drain(now_us);
         const float dt_s = float(now_us - prev_us) * 1e-6f;
         if (dt_s <= 0.0f) continue;
         prev_us = now_us;
-        _arb.evaluate(now_us, dt_s);
+        _arb.planTick(now_us, dt_s);
         if (now_us >= next_pub_us) {
             next_pub_us = now_us + kPublishUs;
             _arb.drainAnomalies();
+            // The steer's counters and _backstop_on are read as single
+            // words, at most one steer old.
             refreshSnapshot(now_us);
         }
+    }
+}
+
+void MotionTask::steerRun() {
+    uint64_t prev_us = espNowUs();
+    for (;;) {
+        // Nothing wakes it early: one steer per tick, dt measured.
+        vTaskDelay(pdMS_TO_TICKS(kMotionTickUs / 1000));
+        const uint64_t now_us = espNowUs();
+        const float dt_s = float(now_us - prev_us) * 1e-6f;
+        if (dt_s <= 0.0f) continue;
+        prev_us = now_us;
+        _arb.steerTick(now_us, dt_s);
     }
 }
 
@@ -320,6 +367,7 @@ void motionSetWindow(float lo, float hi, float rail) { g_motion.arbiter().setWin
 void motionNoteStream(uint32_t b, uint32_t s, uint32_t d) { g_motion.arbiter().noteStream(b, s, d); }
 float motionForceHome(float stroke_mm) { return g_motion.arbiter().forceHome(stroke_mm); }
 MotionCensus motionCensus() { return g_motion.census(); }
+uint32_t motionSteerStackFree() { return g_motion.steerStackFree(); }
 
 void motionSetTuning(const MotionTuning& t) { g_motion.setTuning(t); }
 

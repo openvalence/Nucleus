@@ -9,23 +9,34 @@
 //   one copy, so a gate change lands once and both run it. The emitter and the
 //   clock are handed IN; a host owns the task, the queues and the lock.
 // - THE ARBITER IS THE SOLE CALLER of the emitter (architecture.md section 2):
-//   steer() from begin() and evaluate(), park() from estop(), a power loss,
-//   homeSenseRose() in the home sense's interrupt, and evaluate(); fence() and
-//   renew() from evaluate(). Nothing else commands it. Two producers steer
-//   it, mutually exclusive by the cycle's ownership of the rail: the
-//   plan-tracking feedforward, and while a home cycle runs the seek producer
-//   (homing, below), which the engine never sees.
-// - OWNING-TASK methods (begin, applyTuning, accept, evaluate, drainAnomalies,
-//   snapshot) touch the engine and run on ONE task, the host's motion task.
-//   The window solve runs lazily in the first sample after a submit, on that
-//   task, with a copy of the pending knots and the solver's fixed arrays on
-//   its stack: KB-scale temporaries (T1, memory-budget.md T21).
+//   steer() from begin(), steerTick() and the seek producer; park() from
+//   estop(), a power loss, homeSenseRose() in the home sense's interrupt,
+//   planTick() and steerTick(); fence() and renew() from steerTick(), and
+//   from planTick() while a home cycle runs. Nothing else commands it. Two
+//   producers steer it, mutually exclusive by the cycle's ownership of the
+//   rail: the plan-tracking feedforward (steerTick()), and while a home cycle
+//   runs the seek producer (homing, below, on the planner), which the engine
+//   never sees.
+// - TWO OWNING TASKS, on one core, the steer's priority above the planner's,
+//   so the planner never runs inside a steerTick() (ValenceMotion.cpp).
+//   PLANNER-TASK methods (begin, applyTuning, accept, planTick,
+//   drainAnomalies, snapshot, planState, engine) own the engine. The window
+//   solve runs lazily in the first sample after a submit, on that task, with
+//   a copy of the pending knots and the solver's fixed arrays on its stack:
+//   KB-scale temporaries (T1, memory-budget.md T21).
+//   STEER-TASK: steerTick() owns the steer, renew() and fence() outside a
+//   home cycle, _p_cmd_mm and the backstop, stall and strip counters. It
+//   never touches the engine: the plan reaches it as the STRIP (PlanStrip),
+//   which planTick() publishes and steerTick() copies, each under the host's
+//   Lock.
+//   evaluate() is planTick() then steerTick() on one task: the host twin's
+//   and the native suites' entry.
 // - Every conversion between this interface and Kinetic²'s knots lives in
 //   MotionArbiter.cpp's Kinetic² boundary section, nowhere else.
 // - CROSS-TASK methods (estop, pause, override, returnToPause, acquireRail,
 //   releaseRail, setEstopCutsPower, setMotorPowered, setCommissioned, the limit and window setters,
 //   forceHome, home, noteStream) never touch the engine.
-//   They write flags and scalars the owning task reads on its next pass;
+//   They write flags and scalars the owning tasks read on their next pass;
 //   estop() and a power loss also park the emitter on the CALLING task,
 //   because an e-stop that waits for a tick is not one.
 // - homeSenseRose() is the one INTERRUPT-CONTEXT method; its own comment
@@ -39,6 +50,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 
 #include "ValenceMotion.h"
@@ -87,14 +99,15 @@ inline constexpr uint32_t kMinCyclesPerEdge = 40;
 inline constexpr uint32_t kIntentQueueDepth = 40;
 
 // The longest interval a steer's residual kick and velocity cap are priced
-// over: two sampler periods. A tick later than this is a STALL (evaluate()),
+// over: two sampler periods. A steer later than this is a STALL (steerTick()),
 // counted and steered without the catch-up the elapsed time would ask for.
 // Also the wall bound's horizon: no steer carries the carriage past the
 // backstop's edge within this long.
 inline constexpr float kTickDtCapS = 2.0f * float(kMotionTickUs) * 1e-6f;
 
-// THE LP LEASE (operator ruling 2026-10-06, bd val-fi5): evaluate() renews it
-// on every tick, and the emitter stops itself, the store park() makes, once
+// THE LP LEASE (operator ruling 2026-10-06, bd val-fi5): steerTick() renews it
+// on every tick (planTick(), after each seek step, while a home cycle runs),
+// and the emitter stops itself, the store park() makes, once
 // it has not been renewed for this long. An HP stall therefore renders the
 // last steer for at most kLeaseUs. Longer than kTickDtCapS, so a tick late
 // enough to lapse it is already counted a stall.
@@ -104,6 +117,12 @@ inline constexpr uint32_t kLeaseUs    = kLeaseTicks * kMotionTickUs;
 // (main.cpp start_lp_core()).
 inline constexpr uint32_t kLeaseCycles = kLeaseUs * uint32_t(kLpClockHz / 1.0e6f);
 static_assert(float(kLeaseUs) * 1e-6f > kTickDtCapS, "a lapse must be rarer than a stall");
+
+// THE STRIP (bd val-8rt): the plan's positions at kMotionTickUs spacing, this
+// many ahead of the planner's last tick, so a window solve up to that long on
+// the planner never leaves the steer without a plan. Past its end the steer
+// holds the last entry and counts a planner stall.
+inline constexpr size_t kStripLen = 128;
 
 // ---- homing -----------------------------------------------------------------
 // Home op 1 is the arbiter's own motion path, never the planner's (operator
@@ -142,7 +161,7 @@ static_assert(float(kLeaseUs) * 1e-6f > kTickDtCapS, "a lapse must be rarer than
 // rose faster than kStallRiseAPerMs (5 A/ms) across kStallRiseSamples (2);
 // LOW after kStallOffSamples (3) under kStallOffA (0.5 A). This side confirms
 // the line with two reads kHomeSenseDebounceUs apart, its rise wakes the
-// motion task (ValenceHomeSense.cpp), and nothing else. kHomeSenseLatencyUs is
+// planner task (ValenceHomeSense.cpp), and nothing else. kHomeSenseLatencyUs is
 // the two ends' shared contact-to-park figure; a change to the source's
 // numbers moves it here.
 inline constexpr uint32_t kStallConversionUs    = 150;    // the S3's INA228 shunt conversion
@@ -221,15 +240,15 @@ class MotionEmitter {
 public:
     // Signed edge count. Any task.
     virtual int32_t count() const = 0;
-    // Owning task only.
+    // The steer task, or the planner while a home cycle runs; never both.
     virtual void steer(float v_mm_s) = 0;
     // Any task: stop rendering now. One word store, no lock, no engine.
     virtual void park() = 0;
-    // Owning task only. THE FENCE: no edge takes count() below lo or above hi;
+    // As steer(). THE FENCE: no edge takes count() below lo or above hi;
     // an edge past it is withheld and counted, the period unchanged. Written
     // before any steer into a new frame.
     virtual void fence(int32_t lo, int32_t hi) = 0;
-    // Owning task only, every tick. THE LEASE: unrenewed for kLeaseUs, the
+    // As steer(), every tick. THE LEASE: unrenewed for kLeaseUs, the
     // emitter parks itself and counts a lapse; a renewal lets it render the
     // next steer.
     virtual void renew() = 0;
@@ -252,7 +271,7 @@ public:
     // The line's state before a cycle. undriven: nothing holds it, so a seek
     // would never see a stall. The calling task, never while a cycle runs.
     virtual Probe probe() = 0;
-    // Owning task, during a cycle: HIGH now, a fresh rise confirmed (the
+    // Planner task, during a cycle: HIGH now, a fresh rise confirmed (the
     // board reads it twice, kHomeSenseDebounceUs apart).
     virtual bool high() = 0;
 
@@ -270,23 +289,45 @@ class MotionArbiter {
 public:
     // The engine's clock, microseconds. Read only to time the window solve.
     using Clock = uint64_t (*)();
+    // The host's lock around the strip: hold(true) before, hold(false) after
+    // a publish (planner) or a copy (steer), on the calling task. Held for one
+    // PlanStrip copy; never blocks, logs or allocates inside. Null when one
+    // task runs both halves (evaluate()).
+    using Lock = void (*)(bool hold);
 
-    MotionArbiter(MotionEmitter& emitter, Clock now_us) : _emitter(emitter), _now_us(now_us) {}
+    MotionArbiter(MotionEmitter& emitter, Clock now_us, Lock lock = nullptr)
+        : _emitter(emitter), _now_us(now_us), _lock(lock) {}
 
-    // Owning task.
-    // Before the owning task exists, or on it. Parks and zeroes the origin.
+    // Planner task.
+    // Before either task exists, or on the planner. Parks and zeroes the origin.
     void begin(uint64_t now_us);
     void applyTuning(const MotionTuning& t);
     bool accept(const MotionIntent& in, uint64_t now_us); // gates, clamp, commit
-    // dt_s: the measured interval since the previous call. Clamps the
-    // demand to the backstop's frame and steers; a dt_s past kTickDtCapS
-    // is a stall.
-    void evaluate(uint64_t now_us, float dt_s);
+    // The gates, the brake and return requests, the home cycle's seek
+    // producer, the one side-effecting engine sample, then the strip's
+    // publish. dt_s: the interval since the previous planTick().
+    void planTick(uint64_t now_us, float dt_s);
+    // Steer task. The strip at now_us, clamped to the backstop's frame, as
+    // the feedforward and the residual kick; the fence, the steer and the
+    // lease. dt_s: the interval since the previous steerTick(); past
+    // kTickDtCapS it is a stall. Steers nothing while a home cycle runs.
+    void steerTick(uint64_t now_us, float dt_s);
+    // One task, both halves in order: the host twin's and the tests' tick.
+    void evaluate(uint64_t now_us, float dt_s) {
+        planTick(now_us, dt_s);
+        steerTick(now_us, dt_s);
+    }
+    // Steer task's counters, for host tests and logs, never a census field:
+    // ticks that ran past the strip's end (counted at onset), and new plans
+    // that landed more than a step off the strip the steer was rendering.
+    uint32_t plannerStalls() const { return _planner_stalls; }
+    uint32_t latePlans() const { return _late_plans; }
     // Returns the kinds drained, bit k = kinetic2::AnomalyKind k.
     uint32_t drainAnomalies();
     // Every census field the arbiter owns. The emitter's counters (edges,
     // late, resteers, catchups, step_q8, emitter_faults) and stack_free are
     // the host's to fill: they are facts about its hardware and its task.
+    // Reads the steer task's counters and _backstop_on as single words.
     MotionCensus snapshot(uint64_t now_us);
 
     // Any task.
@@ -294,7 +335,7 @@ public:
     // from both generators, and drops homed when the hub declares
     // estop_cuts_power. off is the RELEASE and lands in PAUSE, never in motion.
     void estop(bool on);
-    // SPEC 11.1 PAUSE. on: latches, THEN asks the owning task to brake the
+    // SPEC 11.1 PAUSE. on: latches, THEN asks the planner to brake the
     // plan in flight to rest at the input decel. That order is the guarantee:
     // a half-stroke or a stream sample queued before the pause is either
     // refused at accept() or already accepted and braked. off is `resume`, the
@@ -305,7 +346,7 @@ public:
     // it), then hands the rail to the operator: a Manual intent is the one
     // motion accepted, at the jog set, anywhere on the rail. ESTOP drops it.
     void override();
-    // SPEC 11.1 RETURN: the owning task plans a jog-set move back to where the
+    // SPEC 11.1 RETURN: the planner plans a jog-set move back to where the
     // pause brought the machine to rest; on arrival override drops and
     // returns() counts once. Manual intents are refused while it runs. `none`
     // without override. With the power gate shut nothing can render, so it is
@@ -349,17 +390,17 @@ public:
     void setInputLimits(float v, float a, float j) { _in_v = v; _in_a = a; _in_j = j; }
     void setWindow(float lo, float hi, float rail);
     float forceHome(float stroke_mm);
-    // Before the owning task runs. Until then, and on a build without one,
+    // Before either owning task runs. Until then, and on a build without one,
     // the sense is absent and home() answers no_sense.
     void setHomeSense(HomeSense& sense) { _sense = &sense; }
     // Home op 1 (ValenceMotion.h motionHome()): refused here on what the
     // calling task can see, the sense probed last; started queues the cycle
-    // for the owning task. One cycle at a time: a request while one runs
+    // for the planner. One cycle at a time: a request while one runs
     // answers started and changes nothing.
     HomeStart home();
-    // INTERRUPT CONTEXT: the home sense's rising edge, before the motion task
-    // is woken. While a seek leg is armed it parks the emitter and latches the
-    // step count for the owning task's next tick; otherwise it does nothing.
+    // INTERRUPT CONTEXT: the home sense's rising edge, before the planner is
+    // woken. While a seek leg is armed it parks the emitter and latches the
+    // step count for the planner's next tick; otherwise it does nothing.
     // It touches the seek word, the latched count, and the emitter's park()
     // and count() (on the board one 32-bit store and one 32-bit load in the LP
     // core's shared memory), and nothing else: no log, no allocation, no
@@ -368,11 +409,11 @@ public:
     void noteStream(uint32_t bundles, uint32_t samples, uint32_t dropped);
 
     float positionMm() const { return float(_emitter.count() - _origin) * kMmPerStep; }
-    // Owning task. The planned state at now_us, engine frame, for host tooling
-    // (tools/kinetic-wasm): the same sample evaluate() and snapshot() take, so
+    // Planner task. The planned state at now_us, engine frame, for host tooling
+    // (tools/kinetic-wasm): the same sample planTick() and snapshot() take, so
     // reading it at their time changes nothing. Nothing on the board calls it.
     kinetic2::State planState(uint64_t now_us) { return sampleEngine(now_us); }
-    // Owning task. The engine itself, for host tooling only (tools/kinetic-wasm
+    // Planner task. The engine itself, for host tooling only (tools/kinetic-wasm
     // reads its pending knots as solved). Reading solved() solves a dirty
     // window: read it after evaluate(), never between accept() and evaluate().
     // Nothing on the board calls it.
@@ -395,9 +436,30 @@ private:
         uint32_t plans = 0, failures = 0;
     };
     PlanRead readPlan(uint64_t now_us);
-    // evaluate() between the lease's two ends: the gates, the producers and
-    // the steer.
-    void tick(uint64_t now_us, float dt_s);
+
+    // THE STRIP: the plan's position at t0_us + i * kMotionTickUs, mm, for i
+    // in [0, n). n is 0 (steer nothing) or kStripLen. gen is the engine reset
+    // it follows: the steer re-anchors its feedforward at anchor_mm, the
+    // carriage's position at that reset, once per gen. plan moves with every
+    // whole refill (a submit, a brake, a reset, an expired strip); between
+    // refills the strip only advances.
+    struct PlanStrip {
+        uint64_t t0_us = 0;
+        uint16_t n = 0;
+        uint32_t gen = 0;
+        uint32_t plan = 0;
+        float    anchor_mm = 0.0f;
+        std::array<float, kStripLen> p_mm{};
+    };
+    // planTick() up to the strip: false when no plan renders this tick (the
+    // e-stop, power and frame-move branches, a home cycle).
+    bool planStep(uint64_t now_us, float dt_s);
+    // Refills or advances _strip and publishes it; an empty one when !live.
+    void fillStrip(uint64_t now_us, bool live);
+    // The strip at t_us, interpolated between the two entries around it,
+    // into p_mm (clamped to the first or last entry outside it). False when
+    // t_us lies outside [t0_us, the last entry] or the strip is empty.
+    static bool stripAt(const PlanStrip& s, uint64_t t_us, float& p_mm);
     // Writes the emitter's fence for the frame in force: the backstop's, or
     // the home cycle's search while one runs. Before every nonzero steer.
     void syncFence();
@@ -417,13 +479,13 @@ private:
     float toNorm(float mm) const { return (mm - frameLo()) / span(); }
     float toMm(float norm) const { return frameLo() + norm * span(); }
     float winSpan() const { return _win_max - _win_min; }
-    // The position backstop's frame, mm (evaluate()): the configured window
+    // The position backstop's frame, mm (steerTick()): the configured window
     // held inside the rail, or the asserted rail while the engine plans in
     // the rail frame (override's jog and its return, SPEC 11.1).
     float backstopLo() const { return _rail_frame ? 0.0f : (_win_min > 0.0f ? _win_min : 0.0f); }
     float backstopHi() const { return _rail_frame ? _rail : (_win_max < _rail ? _win_max : _rail); }
     // The INPUT set's ceilings as the engine plans them, in mm: the mm limit,
-    // or the normalized override scaled by the CURRENT window. evaluate()'s
+    // or the normalized override scaled by the CURRENT window. steerTick()'s
     // tracking cap reads the same answer, so a plan an override allowed is
     // never capped below its own ceiling at render time.
     float inputVmaxMm() const { return _ovr_v > 0.0f ? _ovr_v * winSpan() : _in_v; }
@@ -433,10 +495,10 @@ private:
     void setRailFrame(bool on, uint64_t now_us);
     EngineLimits limitsFor(bool manual) const;
     void brakeToRest(uint64_t now_us);
-    // The power gate as accept(), evaluate() and returnToPause() apply it.
+    // The power gate as accept(), both ticks and returnToPause() apply it.
     bool powerGateOpen() const { return kBenchNoMotor || _powered.load(); }
     // Plans `target` (already clamped, mm) from the machine's actual state
-    // under `lim`. Owning task; counts the plan cost and a failure as a
+    // under `lim`. Planner task; counts the plan cost and a failure as a
     // rejection.
     bool plan(float target, const MotionIntent& in, const EngineLimits& lim, uint64_t now_us);
     // The Kinetic² boundary (MotionArbiter.cpp): an intent becomes a knot, a
@@ -445,7 +507,7 @@ private:
     // The one door to the engine's stateAt(): records the brake the engine
     // takes from a knot that ends the timeline still moving (RFC-105 (dd)).
     kinetic2::State sampleEngine(uint64_t now_us);
-    // The home cycle, owning task only (MotionArbiter.cpp, homing). A leg:
+    // The home cycle, planner task only (MotionArbiter.cpp, homing). A leg:
     // approach, clear (the backoff), touch; then the far leg, or finish (the
     // final backoff).
     enum class HomePhase : uint8_t { idle, approach, clear, touch, finish };
@@ -488,10 +550,32 @@ private:
 
     MotionEmitter& _emitter;
     Clock          _now_us;
+    Lock           _lock;
 
     MotionEngine _engine{engineConfig()};
 
-    // Kinetic² boundary state, owning task only. The newest knot the engine
+    // The strip (PlanStrip). _strip, _strip_stale and _anchor_mm are the
+    // planner's: the strip it advances, a plan change since its last refill,
+    // and the position of the last engine reset. _strip_pub is the shared
+    // copy, touched only under _lock. _strip_gen counts engine resets
+    // (resetEngine(), planner the one writer): a published strip behind it is
+    // stale and steers nothing. The rest is the steer's: its copy of the
+    // strip, the gen and plan it last took, a tick it did not steer from the
+    // plan, a run past the strip's end in progress, and its two counters.
+    PlanStrip _strip{};
+    bool      _strip_stale = true;
+    float     _anchor_mm = 0.0f;
+    PlanStrip _strip_pub{};
+    std::atomic<uint32_t> _strip_gen{0};
+    PlanStrip _steer_strip{};
+    uint32_t  _seen_gen = 0;
+    uint32_t  _seen_plan = 0;
+    bool      _steer_gap = false;
+    bool      _strip_starved = false;
+    uint32_t  _planner_stalls = 0;
+    uint32_t  _late_plans = 0;
+
+    // Kinetic² boundary state, planner task only. The newest knot the engine
     // holds (or the rest point after a reset, or a brake's end): a segment
     // starting after it is a rest until its start, and a jog chains from it.
     uint64_t _k2_newest_us = 0;
@@ -505,6 +589,10 @@ private:
     bool     _k2_chase = false;           // the newest knot is a sample's
     bool     _k2_window_clamped = false;  // the last plan's target was window-clamped
     bool     _k2_dirty = false;           // submitted since the last sample: it solves
+    // The plan in flight was planned under the jog set (a Manual move, the
+    // RETURN): set by plan(), cleared once the engine is idle. Planner the
+    // writer, steerTick() the reader.
+    std::atomic<bool> _plan_manual{false};
     uint32_t _k2_plans = 0, _k2_failures = 0;
     // From applyTuning(): the tuning's policy (a Manual move overrides it
     // with Stretch), the curve policy (0 follow, 1 C1, 2 C2) and the samples
@@ -525,22 +613,26 @@ private:
     float _in_v   = DEFAULT_MAX_SPEED_MM_S;
     float _in_a   = DEFAULT_ACCEL_MM_S2;
     float _in_j   = DEFAULT_INPUT_MAX_JERK_MM_S3;
-    // Normalized ceiling overrides from 0x3120, 0 = derived. Owning task only:
-    // written by applyTuning(), read by accept() and evaluate().
+    // Normalized ceiling overrides from 0x3120, 0 = derived. Written by
+    // applyTuning() on the planner, read by accept() and by steerTick() (one
+    // word each).
     float _ovr_v = 0.0f;
     float _ovr_a = 0.0f;
     float _ovr_j = 0.0f;
 
     int32_t _origin   = 0;       // the emitter count that means 0.0 mm
-    float   _p_cmd_mm = 0.0f;    // the plan position at the previous tick
-    // The fence as last written, emitter counts. The LP core loads it open.
+    // The plan position at the previous steer. Steer task; brakeToRest() on
+    // the planner reads it as one word.
+    float   _p_cmd_mm = 0.0f;
+    // The fence as last written, emitter counts, by whichever task steers
+    // (syncFence()). The LP core loads it open.
     int32_t _fence_lo = INT32_MIN;
     int32_t _fence_hi = INT32_MAX;
 
     volatile bool _homed  = false;
     volatile bool _estop  = false;
     // Written by setMotorPowered() on the switch host's task. _power_settled
-    // re-arms on a loss and is spent once by evaluate() on the owning task.
+    // re-arms on a loss and is spent once by planTick().
     std::atomic<bool> _powered{false};
     std::atomic<bool> _commissioned{false};
     std::atomic<bool> _power_settled{false};
@@ -559,29 +651,31 @@ private:
     static constexpr uint8_t kRailFree   = 0xFF;
     static constexpr uint8_t kRailClosed = 0xFE;
     std::atomic<uint8_t> _rail_gen{kRailFree};
-    // Owning task only.
+    // Planner task only; steerTick() reads _rail_frame as one word.
     bool     _rail_frame  = false;
     bool     _returning   = false;
     // Where the last pause brought the machine to rest (the return target),
-    // and the completed returns. Written by the owning task and, for an
+    // and the completed returns. Written by the planner and, for an
     // unpowered arrival, by returnToPause() on the hub task: atomics, so the
     // two never tear a value or lose an increment.
     std::atomic<float>    _pause_pos_mm{0.0f};
     std::atomic<uint32_t> _returns{0};
-    // The bench bypass has been logged this boot. Owning task only.
+    // The bench bypass has been logged this boot. Planner task only.
     bool     _bench_noted = false;
-    // Set by setWindow()/forceHome() on any task, consumed by evaluate() on
-    // the owning task: the mm FRAME moved, the carriage did not.
+    // Set by setWindow()/forceHome() on any task, consumed by planTick(),
+    // read by steerTick(): the mm FRAME moved, the carriage did not.
     volatile bool _frame_moved = false;
 
-    // The home cycle. _homing is set by home() and cleared only by the owning
-    // task when the cycle ends; _home_req hands the start across; pause()
-    // sets _home_abort. The rest is the owning task's.
+    // The home cycle. _homing is set by home() and cleared only by the
+    // planner when the cycle ends; _home_req hands the start across; pause()
+    // sets _home_abort. The rest is the planner's. _home is not idle exactly
+    // while the seek producer owns the emitter: an atomic, because the steer
+    // reads it to stand aside.
     HomeSense* _sense = &noHomeSense();
     std::atomic<bool> _homing{false};
     std::atomic<bool> _home_req{false};
     std::atomic<bool> _home_abort{false};
-    HomePhase _home = HomePhase::idle;
+    std::atomic<HomePhase> _home{HomePhase::idle};
     uint8_t   _home_leg = 0;      // 0 the home end, 1 the far end
     bool      _home_flip = false; // the flip as the cycle started
     uint64_t  _home_deadline_us = 0;
@@ -594,7 +688,7 @@ private:
     float     _leg_v = 0.0f;
     uint64_t  _leg_start_us = 0;
     float     _seek_v = 0.0f;
-    // The interrupt's handshake with the owning task. The task stores armed
+    // The interrupt's handshake with the planner. The task stores armed
     // (and idle); homeSenseRose() alone moves armed -> tripping -> latched,
     // storing _seek_hit before latched (release). 32-bit words: a native
     // compare-and-swap on the HP cores, safe in interrupt context.
@@ -616,19 +710,20 @@ private:
     uint8_t   _home_fail_leg = 0;
     const char* _home_fail_why = nullptr;   // a string literal
 
-    // Odometer state, owning task only.
+    // Odometer state, planner task only.
     int32_t _odo_steps = 0;       // emitter count at the previous snapshot
     int32_t _stroke_dir = 0;      // sign of the run in progress
     float   _stroke_run_mm = 0.0f;
 
-    // Owning-task counters. They live outside any published census so a host
-    // publishes only what snapshot() built, under its own lock.
+    // Counters outside any published census, so a host publishes only what
+    // snapshot() built, under its own lock. _stalls through _lease_lapses
+    // are the steer task's; the rest the planner's.
     uint32_t _intents  = 0;
     uint32_t _rejected = 0;
-    uint32_t _stalls    = 0;       // ticks later than kTickDtCapS
+    uint32_t _stalls    = 0;       // steers later than kTickDtCapS
     uint32_t _backstops = 0;       // backstop engagements, counted at onset
     bool     _backstop_on = false; // an engagement is in progress
-    uint32_t _lapses_seen = 0;     // the emitter's lapses() at the last tick
+    uint32_t _lapses_seen = 0;     // the emitter's lapses() at the last steer
     uint32_t _lease_lapses = 0;    // lapses since begin()
     uint32_t _plan_us_last = 0;
     uint32_t _plan_us_max  = 0;

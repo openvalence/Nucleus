@@ -5,13 +5,13 @@
 //   gpio_config() (BoardPins.h: the same door for every pad, LP or not).
 // - The ISR calls the arbiter's park (`rose`) before anything else, then
 //   writes g_rose_us and g_rose, stamp first, then the wake; high() on the
-//   motion task is the stamp's one reader and clears g_rose. Lock-free atomic
+//   planner task is the stamp's one reader and clears g_rose. Lock-free atomic
 //   stores and the two calls, no log, no allocation.
 // - The GPIO ISR service is installed without ESP_INTR_FLAG_IRAM, so the
 //   handler is held off while the flash cache is disabled; the LP core keeps
 //   rendering the seek through a flash write.
 //   TODO(val-sv6): an IRAM-resident park that a flash write cannot hold off.
-// - high() busy-waits at most kHomeSenseDebounceUs on the motion task, once
+// - high() busy-waits at most kHomeSenseDebounceUs on the planner task, once
 //   per rise: the second read of a rise that young. The source drives the
 //   line push-pull, so two reads that far apart reject a coupled spike and
 //   cost a real stall nothing it can measure.

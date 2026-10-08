@@ -44,7 +44,9 @@ on the count. The plan-tracking feedforward, its velocity cap and its
 residual kick never steer during a cycle; the engine is reset at the count
 when the cycle ends, as after an e-stop. Exclusivity is the rail: a cycle
 owns it from the request to its end, `accept()` refuses every intent
-meanwhile, and `evaluate()` runs one producer per tick. **The safety margin
+meanwhile, and one producer steers per tick: the seek producer runs on the
+planner and renews the lease there, and `steerTick()` stands aside while a
+leg is in flight. **The safety margin
 (`kHomeSafetyMarginMm`, 5 mm) is never a commandable position**: 0.0 mm is a
 margin off the low stop's datum, the rail ends a margin short of the high
 one, so a 300 mm stop-to-stop rail is a 290 mm usable rail, and the usable
@@ -52,6 +54,30 @@ rail is what max_rail stores.
 
 Event-driven, never clocked: an intent becomes knots at arrival, the pending
 window is solved at the next sample, and the sampler evaluates it.
+
+- **The planner and the steer (bd val-8rt).** Two tasks on HP core 1
+  (`subsystem-map.md`). The planner (priority 5) owns the engine: it drains
+  the intents, samples the engine once per tick (`MotionArbiter::planTick()`)
+  and publishes THE STRIP, the plan's position in mm every `kMotionTickUs`
+  for `kStripLen` (128) entries, read with `kinetic2::Engine::peek()`, which
+  returns bit for bit what the sampler returns later. A plan change (a
+  submit, a brake, a reset) refills it whole; a tick without one shifts it
+  and appends the new tail. The steer (priority 6, `MotionArbiter::steerTick()`)
+  copies the strip under the host's lock every tick, interpolates it at now
+  and steers, so a window solve of up to 128 ms on the planner never delays
+  a steer. Past the strip's end the last entry holds, the carriage stops
+  there, and the steer counts a planner stall (`plannerStalls()`, logged
+  once a second). An engine reset carries a new generation: the steer steers
+  nothing from an older strip and re-anchors its feedforward at the reset's
+  position. A new plan landing off the strip the steer was rendering (a
+  solve longer than `react_us`) moves the previous command by the gap, so
+  the gap closes at the bounded kick, never as a burst (`latePlans()`,
+  logged). The first steer after a tick the steer held (an e-stop, power, a
+  frame move, no strip) starts its feedforward from the plan itself.
+  `evaluate()` is both halves on one task: the sim, kinetic-wasm and the
+  native suites [verified 2026-10-08 -- test_motion_arbiter, the strip cases
+  driving planTick() and steerTick() apart; test_kinetic_wasm_trace
+  re-recorded its 60 s fixture byte-identical through evaluate()].
 
 - **Map:** header-only, hardware-free `kinetic2::Engine`: a knot timeline (64
   knots per axis here), a window solver that re-plans every pending knot
@@ -81,7 +107,7 @@ window is solved at the next sample, and the sampler evaluates it.
 - **The position backstop (operator ruling 2026-10-06, bd val-1w8): no plan
   moves the carriage out of its frame.** The brakes (PAUSE, a generator's
   stop, a starved timeline) are profiles the referee never scores, so
-  `MotionArbiter::evaluate()` clamps the rendered demand on every tick to the
+  `MotionArbiter::steerTick()` clamps the rendered demand on every tick to the
   backstop's frame: the configured window held inside the rail, or the
   asserted rail while the engine plans in the rail frame (override's jog and
   its return). A home cycle's seek producer never reaches it. The frame
@@ -99,23 +125,25 @@ window is solved at the next sample, and the sampler evaluates it.
   skip.
 - **A late tick is a stall, never a burst (bd val-1w8).** Every steer is
   priced over at most `kTickDtCapS`, two `kMotionTickUs`, so none exceeds the
-  input vmax plus that long of the input amax; a tick later than that is
-  re-anchored to the plan, steers the plan's own velocity, and is counted
-  (census `stalls`, on the status line). Between ticks the LP core renders
-  the last steer open loop, so an HP stall (a window solve on the tick,
-  283 ms measured on the P4, bd val-8rt; a flash write with the cache off)
-  carries the carriage that steer for at most `kLeaseUs`, then the LP core
-  stops it (the lease, below), and never past the frame's edge (the fence).
-  The next tick counts the lapse (census `lease_lapses`, `lapses=` on the
-  status line) and never re-anchors `_p_cmd_mm` to the count: a stall inside
-  the host's drain reaches `evaluate()` with a `dt_s` measured before it, and
+  vmax of the set the plan in flight was planned under (the jog set's for a
+  Manual plan and the RETURN, the input set's otherwise) plus that long of
+  the input amax; a tick later than that is re-anchored to the plan, steers
+  the plan's own velocity, and is counted (census `stalls`, on the status
+  line). Between ticks the LP core renders the last steer open loop, so a
+  steer-task stall (a flash write with the cache off; never the window
+  solve, which runs on the planner) carries the carriage that steer for at
+  most `kLeaseUs`, then the LP core stops it (the lease, below), and never
+  past the frame's edge (the fence). The next tick counts the lapse (census
+  `lease_lapses`, `lapses=` on the status line) and never re-anchors
+  `_p_cmd_mm` to the count: a stall between the clock read and the steer
+  reaches `steerTick()` with a `dt_s` measured before it, and
   the residual as feedforward over that is an uncommanded reversal (measured
   -600 mm/s against a 223 mm/s plan). The residual closes at the bounded kick
   [verified 2026-10-06 -- test_motion_arbiter, a 283 ms stall moves the
   carriage 0.896 mm at 223.5 mm/s, then steers 233 mm/s].
 - **Whichever task samples the engine first after a submit needs a deep
   stack**: the window solve copies the pending knots and runs the solver's
-  fixed arrays on the calling stack, KB-scale. That is the motion task only.
+  fixed arrays on the calling stack, KB-scale. That is the planner task only.
   Its size is not yet measured under Kinetic² (bd val-4q1); never size it
   down without a measured high-water mark under a real motion workload (T1
   class, `memory-budget.md` T21). That stack is HP-side and internal RAM only
@@ -166,7 +194,7 @@ per sample, decoded in numpy; board `val-091.3`].
   window: `late=0`, `f_LP` unchanged, 0 illegal transitions, 0 outliers
   beyond the poll grid]. Never move edge rendering back to an HP-resident
   renderer. A cache-off window longer than `kLeaseUs` during motion now stops
-  the carriage by design: the motion task cannot renew the lease through it.
+  the carriage by design: the steer task cannot renew the lease through it.
 - **The fence: two words, `g_fence_lo` and `g_fence_hi`, in `g_pos`'s frame.**
   No edge takes the count below the low word or above the high one; an edge
   past it is withheld (no store, no count, `g_fence_hits`), its deadline still
@@ -184,8 +212,9 @@ per sample, decoded in numpy; board `val-091.3`].
   [verified 2026-10-06 -- test_motion_arbiter, a steer a 3.9 ms stall
   carries past the window stops with the count exactly on the fence, 13
   edges withheld; the rig without the fence ran 13 steps past].
-- **The lease: `g_lease`, renewed by any change.** `evaluate()` renews it on
-  every tick, the seek producer's included. When it has not moved for
+- **The lease: `g_lease`, renewed by any change.** `steerTick()` renews it on
+  every tick; while a home cycle runs, the planner renews it after each seek
+  step instead. When it has not moved for
   `g_lease_cycles` (`kLeaseCycles`, `kLeaseTicks` = 4 ticks = 4 ms, written by
   the HP before the core runs and read once) the core stores 0 to
   `g_step_q8`, counts `g_lapses`, and renders nothing until it moves again.
@@ -222,9 +251,10 @@ per sample, decoded in numpy; board `val-091.3`].
   count, and nothing else: no float, no log, no allocation, no engine, no
   FreeRTOS call. It is not IRAM-resident, so a flash write holds it off.
 - `g_step_q8` has more than one writer only for a stop: every writer other
-  than `steer()` on the motion task stores 0 (e-stop, power loss, the home
+  than `steer()` (on the steer task, or on the planner while a home cycle
+  runs, never both in one tick) stores 0 (e-stop, power loss, the home
   sense's interrupt, and the LP core itself when its lease lapses). A steer
-  racing an interrupt park is parked again by the motion task (`homeSteer()`,
+  racing an interrupt park is parked again by the planner (`homeSteer()`,
   a full fence between its steer and its read of the seek word); a steer
   racing a lapse is lost for one tick and steered again by the next.
 - The HP-to-LP channel is the LP shared memory window. It carries a velocity,
