@@ -485,17 +485,23 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
         // newest knot leaves a gap the sender meant as a rest, so the curve
         // holds until the start.
         const uint64_t start = in.anchor_us > now_us ? in.anchor_us : now_us;
+        // A start within a tick of the newest knot IS that knot: the sender
+        // tiled its spans and two of its clock reads moved the stamp by
+        // microseconds. Held there, a span ending moving stopped dead in one
+        // tick (PieceOverCeiling); flushed there, the knot the bundle meant to
+        // keep was replaced (Kinetic kin-554).
+        const bool tiles = start < _k2_newest_us + kMotionTickUs && _k2_newest_us < start + kMotionTickUs;
         // RFC-087 supersede: a bundle replaces every knot queued at or after
         // its first start; the motion in flight hands off there, or at the
         // reaction horizon when the start is not past it
         // (Engine::truncateAfter). The start is then never a rest.
-        if (in.supersede && _engine.truncateAfter(start, now_us) > 0) {
+        if (in.supersede && !tiles && _engine.truncateAfter(start, now_us) > 0) {
             const kinetic2::Knot h = _engine.newest();
             _k2_newest_us = start > h.t_us ? start : h.t_us;
             _k2_newest_p  = h.p;
             _k2_dirty = true;
         }
-        if (start > _k2_newest_us) {
+        if (!tiles && start > _k2_newest_us) {
             kinetic2::Knot hold;
             hold.t_us   = start;
             hold.p      = _k2_newest_p;

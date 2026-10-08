@@ -2406,6 +2406,77 @@ TEST_CASE("C1 script, a bundle per span: the author's cubics render with nothing
     CHECK(worst <= 0.5f);
 }
 
+// ---- a bundle start microseconds off the newest knot (Kinetic kin-554) ---------
+// Each 0x2101 bundle's start is resolved from the sender's stamp, so a span
+// that tiles the previous one in the sender's clock lands a few microseconds
+// early or late here: two clock reads in the sender and its integer rounding.
+
+TEST_CASE("a segment stream whose starts miss the newest knot by microseconds renders the author's curve: no hold, no flush (kin-554)") {
+    // The operator's ADSR play on the hub (2026-10-08): full
+    // strokes 5 to 95 percent of a 100 mm window, every end velocity 0, each
+    // span 125 ms ahead, one per bundle. The plan ran past 135 mm to 169 mm
+    // and the backstop held the carriage at the window's edge for 350 ms. The
+    // through case passes 50 percent moving at the player's knot slope, 300
+    // mm/s: a hold a few microseconds after it stopped the plan dead in a tick.
+    struct Span { float mm; uint32_t ms; float v; };
+    const Span adsr[] = {{135, 300, 0}, {45, 633, 0}, {135, 300, 0}, {45, 634, 0}, {135, 300, 0}, {45, 600, 0},
+                         {135, 633, 0}, {45, 600, 0}, {135, 300, 0}, {45, 634, 0}, {135, 300, 0}, {45, 633, 0}};
+    const Span through[] = {{90, 150, 300}, {135, 150, 0}, {90, 150, -300}, {45, 150, 0}, {90, 150, 300}, {135, 150, 0},
+                            {90, 150, -300}, {45, 150, 0}, {90, 150, 300}, {135, 150, 0}, {90, 150, -300}, {45, 150, 0}};
+    const int64_t skews[] = {-3, 3, -30, 30, -3, 900, -900, 3, -3, 0, 7, -7};
+    for (const Span* script : {adsr, through}) {
+        for (const uint8_t fam : {uint8_t(0), uint8_t(1)}) {
+            auto r = rig();
+            r->arb.forceHome(268.0f);
+            r->arb.setWindow(40.0f, 140.0f, 268.0f);
+            r->arb.setInputLimits(1200.0f, 100000.0f, 2e7f);
+            r->run(1000);
+            REQUIRE(r->submit(MotionSource::Manual, 45.0f));
+            r->run(2'000'000);
+            r->arb.drainAnomalies();
+            const MotionCensus before = r->census();
+            const uint64_t t0 = g_now_us + 200'000;
+            uint64_t start = t0;
+            float lo = 1e9f, hi = -1e9f;
+            size_t next = 0;
+            const uint64_t end = t0 + 6'500'000;
+            while (g_now_us < end) {
+                while (next < 12 && start <= g_now_us + 125'000) {
+                    MotionIntent in;
+                    in.source = MotionSource::Stream;
+                    in.target_mm = script[next].mm;
+                    in.duration_us = script[next].ms * 1000u;
+                    in.has_end_vel = true;
+                    in.end_vel_mm_s = script[next].v;
+                    in.curve_family = fam;
+                    in.anchor_us = uint64_t(int64_t(start) + skews[next]);
+                    in.supersede = true;
+                    REQUIRE(r->arb.accept(in, g_now_us));
+                    start += in.duration_us;
+                    ++next;
+                }
+                r->run(1000);
+                const float p = r->census().plan_mm;
+                lo = std::fmin(lo, p);
+                hi = std::fmax(hi, p);
+            }
+            r->arb.drainAnomalies();
+            const MotionCensus c = r->census();
+            auto added = [&](kinetic2::AnomalyKind k) { return c.anom[size_t(k)] - before.anom[size_t(k)]; };
+            CAPTURE(script == adsr);
+            CAPTURE(int(fam));
+            MESSAGE("plan ", lo, "..", hi, " mm; over ceiling ", added(kinetic2::AnomalyKind::PieceOverCeiling), ", refused ",
+                    added(kinetic2::AnomalyKind::KnotRefused), ", backstops ", c.backstops - before.backstops);
+            CHECK(hi <= 135.0f + 0.1f);
+            CHECK(lo >= 45.0f - 0.1f);
+            CHECK(c.backstops == before.backstops);
+            CHECK(added(kinetic2::AnomalyKind::PieceOverCeiling) == 0);
+            CHECK(added(kinetic2::AnomalyKind::KnotRefused) == 0);
+            CHECK(c.failures == before.failures);
+        }
+    }
+}
+
 // ---- the planner and the steer (bd val-8rt) ----------------------------------
 // The board runs planTick() and steerTick() on two tasks; evaluate() is both on
 // one. These cases drive the halves apart, as a long solve or a late planner
