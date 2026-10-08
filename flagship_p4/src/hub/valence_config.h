@@ -28,9 +28,9 @@
 #endif
 
 #if NUCLEUS_BENCH_NO_MOTOR
-#define FIRMWARE_VERSION "0.1.29-p4hub-bench"
+#define FIRMWARE_VERSION "0.1.30-p4hub-bench"
 #else
-#define FIRMWARE_VERSION "0.1.29-p4hub"
+#define FIRMWARE_VERSION "0.1.30-p4hub"
 #endif
 
 // Identity strings for WELCOME key 37 (RFC-016a). Static storage, so the views
