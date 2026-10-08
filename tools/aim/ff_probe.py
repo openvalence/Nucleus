@@ -15,6 +15,7 @@ ap.add_argument('--ip', default='192.168.1.118'); ap.add_argument('--com', defau
 ap.add_argument('--speed', type=float, default=1000.0); ap.add_argument('--accel', type=float, default=100000.0)
 ap.add_argument('--lo', type=float, default=20.0); ap.add_argument('--hi', type=float, default=620.0); ap.add_argument('--legs', type=int, default=4)
 ap.add_argument('--regs', default='', help='comma list addr=value, hex addr ok'); ap.add_argument('--tag', default='')
+ap.add_argument('--fake-home', type=float, help='bench only: fake-home this stroke (0x3101 op 2). Never on a real rail')
 a = ap.parse_args()
 CPM = 834.4; MM_PER_REV = 39.27
 
@@ -86,7 +87,8 @@ sp.send_frame(ws, sp.FRAME['CATALOG_READY'], 0, welcome.get(sp.K['catalog_etag']
 iid = [1]
 def intent(ch, fields):
     sp.send_frame(ws, sp.FRAME['INTENT'], ch, sp.build_intent(ch, iid[0], sorted(fields))); iid[0] += 1
-intent(0x3101, [(1, sp.cb_uint(2)), (2, sp.cb_f32(650.0))]); intent(0x3000, [(8, sp.cb_f32(650.0))]); time.sleep(0.2)
+if a.fake_home is not None:
+    intent(0x3101, [(1, sp.cb_uint(2)), (2, sp.cb_f32(a.fake_home))]); intent(0x3000, [(8, sp.cb_f32(a.fake_home))]); time.sleep(0.2)
 intent(0x3000, [(1, sp.cb_f32(0.0)), (2, sp.cb_f32(a.hi + 10)), (3, sp.cb_f32(a.speed)), (4, sp.cb_f32(a.accel)), (5, sp.cb_f32(3200.0)), (6, sp.cb_f32(a.accel))])
 rx = []; nacks = []
 def drain(until):
