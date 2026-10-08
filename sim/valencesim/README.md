@@ -1,10 +1,20 @@
-# valencesim -- the Nucleus device twin
+# Integral -- the Nucleus device twin
 
-A desktop binary that serves `valence.v1` the way the Flagship P4 does, so
-client tests (Phosphor's `test/*.mjs`, `valence_probe.py`, anything built on
-`valence-js`) run with no hardware. It is the device twin; Valence Bench
-(`../Valence/hub/bench`) is the opposite tool, a catalog-shaped test double
-with no device semantics.
+Formerly valencesim. Integral serves `valence.v1` the way the Flagship P4
+does, so clients run and test with no hardware. It is the device twin; Valence
+Bench (`../Valence/hub/bench`) is the opposite tool, a catalog-shaped test
+double with no device semantics.
+
+## Two fronts, one machine
+
+The machine is `src/SimCore.{h,cpp}`: catalog, delegate, Hub, motion,
+patterns, motor switch, the `/uitoken` table and persistence. It owns no
+socket, no clock and no thread. Two fronts drive it:
+
+| Front | Where | Used by |
+|---|---|---|
+| Native exe `valencesim` | `src/main.cpp`, `CMakeLists.txt` | Phosphor's test suites (`test/valence-sim.mjs` and the rest), the bench, the twin's pin recorder: a WebSocket server, `/uitoken` on HTTP, UDP discovery, files for state, the wall clock |
+| `integral.wasm` + `integral.js` | `wasm/integral.cpp`, `wasm/CMakeLists.txt` | Phosphor's built-in machine, in process on every platform: a worker drives it over a MessagePort; no sidecar (bd val-atu, Phosphor ph-5u0g.1) |
 
 ## What is real and what is not
 
@@ -22,10 +32,10 @@ with no device semantics.
 | Durable hub identity (WELCOME identity key 5, SPEC §6.3) | minted once like the board's `hub_iid` NVS key | persisted: `PREFIX.iid`, 8 bytes little-endian |
 | Pattern presets (0x5220) | `PatternPresetStore` inside the delegate | persisted: `PREFIX.presets` holds the board's NVS `presets` blob, same debounce |
 | `background_run` | the delegate's `PatternSettings` | in memory, same as the board: persisting it waits on an operator ruling (bd val-wcm) |
-| WebSocket port | `../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home | real host binding |
+| WebSocket port | native: `../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home; wasm: the host's MessagePort through `integral_send`/`integral_poll` | real host binding |
 | UDP discovery responder (SPEC 13.8) | `flagship_p4/src/hub/ValenceDiscovery.cpp`, compiled verbatim (Winsock or POSIX here, lwIP on the board) | real: answers DISCOVER_PROBE on the registry port with the twin's name, `hub_instance_id`, WS port, version, etag and pairing window |
 | `/uitoken` token: slot table, rate gate, HMAC derivation | `flagship_p4/src/hub/UiTokenTable.h`, compiled verbatim | real |
-| `/uitoken` endpoint | `src/SimUiToken.cpp` on IXWebSocket's HTTP server, a `std::mutex` for the board's spinlock | same contract, on 127.0.0.1 |
+| `/uitoken` endpoint | `src/SimUiToken.cpp` (`serve`), on IXWebSocket's HTTP server in the exe and `integral_http` in wasm, a `std::mutex` for the board's spinlock | same contract; the exe binds 127.0.0.1 |
 | Config and tuning persistence (0x1000, 0x1030, 0x1120, 0x1122, cfg_gen) | `StoredState.h` codec, compiled verbatim | persisted: `PREFIX.cfg` holds the board's NVS `cfg` blob; a file stands in for NVS |
 | Push-to-pair gesture | `--pairing-window` opens the hub's presence window at boot | the board's PAIR-button gesture is bd val-9u0.10; the twin follows it (bd val-sf7.6) |
 | Geiger log lines from device code | `lib/geiger`'s host platform layer (`GEIGER_HOST_PLATFORM`), drained on the hub thread into the sim's log | real: device lines print beside the sim's own, stamped with the hub clock |
@@ -95,6 +105,60 @@ mints `/uitoken` per connect (`acquireToken` in valence-js); run
 
 Kill any stale `valencesim` on 80/82 first, or a test talks to the wrong
 binary.
+
+## The wasm front
+
+### Build
+
+With the emsdk at `../.tools/emsdk` (the workspace's; `emsdk_env` or its
+`upstream/emscripten` on PATH, plus Ninja):
+
+```
+emcmake cmake -S sim/valencesim/wasm -B sim/valencesim/wasm/build -G Ninja
+cmake --build sim/valencesim/wasm/build
+node sim/valencesim/wasm/check.mjs
+```
+
+Output `sim/valencesim/wasm/build/integral.js` (ES6 module factory
+`createIntegral`) and `integral.wasm`, about 540 KB raw and 170 KB gzipped;
+build products, never committed. Same sources and capacities as the exe, no
+pthreads, no asyncify, no filesystem. `check.mjs` boots it, opens a
+valence-js session over an in-memory socket, verifies the catalog against the
+WELCOME etag (`--etag HEX` to expect another), and jogs to 80 mm.
+
+### The C ABI
+
+wasm32: pointers and `size_t` are u32; `now_us` is a BigInt. A pointer handed
+out stays valid until the next call of the same function.
+
+| Function | Contract |
+|---|---|
+| `integral_create(json_opts, state, state_len)` | Boots the machine. Options: `homed`, `pairing_window`, `uncommissioned`, `motor_switch` (bool), `msw_fault_s`, `home_sense_at_mm`, `rail_end_at_mm` (number), the flags of the same names above. `state` is the blob `integral_state_get` last returned, or null. 1 booted, 0 refused. Once per module instance |
+| `integral_tick(now_us)` | Runs every 1 ms pass up to `now_us` (any epoch, monotonic); more than 250 ms behind, the clock jumps and the arbiter's stall cap holds, as on a stalled board. The hub ticks every 5 ms of it. Returns bit0 when the state blob changed |
+| `integral_connect(id)` | A socket opened: 1 attached, 0 refused (all five slots busy) |
+| `integral_send(id, data, len)` | One WebSocket message (one frame, at most 512 B). 1 queued, 0 dropped (ring of 32 full, oversize, unknown id) |
+| `integral_poll(id, &out, &len)` | 1: the next message to the client; 0: none; -1: the hub closed it (fire `onclose`; the id is free) |
+| `integral_disconnect(id)` | The client closed; frames already sent are read at the next hub tick |
+| `integral_http(method, path, body, len, &out, &out_len)` | Status and body. Only `GET /uitoken` exists (RFC-029 section 4); anything else is 404 |
+| `integral_state_get(&out, &len)` | The persisted state as one blob: repeated `[u8 key][u32 LE length][bytes]`, keys 1 cfg, 2 presets, 3 hub_iid, the board's NVS blobs |
+| `integral_destroy()` | Closes every client. The machine stays in memory; drop the module to free it |
+
+Log lines (the boot banner with the etag, device GLOG lines) arrive on the
+module's `print`/`printErr`.
+
+### The host contract
+
+- The host owns time. `integral_tick` is the only thing that advances it;
+  call it at least every few milliseconds with the host's monotonic clock.
+  Ticking slower than the catalog's fastest rate (the 60 Hz motion STATE, a
+  20 Hz jog) delays every STATE push and makes motion jump.
+- After each tick, drain `integral_poll` for every open client.
+- Persist: when `integral_tick` returns bit0, store `integral_state_get`'s
+  blob (IndexedDB or localStorage) and pass it to the next `integral_create`.
+  A machine started without it mints a new hub identity.
+- One machine per module instance; a restart is a new instance.
+- The HTTP side has one route; a session's token provider calls
+  `integral_http("GET", "/uitoken")` and passes the hex token as bytes.
 
 ## Verify
 
