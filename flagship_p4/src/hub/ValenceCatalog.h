@@ -1243,7 +1243,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .role = valence::channel_roles::events_anomaly});
     c.setEventKinds({"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
                      "waveform_fallback", "waveform_scaled", "waveform_centered",
-                     "handoff_bounded", "waveform_smoothed", "dwell_zeroed", "knot_refused"});
+                     "handoff_bounded", "waveform_smoothed", "dwell_zeroed", "knot_refused", "piece_over_ceiling"});
     c.addSchemaField({.key = anom_body::kind, .name = "kind", .type = CborFieldType::uint_t, .unit = "",
                       .group = card::anomalies, .desc = "Anomaly kind, same as the event kind"});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",
