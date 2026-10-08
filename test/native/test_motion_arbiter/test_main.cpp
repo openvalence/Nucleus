@@ -397,6 +397,78 @@ TEST_CASE("window clamp: every source held in the window; the jog under override
     CHECK(r->census().demand_mm == doctest::Approx(0.0f));
 }
 
+TEST_CASE("a Manual move during a stream stops it at the input set, then jogs and lands; a census read changes nothing (val-hlj)") {
+    // F: a stream at cruise, then the jog. G: two samples a tick apart, then
+    // the jog. Each run twice, the census read every tick and never: the
+    // emitter must not tell them apart. The plan ran away to 1,074,850 mm
+    // (F) and 37,260 mm (G, census read) before.
+    struct Run {
+        std::vector<int32_t> n;
+        float lo = 1e9f, hi = -1e9f, v = 0.0f, v_jog = 0.0f;
+        float dv = 0.0f;   // the emitter's largest speed change in one tick, mm/s
+        MotionCensus end{};
+    };
+    auto go = [](bool cruise, bool read) {
+        auto r = rig();
+        r->arb.forceHome(500.0f);
+        r->arb.setWindow(100.0f, 200.0f, 400.0f);
+        r->run(1000);
+        Run out;
+        bool jog = false;
+        uint64_t since = 0;
+        auto tick = [&](uint64_t us) {
+            for (uint64_t t = 0; t < us; t += 1000, since += 1000) {
+                r->run(1000);
+                out.n.push_back(r->emitter.n);
+                const size_t k = out.n.size();
+                if (k >= 3) {
+                    const float v1 = float(out.n[k - 1] - out.n[k - 2]) * valence::kMmPerStep * 1e3f;
+                    const float v0 = float(out.n[k - 2] - out.n[k - 3]) * valence::kMmPerStep * 1e3f;
+                    out.dv = std::max(out.dv, std::fabs(v1 - v0));
+                }
+                if (!read) continue;
+                const MotionCensus c = r->census();
+                out.lo = std::min(out.lo, c.plan_mm);
+                out.hi = std::max(out.hi, c.plan_mm);
+                out.v = std::max(out.v, std::fabs(c.velocity_mm_s));
+                if (jog && since >= 50'000) out.v_jog = std::max(out.v_jog, std::fabs(c.velocity_mm_s));
+            }
+        };
+        REQUIRE(r->submit(MotionSource::Stream, 250.0f));
+        if (cruise) tick(100'000);
+        else {
+            tick(1000);
+            REQUIRE(r->submit(MotionSource::Stream, 20.0f));
+        }
+        if (read) (void)r->census();
+        REQUIRE(r->submit(MotionSource::Manual, 390.0f));
+        jog = true;
+        since = 0;
+        tick(moveUs(5'000'000));
+        out.end = r->census();
+        return out;
+    };
+    for (const bool cruise : {true, false}) {
+        CAPTURE(cruise);
+        const Run quiet = go(cruise, false), read = go(cruise, true);
+        MESSAGE("plan ", read.lo, "..", read.hi, " mm, peak ", read.v, " mm/s, jog ", read.v_jog, " mm/s, emitter step ",
+                read.dv, " mm/s per tick, backstops ", read.end.backstops);
+        CHECK(quiet.n == read.n);
+        CHECK(read.lo >= -0.01f);
+        CHECK(read.hi <= 200.01f);
+        CHECK(read.v <= DEFAULT_MAX_SPEED_MM_S * 1.001f);
+        // The brake ends within 50 ms; from there the jog set holds.
+        CHECK(read.v_jog <= DEFAULT_JOG_MAX_SPEED_MM_S * 1.001f);
+        // The brake runs under the input set's cap: one tick changes the
+        // emitter's speed by at most the plan's accel and the kick, never
+        // a stop from 1200 mm/s to the jog cap.
+        CHECK(read.dv <= 2.0f * DEFAULT_ACCEL_MM_S2 * 1e-3f + 4.0f * valence::kMmPerStep * 1e3f);
+        CHECK_FALSE(read.end.busy);
+        CHECK(read.end.position_mm == doctest::Approx(200.0f).epsilon(1e-3));
+        CHECK(read.end.backstops == 0);
+    }
+}
+
 TEST_CASE("a Manual point move lands on target through the emitter, at the jog ceiling") {
     auto r = rig();
     REQUIRE(r->submit(MotionSource::Manual, 60.0f));
@@ -972,8 +1044,9 @@ TEST_CASE("Kinetic² samples: one behind at the grant's latency, a stream that s
     for (int i = 0; i < 40; ++i) {
         target += 0.1f;
         REQUIRE(r->submit(MotionSource::Stream, target));
+        r->run(1000);
         CHECK(r->census().mode == 2);   // chase: a sample's knot
-        r->run(20'000);
+        r->run(19'000);
     }
     // The chase (Kinetic kin-j6g): a run of samples renders as the fastest
     // legal move to rest on the newest held sample, re-planned per sample.

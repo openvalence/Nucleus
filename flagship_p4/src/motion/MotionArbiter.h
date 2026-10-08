@@ -327,7 +327,8 @@ public:
     // Every census field the arbiter owns. The emitter's counters (edges,
     // late, resteers, catchups, step_q8, emitter_faults) and stack_free are
     // the host's to fill: they are facts about its hardware and its task.
-    // Reads the steer task's counters and _backstop_on as single words.
+    // Reads the steer task's counters and _backstop_on as single words, and
+    // the plan as the last planTick() sampled it: never the engine.
     MotionCensus snapshot(uint64_t now_us);
 
     // Any task.
@@ -410,8 +411,8 @@ public:
 
     float positionMm() const { return float(_emitter.count() - _origin) * kMmPerStep; }
     // Planner task. The planned state at now_us, engine frame, for host tooling
-    // (tools/kinetic-wasm): the same sample planTick() and snapshot() take, so
-    // reading it at their time changes nothing. Nothing on the board calls it.
+    // (tools/kinetic-wasm): the same sample planTick() takes, so reading it at
+    // that time changes nothing. Nothing on the board calls it.
     kinetic2::State planState(uint64_t now_us) { return sampleEngine(now_us); }
     // Planner task. The engine itself, for host tooling only (tools/kinetic-wasm
     // reads its pending knots as solved). Reading solved() solves a dirty
@@ -433,9 +434,14 @@ private:
         float    pos = 0.0f, vel = 0.0f, start = 0.0f, target = 0.0f;
         float    duration_s = 0.0f, elapsed_s = 0.0f;
         uint8_t  mode = 0, plan_kind = 0, flags = 0;
-        uint32_t plans = 0, failures = 0;
     };
-    PlanRead readPlan(uint64_t now_us);
+    // From the state sampleEngine() just returned; samples and solves nothing.
+    PlanRead readPlan(const kinetic2::State& st, uint64_t now_us);
+    // The plan as the planner's last sample read it (planStep(), a reset):
+    // the census reads this and never the engine, so a read never changes
+    // the plan (val-hlj).
+    PlanRead _plan_read{};
+    bool     _plan_busy = false;
 
     // THE STRIP: the plan's position at t0_us + i * kMotionTickUs, mm, for i
     // in [0, n). n is 0 (steer nothing) or kStripLen. gen is the engine reset
@@ -593,6 +599,9 @@ private:
     // RETURN): set by plan(), cleared once the engine is idle. Planner the
     // writer, steerTick() the reader.
     std::atomic<bool> _plan_manual{false};
+    // Planner only: a jog that braked the motion in flight first, waiting for
+    // that brake's end to take the jog set's cap; 0 when none.
+    uint64_t _jog_after_us = 0;
     uint32_t _k2_plans = 0, _k2_failures = 0;
     // From applyTuning(): the tuning's policy (a Manual move overrides it
     // with Stretch), the curve policy (0 follow, 1 C1, 2 C2) and the samples

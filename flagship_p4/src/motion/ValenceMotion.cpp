@@ -50,10 +50,11 @@ constexpr const char* kTag = "motion";
 // ---- task constants ---------------------------------------------------------
 
 // How often the cross-task snapshot is refreshed. 50 Hz feeds a 60 Hz 0x1100
-// and a 45 Hz 0x1110 with one engine sample per refresh instead of one per
-// tick, which is the whole reason it is not simply done at kMotionTickUs: the
-// snapshot calls Engine::snapshot(), and an instrument billed at the tick rate
-// is the class that manufactures the fault it observes (memory-budget.md T27).
+// and a 45 Hz 0x1110 with one census build and anomaly drain per refresh
+// instead of one per tick, which is the whole reason it is not simply done at
+// kMotionTickUs: an instrument billed at the tick rate is the class that
+// manufactures the fault it observes (memory-budget.md T27). The snapshot
+// reads the plan planTick() sampled; it never samples the engine.
 constexpr uint32_t kPublishUs = 20000;
 
 // ---- the emitter's one door -------------------------------------------------

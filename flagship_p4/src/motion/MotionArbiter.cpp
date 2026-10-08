@@ -399,7 +399,11 @@ bool MotionArbiter::plan(float target, const MotionIntent& in, const EngineLimit
     _demand_mm = target;
     _stream    = in.source == MotionSource::Stream;
     // The ceiling set the plan in flight was planned under: steerTick()'s cap.
-    _plan_manual.store(in.source == MotionSource::Manual);
+    // A jog that stops the motion in flight first takes the jog set's when
+    // that brake ends (planStep()): capped at 50 mm/s, a 1200 mm/s brake
+    // was a one-tick stop at the emitter.
+    if (in.source != MotionSource::Manual) _jog_after_us = 0;
+    _plan_manual.store(in.source == MotionSource::Manual && _jog_after_us == 0);
     return true;
 }
 
@@ -416,6 +420,9 @@ void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
     _k2_brake_to_us = 0;
     _k2_starved     = false;
     _k2_chase       = false;
+    _plan_read = PlanRead{};
+    _plan_read.pos = _plan_read.start = _plan_read.target = p_norm;
+    _plan_busy = false;
     // The steer re-anchors its feedforward here and steers nothing from a
     // strip published before this reset (steerTick()).
     _anchor_mm   = positionMm();
@@ -505,6 +512,19 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
                                       fam <= 3 ? kinetic2::Family(fam) : kinetic2::Family::Unspecified);
         _k2_chase = false;
     } else if (manual) {
+        // Motion the jog set did not plan (a stream, a pattern, segments) is
+        // stopped first as PAUSE stops it: the engine's brake at the input
+        // set, and the jog chains from its end. The jog set cannot stop it:
+        // from 1200 mm/s at 200 mm/s^2 its fastest stop runs 3.6 m (val-hlj).
+        // The plan in flight is read under the input set it was planned
+        // under, whether or not a sample solved it since the last intent.
+        _jog_after_us = 0;
+        _engine.setLimits(limitsFor(false));
+        if (!_plan_manual.load() && _engine.isBusy(now_us)) {
+            brakeEngine(now_us);
+            _jog_after_us = _k2_brake_to_us;
+        }
+        _engine.setConfig(cfg);
         // A jog is LIVE (operator ruling 2026-10-06, RFC-105 (n) amended): the
         // newest target supersedes every move still queued; the motion in
         // flight hands off at the reaction horizon (Engine::truncateAfter) and
@@ -603,6 +623,7 @@ EngineLimits MotionArbiter::limitsFor(bool manual) const {
 // The rest point is recorded as the paused position, the one place a
 // `return` goes back to.
 void MotionArbiter::brakeToRest(uint64_t now_us) {
+    _jog_after_us = 0;   // a jog waiting out a brake is dropped with it
     _engine.setLimits(limitsFor(false));
     [[maybe_unused]] const float v = sampleEngine(now_us).v * span();   // log only
     if (!brakeEngine(now_us)) {
@@ -732,10 +753,18 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // PLANNED CHANGE (bd val-klo): the RFC-103 oscillator (kinetic2/oscillator.hpp)
     // is additive on this sampled state, after the planner and before the
     // backstop, and is not wired yet.
-    (void)sampleEngine(now_us);
+    const kinetic2::State st = sampleEngine(now_us);
     const bool busy = _engine.isBusy(now_us);
+    _plan_read = readPlan(st, now_us);
+    _plan_busy = busy;
     // The jog set's ceiling holds until the plan planned under it has ended.
-    if (!busy) _plan_manual.store(false);
+    if (!busy) {
+        _plan_manual.store(false);
+        _jog_after_us = 0;
+    } else if (_jog_after_us != 0 && now_us >= _jog_after_us) {
+        _plan_manual.store(true);
+        _jog_after_us = 0;
+    }
 
     // Arrival ends the return: override drops, plain PAUSE stays.
     if (_returning && !busy) {
@@ -1225,15 +1254,12 @@ uint32_t MotionArbiter::drainAnomalies() {
     return kinds;
 }
 
-MotionArbiter::PlanRead MotionArbiter::readPlan(uint64_t now_us) {
+MotionArbiter::PlanRead MotionArbiter::readPlan(const kinetic2::State& st, uint64_t now_us) {
     PlanRead r;
-    const kinetic2::State st = sampleEngine(now_us);
     r.pos      = st.p;
     r.vel      = st.v;
     r.start    = st.p;
     r.target   = st.p;
-    r.plans    = _k2_plans;
-    r.failures = _k2_failures;
     if (now_us < _k2_brake_to_us) {
         // A brake renders: PAUSE, a generator's stop, a starved stream.
         r.mode       = uint8_t(PlanStyle::settle);
@@ -1262,8 +1288,8 @@ MotionArbiter::PlanRead MotionArbiter::readPlan(uint64_t now_us) {
     return r;
 }
 
-MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
-    const PlanRead s = readPlan(now_us);
+MotionCensus MotionArbiter::snapshot(uint64_t) {
+    const PlanRead s = _plan_read;
     const float s_mm = span();
 
     const int32_t steps = _emitter.count();
@@ -1319,7 +1345,7 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.home_fails     = _home_fails;
     c.home_fail_leg  = _home_fail_leg;
     c.home_fail_why  = _home_fail_why;
-    c.busy           = seeking || _engine.isBusy(now_us);
+    c.busy           = seeking || _plan_busy;
     c.mode           = s.mode;
     c.plan_kind      = s.plan_kind;
     c.plan_start     = s.start;
@@ -1336,8 +1362,8 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     // backstop holding the demand at the frame's edge is one, whatever runs.
     c.plan_flags = c.busy && s.mode != uint8_t(PlanStyle::settle) ? s.flags : 0;
     if (_backstop_on) c.plan_flags |= plan_flags::clamped;
-    c.plans          = s.plans;
-    c.failures       = s.failures;
+    c.plans          = _k2_plans;
+    c.failures       = _k2_failures;
     c.anomalies      = _anomalies;
     c.anom           = _anom;
     c.plan_us_last   = _plan_us_last;
