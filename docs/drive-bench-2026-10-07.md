@@ -3,9 +3,9 @@
 What the 57AIM30 drive and motor do when the P4 emits quadrature at them, and
 what the drive's own registers do, measured on a bare, clamped motor at 36 V.
 The numbers are the unloaded ceiling; the machine's 60AIM40F with a carriage
-and a toy is measured in the last section (2026-10-08). Firmware consequences
-come before the ladder; the open decisions are on the board (val-d66,
-val-sgj, val-25a).
+and a toy is measured in the last section (2026-10-08). Firmware consequences,
+the factory input set ruled 2026-10-08 (val-sgj) among them, come before the
+ladder; the open decisions are on the board (val-d66, val-25a).
 
 ## Setup
 
@@ -224,8 +224,8 @@ legs each, alarm 0.
 - Both commands peak at the same speed: the motor's ceiling on the 36 V bus
   under this load is about 1730 rpm, 1130 mm/s.
 - 2000 mm/s needs more bus voltage or field weakening (0x04, untested
-  loaded). The default input ceiling of 1000 mm/s sits just under the
-  motor's ceiling.
+  loaded). The factory input ceiling of 1200 mm/s (val-sgj) sits just above
+  the motor's ceiling; the drive buffers the difference.
 
 ### Acceleration at 1000 mm/s
 
@@ -244,8 +244,7 @@ leg landed on the hub's count to 0.04 mm. The programmed gains are KP 3000
 - The drive and the toy on it take a 100,000 mm/s2 plan at 1000 mm/s
   cleanly with the programmed gains (following error 13 mm, settle 21 ms),
   so the catalog's 100,000 ceiling (MAX_ACCEL_MM_S2) is real for this toy.
-  Whether the 50,000 default moves is the operator's ruling; heavier toys
-  are torque-bound. val-sgj.
+  The factory default is 100,000 (val-sgj); heavier toys are torque-bound.
 - KP 8000 and feed-forward 60 are not worth it loaded: following error p95
   more than doubles and the motor runs 33 to 35 mm ahead of the pulses.
 - Feed-forward 40 trades 5 mm more lead for a 14 ms faster settle.
