@@ -66,7 +66,7 @@ fresh, HP evaluates the plan and runs the hub.**
 
 | Runner | Core | Role |
 |---|---|---|
-| `app_main` | HP core 0, with the `esp_hosted` SDIO service | Motor power held off first, boot report, subsystem start, the boot self-check last, periodic liveness line (free/maxblock for both heaps, LP counters, stack high-water, self-check verdict) |
+| `app_main` | HP core 0, with the `esp_hosted` SDIO service | Motor power held off first, boot report, subsystem start, the boot self-check last, periodic liveness line (free/maxblock for both heaps, minimum free internal, RSSI and WiFi drops, late stream samples, LP counters, stack high-water, self-check verdict) on the console, and its link and heap subset as GLOG tag `health` into `/diag` |
 | `Motion` (`motion/ValenceMotion.cpp`) | HP core 1, priority 6 | The steer: every 1 ms tick reads the arbiter's strip (`motion-control.md`, the planner and the steer) and hands the LP core a velocity, the fence and the lease (`MotionArbiter::steerTick()`). Never touches the engine; stands aside while a home cycle's seek producer steers. Stack `kMotionTaskStackBytes` |
 | `Planner` (`motion/ValenceMotion.cpp`) | HP core 1, priority 5 | Owns the engine: drains the intent and tuning queues on arrival or the 1 ms tick, solves the window, runs the home cycle, publishes the strip and the 50 Hz census (`MotionArbiter::planTick()`). At the hub's priority, so a long solve time-slices with the hub; woken by the home sense's interrupt. Stack `kMotionTaskStackBytes`, the deep one (`motion-control.md`) |
 | `ValenceHub` (`hub/ValenceHub.cpp`) | HP core 1, priority 5 | The hub, single-task by design (`transport.md` T5), and the one Geiger drain, so the log bridge's sink runs here. Stack `kHubTaskStackBytes` |
@@ -76,7 +76,7 @@ fresh, HP evaluates the plan and runs the hub.**
 | `DriveLnk` (`system/ValenceDriveLink.cpp`) | HP core 0, priority 2 | A 5 ms pass: DRV_ALM and DRV_RDY sampled and debounced, then one step of the Modbus master (the probe once motor power settles, then the alarm-code and encoder poll, and reads for other tasks from a 4-deep queue). Never waits on the UART: the master takes what the RX ring holds. Its one safety act is handing a DRV_ALM alarm to the hub task, which latches ESTOP. Stack `kDriveLinkTaskStackBytes` |
 | `Pattern` (`patterns/ValencePattern.cpp`) | HP core 1, priority 4 | Both generators: wakes when either's half-stroke is due or settings arrive, submits it as an intent. Below the hub and the planner (5) and the steer (6); stack `kPatternTaskStackBytes` |
 | `Provision` (`hub/ValenceProvisioning.cpp`) | HP core 0, priority 2 | Sleeps on a notification; runs one `wifi_join`'s esp_hosted RPCs (set the config, reconnect, wait for an address, restore the prior network on failure) and hands the outcome to the hub task, which answers and persists. Nothing on a motion path. Stack `kTaskStackBytes` in that file |
-| `esp_hosted` / WiFi / lwIP tasks | HP | Owned by the drivers, not by us. Their callbacks are not our task (`transport.md` T5) |
+| `esp_hosted` / WiFi / lwIP tasks | HP | Owned by the drivers, not by us. Their callbacks are not our task (`transport.md` T5). An ESP_LOG on them runs `ValenceDiag.cpp`'s non-blocking bridge, which copies esp_hosted and WiFi Warn+ lines into Geiger as tag `hosted`; the default event loop runs `main.cpp`'s WiFi handler, which logs each drop (reason, count) and the reconnect time as tag `wifi` |
 
 Every stack size and the measurement behind it live on its constant, never
 here. Task stacks are internal RAM (`governance.md` §6).

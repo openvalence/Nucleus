@@ -163,6 +163,12 @@ public:
     // owns the radio; never read on the hub task (see ValenceHub.h).
     void setLinkRssi(int8_t rssi) { _linkRssi.store(rssi, std::memory_order_relaxed); }
 
+    // Stream samples, either kind, that reached onStreamBundle after their
+    // time, since boot. Any task reads it; the hub task is its one writer.
+    uint32_t lateSamples() const { return _lateSamples.load(std::memory_order_relaxed); }
+    // Bundles on motion-segment, kinetic-diag sync_seg_bundles. Hub task.
+    uint32_t segBundles() const { return _segBundles; }
+
     // ---- HubDelegate --------------------------------------------------------
     AccessLevel validateToken(std::span<const std::byte> instance_id,
                               std::span<const std::byte> token, bool hasToken) override;
@@ -360,6 +366,10 @@ private:
 
     // The hub half of 0x1111 sync_dropped, folded every tick.
     IngressDropTally _ingressDrops{};
+    uint32_t _segBundles = 0;
+    // One writer, so load then store: no atomic read-modify-write ever
+    // targets this object, which lives in PSRAM (HubBox).
+    std::atomic<uint32_t> _lateSamples{0};
 
     uint32_t _lastMotionMs = 0;
     uint32_t _lastPlanMs = 0;

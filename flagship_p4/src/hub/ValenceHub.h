@@ -70,6 +70,9 @@ struct HubCensus {
     // T21: a mark only knows the paths that have run, so it is a floor on this
     // boot's workload, never a sizing number on its own.
     uint32_t stackFree = 0;
+    // Stream samples that arrived after their time, since boot. Liveness and
+    // /diag only: a client reads it once Valence RFC-109 gives it a role.
+    uint32_t lateSamples = 0;
 };
 HubCensus hubCensus();
 

@@ -11,6 +11,7 @@
 //   the C6. Pins and bus live in sdkconfig.defaults, credentials in secrets.h.
 // See: docs/flagship-board.md section 8, bd val-091
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <esp_chip_info.h>
@@ -27,6 +28,7 @@
 #include <nvs_flash.h>
 #include <sdkconfig.h>
 #include <ulp_lp_core.h>
+#include "geiger/geiger.h"
 #include "hub/ValenceHub.h"
 #include "hub/ValenceProvisioning.h"
 #include "motion/MotionArbiter.h"
@@ -62,17 +64,54 @@ extern const uint8_t ulp_main_bin_end[]   asm("_binary_ulp_main_bin_end");
 static volatile bool g_got_ip = false;
 static bool g_hosted_ok = false;   // the C6 answered over SDIO; app_main only
 static char g_ip[16] = "-";
+// Event-loop task only, except g_wifi_drops, which the liveness line reads.
+// A drop is losing a link that had an address; a failed rejoin is not one.
+static std::atomic<uint32_t> g_wifi_drops{0};
+static int64_t g_wifi_down_us = 0;   // esp_timer at the last drop, 0 while up
+
+static const char* wifi_reason_name(uint8_t r) {
+    switch (r) {
+        case WIFI_REASON_AUTH_EXPIRE:            return "auth expired";
+        case WIFI_REASON_ASSOC_LEAVE:            return "left";
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "4-way handshake timeout";
+        case WIFI_REASON_BEACON_TIMEOUT:         return "beacon timeout";
+        case WIFI_REASON_NO_AP_FOUND:            return "no AP found";
+        case WIFI_REASON_AUTH_FAIL:              return "auth failed";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:      return "handshake timeout";
+        case WIFI_REASON_CONNECTION_FAIL:        return "connection failed";
+        case WIFI_REASON_ROAMING:                return "roaming";
+        default:                                 return "802.11 reason";
+    }
+}
 
 static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        const auto* d = static_cast<const wifi_event_sta_disconnected_t*>(data);
+        if (g_got_ip) {
+            g_wifi_down_us = esp_timer_get_time();
+            const uint32_t n = g_wifi_drops.load(std::memory_order_relaxed) + 1;
+            g_wifi_drops.store(n, std::memory_order_relaxed);
+            GLOGW("wifi", "DROP #%lu: %s (%u), rssi %d dBm", static_cast<unsigned long>(n),
+                  wifi_reason_name(d->reason), unsigned(d->reason), int(d->rssi));
+        } else {
+            GLOGW_EVERY_MS(5000, "wifi", "join failed: %s (%u)", wifi_reason_name(d->reason), unsigned(d->reason));
+        }
         g_got_ip = false; strcpy(g_ip, "-");
         esp_wifi_connect();   // dumb retry is fine for a bench image
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         auto* e = static_cast<ip_event_got_ip_t*>(data);
         snprintf(g_ip, sizeof g_ip, IPSTR, IP2STR(&e->ip_info.ip));
         g_got_ip = true;
+        if (g_wifi_down_us != 0) {
+            GLOGW("wifi", "back after %lu ms (drop #%lu), ip %s",
+                  static_cast<unsigned long>((esp_timer_get_time() - g_wifi_down_us) / 1000),
+                  static_cast<unsigned long>(g_wifi_drops.load(std::memory_order_relaxed)), g_ip);
+            g_wifi_down_us = 0;
+        } else {
+            GLOGI("wifi", "joined, ip %s", g_ip);
+        }
     }
 }
 
@@ -350,10 +389,23 @@ extern "C" void app_main() {
         // hub task: the radio is on the C6, so this call is an esp_hosted RPC
         // measured at 151 ms, which on a 5 ms tick is the instrument breaking
         // the thing it measures. This loop has nothing to starve.
+        int rssi = 0;   // dBm, 0 = no reading
         if (wifi_ok && g_got_ip) {
             wifi_ap_record_t ap{};
-            if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) valence::hubSetLinkRssi(ap.rssi);
+            if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+                rssi = ap.rssi;
+                valence::hubSetLinkRssi(ap.rssi);
+            }
         }
+        const unsigned int_free = unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        const unsigned int_max = unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        const unsigned int_min = unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+        const unsigned psram_free = unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        const unsigned long drops = g_wifi_drops.load(std::memory_order_relaxed);
+        // The archive's copy of the link and heap headroom: the printf line
+        // below reaches the console only. Under kMsgBytes (geiger_core.hpp).
+        GLOGI("health", "rssi=%d int=%u/%u min=%u psram=%u drops=%lu stream_late=%lu", rssi, int_free, int_max,
+              int_min, psram_free, drops, static_cast<unsigned long>(census.lateSamples));
         // maxblock, not free, is the number that decides anything: a serve or a
         // DMA descriptor needs ONE contiguous block, and a fragmented heap
         // reads healthy on free right up to the allocation that fails
@@ -370,23 +422,21 @@ extern "C" void app_main() {
         const valence::MotorSwitchStatus msw = valence::motorSwitchStatus();
         const valence::DriveLinkStatus drv = valence::driveLinkStatus();
         const valence::FanStatus fan = valence::fanStatus();
-        printf("[flagship_p4] %lus  int_free=%u int_max=%u  psram_free=%u psram_max=%u  "
-               "lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s ip=%s  "
-               "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu  "
+        printf("[flagship_p4] %lus  int_free=%u int_max=%u int_min=%u  psram_free=%u psram_max=%u  "
+               "lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s rssi=%d drops=%lu ip=%s  "
+               "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu stream_late=%lu  "
                "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu "
                "faults=%lu stalls=%lu backstops=%lu lapses=%lu fence=%lu  selfcheck=%s:%u/%u %s  msw=%s  drv=%s alm=%u rdy=%u  "
                "therm=%.1fC fan=%.0f%%/%.0frpm\n",
                static_cast<unsigned long>(n * 5),
-               unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
-               unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
-               unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+               int_free, int_max, int_min, psram_free,
                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
                lp_ok ? "running" : "down",
                static_cast<unsigned long>(ulp_g_edges),
                static_cast<unsigned long>(ulp_g_late),
                static_cast<unsigned long>(ulp_g_catchup),
                wifi_ok ? (g_got_ip ? "up" : "connecting") : "down",
-               g_ip,
+               rssi, drops, g_ip,
                hub_ok ? "up" : "down",
                static_cast<unsigned long>(census.sessions),
                static_cast<unsigned long>(census.parked),
@@ -394,6 +444,7 @@ extern "C" void app_main() {
                static_cast<unsigned long>(census.uiSockets),
                static_cast<unsigned long>(census.wsFrames),
                static_cast<unsigned long>(census.wsDrops),
+               static_cast<unsigned long>(census.lateSamples),
                mo.estop ? "estop" : (mo.busy ? "moving" : (mo.homed ? "idle" : "unhomed")),
                double(mo.position_mm),
                static_cast<long>(mo.steps),

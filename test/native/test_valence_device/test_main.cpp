@@ -1248,6 +1248,29 @@ TEST_CASE("VD-SEG-1: a segments bundle flushes on the first segment the motion p
     CHECK_FALSE(g_intents[1].supersede);
 }
 
+TEST_CASE("VD-SEG-2: every sample past its time at ingress counts late; only segments bundles count as such") {
+    auto rig = std::make_unique<Rig>();
+    const uint32_t now32 = uint32_t(g_clock.nowUs());
+    std::vector<std::byte> bytes;
+
+    // Starts 30 ms and 5 ms ago, and 20 ms ahead: two late, one bundle.
+    rig->device.onStreamBundle(ch::motion_segment, 1, segmentsBundle(bytes, now32 - 30'000, {{5000, 25}, {6000, 25}, {7000, 25}}));
+    CHECK(rig->device.lateSamples() == 2);
+    CHECK(rig->device.segBundles() == 1);
+
+    // One point stamped 30 ms ago: late, and not a segments bundle.
+    std::vector<std::byte> pts(6 + 2 + 4, std::byte{0});
+    std::span<std::byte> out(pts);
+    putU32(out.subspan(0, 4), now32 - 30'000);
+    out[4] = std::byte{1};
+    putU16(out.subspan(8, 2), 5000);   // t_off[0] = 0, then the point
+    const auto parsed = BundleView::parse(std::span<const std::byte>(pts), 4);
+    REQUIRE(parsed);
+    rig->device.onStreamBundle(ch::motion_input, 1, parsed.value());
+    CHECK(rig->device.lateSamples() == 3);
+    CHECK(rig->device.segBundles() == 1);
+}
+
 // ---- bd val-68v / val-88t: the kinetic cards carry what Kinetic² reads ----------
 
 TEST_CASE("VD-K2-1: the catalog advertises only settings the planner reads") {

@@ -3,16 +3,20 @@
 
 #include "system/ValenceDiag.h"
 
+#include <array>
 #include <atomic>
+#include <cinttypes>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <string_view>
 
 #include <esp_attr.h>
 #include <esp_heap_caps.h>
 #include <esp_http_server.h>
+#include <esp_log.h>
 #include <esp_system.h>
 #include <esp_timer.h>
 
@@ -241,6 +245,82 @@ esp_err_t handleGet(httpd_req_t* req) {
     return ESP_OK;
 }
 
+// ---- the ESP_LOG bridge -----------------------------------------------------------
+// esp_hosted and the WiFi glue log through ESP_LOG, which writes the console
+// only. Their Warn and Error lines also enter Geiger under kEspTag, so they
+// land in the archive and, at Warn, on the log channel.
+// - Runs on whichever task called ESP_LOG: it never blocks, never allocates and
+//   never calls ESP_LOG. The console write it chains to is unchanged.
+// - kEspLinesPerSec bounds what a driver in a retry loop can push into the
+//   archive and onto the wire; the next line admitted names how many were cut.
+
+constexpr const char* kEspTag = "hosted";
+constexpr uint32_t kEspLinesPerSec = 10;
+
+// Tag prefixes of the esp_hosted host side and esp_wifi_remote
+// (managed_components). A tag outside them stays console-only.
+constexpr std::array<std::string_view, 10> kEspBridged = {
+    "H_", "rpc_", "RPC_", "sdio", "transport", "host_init", "os_wrapper", "serial", "esp_hosted", "wifi"};
+
+// ESP_LOG's line head after the level letter (esp_log_format.h LOG_FORMAT,
+// CONFIG_LOG_COLORS off): the timestamp, then the tag, are its first arguments.
+constexpr std::string_view kEspHead = " (%" PRIu32 ") %s: ";
+
+// The console writer the hook chains to: IDF's default until diagBegin()
+// records what the hook replaced, so no line is lost in between.
+std::atomic<vprintf_like_t> g_espConsole{&vprintf};
+std::atomic<uint32_t> g_espSec{0};
+std::atomic<uint32_t> g_espInSec{0};
+std::atomic<uint32_t> g_espCut{0};
+
+bool espBridged(const char* tag) {
+    const std::string_view t(tag);
+    for (const std::string_view p : kEspBridged)
+        if (t.starts_with(p)) return true;
+    return false;
+}
+
+// False cuts this line; `cut` receives the lines cut since the last admitted.
+// Two tasks crossing a second together can miscount by a line, never block.
+bool espAdmit(uint32_t& cut) {
+    const uint32_t sec = uint32_t(esp_timer_get_time() / 1000000);
+    if (g_espSec.exchange(sec, std::memory_order_relaxed) != sec) g_espInSec.store(0, std::memory_order_relaxed);
+    if (g_espInSec.fetch_add(1, std::memory_order_relaxed) >= kEspLinesPerSec) {
+        g_espCut.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    cut = g_espCut.exchange(0, std::memory_order_relaxed);
+    return true;
+}
+
+// Its own frame, so the line buffer is gone before the console write runs on
+// the same (possibly small) driver task stack.
+__attribute__((noinline)) void espBridgeLine(const char* fmt, va_list ap) {
+    const char lvl = fmt[0];
+    if ((lvl != 'W' && lvl != 'E') || std::strncmp(fmt + 1, kEspHead.data(), kEspHead.size()) != 0) return;
+    va_list rest;
+    va_copy(rest, ap);
+    (void)va_arg(rest, uint32_t);
+    const char* tag = va_arg(rest, const char*);
+    uint32_t cut = 0;
+    if (tag != nullptr && espBridged(tag) && espAdmit(cut)) {
+        char msg[geiger::Record::kMsgBytes];
+        vsnprintf(msg, sizeof msg, fmt + 1 + kEspHead.size(), rest);
+        size_t len = std::strlen(msg);
+        while (len > 0 && msg[len - 1] == '\n') msg[--len] = '\0';
+        char cutNote[24] = "";
+        if (cut) snprintf(cutNote, sizeof cutNote, " (+%lu cut)", static_cast<unsigned long>(cut));
+        if (lvl == 'E') GLOGE(kEspTag, "%s: %s%s", tag, msg, cutNote);
+        else            GLOGW(kEspTag, "%s: %s%s", tag, msg, cutNote);
+    }
+    va_end(rest);
+}
+
+int espLogHook(const char* fmt, va_list ap) {
+    espBridgeLine(fmt, ap);
+    return g_espConsole.load(std::memory_order_relaxed)(fmt, ap);
+}
+
 }  // namespace
 
 bool diagBegin() {
@@ -275,6 +355,7 @@ bool diagBegin() {
     g_crash.count = 0;
 
     geiger::logger().addSink(g_ar);
+    g_espConsole.store(esp_log_set_vprintf(&espLogHook), std::memory_order_relaxed);
     GLOGI(kTag, "archive %u B in PSRAM, %u slots; boot %lu after %s, %lu prior breadcrumbs",
           unsigned(sizeof(Archive)), unsigned(kSlots),
           static_cast<unsigned long>(g_ar->_bootSeq), resetName(esp_reset_reason()),

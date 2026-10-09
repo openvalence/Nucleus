@@ -369,7 +369,8 @@ void publishPlanStrip(Hub& hub, const MotionCensus& m) {
 }
 
 // hubDropped: bundles the hub dropped whole at ingress (IngressDropTally.h).
-void publishMotionDiag(Hub& hub, const MotionCensus& m, uint32_t hubDropped) {
+// segBundles: the motion-segment share of sync_bundles.
+void publishMotionDiag(Hub& hub, const MotionCensus& m, uint32_t hubDropped, uint32_t segBundles) {
     // The layout ValenceCatalog.h's kinetic-diag entry sums: 48 B around one
     // u32 per kind, kind 0 (never counted) excepted.
     std::array<std::byte, 48 + 4 * (kAnomalyKinds - 1)> buf{};
@@ -393,11 +394,10 @@ void publishMotionDiag(Hub& hub, const MotionCensus& m, uint32_t hubDropped) {
     // A dropped bundle counts ONE: the library keeps no sample count for it,
     // so the field understates samples rather than inventing them.
     packU32(buf, n, m.stream_dropped + hubDropped);
-    // sync_seg_bundles is not separated here: both stream channels land in one
-    // counter, and splitting it would need a second pair the census does not
-    // carry. It reads 0, which understates rather than invents.
-    packU32(buf, n, 0);
-    packU16(buf, n, 0);                                // reset_gen: nothing resets these
+    packU32(buf, n, segBundles);
+    // reset_gen: no action resets this group (SPEC 9.3), so it stays 0; a
+    // reboot reads as a new boot_id, never as a reset.
+    packU16(buf, n, 0);
     publishPacked(hub, ch::motion_diag, buf, n);
 }
 
@@ -1418,6 +1418,11 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
     const float span = w.hi - w.lo;
     uint32_t dropped = 0;
     uint32_t farClamped = 0;
+    // Samples of either kind whose time had passed at ingress, the count
+    // Valence RFC-109 drafts as stream.late; worstUs is the bundle's arrival
+    // lead when it is negative.
+    uint32_t late = 0;
+    int32_t worstUs = 0;
     // RFC-087 supersede: the bundle's first segment the motion path takes
     // flushes what is queued from its start (MotionArbiter, the Kinetic²
     // boundary). A samples bundle never flushes.
@@ -1428,7 +1433,11 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
         // span is capped far under the 32-bit wrap).
         int32_t delta = int32_t(bundle.sampleTimeUs(i) - now32);
         if (delta > leadCapUs) { delta = leadCapUs; ++farClamped; }
-        if (delta < 0) delta = 0;
+        if (delta < 0) {
+            ++late;
+            worstUs = std::min(worstUs, delta);
+            delta = 0;
+        }
 
         // The field mapping is StreamIntent.h's, shared with the offline
         // planner; a zero-duration segment decodes to nullopt and is dropped.
@@ -1449,6 +1458,12 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
     }
 
     motionNoteStream(1, n, dropped);
+    if (isSegment) ++_segBundles;
+    if (late) {
+        _lateSamples.store(_lateSamples.load(std::memory_order_relaxed) + late, std::memory_order_relaxed);
+        GLOGI_EVERY_MS(1000, kTag, "motion stream: %u of %u sample(s) arrived past their time, by up to %.1f ms",
+                       unsigned(late), unsigned(n), double(-worstUs) * 1e-3);
+    }
     if (farClamped) {
         GLOGW_EVERY_MS(2000, kTag,
                        "motion stream: %u sample(s) clamped from a far-future t_off "
@@ -1741,7 +1756,7 @@ void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     const MotionCensus mo = motionCensus();
     publishMotion(hub, mo, patternActive());
     publishPlanStrip(hub, mo);
-    publishMotionDiag(hub, mo, _ingressDrops.total());
+    publishMotionDiag(hub, mo, _ingressDrops.total(), _segBundles);
     publishOdometer(hub, mo);
     if (boardFeatures().has_pattern) {
         pushPattern();
@@ -1935,7 +1950,7 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     }
     if (uint32_t(nowMs - _lastSlowMs) >= 1000u) {
         _lastSlowMs = nowMs;
-        publishMotionDiag(*_hub, mo, _ingressDrops.total());
+        publishMotionDiag(*_hub, mo, _ingressDrops.total(), _segBundles);
         publishOdometer(*_hub, mo);
     }
 

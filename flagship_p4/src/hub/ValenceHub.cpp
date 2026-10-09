@@ -388,6 +388,7 @@ HubCensus hubCensus() {
     c.wsSockets = uint32_t(g_box->port.openSockets());
     c.uiSockets = uint32_t(http80Sockets());
     c.stackFree = g_hubTask ? uint32_t(uxTaskGetStackHighWaterMark(g_hubTask)) : 0;
+    c.lateSamples = g_box->device.lateSamples();
     return c;
 }
 

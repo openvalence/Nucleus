@@ -29,10 +29,11 @@
 
 namespace valence {
 
-// Allocates the PSRAM archive, adopts the previous boot's crash breadcrumbs
-// and registers the Geiger sink. Call it BEFORE anything worth logging, and
-// before the network: it needs nothing but PSRAM. False means no archive (the
-// console sink is unaffected).
+// Allocates the PSRAM archive, adopts the previous boot's crash breadcrumbs,
+// registers the Geiger sink and hooks ESP_LOG so esp_hosted and WiFi Warn and
+// Error lines reach Geiger as tag "hosted". Call it BEFORE anything worth
+// logging, and before the network: it needs nothing but PSRAM. False means no
+// archive and no hook (the console sink is unaffected).
 bool diagBegin();
 
 // Registers GET /diag* on the shared :80 instance. Non-fatal on failure.
