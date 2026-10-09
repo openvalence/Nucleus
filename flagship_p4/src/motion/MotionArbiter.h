@@ -499,7 +499,8 @@ private:
     // through here, so the Kinetic² boundary state resets with the engine.
     void resetEngine(float p_norm, uint64_t now_us);
     // The window moved under a plan in flight: the pending knots stay and the
-    // plan's state at now_us is restated in the new frame (bd val-17u).
+    // plan's curve is restated in the new frame (bd val-17u), kept through
+    // the reaction horizon or the next knot (bd val-4dt).
     void reseedEngine(uint64_t now_us);
     // Planner task: applies the window setWindow() last posted, if one is
     // new and whole, and raises the frame-move flag. True when it applied.

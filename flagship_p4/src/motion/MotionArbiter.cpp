@@ -469,21 +469,24 @@ void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
 }
 
 void MotionArbiter::reseedEngine(uint64_t now_us) {
-    // The plan's own state, not the count: the strip the steer follows runs
-    // on through the reseed in mm, and the carriage's lag stays the kick's
-    // to close, as through any re-plan. Ceilings scale with the state, so the
-    // curve in flight keeps its mm ceilings until the next intent sets the
-    // new frame's.
-    const kinetic2::State was = sampleEngine(now_us);
+    // The plan's own curve, not the count: the engine restates it and keeps
+    // it through the reaction horizon or the next knot (Engine::reframe,
+    // RFC-105 (bb)), so the strip the steer follows runs on in mm and the
+    // carriage's lag stays the kick's to close, as through any re-plan.
+    // Never a re-plan from now: a write inside a knot's horizon trims that
+    // knot to rest on the write's state (bd val-4dt, val-83q). Ceilings scale
+    // with the curve, so it keeps its mm ceilings until the next intent sets
+    // the new frame's.
+    (void)sampleEngine(now_us);
     const float k = _eng_span / span();
-    const float lo = _eng_lo, sp = _eng_span;
-    auto restate = [&](float p) { return (lo + p * sp - frameLo()) / span(); };
+    const float c = (_eng_lo - frameLo()) / span();
+    auto restate = [&](float p) { return p * k + c; };
     EngineLimits lim = _engine.config().limits;
     lim.vmax *= k;
     lim.amax *= k;
     lim.jmax *= k;
     _engine.setLimits(lim);
-    _engine.reseedAt(kinetic2::State{restate(was.p), was.v * k, was.a * k}, now_us);
+    _engine.reframe(k, c, now_us);
     _k2_dirty = true;
     _k2_brake_from_p = restate(_k2_brake_from_p);
     _k2_brake_to_p   = restate(_k2_brake_to_p);
@@ -786,7 +789,7 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // travel at its maximum rate, plus thousands of missed deadlines
     // (measured, bd val-091.13). A window change with motion planned
     // re-targets in place (bd val-17u): the pending knots are window shares
-    // and stay, and the plan's own state is restated in the new frame
+    // and stay, and the plan's own curve is restated in the new frame
     // (reseedEngine()), so the strip runs on in mm. force_home, a home cycle,
     // or a carriage at rest with nothing pending resets at the carriage: the
     // steer parks for this tick (an empty strip) and re-anchors at the reset,

@@ -2983,6 +2983,85 @@ TEST_CASE("window dragged mid-stream, writes landed inside planner ticks: every 
     CHECK(c.position_mm == doctest::Approx(lo + 0.9f * (hi - lo)).epsilon(1e-3));
 }
 
+// bd val-4dt, val-83q: the val-17u sweep with the window dragged 80 mm at
+// 400 mm/s, a 2 mm write and a second one a tick later every 10 ms, at every
+// phase of the drag against the knots. Re-planned from the write, one landing
+// inside a knot's horizon trimmed that knot to rest on the write's state: the
+// plan ran out and back (-336 mm/s) or held a tick at the knot (128 -> 0 ->
+// 90 mm/s). Never backward past kin-554's tolerance, never a held tick, never
+// past a ceiling.
+TEST_CASE("window dragged mid-stream at every phase against the knots: never out and back, never a held tick") {
+    constexpr float kRail = 400.0f;
+    constexpr int kSegs = 20;
+    for (uint64_t off = 0; off < 10'000; off += 1'000) {
+        float lo = 0.0f, hi = 320.0f;
+        auto r = rig();
+        r->arb.setWindow(lo, hi, kRail);
+        r->arb.forceHome(kRail);
+        r->run(1000);
+        const float rate = 0.8f / (float(kSegs) * 0.1f);   // shares/s
+        const uint64_t first = g_now_us + 120'000;
+        const uint64_t last_knot = first + uint64_t(kSegs) * 100'000;
+        auto segment = [&](int i) {
+            MotionIntent in;
+            in.source = MotionSource::Stream;
+            in.target_mm = lo + (0.1f + rate * 0.1f * float(i + 1)) * (hi - lo);
+            in.duration_us = 100'000;
+            in.anchor_us = first + uint64_t(i) * 100'000;
+            in.has_end_vel = true;
+            in.end_vel_mm_s = i + 1 < kSegs ? rate * (hi - lo) : 0.0f;
+            return r->arb.accept(in, g_now_us);
+        };
+        auto shift = [&] {
+            lo += 2.0f;
+            hi += 2.0f;
+            r->arb.setWindow(lo, hi, kRail);
+        };
+        const uint64_t drag_from = first + 1'000'000 + off;
+        int sent = 0, writes = 0, held = 0;
+        float top = -1e9f, back = 0.0f, fastest = 0.0f;
+        double worst_steer = 0.0;
+        MotionCensus prev = r->census(), prev2 = prev;
+        while (g_now_us < last_knot + 500'000) {
+            while (sent < kSegs && g_now_us + 120'000 >= first + uint64_t(sent) * 100'000) REQUIRE(segment(sent++));
+            elapse(*r);
+            if (writes < 40 && g_now_us >= drag_from && (g_now_us - drag_from) % 10'000 <= 1'000) {
+                shift();
+                ++writes;
+            }
+            planOnly(*r);
+            steerOnly(*r);
+            const MotionCensus c = r->census();
+            if (g_now_us >= drag_from) {
+                top = std::max(top, c.plan_mm);
+                back = std::max(back, top - c.plan_mm);
+            }
+            fastest = std::max(fastest, std::fabs(c.velocity_mm_s));
+            worst_steer = std::max(worst_steer, std::fabs(steeredMmS(r->emitter)));
+            if (g_now_us < last_knot - 100'000 && std::fabs(prev.velocity_mm_s) < 1.0f &&
+                std::fabs(prev2.velocity_mm_s) > 10.0f && std::fabs(c.velocity_mm_s) > 10.0f)
+                ++held;
+            prev2 = prev;
+            prev = c;
+        }
+        const MotionCensus c = r->census();
+        CAPTURE(off);
+        MESSAGE("drag at +", off / 1000, " ms: back ", back, " mm, held ", held, ", plan peak ", fastest,
+                " mm/s, steer peak ", worst_steer, " mm/s");
+        REQUIRE(writes == 40);
+        CHECK(back <= 2e-3f * (hi - lo));   // kin-554's tolerance
+        CHECK(held == 0);
+        CHECK(fastest <= DEFAULT_MAX_SPEED_MM_S);
+        CHECK(worst_steer <= double(DEFAULT_MAX_SPEED_MM_S) + kKickMax);
+        CHECK(r->arb.plannerStalls() == 0);
+        CHECK(c.emitter_faults == 0);
+        CHECK(c.rejected == 0);
+        CHECK(c.failures == 0);
+        CHECK_FALSE(c.busy);
+        CHECK(c.position_mm == doctest::Approx(lo + 0.9f * (hi - lo)).epsilon(1e-3));
+    }
+}
+
 // ---- the stream's expectation (Kinetic Engine::expect, bd val-g62) -----------
 // A Stream segment carries the hub's quiet window (MotionIntent::expect_us), so
 // its free knot renders through toward a provisional successor; the hub's
