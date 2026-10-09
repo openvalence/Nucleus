@@ -103,9 +103,11 @@ not be cited as a reason to re-run a failed build.
 board's own port 80, RAW body, `X-OTA-Token`, `esp_ota_ops` into the idle slot,
 reboot. No forwarding hop exists: the sockets are on the P4.
 
-- `python tools/ota.py [--ip <ip>] [--image <bin>] [--expect <version>]`. It
-  reads the running version off the hub, pushes the image, then waits for a
-  NEW version AND for that image to buy itself. Both, or it is not a deploy.
+- `python tools/ota.py --image <bin> --expect <version> [--ip <ip>] [--dry-run]`.
+  It refuses an image whose compiled FIRMWARE_VERSION is not `--expect`
+  (there is no default image), reads the running version off the hub, pushes
+  the image, then waits for a NEW version AND for that image to buy itself.
+  Both, or it is not a deploy.
 - The token lives in git-ignored `flagship_p4/src/secrets.h`
   (`SECRET_OTA_TOKEN`, template in `secrets.example.h`) and the tool reads it
   from there. Never put it on a command line and never inline it.

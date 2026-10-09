@@ -15,6 +15,10 @@ Constraints:
   it from, so the two cannot drift. --token overrides for a foreign board.
 - The version read is a tokenless-capable WATCH session: WELCOME carries the
   identity map regardless of tier, so a 429 on the mint never blocks a deploy.
+- THE IMAGE IS CHECKED BEFORE IT LEAVES THE HOST. --image and --expect are
+  both required, and the FIRMWARE_VERSION string compiled into the .bin must
+  equal --expect or nothing is sent. There is no default image: two build
+  envs share one tree and the wrong one was pushed once (bd val-bep).
 - A NEW IMAGE IS ON TRIAL. It reverts unless it brings the hub and WiFi up, so
   a poll that times out means the board is BACK ON THE OLD SLOT, not bricked.
 
@@ -36,7 +40,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(_ROOT, "..", "Valence", "tools")
 import valence_probe as sp  # noqa: E402
 import websocket  # noqa: E402
 
-DEFAULT_IMAGE = os.path.join(_ROOT, "flagship_p4", ".pio", "build", "flagship_p4", "firmware.bin")
 SECRETS = os.path.join(_ROOT, "flagship_p4", "src", "secrets.h")
 
 
@@ -49,6 +52,12 @@ def read_token(path):
     if not m:
         return None, "no SECRET_OTA_TOKEN in %s (see secrets.example.h)" % path
     return m.group(1), None
+
+
+def image_version(path):
+    """The FIRMWARE_VERSION string compiled into the image, or None unless exactly one."""
+    found = set(re.findall(rb"\d+\.\d+\.\d+-p4hub[\w.-]*", open(path, "rb").read()))
+    return found.pop().decode() if len(found) == 1 else None
 
 
 def hub_version(ip, port, timeout=5.0):
@@ -115,17 +124,28 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ip", default="192.168.1.118")
     ap.add_argument("--port", type=int, default=82, help="the Valence WS port, for the version read")
-    ap.add_argument("--image", default=DEFAULT_IMAGE)
+    ap.add_argument("--image", required=True,
+                    help="flagship_p4/.pio/build/<env>/firmware.bin; no default (bd val-bep)")
     ap.add_argument("--token", default=None, help="overrides the value read from secrets.h")
     ap.add_argument("--secrets", default=SECRETS)
     ap.add_argument("--timeout", type=float, default=300.0, help="seconds for the upload itself")
     ap.add_argument("--wait", type=float, default=150.0, help="seconds to wait for the new version")
-    ap.add_argument("--expect", default=None, help="fail unless the board comes back as this version")
+    ap.add_argument("--expect", required=True,
+                    help="the image must carry this FIRMWARE_VERSION, and the board must come back as it")
+    ap.add_argument("--dry-run", action="store_true", help="check the image, send nothing")
     args = ap.parse_args()
 
     if not os.path.isfile(args.image):
         print("FAIL: no image at %s (build it first)" % args.image)
         return 1
+    built = image_version(args.image)
+    print("image   : %s (%u B) carries %s" % (args.image, os.path.getsize(args.image), built or "<no single version>"))
+    if built != args.expect:
+        print("REFUSED: image is %s, --expect is %s; nothing sent" % (built, args.expect))
+        return 1
+    if args.dry_run:
+        print("dry run : image matches, nothing sent")
+        return 0
     token = args.token
     if token is None:
         token, err = read_token(args.secrets)
@@ -135,7 +155,6 @@ def main():
 
     before = hub_version(args.ip, args.port)
     print("running : %s" % (before or "<no answer>"))
-    print("image   : %s (%u B)" % (args.image, os.path.getsize(args.image)))
 
     status, body, secs, sent = post_image(args.ip, args.image, token, args.timeout)
     print("POST /ota -> %s in %.1f s (%.0f kB/s)" % (status, secs, sent / 1024.0 / max(secs, 1e-3)))
@@ -161,7 +180,7 @@ def main():
             print("booted  : %s (%.0f s), waiting for it to buy itself" % (now, time.time() - t0))
         if image_state(args.ip) == "valid":
             print("deployed: %s, image bought (%.0f s after the upload)" % (now, time.time() - t0))
-            if args.expect and now != args.expect:
+            if now != args.expect:
                 print("FAIL: expected %s" % args.expect)
                 return 1
             return 0
