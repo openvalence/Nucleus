@@ -27,4 +27,9 @@ void simMotionSetHomeSenseAt(float at_mm);
 // HIGH at or past it too. After simMotionSetHomeSenseAt().
 void simMotionSetRailEndAt(float at_mm);
 
+// --plan-delay-ms: every solve lands `ms` after it starts, the twin's way to
+// force HUB-late episodes (planned late, arrived on time). 0, the default,
+// plans at arrival. SIM-ONLY: the board has no such knob.
+void simMotionSetPlanDelayMs(uint32_t ms);
+
 }  // namespace valence

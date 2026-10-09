@@ -80,8 +80,11 @@ public:
         _arb.setHomeSense(_sense);
         _arb.begin(now_us);
         _prev_us = now_us;
+        _steer_prev_us = now_us;
         refreshSnapshot(now_us);
     }
+
+    void setPlanDelayUs(uint64_t us) { _plan_delay_us = us; }
 
     bool submit(const MotionIntent& in) {
         if (_count == _queue.size()) return false;
@@ -100,20 +103,16 @@ public:
     void tick(uint64_t now_us) {
         _emitter.advance(now_us);
         if (_sense.rose()) _arb.homeSenseRose();
-        if (_tune_pending) {
-            _arb.applyTuning(*_tune_pending);
-            _tune_pending.reset();
-        }
-        while (_count > 0) {
-            const MotionIntent in = _queue[_head];
-            _head = (_head + 1) % _queue.size();
-            --_count;
-            _arb.accept(in, now_us);
-        }
-        const float dt_s = float(now_us - _prev_us) * 1e-6f;
-        if (dt_s > 0.0f) {
-            _prev_us = now_us;
-            _arb.evaluate(now_us, dt_s);
+        if (_plan_delay_us != 0) {
+            tickDelayed(now_us);
+        } else {
+            applyTuning();
+            acceptQueued(now_us);
+            const float dt_s = float(now_us - _prev_us) * 1e-6f;
+            if (dt_s > 0.0f) {
+                _prev_us = now_us;
+                _arb.evaluate(now_us, dt_s);
+            }
         }
         _arb.drainAnomalies();
         refreshSnapshot(now_us);
@@ -123,6 +122,54 @@ public:
     MotionCensus census() const { return _pub; }
 
 private:
+    void applyTuning() {
+        if (!_tune_pending) return;
+        _arb.applyTuning(*_tune_pending);
+        _tune_pending.reset();
+    }
+
+    void acceptQueued(uint64_t now_us) {
+        while (_count > 0) {
+            const MotionIntent in = _queue[_head];
+            _head = (_head + 1) % _queue.size();
+            --_count;
+            _arb.accept(in, now_us);
+        }
+    }
+
+    // --plan-delay-ms: a solve that starts at t lands at t + delay, as a slow
+    // solve lands on the board's planner task. accept() runs at arrival; the
+    // planTick(t) that solves runs once the delay is up, so its strip is
+    // anchored at t and published late. The steer renders the strip it has
+    // meanwhile, and intents that arrive while the planner is busy wait.
+    void tickDelayed(uint64_t now_us) {
+        if (!_solve_at_us) {
+            applyTuning();
+            if (_count > 0) {
+                acceptQueued(now_us);
+                _solve_at_us = now_us;
+            } else {
+                planAt(now_us);
+            }
+        }
+        if (_solve_at_us && now_us >= *_solve_at_us + _plan_delay_us) {
+            planAt(*_solve_at_us);
+            _solve_at_us.reset();
+        }
+        const float dt_s = float(now_us - _steer_prev_us) * 1e-6f;
+        if (dt_s > 0.0f) {
+            _steer_prev_us = now_us;
+            _arb.steerTick(now_us, dt_s);
+        }
+    }
+
+    void planAt(uint64_t t_us) {
+        if (t_us <= _prev_us) return;
+        const float dt_s = float(t_us - _prev_us) * 1e-6f;
+        _prev_us = t_us;
+        _arb.planTick(t_us, dt_s);
+    }
+
     void refreshSnapshot(uint64_t now_us) {
         MotionCensus c = _arb.snapshot(now_us);
         c.edges          = _emitter.edges();
@@ -141,7 +188,10 @@ private:
     size_t _head = 0;
     size_t _count = 0;
     std::optional<MotionTuning> _tune_pending;
-    uint64_t _prev_us = 0;
+    uint64_t _prev_us = 0;         // the planner's last tick
+    uint64_t _steer_prev_us = 0;   // the steer's, apart only under a plan delay
+    uint64_t _plan_delay_us = 0;
+    std::optional<uint64_t> _solve_at_us;   // a delayed solve's start
     MotionCensus _pub{};
 };
 
@@ -153,6 +203,7 @@ SimHost g_sim;
 void simMotionTick(uint64_t now_us) { g_sim.tick(now_us); }
 void simMotionSetHomeSenseAt(float at_mm) { g_sim.placeHomeStop(at_mm); }
 void simMotionSetRailEndAt(float at_mm) { g_sim.placeFarStop(at_mm); }
+void simMotionSetPlanDelayMs(uint32_t ms) { g_sim.setPlanDelayUs(uint64_t(ms) * 1000u); }
 
 // ---- motion/ValenceMotion.h -------------------------------------------------
 

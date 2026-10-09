@@ -74,7 +74,7 @@ links libstdc++ in. Phosphor's CI builds all three for its sidecar (Phosphor
 ```
 valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
            [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
-           [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]]
+           [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]] [--plan-delay-ms N]
            [--uncommissioned] [--no-discovery] [--discovery-port N]
            [--headless] [--no-mdns] [--enforce]
 ```
@@ -93,6 +93,7 @@ valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--durat
 | `--no-estop-udp` | RFC-053's runtime switch off: an ESTOP datagram on the §13.8 port reads `disabled` and never latches, so a test run cannot be stopped by the LAN. Without it the twin latches on one, exactly as a raw 0xE5 over WS (`flagship_p4/src/hub/ValenceEstopDatagram.cpp`, compiled verbatim) |
 | `--home-sense-at MM` | a home stop MM from the boot position, so home op 1 runs the board's own two-leg cycle (`MotionArbiter.cpp`, homing): the sense reads HIGH while the carriage is at or past MM on the side away from 0, and its rise reaches the arbiter's interrupt entry at tick resolution. The home leg runs toward 0, so the stop is negative (`--home-sense-at -120`), or positive with the flip on. Without it the twin has no sense line and home op 1 refuses `UNSUPPORTED_OP`, as the release board does |
 | `--rail-end-at MM` | with `--home-sense-at`: the far stop the second leg stalls on, MM from the boot position on the other side of it; default the stored `max_rail` plus both 5 mm safety margins from the home stop. A completed cycle stores the usable rail, the distance between the two minus both margins, as `max_rail` (`--home-sense-at -120 --rail-end-at 380` measures about 490 mm) |
+| `--plan-delay-ms N` | SIM-ONLY, a test fault with no board counterpart: every solve lands N ms after it starts, as a slow solve lands on the board's planner task. Intents are accepted on arrival; the plan tick that solves them runs N ms later with its strip anchored at the arrival, and intents that arrive meanwhile wait. The steer keeps rendering the strip it has, so a stream sees `LATE PLAN`, `PLANNER STALL` and a plan that runs out while its segments arrived on time: the HUB cause in Phosphor's link health classification (ph-9t5l). Default 0, no delay |
 | `--no-discovery` | no UDP discovery socket: keeps a test run off the registry port |
 | `--discovery-port N` | answer DISCOVER_PROBE on N instead of the registry's `udp_discovery.port`, so a test talks to this twin and no other. A port another process holds costs only discovery (logged), never the run |
 | `--state PREFIX` | where the persisted blobs live (`PREFIX.cfg`, `PREFIX.presets`, `PREFIX.iid`); default `valencesim-state` beside the exe. Delete `.cfg` and `.presets` for factory values; deleting `.iid` makes the twin a different hub |
@@ -133,7 +134,7 @@ out stays valid until the next call of the same function.
 
 | Function | Contract |
 |---|---|
-| `integral_create(json_opts, state, state_len)` | Boots the machine. Options: `homed`, `pairing_window`, `uncommissioned`, `motor_switch` (bool), `msw_fault_s`, `home_sense_at_mm`, `rail_end_at_mm` (number), the flags of the same names above. `state` is the blob `integral_state_get` last returned, or null. 1 booted, 0 refused. Once per module instance |
+| `integral_create(json_opts, state, state_len)` | Boots the machine. Options: `homed`, `pairing_window`, `uncommissioned`, `motor_switch` (bool), `msw_fault_s`, `home_sense_at_mm`, `rail_end_at_mm`, `plan_delay_ms` (number), the flags of the same names above. `state` is the blob `integral_state_get` last returned, or null. 1 booted, 0 refused. Once per module instance |
 | `integral_tick(now_us)` | Runs every 1 ms pass up to `now_us` (any epoch, monotonic); more than 250 ms behind, the clock jumps and the arbiter's stall cap holds, as on a stalled board. The hub ticks every 5 ms of it. Returns bit0 when the state blob changed |
 | `integral_connect(id)` | A socket opened: 1 attached, 0 refused (all five slots busy) |
 | `integral_send(id, data, len)` | One WebSocket message (one frame, at most 512 B). 1 queued, 0 dropped (ring of 32 full, oversize, unknown id) |

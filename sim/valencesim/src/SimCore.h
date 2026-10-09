@@ -53,6 +53,7 @@ struct SimConfig {
     int mswFaultS = -1;
     std::optional<float> homeSenseAtMm;
     std::optional<float> railEndAtMm;
+    uint32_t planDelayMs = 0;     // --plan-delay-ms (SimMotion.h)
     const char* storeName = "";   // names the store in log lines only
 };
 

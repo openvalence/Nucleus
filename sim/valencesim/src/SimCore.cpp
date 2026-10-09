@@ -83,6 +83,11 @@ bool SimCore::begin(const SimConfig& opt, IClock& clock, ISimStore& store) {
         log.logf('W', "valencesim: --home-sense-at: home stop at %.1f mm from the boot position",
                  double(*opt.homeSenseAtMm));
     }
+    if (opt.planDelayMs) {
+        simMotionSetPlanDelayMs(opt.planDelayMs);
+        log.logf('W', "valencesim: --plan-delay-ms: every solve lands %lu ms after it starts",
+                 static_cast<unsigned long>(opt.planDelayMs));
+    }
     motionBegin();
     if (opt.motorSwitch) simMotorSwitchModel();
     motorSwitchBegin();

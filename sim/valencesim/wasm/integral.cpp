@@ -202,7 +202,7 @@ uint32_t hostNowMs() { return uint32_t(g_clock.now / 1000); }
 extern "C" {
 
 // json_opts keys: homed, pairing_window, uncommissioned, motor_switch (bool);
-// msw_fault_s, home_sense_at_mm, rail_end_at_mm (number). state: the blob
+// msw_fault_s, home_sense_at_mm, rail_end_at_mm, plan_delay_ms (number). state: the blob
 // integral_state_get last returned, or null. 1 booted, 0 refused.
 EMSCRIPTEN_KEEPALIVE int integral_create(const char* json_opts, const uint8_t* state, size_t state_len) {
     if (g_core != nullptr) return 0;
@@ -215,6 +215,7 @@ EMSCRIPTEN_KEEPALIVE int integral_create(const char* json_opts, const uint8_t* s
     if (auto v = optNum(j, "msw_fault_s")) cfg.mswFaultS = int(*v);
     if (auto v = optNum(j, "home_sense_at_mm")) cfg.homeSenseAtMm = float(*v);
     if (auto v = optNum(j, "rail_end_at_mm")) cfg.railEndAtMm = float(*v);
+    if (auto v = optNum(j, "plan_delay_ms")) cfg.planDelayMs = uint32_t(*v);
     cfg.storeName = "host blob";
     if (state && state_len) g_store.adopt(state, state_len);
     g_core = new valence::SimCore();

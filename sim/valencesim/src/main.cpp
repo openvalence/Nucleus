@@ -4,7 +4,7 @@
 //
 //   valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
 //              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
-//              [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]]
+//              [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]] [--plan-delay-ms N]
 //              [--uncommissioned] [--no-discovery] [--discovery-port N]
 //              [--headless] [--no-mdns] [--enforce]
 //
@@ -97,6 +97,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (!std::strcmp(a, "--no-estop-udp")) o.noEstopUdp = true;
         else if (!std::strcmp(a, "--home-sense-at") && hasNext) o.sim.homeSenseAtMm = float(std::atof(argv[++i]));
         else if (!std::strcmp(a, "--rail-end-at") && hasNext) o.sim.railEndAtMm = float(std::atof(argv[++i]));
+        else if (!std::strcmp(a, "--plan-delay-ms") && hasNext) o.sim.planDelayMs = uint32_t(std::atoi(argv[++i]));
         else if (!std::strcmp(a, "--state") && hasNext) o.statePrefix = argv[++i];
         else if (!std::strcmp(a, "--no-discovery")) o.discovery = false;
         else if (!std::strcmp(a, "--discovery-port") && hasNext) o.discoveryPort = uint16_t(std::atoi(argv[++i]));
@@ -209,7 +210,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "usage: valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]\n"
                      "                  [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]\n"
-                     "                  [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]]\n"
+                     "                  [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]] [--plan-delay-ms N]\n"
                      "                  [--uncommissioned] [--no-discovery] [--discovery-port N]\n"
                      "                  [--headless] [--no-mdns] [--enforce]\n");
         return 2;
