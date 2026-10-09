@@ -53,6 +53,13 @@ public:
 
 AbsentHomeSense g_absent_sense;
 
+// The oscillator's shapes are the registry's osc_shapes numbers on the wire.
+static_assert(uint8_t(kinetic2::OscShape::Sine) == osc_shapes::sine &&
+                  uint8_t(kinetic2::OscShape::Square) == osc_shapes::square &&
+                  uint8_t(kinetic2::OscShape::Saw) == osc_shapes::saw &&
+                  uint8_t(kinetic2::OscShape::SawReverse) == osc_shapes::saw_reverse,
+              "kinetic2::OscShape is the registry's osc_shapes");
+
 static_assert(MotionTuning{}.smoothness == kinetic2::Config{}.smoothness &&
                   MotionTuning{}.handle_floor == kinetic2::Config{}.handle_floor &&
                   MotionTuning{}.trim_max == kinetic2::Config{}.trim_max &&
@@ -227,6 +234,17 @@ bool MotionArbiter::takeWindow() {
     _rail     = rail;
     _max_rail = rail;
     return true;
+}
+
+void MotionArbiter::setOscillator(const MotionOsc& o) {
+    _osc_seq.fetch_add(1);   // odd: being written
+    _osc_req_on.store(o.enabled);
+    _osc_req_shape.store(o.shape);
+    _osc_req_hz.store(o.frequency_hz);
+    _osc_req_amp.store(o.amplitude);
+    _osc_req_crest.store(o.dwell_crest);
+    _osc_req_trough.store(o.dwell_trough);
+    _osc_seq.fetch_add(1);   // even: whole
 }
 
 HomeStart MotionArbiter::home() {
@@ -459,8 +477,11 @@ void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
     _plan_read.pos = _plan_read.start = _plan_read.target = p_norm;
     _plan_busy = false;
     // The steer re-anchors its feedforward here and steers nothing from a
-    // strip published before this reset (steerTick()).
+    // strip published before this reset (steerTick()); the oscillation stops
+    // with the plan it rode.
     _anchor_mm   = positionMm();
+    _osc.reset();
+    _osc_head = 0.0f;
     _strip_continuous = false;
     _strip_stale = true;
     _strip_gen.fetch_add(1);
@@ -490,6 +511,11 @@ void MotionArbiter::reseedEngine(uint64_t now_us) {
     _k2_dirty = true;
     _k2_brake_from_p = restate(_k2_brake_from_p);
     _k2_brake_to_p   = restate(_k2_brake_to_p);
+    // The plan the strip was cut from, and the oscillation in millimeters:
+    // its amplitude is a window share, so it moves to the new window's
+    // through its fade, never in a step.
+    for (float& p : _plan_ext) p = restate(p);
+    _osc.rescale(k);
     if (_engine.pending() == 0) {
         const kinetic2::Knot h = _engine.newest();
         _k2_newest_us = h.t_us;
@@ -648,6 +674,26 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     return true;
 }
 
+void MotionArbiter::takeOscillator() {
+    // Mid-write or nothing new: the next tick takes it, never a spin.
+    const uint32_t seq = _osc_seq.load();
+    if ((seq & 1u) != 0 || seq == _osc_taken) return;
+    kinetic2::OscParams p;
+    p.enabled = _osc_req_on.load();
+    const uint8_t shape = _osc_req_shape.load();
+    p.shape = kinetic2::OscShape(shape <= uint8_t(kinetic2::OscShape::SawReverse) ? shape : 0);
+    // Written so a NaN reads 0: the delegate clamped, this is the backstop.
+    const float hz = _osc_req_hz.load(), amp = _osc_req_amp.load();
+    p.frequency = !(hz > 0.0f) ? 0.0f : std::fmin(hz, OSC_MAX_HZ);
+    // A window share is the engine's unit in the window frame.
+    p.amplitude = !(amp > 0.0f) ? 0.0f : std::fmin(amp, 1.0f);
+    p.dwell_crest = _osc_req_crest.load();
+    p.dwell_trough = _osc_req_trough.load();
+    if (_osc_seq.load() != seq) return;   // rewritten while read
+    _osc_taken = seq;
+    _osc.set(p);
+}
+
 kinetic2::State MotionArbiter::sampleEngine(uint64_t now_us) {
     // The first sample after a submit solves the window: that is the plan's
     // cost, so it is what plan_us_* times. The plan changed: the strip
@@ -708,9 +754,14 @@ EngineLimits MotionArbiter::limitsFor(bool manual) const {
 void MotionArbiter::brakeToRest(uint64_t now_us) {
     _jog_after_us = 0;   // a jog waiting out a brake is dropped with it
     _engine.setLimits(limitsFor(false));
-    [[maybe_unused]] const float v = sampleEngine(now_us).v * span();   // log only
+    const kinetic2::State st = sampleEngine(now_us);
+    [[maybe_unused]] const float v = st.v * span();   // log only
+    // The oscillation stops with the motion (SPEC 9.7): this tick's refill
+    // carries the cut, and an idle carriage comes to rest on the plan.
+    _osc_cut = _osc.active();
+    _osc.reset();
     if (!brakeEngine(now_us)) {
-        _pause_pos_mm.store(positionMm());
+        _pause_pos_mm.store(_osc_cut ? toMm(st.p) : positionMm());
         return;
     }
     // Where it comes to rest: the brake's end, held by the backstop
@@ -752,6 +803,7 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // FIRST, before any reset, reseed or fill: the frame changes only here
     // and in accept(), so every strip is built in one frame (bd val-8es).
     takeWindow();
+    takeOscillator();
     if (_estop) {
         _brake_req.store(false);   // park already stopped it
         _returning = false;        // estop() dropped override with it
@@ -793,7 +845,8 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // (reseedEngine()), so the strip runs on in mm. force_home, a home cycle,
     // or a carriage at rest with nothing pending resets at the carriage: the
     // steer parks for this tick (an empty strip) and re-anchors at the reset,
-    // and the next accepted intent plans from the new frame's rest.
+    // and the next accepted intent plans from the new frame's rest. A rest
+    // the oscillator is riding reseeds instead, so the oscillation runs on.
     // The generation moves BEFORE the flag drops, so no strip of the old
     // frame steers in between.
     if (_frame_moved) {
@@ -804,7 +857,7 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
         // A cycle counted in the old frame: its seek or backoff is void.
         const bool homing = _homing.load();
         if (homing) homeEnd("the travel window changed", now_us);
-        if (origin_moved || homing || (_engine.pending() == 0 && !_engine.isBusy(now_us))) {
+        if (origin_moved || homing || (_engine.pending() == 0 && !_engine.isBusy(now_us) && !_osc.active())) {
             resetEngine(toNorm(positionMm()), now_us);
             return false;
         }
@@ -848,10 +901,7 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // The one side-effecting sample per tick: it solves the window after a
     // submit and records the brake the engine takes when the timeline runs
     // dry still moving (sampleEngine()). The strip (fillStrip()) reads the
-    // plan after it without side effects.
-    // PLANNED CHANGE (bd val-klo): the RFC-103 oscillator (kinetic2/oscillator.hpp)
-    // is additive on this sampled state, after the planner and before the
-    // backstop, and is not wired yet.
+    // plan after it without side effects, and sums the oscillator into it.
     const kinetic2::State st = sampleEngine(now_us);
     const bool busy = _engine.isBusy(now_us);
     _plan_read = readPlan(st, now_us);
@@ -883,25 +933,63 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
     s.gen = _strip_gen.load();
     s.anchor_mm = _anchor_mm;
     s.continuous = _strip_continuous;
+    s.cut = false;
     constexpr uint64_t kSpanUs = uint64_t(kStripLen) * kMotionTickUs;
+    // The plan from t0 on, engine frame, in _plan_ext after the kOscEdge
+    // ticks before t0. Read this far ahead only while the oscillator renders:
+    // its look-ahead past the strip, and its edge.
+    float* plan = _plan_ext.data() + kOscEdge;
+    const size_t ahead = _osc.idle() ? kStripLen : kPlanExt - kOscEdge;
     if (!live) {
         s.n = 0;
-    } else if (_strip_stale || s.n == 0 || now_us < s.t0_us || now_us - s.t0_us >= kSpanUs) {
+        _osc.reset();
+        _osc_head = 0.0f;
+    } else if (_strip_stale || s.n == 0 || now_us < s.t0_us || now_us - s.t0_us >= kSpanUs ||
+               ahead > _plan_ahead) {
         // A whole refill: one walk of the window, one piece per knot interval.
+        // The ticks before t0 are what the last strip planned there, for the
+        // oscillator's differences; after a reset, the plan's own start.
+        std::array<float, kOscEdge> before{};
+        for (size_t i = 0; i < kOscEdge; ++i) {
+            const float at = float(int64_t(now_us) - int64_t(s.t0_us)) / float(kMotionTickUs) + float(i);
+            const float x = std::fmin(std::fmax(at, 0.0f), float(kPlanExt - 1));
+            const size_t j = std::min(size_t(x), kPlanExt - 2);
+            before[i] = _plan_ext[j] + (_plan_ext[j + 1] - _plan_ext[j]) * (x - float(j));
+        }
+        const bool had = s.n != 0 && now_us >= s.t0_us && now_us - s.t0_us < kSpanUs;
         _strip_stale = false;
         s.t0_us = now_us;
         s.n = uint16_t(kStripLen);
+        s.cut = _osc_cut;
+        _osc_cut = false;
         ++s.plan;
-        _engine.peek(0, now_us, kMotionTickUs, kStripLen, s.p_mm.data());
-        for (float& p : s.p_mm) p = toMm(p);
+        _plan_ahead = ahead;
+        _engine.peek(0, now_us, kMotionTickUs, ahead, plan);
+        for (size_t i = 0; i < kOscEdge; ++i) _plan_ext[i] = had ? before[i] : plan[0];
     } else if (const size_t k = size_t((now_us - s.t0_us) / kMotionTickUs); k > 0) {
         // The same plan, advanced by the ticks elapsed: only the new tail is
         // read from the engine.
-        std::copy(s.p_mm.begin() + k, s.p_mm.end(), s.p_mm.begin());
+        std::copy(_plan_ext.begin() + k, _plan_ext.end(), _plan_ext.begin());
         s.t0_us += uint64_t(k) * kMotionTickUs;
-        float* tail = s.p_mm.data() + (kStripLen - k);
-        _engine.peek(0, s.t0_us + uint64_t(kStripLen - k) * kMotionTickUs, kMotionTickUs, k, tail);
-        for (size_t i = 0; i < k; ++i) tail[i] = toMm(tail[i]);
+        _engine.peek(0, s.t0_us + uint64_t(_plan_ahead - k) * kMotionTickUs, kMotionTickUs, k,
+                     plan + (_plan_ahead - k));
+    }
+    if (s.n != 0) {
+        // THE OSCILLATOR (RFC-103): summed into the plan before the backstop,
+        // so the steer follows it like any plan. It yields first under the
+        // input set, inside the window, and holds at nothing while the
+        // machine may not move on its own (SPEC 9.7, 11.1).
+        // ponytail: it re-renders the whole strip every tick (a few tens of
+        // us on the P4); shifting its envelope with the strip is the upgrade
+        // if the planner's tick ever shows it.
+        std::array<float, kStripLen> osc{};
+        if (!_osc.idle()) {
+            const bool hold = _paused.load() || !_homed || !_commissioned.load();
+            _osc.render(s.t0_us, kMotionTickUs, _plan_ext.data(), kStripLen, limitsFor(false),
+                        toNorm(backstopLo()), toNorm(backstopHi()), hold, osc.data());
+        }
+        _osc_head = osc[0];
+        for (size_t i = 0; i < kStripLen; ++i) s.p_mm[i] = toMm(plan[i] + osc[i]);
     }
     // ponytail: the whole strip is copied under the lock every tick (~0.5 KB);
     // a ring with a published head is the upgrade if the copy ever shows.
@@ -970,7 +1058,7 @@ void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
         // frame.
         if (was_in && in) {
             const float d = p_plan_mm - p_was;
-            if (std::fabs(d) > kMmPerStep) {
+            if (std::fabs(d) > kMmPerStep && !s.cut) {
                 ++_late_plans;
                 GLOGW_EVERY_MS(1000, kTag, "LATE PLAN: %.3f mm off the strip in flight, closed by the kick", double(d));
             }
@@ -1417,7 +1505,9 @@ MotionCensus MotionArbiter::snapshot(uint64_t) {
     MotionCensus c{};
     c.steps          = steps - _origin;
     c.position_mm    = float(c.steps) * kMmPerStep;
-    c.plan_mm        = seeking ? c.position_mm : toMm(s.pos);
+    // The plan's position with the oscillation summed in: what the steer is
+    // following, so the residual stays a tracking error.
+    c.plan_mm        = seeking ? c.position_mm : toMm(s.pos + _osc_head);
     c.target_mm      = seeking ? float(_leg_end - _origin) * kMmPerStep : toMm(s.target);
     c.velocity_mm_s  = vel_mm_s;
     c.residual_steps = static_cast<int32_t>(std::lround((c.plan_mm - c.position_mm) * kStepsPerMm));
@@ -1462,6 +1552,10 @@ MotionCensus MotionArbiter::snapshot(uint64_t) {
     // backstop holding the demand at the frame's edge is one, whatever runs.
     c.plan_flags = c.busy && s.mode != uint8_t(PlanStyle::settle) ? s.flags : 0;
     if (_backstop_on) c.plan_flags |= plan_flags::clamped;
+    // RFC-103: the ceilings or the window cut the oscillation below its ask.
+    if (_osc.shaped()) c.plan_flags |= plan_flags::clamped;
+    c.osc_active     = _osc.active();
+    c.osc_amplitude  = _osc.amplitudeEffective();
     c.plans          = _k2_plans;
     c.failures       = _k2_failures;
     c.anomalies      = _anomalies;

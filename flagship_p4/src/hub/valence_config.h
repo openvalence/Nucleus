@@ -64,6 +64,12 @@
 #define DEFAULT_INPUT_MAX_JERK_MM_S3 20000000.0f
 #define MAX_JERK_MM_S3              50000000.0f
 
+// ---- The oscillator (RFC-103): the highest frequency it renders -------------
+// WELCOME limits osc_max_hz and the catalog's osc.frequency bound. NOT
+// MEASURED: a conservative start on the 1 ms strip, 50 samples a period. Raise
+// it only on a bench measurement of the loaded drive (bd val-ael).
+#define OSC_MAX_HZ                  20.0f
+
 #ifdef __cplusplus
 namespace valence {
 // The bench profile as C++ reads it. True only in a NUCLEUS_BENCH_NO_MOTOR build.

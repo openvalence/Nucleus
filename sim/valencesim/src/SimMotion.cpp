@@ -236,5 +236,6 @@ float motionForceHome(float stroke_mm) { return g_sim.arbiter().forceHome(stroke
 MotionCensus motionCensus() { return g_sim.census(); }
 
 void motionSetTuning(const MotionTuning& t) { g_sim.setTuning(t); }
+void motionSetOscillator(const MotionOsc& o) { g_sim.arbiter().setOscillator(o); }
 
 }  // namespace valence

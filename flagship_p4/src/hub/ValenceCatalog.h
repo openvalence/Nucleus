@@ -91,6 +91,8 @@ inline constexpr uint16_t kinetic_planner  = 0x1122;  // STATE·motion, family 2
 // the planner. Family 2 is kinetic's; a drive register that happens to be
 // spelled "acceleration" is a different subsystem and gets its own writer.
 inline constexpr uint16_t drive_tune       = 0x1130;  // STATE·motion, family 3 member 0 (master)
+// ---- The oscillator (RFC-103, SPEC 9.7): its own family on the motion plane --
+inline constexpr uint16_t oscillator       = 0x1140;  // STATE·motion, family 4 member 0 (master)
 // ---- Advanced pattern — off the dead /api/pattern HTTP surface, onto Valence
 // Same flattened-entry budget split as 0x008B/C/D. AdvancedPattern.h's real
 // parameter set is the master knob, 8 base controls (advpat::BASE_COUNT) and
@@ -122,6 +124,7 @@ inline constexpr uint16_t modes_set        = 0x3030;  // INTENT·machine, family
 inline constexpr uint16_t kinetic_set      = 0x3120;  // INTENT·motion, family 2 member 0, MIRROR of the kinetic_* family (was 0x3102)
 inline constexpr uint16_t machine_admin    = 0x30F0;  // INTENT·machine, family F member 0 = admin (was 0x3002)
 inline constexpr uint16_t drive_set        = 0x3130;  // INTENT·motion, family 3 member 0, MIRROR of drive_tune
+inline constexpr uint16_t osc_set          = 0x3140;  // INTENT·motion, family 4 member 0, MIRROR of oscillator
 // Shared writer behind ALL NINE pattern-advanced STATE channels — same
 // "one settingChannel, many cards" pattern as kinetic_set. MIRROR of
 // pattern_advanced (family 1 member 0 on both sides).
@@ -307,6 +310,8 @@ inline constexpr float accel_max  = 100000.0f;    // MAX_ACCEL_MM_S2
 inline constexpr float jerk_min   = 1000.0f;
 inline constexpr float jerk_max   = 50000000.0f;  // MAX_JERK_MM_S3
 inline constexpr float home_speed_min = 5.0f;     // MIN_HOME_SPEED_MM_S; its max is speed_max
+inline constexpr float osc_max_hz = 20.0f;        // OSC_MAX_HZ, WELCOME limits osc_max_hz
+inline constexpr float osc_dwell_max = 4.0f;      // the longest hold, four moving cycles
 }  // namespace ceiling
 
 // Fills `c` with this device's catalog. OUT-PARAM, never a return value: a
@@ -1546,6 +1551,62 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                        {"accel_reg"});
     };
 
+    // ---- "oscillator" -- STATE, motion: the oscillator's twin (RFC-103) -----
+    // What 0x3140 osc-set last applied, post-clamp, and what renders now:
+    // osc.active and osc.amplitude_effective, the amplitude the ceilings and
+    // the window leave (it yields first). The parameters' osc.* roles live on
+    // the writer (SPEC 9.7, once per catalog); these mirror it by setting_key.
+    // Session-volatile: nothing persists, enabled boots false, and a session
+    // ending clears it (ValenceDevice.cpp onSessionLeft()).
+    //   [1 + 4 + 4 + 1 + 4 + 4 + 1 + 4 = 23 B]
+    auto addOscillator = [&]() {
+    c.addEntry({.id = ch::oscillator, .name = "oscillator",
+                .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                .access = AccessLevel::watch, .maxRateHz = 0.0f,
+                .defaultPriority = Priority::normal,
+                .hasCategory = true, .category = valence::ui_categories::motion,
+                .hasSettingChannel = true, .settingChannel = ch::osc_set,
+                .hasRank = true, .rank = valence::ui_ranks::control});
+    c.addLayoutField({.name = "enabled", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                      .dflt = SettingDefault::ofBool(false), .group = "Oscillator",
+                      .desc = "Oscillate on top of whatever moves the rail",
+                      .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true});
+    c.addLayoutField({.name = "frequency", .type = PackedFieldType::f32, .unit = "Hz", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_max_hz,
+                      .dflt = SettingDefault::ofFloat(MotionOsc{}.frequency_hz), .group = "Oscillator",
+                      .desc = "Cycles a second, holds aside",
+                      .step = 0.1f, .settingKey = 2, .hasSettingKey = true, .hasStep = true,
+                      .hasUnitId = true, .unitId = valence::unit_ids::hz});
+    c.addLayoutField({.name = "amplitude", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                      .dflt = SettingDefault::ofFloat(MotionOsc{}.amplitude), .group = "Oscillator",
+                      .desc = "Peak displacement, share of the window",
+                      .step = 0.001f, .settingKey = 3, .hasSettingKey = true, .hasStep = true});
+    c.addSelectField({.name = "shape", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 3.0f,
+                      .dflt = SettingDefault::ofInt(0), .group = "Oscillator",
+                      .desc = "Waveform",
+                      .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true},
+                     {"sine", "square", "saw", "saw_reverse"});
+    c.addLayoutField({.name = "dwell_crest", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_dwell_max,
+                      .dflt = SettingDefault::ofFloat(0.0f), .group = "Oscillator",
+                      .desc = "Hold at the crest, share of a cycle",
+                      .step = 0.01f, .settingKey = 5, .hasSettingKey = true, .hasStep = true});
+    c.addLayoutField({.name = "dwell_trough", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_dwell_max,
+                      .dflt = SettingDefault::ofFloat(0.0f), .group = "Oscillator",
+                      .desc = "Hold at the trough, share of a cycle",
+                      .step = 0.01f, .settingKey = 6, .hasSettingKey = true, .hasStep = true});
+    c.addLayoutField({.name = "active", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .group = "Oscillator", .desc = "Rendering now",
+                      .role = roles::osc_active});
+    c.addLayoutField({.name = "amplitude_effective", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
+                      .group = "Oscillator", .desc = "Peak displacement the ceilings and window leave",
+                      .role = roles::osc_amplitude_effective});
+    };
+
     // ---- "pattern-advanced" — STATE, normal, on-change ----------------------
     // The advanced generator's 7 BASE controls and its own run/stop
     // (advpat::Settings, everything except the per-control modulators,
@@ -2091,6 +2152,36 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 60098.0f});
     };
 
+    // ---- "osc-set" -- INTENT, control, 20 Hz: the oscillator (RFC-103) -----
+    // Every key optional; present keys applied, clamped, echoed post-clamp
+    // (SPEC 9.7). The osc.* roles live here, the prose on 0x1140.
+    auto addOscSet = [&]() {
+    c.addEntry({.id = ch::osc_set, .name = "osc-set",
+                .cls = ChannelClass::INTENT, .dir = Direction::c2h,
+                .access = AccessLevel::control, .maxRateHz = 20.0f,
+                .defaultPriority = Priority::normal,
+                .hasCategory = true, .category = valence::ui_categories::motion,
+                .hasRank = true, .rank = valence::ui_ranks::control});
+    c.addSchemaField({.key = 1, .name = "enabled", .type = CborFieldType::bool_t, .unit = "",
+                      .role = roles::osc_enabled});
+    c.addSchemaField({.key = 2, .name = "frequency", .type = CborFieldType::f32_t, .unit = "Hz",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_max_hz,
+                      .role = roles::osc_frequency, .hasUnitId = true, .unitId = valence::unit_ids::hz});
+    c.addSchemaField({.key = 3, .name = "amplitude", .type = CborFieldType::f32_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                      .role = roles::osc_amplitude});
+    c.addSelectSchemaField({.key = 4, .name = "shape", .type = CborFieldType::uint_t, .unit = "",
+                            .hasMin = true, .hasMax = true, .min = 0.0f, .max = 3.0f,
+                            .role = roles::osc_shape},
+                           {"sine", "square", "saw", "saw_reverse"});
+    c.addSchemaField({.key = 5, .name = "dwell_crest", .type = CborFieldType::f32_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_dwell_max,
+                      .role = roles::osc_dwell_crest});
+    c.addSchemaField({.key = 6, .name = "dwell_trough", .type = CborFieldType::f32_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_dwell_max,
+                      .role = roles::osc_dwell_trough});
+    };
+
     // ---- "machine-admin" — INTENT, control ----------------------------------
     // The device ACTIONS that are not settings and not motion: clear a driver
     // fault, persist config, kick off a servo register scan. They were HTTP
@@ -2242,6 +2333,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         addKineticPlanner();     // 0x1122 STATE·motion, family 2 member 2
     }
     if (feat.has_drive) addDriveTune();   // 0x1130 STATE·motion, family 3 member 0
+    if (feat.has_motion) addOscillator(); // 0x1140 STATE·motion, family 4 member 0
     if (feat.has_pattern) {
         addPatternState();       // 0x1200 STATE·pattern, family 0 member 0
         addPatternAdvanced();    // 0x1210 STATE·pattern, family 1 member 0
@@ -2268,6 +2360,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         addKineticSet();         // 0x3120 INTENT·motion, family 2 member 0
     }
     if (feat.has_drive) addDriveSet();   // 0x3130 INTENT·motion, family 3 member 0
+    if (feat.has_motion) addOscSet();    // 0x3140 INTENT·motion, family 4 member 0
     if (feat.has_pattern) {
         addPatternCmd();         // 0x3200 INTENT·pattern, family 0 member 0
         addPatternAdvancedCmd(); // 0x3210 INTENT·pattern, family 1 member 0

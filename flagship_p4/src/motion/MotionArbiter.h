@@ -35,9 +35,10 @@
 //   MotionArbiter.cpp's Kinetic² boundary section, nowhere else.
 // - CROSS-TASK methods (estop, pause, override, returnToPause, acquireRail,
 //   releaseRail, setEstopCutsPower, setMotorPowered, setCommissioned, the limit and window setters,
-//   forceHome, home, noteStream) never touch the engine.
+//   setOscillator, forceHome, home, noteStream) never touch the engine.
 //   They write flags and scalars the owning tasks read on their next pass;
-//   setWindow() posts a request the planner applies (takeWindow());
+//   setWindow() and setOscillator() post requests the planner applies
+//   (takeWindow(), takeOscillator());
 //   estop() and a power loss also park the emitter on the CALLING task,
 //   because an e-stop that waits for a tick is not one.
 // - homeSenseRose() is the one INTERRUPT-CONTEXT method; its own comment
@@ -57,6 +58,7 @@
 #include "ValenceMotion.h"
 #include "hub/valence_config.h"
 #include "kinetic2/engine.hpp"
+#include "kinetic2/oscillator.hpp"
 #include "kinetic2/sources.hpp"
 
 namespace valence {
@@ -124,6 +126,15 @@ static_assert(float(kLeaseUs) * 1e-6f > kTickDtCapS, "a lapse must be rarer than
 // the planner never leaves the steer without a plan. Past its end the steer
 // holds the last entry and counts a planner stall.
 inline constexpr size_t kStripLen = 128;
+
+// THE OSCILLATOR (RFC-103, bd val-dzf): Kinetic²'s stage, summed into the
+// strip, its fade 150 ticks at most. It reads the plan kOscLook ticks past the
+// strip's end, and kOscEdge before and after for its differences: the plan
+// buffer the strip is cut from is kPlanExt long, from kOscEdge before t0.
+using MotionOscillator = kinetic2::Oscillator<kStripLen, 150>;
+inline constexpr size_t kOscEdge = MotionOscillator::kPlanEdge;
+inline constexpr size_t kOscLook = MotionOscillator::lookahead(kMotionTickUs);
+inline constexpr size_t kPlanExt = kOscEdge + kStripLen + kOscLook + kOscEdge;
 
 // ---- homing -----------------------------------------------------------------
 // Home op 1 is the arbiter's own motion path, never the planner's (operator
@@ -398,6 +409,13 @@ public:
     // the frame-move flag; the planner applies it at its next accept() or
     // planTick(), so winMin(), winMax() and rail() read it from then on.
     void setWindow(float lo, float hi, float rail);
+    // RFC-103 (SPEC 9.7): the oscillator's parameters, already clamped by the
+    // delegate. ONE WRITER, the hub task: a post the planner takes at its next
+    // tick (takeOscillator()). The oscillator rides whatever owns the rail and
+    // the rest between, yields first under the input set's ceilings, never
+    // leaves the window, and renders nothing under ESTOP, PAUSE (cut at once,
+    // the phase back at the trough), unhomed or uncommissioned.
+    void setOscillator(const MotionOsc& o);
     float forceHome(float stroke_mm);
     // Before either owning task runs. Until then, and on a build without one,
     // the sense is absent and home() answers no_sense.
@@ -469,6 +487,9 @@ private:
         // The gen follows a reseed (reseedEngine()): the plan runs on in mm,
         // so the steer keeps its command and never re-anchors.
         bool     continuous = false;
+        // This refill cut the oscillation (a PAUSE): the gap it leaves at
+        // now is the oscillator's, closed by the kick, never a late plan.
+        bool     cut = false;
         std::array<float, kStripLen> p_mm{};
     };
 
@@ -505,6 +526,9 @@ private:
     // Planner task: applies the window setWindow() last posted, if one is
     // new and whole, and raises the frame-move flag. True when it applied.
     bool takeWindow();
+    // Planner task: hands the oscillator the parameters setOscillator() last
+    // posted, if new and whole.
+    void takeOscillator();
     // Stops as fast as the engine's current limits allow, from its own
     // state at at_us. False when there was nothing moving to stop.
     bool brakeEngine(uint64_t at_us);
@@ -613,6 +637,14 @@ private:
     float     _eng_lo = 0.0f;
     float     _eng_span = DEFAULT_MAX_RAIL_MM;
     PlanStrip _strip_pub{};
+    // The plan the strip is cut from, engine frame, on the strip's grid from
+    // kOscEdge ticks before t0 (fillStrip()), and the oscillator summed into
+    // it: its offset at t0, and a PAUSE's cut for the next refill to carry.
+    std::array<float, kPlanExt> _plan_ext{};
+    MotionOscillator _osc{};
+    float     _osc_head = 0.0f;
+    bool      _osc_cut = false;
+    size_t    _plan_ahead = 0;   // entries from t0 the last refill read
     std::atomic<uint32_t> _strip_gen{0};
     PlanStrip _steer_strip{};
     uint32_t  _seen_gen = 0;
@@ -666,6 +698,15 @@ private:
     std::atomic<float>    _win_req_hi{0.0f};
     std::atomic<float>    _win_req_rail{0.0f};
     uint32_t              _win_taken = 0;
+    // The oscillator's parameters setOscillator() posted, the same seqlock.
+    std::atomic<uint32_t> _osc_seq{0};
+    std::atomic<bool>     _osc_req_on{false};
+    std::atomic<uint8_t>  _osc_req_shape{0};
+    std::atomic<float>    _osc_req_hz{0.0f};
+    std::atomic<float>    _osc_req_amp{0.0f};
+    std::atomic<float>    _osc_req_crest{0.0f};
+    std::atomic<float>    _osc_req_trough{0.0f};
+    uint32_t              _osc_taken = 0;
 
     float _jog_v = DEFAULT_JOG_MAX_SPEED_MM_S;
     float _jog_a = DEFAULT_JOG_ACCEL_MM_S2;

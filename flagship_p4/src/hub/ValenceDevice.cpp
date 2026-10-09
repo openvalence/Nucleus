@@ -547,6 +547,7 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     // None of the three moves cfg_gen (cfgChanged stays false). The presets
     // persist, but on their own blob, and their change signal is the roster
     // generation.
+    if (channel_id == ch::osc_set) return applyOsc(requested, cfgChanged);
     if (channel_id == ch::pattern_cmd) return applyPattern(requested);
     if (channel_id == ch::pattern_advanced_cmd) return applyPatternAdvanced(requested);
     if (channel_id == ch::pattern_presets_cmd) return applyPresets(requested);
@@ -1033,6 +1034,72 @@ void ValenceDevice::publishPatternPlane(const MotionCensus& mo) {
     }
 }
 
+// ---- 0x3140 osc-set, the oscillator (RFC-103, SPEC 9.7) --------------------------
+// Every key is a parameter, accepted in every machine state: under ESTOP, PAUSE
+// or unhomed the oscillator renders nothing whatever it is set to
+// (MotionArbiter::setOscillator()), so a write there moves nothing until the
+// machine may move again. Each key is checked before any is applied; the echo
+// is the clamped value; a change moves cfg_gen (SPEC 9.7, a hub-side clear
+// does too) and is never persisted.
+Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
+    const auto* f1 = findField(requested, 1);  // enabled
+    const auto* f2 = findField(requested, 2);  // frequency
+    const auto* f3 = findField(requested, 3);  // amplitude
+    const auto* f4 = findField(requested, 4);  // shape
+    const auto* f5 = findField(requested, 5);  // dwell_crest
+    const auto* f6 = findField(requested, 6);  // dwell_trough
+    if (!(f1 || f2 || f3 || f4 || f5 || f6)) return Ret::err(NackCode::INVALID_VALUE);
+    if (f1 && !boolOf(f1)) return refuseNotANumber(ch::osc_set, 1);
+    for (const auto* f : {f2, f3, f4, f5, f6})
+        if (f && !numberOf(f)) return refuseNotANumber(ch::osc_set, f->key);
+    // Two decimals (SPEC 9.7).
+    auto dwell = [](float v) { return std::round(clampf(v, 0.0f, ceiling::osc_dwell_max) * 100.0f) / 100.0f; };
+    const MotionOsc was = _osc;
+    MotionOsc& o = _osc;
+    if (f1) o.enabled = *boolOf(f1);
+    if (f2) o.frequency_hz = clampf(*numberOf(f2), 0.0f, ceiling::osc_max_hz);
+    if (f3) o.amplitude = clampf(*numberOf(f3), 0.0f, 1.0f);
+    if (f4) o.shape = uint8_t(wholeIn(*numberOf(f4), 0.0f, 3.0f));
+    if (f5) o.dwell_crest = dwell(*numberOf(f5));
+    if (f6) o.dwell_trough = dwell(*numberOf(f6));
+    if (!(o == was)) {
+        motionSetOscillator(o);
+        _oscDirty = true;
+        cfgChanged = true;
+    }
+    IntentValueMap applied{};
+    uint32_t n = 0;
+    if (f1) applied.fields[n++] = {1, IntentValue::ofBool(o.enabled)};
+    if (f2) applied.fields[n++] = {2, IntentValue::ofF32(o.frequency_hz)};
+    if (f3) applied.fields[n++] = {3, IntentValue::ofF32(o.amplitude)};
+    if (f4) applied.fields[n++] = {4, IntentValue::ofU64(o.shape)};
+    if (f5) applied.fields[n++] = {5, IntentValue::ofF32(o.dwell_crest)};
+    if (f6) applied.fields[n++] = {6, IntentValue::ofF32(o.dwell_trough)};
+    applied.count = n;
+    return Ret::ok(applied);
+}
+
+// The parameters as applied, then what renders: osc.active and
+// osc.amplitude_effective from the census.
+void ValenceDevice::publishOscillator(const MotionCensus& mo, bool force) {
+    std::array<std::byte, 23> buf{};
+    size_t n = 0;
+    packU8(buf, n, _osc.enabled ? 1 : 0);
+    packF32(buf, n, _osc.frequency_hz);
+    packF32(buf, n, _osc.amplitude);
+    packU8(buf, n, _osc.shape);
+    packF32(buf, n, _osc.dwell_crest);
+    packF32(buf, n, _osc.dwell_trough);
+    packU8(buf, n, mo.osc_active ? 1 : 0);
+    packF32(buf, n, mo.osc_amplitude);
+    publishIfChanged(*_hub, ch::oscillator, buf, n, _sentOsc, force);
+    // RFC-011: a hub-side change bumps after its STATE is out.
+    if (_oscCleared) {
+        _oscCleared = false;
+        _hub->bumpConfigGeneration();
+    }
+}
+
 // ---- 0x3100 move, the jog ------------------------------------------------------
 // MANUAL source: the wire operator is the one driving. The arbiter lets a
 // Manual intent through an unhomed machine (the push-to-home case a local
@@ -1478,6 +1545,16 @@ void ValenceDevice::onSessionJoined(uint32_t session_id) {
 
 void ValenceDevice::onSessionLeft(uint32_t session_id) {
     GLOGI(kTag, "session %lu left", static_cast<unsigned long>(session_id));
+    // SPEC 9.7: no oscillation outlives the hand that enabled it. The hub does
+    // not tell the delegate which session wrote 0x3140, so any session's end
+    // clears it: never late, and early while several are attached (bd Valence rfc-ns5c).
+    if (_osc.enabled) {
+        _osc.enabled = false;
+        motionSetOscillator(_osc);
+        _oscDirty = true;
+        _oscCleared = true;
+        GLOGI(kTag, "oscillator off: session %lu left", static_cast<unsigned long>(session_id));
+    }
     (void)session_id;
 }
 
@@ -1758,6 +1835,7 @@ void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     publishPlanStrip(hub, mo);
     publishMotionDiag(hub, mo, _ingressDrops.total(), _segBundles);
     publishOdometer(hub, mo);
+    publishOscillator(mo, true);
     if (boardFeatures().has_pattern) {
         pushPattern();
         publishPatternPlane(mo);
@@ -1947,6 +2025,11 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     if (uint32_t(nowMs - _lastPlanMs) >= 50u) {
         _lastPlanMs = nowMs;
         publishPlanStrip(*_hub, mo);
+        publishOscillator(mo, false);   // what renders moves with the plan
+    }
+    if (_oscDirty) {
+        _oscDirty = false;
+        publishOscillator(mo, false);
     }
     if (uint32_t(nowMs - _lastSlowMs) >= 1000u) {
         _lastSlowMs = nowMs;

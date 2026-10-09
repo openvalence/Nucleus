@@ -3235,3 +3235,260 @@ TEST_CASE("expect: PAUSE, ESTOP, a jog and a sample end it; a Stream segment wit
         CHECK(r->arb.expectUntil() == 0);
     }
 }
+
+// ---- the oscillator (RFC-103, SPEC 9.7, bd val-dzf) ---------------------------
+
+namespace {
+
+using valence::MotionOsc;
+
+MotionOsc oscOn(float hz, float amp, uint8_t shape = 0, float crest = 0.0f, float trough = 0.0f) {
+    MotionOsc o;
+    o.enabled = true;
+    o.frequency_hz = hz;
+    o.amplitude = amp;
+    o.shape = shape;
+    o.dwell_crest = crest;
+    o.dwell_trough = trough;
+    return o;
+}
+
+// A homed 500 mm window, the carriage at rest at `at` mm (a Stream move at
+// the input set).
+std::unique_ptr<Rig> restRig(float at) {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Stream, at));
+    r->run(1'000'000);
+    REQUIRE(r->census().position_mm == doctest::Approx(at).epsilon(1e-3));
+    return r;
+}
+
+// What the steer follows each tick: the published strip at now, its first
+// entry, mm.
+struct Heads {
+    std::vector<float> p;
+    void take(const MotionArbiter& a) {
+        const auto s = a.publishedStrip();
+        REQUIRE(s.n != 0);
+        REQUIRE(s.t0_us == g_now_us);
+        p.push_back(s.p_mm[0]);
+    }
+};
+void runHeads(Rig& r, uint64_t us, Heads& h) {
+    for (uint64_t t = 0; t < us; t += 1000) {
+        r.run(1000);
+        h.take(r.arb);
+    }
+}
+
+// Peaks of a commanded sequence by the 1 ms grid's own differences, mm.
+struct GridPeaks { double v = 0, a = 0, j = 0, lo = 1e9, hi = -1e9; };
+GridPeaks gridPeaks(const std::vector<float>& p) {
+    GridPeaks g;
+    for (size_t i = 0; i < p.size(); ++i) {
+        g.lo = std::min(g.lo, double(p[i]));
+        g.hi = std::max(g.hi, double(p[i]));
+        if (i > 0) g.v = std::max(g.v, std::fabs(double(p[i]) - p[i - 1]) / 1e-3);
+        if (i > 1) g.a = std::max(g.a, std::fabs(double(p[i]) - 2.0 * p[i - 1] + p[i - 2]) / 1e-6);
+        if (i > 2) g.j = std::max(g.j, std::fabs(double(p[i]) - 3.0 * p[i - 1] + 3.0 * p[i - 2] - p[i - 3]) / 1e-9);
+    }
+    return g;
+}
+// Float rounding of a position near 500 mm in those differences: 2, 4 and 8
+// half-ulps (ulp 3.05e-5 mm).
+constexpr double kUlpMm = 3.05e-5;
+constexpr double kFdV = 1.0 * kUlpMm / 1e-3, kFdA = 2.0 * kUlpMm / 1e-6, kFdJ = 4.0 * kUlpMm / 1e-9;
+
+// Ticks between rising crossings of `mid`.
+std::vector<size_t> crossings(const std::vector<float>& p, float mid, size_t from) {
+    std::vector<size_t> up, d;
+    for (size_t i = from + 1; i < p.size(); ++i) if (p[i - 1] < mid && p[i] >= mid) up.push_back(i);
+    for (size_t k = 1; k < up.size(); ++k) d.push_back(up[k] - up[k - 1]);
+    return d;
+}
+
+}  // namespace
+
+TEST_CASE("oscillator: boots off; enabled at rest it swings the asked amplitude about the rest, and the strip carries it") {
+    auto r = restRig(250.0f);
+    CHECK_FALSE(r->census().osc_active);
+    CHECK(r->census().osc_amplitude == 0.0f);
+    r->arb.setOscillator(oscOn(10.0f, 0.01f));   // 5 mm peak on the 500 mm window
+    Heads h;
+    runHeads(*r, 1'200'000, h);
+    const MotionCensus c = r->census();
+    CHECK(c.osc_active);
+    CHECK(c.osc_amplitude == doctest::Approx(0.01f));
+    CHECK((c.plan_flags & valence::plan_flags::clamped) == 0);
+    CHECK_FALSE(c.busy);   // it rides the rest; it is not a plan
+    // The strip ahead holds a whole period of it.
+    const auto s = r->arb.publishedStrip();
+    const auto [lo, hi] = std::minmax_element(s.p_mm.begin(), s.p_mm.end());
+    CHECK(*lo == doctest::Approx(245.0f).epsilon(1e-4));
+    CHECK(*hi == doctest::Approx(255.0f).epsilon(1e-4));
+    for (const size_t d : crossings(h.p, 250.0f, 400)) CHECK(d == doctest::Approx(100).epsilon(0.011));
+    // The carriage follows it.
+    float plo = 1e9f, phi = -1e9f;
+    for (int k = 0; k < 200; ++k) {
+        r->run(1000);
+        plo = std::min(plo, r->arb.positionMm());
+        phi = std::max(phi, r->arb.positionMm());
+    }
+    CHECK(plo < 245.5f);
+    CHECK(phi > 254.5f);
+    const GridPeaks g = gridPeaks(h.p);
+    CHECK(g.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
+    CHECK(g.a <= DEFAULT_ACCEL_MM_S2 + kFdA);
+    CHECK(g.j <= DEFAULT_INPUT_MAX_JERK_MM_S3 + kFdJ);
+    CHECK(r->arb.latePlans() == 0);
+    CHECK(r->census().backstops == 0);
+}
+
+TEST_CASE("oscillator under planned strokes: the strip never exceeds a ceiling or leaves the window, and sheds to nothing at full speed") {
+    // The same strokes with and without it: the plan is the engine's alone.
+    auto play = [](bool osc, std::vector<float>* amp) {
+        auto r = restRig(250.0f);
+        if (osc) r->arb.setOscillator(oscOn(10.0f, 0.02f));
+        const uint64_t t0 = g_now_us + 200'000;
+        uint64_t at = t0;
+        float target = 50.0f;
+        // Four fast strokes (300 mm in 300 ms: the input set's speed), then
+        // four slow ones (100 mm in a second).
+        for (int k = 0; k < 8; ++k) {
+            const bool fast = k < 4;
+            target = fast ? (k % 2 ? 50.0f : 350.0f) : (k % 2 ? 200.0f : 300.0f);
+            const uint32_t span = fast ? 300'000 : 1'000'000;
+            MotionIntent seg;
+            seg.source = MotionSource::Stream;
+            seg.target_mm = target;
+            seg.duration_us = span;
+            seg.anchor_us = at;
+            REQUIRE(r->arb.accept(seg, g_now_us));
+            at += span;
+        }
+        Heads h;
+        const uint64_t ticks = at - g_now_us + 600'000;
+        for (uint64_t t = 0; t < ticks; t += 1000) {
+            r->run(1000);
+            h.take(r->arb);
+            if (amp) amp->push_back(r->census().osc_amplitude);
+        }
+        CHECK(r->census().backstops == 0);
+        return h.p;
+    };
+    std::vector<float> amp;
+    const GridPeaks own = gridPeaks(play(false, nullptr));
+    const auto sum = play(true, &amp);
+    const GridPeaks g = gridPeaks(sum);
+    MESSAGE("plan v ", own.v, " a ", own.a, " j ", own.j, "; with the oscillator v ", g.v, " a ", g.a, " j ", g.j);
+    CHECK(g.v <= std::max(double(DEFAULT_MAX_SPEED_MM_S), own.v) + kFdV);
+    CHECK(g.a <= std::max(double(DEFAULT_ACCEL_MM_S2), own.a) + kFdA);
+    CHECK(g.j <= std::max(double(DEFAULT_INPUT_MAX_JERK_MM_S3), own.j) + kFdJ);
+    CHECK(g.lo >= 0.0);
+    CHECK(g.hi <= 500.0);
+    // Mid-way through the 300 mm strokes the plan cruises at the input set's
+    // speed: less than a step of the oscillation is left. The slow ones keep
+    // part of it.
+    for (const size_t mid : {200 + 450, 200 + 750, 200 + 1050}) CHECK(amp[mid] * 500.0f < valence::kMmPerStep);
+    REQUIRE(amp.size() > 200 + 5000);
+    CHECK(*std::max_element(amp.begin() + 200 + 1400, amp.begin() + 200 + 5000) > 0.002f);
+}
+
+TEST_CASE("oscillator: dwells stretch its period; a square with a trough dwell is a pulse") {
+    {
+        auto r = restRig(250.0f);
+        r->arb.setOscillator(oscOn(4.0f, 0.01f, 0, 0.3f, 0.0f));
+        Heads h;
+        runHeads(*r, 2'400'000, h);
+        for (const size_t d : crossings(h.p, 250.0f, 600)) CHECK(d == doctest::Approx(325).epsilon(0.01));
+    }
+    {
+        auto r = restRig(250.0f);
+        r->arb.setOscillator(oscOn(5.0f, 0.002f, 1, 0.0f, 1.0f));
+        Heads h;
+        runHeads(*r, 3'000'000, h);
+        size_t up = 0;
+        for (size_t i = 800; i < h.p.size(); ++i) if (h.p[i] > 250.0f) ++up;
+        CHECK(float(up) / float(h.p.size() - 800) == doctest::Approx(0.25f).epsilon(0.04));
+        for (const size_t d : crossings(h.p, 250.0f, 800)) CHECK(d == doctest::Approx(400).epsilon(0.01));
+    }
+}
+
+TEST_CASE("oscillator: the window edge bounds its amplitude, and the clamped flag says so") {
+    auto r = restRig(20.0f);
+    r->arb.setOscillator(oscOn(5.0f, 0.1f));   // 50 mm asked, 20 mm to the edge
+    Heads h;
+    runHeads(*r, 1'500'000, h);
+    const MotionCensus c = r->census();
+    CHECK(c.osc_amplitude <= 0.04f);
+    CHECK(c.osc_amplitude > 0.035f);
+    CHECK((c.plan_flags & valence::plan_flags::clamped) != 0);
+    CHECK(gridPeaks(h.p).lo >= 0.0);
+    CHECK(c.backstops == 0);
+}
+
+TEST_CASE("oscillator: PAUSE cuts it at once and the kick returns the carriage; resume restarts it at the trough; ESTOP and disable stop it") {
+    auto r = restRig(250.0f);
+    r->arb.setOscillator(oscOn(8.0f, 0.01f));
+    r->run(700'000);
+    REQUIRE(r->census().osc_active);
+    r->arb.pause(true);
+    r->run(1000);
+    MotionCensus c = r->census();
+    CHECK_FALSE(c.osc_active);
+    CHECK(c.osc_amplitude == 0.0f);
+    auto s = r->arb.publishedStrip();
+    for (const float p : s.p_mm) CHECK(p == doctest::Approx(250.0f).epsilon(1e-6));
+    CHECK(r->arb.latePlans() == 0);   // the cut is not a late plan
+    r->run(300'000);
+    CHECK(r->arb.positionMm() == doctest::Approx(250.0f).epsilon(2e-4));
+    // Resume: from the trough, down first.
+    r->arb.pause(false);
+    Heads h;
+    runHeads(*r, 50'000, h);
+    size_t first = 0;
+    while (first < h.p.size() && h.p[first] == h.p[0]) ++first;
+    REQUIRE(first < h.p.size());
+    CHECK(h.p[first] < 250.0f);
+    r->run(700'000);
+    CHECK(r->census().osc_active);
+    // ESTOP stops it with the plan; the release lands in PAUSE, still off.
+    r->arb.estop(true);
+    r->run(1000);
+    CHECK_FALSE(r->census().osc_active);
+    r->arb.estop(false);
+    r->arb.forceHome(500.0f);
+    r->run(100'000);
+    CHECK_FALSE(r->census().osc_active);
+    // Disabled, it fades out within one fade.
+    r->arb.pause(false);
+    REQUIRE(r->submit(MotionSource::Stream, 250.0f));
+    r->run(1'000'000);
+    REQUIRE(r->census().osc_active);
+    MotionOsc off = oscOn(8.0f, 0.01f);
+    off.enabled = false;
+    r->arb.setOscillator(off);
+    r->run(160'000);
+    CHECK_FALSE(r->census().osc_active);
+    CHECK(r->census().osc_amplitude == 0.0f);
+}
+
+TEST_CASE("oscillator: a window write while it rides the rest neither stops nor steps it") {
+    auto r = restRig(250.0f);
+    r->arb.setOscillator(oscOn(10.0f, 0.01f));
+    Heads h;
+    runHeads(*r, 600'000, h);
+    r->arb.setWindow(50.0f, 450.0f, 500.0f);
+    runHeads(*r, 600'000, h);
+    CHECK(r->census().osc_active);
+    CHECK(r->arb.latePlans() == 0);
+    // The step at the write is the oscillation's own, never more: one tick of
+    // its peak speed (2 pi f A).
+    double step = 0.0;
+    for (size_t i = 590; i < 620; ++i) step = std::max(step, std::fabs(double(h.p[i]) - h.p[i - 1]));
+    CHECK(step <= 2.0 * 3.1416 * 10.0 * 5.0 * 1e-3 * 1.05);
+    // Its amplitude moved to the new window's share through the fade.
+    CHECK(r->census().osc_amplitude == doctest::Approx(0.01f));
+}

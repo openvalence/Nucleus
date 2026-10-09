@@ -371,5 +371,6 @@ MotionCensus motionCensus() { return g_motion.census(); }
 uint32_t motionSteerStackFree() { return g_motion.steerStackFree(); }
 
 void motionSetTuning(const MotionTuning& t) { g_motion.setTuning(t); }
+void motionSetOscillator(const MotionOsc& o) { g_motion.arbiter().setOscillator(o); }
 
 }  // namespace valence

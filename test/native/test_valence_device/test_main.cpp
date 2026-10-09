@@ -78,6 +78,8 @@ bool g_driveAlarm = false;
 int g_submits = 0;
 // The intents the motion door took, in order (VD-SEG-1).
 std::vector<MotionIntent> g_intents;
+// The oscillator the motion door last took (osc-set).
+MotionOsc g_osc{};
 int g_patPushes = 0;
 // The fake e-stop reading: what the BoardIo task would have published.
 estop::Reading g_estop{};
@@ -131,6 +133,7 @@ HomeStart motionHome() {
 MotionCensus motionCensus() { return g_census; }
 MotionTuning motionDefaultTuning() { return MotionTuning{}; }
 void motionSetTuning(const MotionTuning&) {}
+void motionSetOscillator(const MotionOsc& o) { g_osc = o; }
 
 bool patternBegin() { return true; }
 void patternSetSettings(const PatternSettings&) { ++g_patPushes; }
@@ -235,7 +238,8 @@ struct Rig {
         client->addSubscriptionWish(ch::pattern_adv_mod_crest, 0.0f, Priority::normal);
         // The STATE every writer moves, so a refused write is seen to move none.
         for (const uint16_t id : {ch::machine_config, ch::machine_modes, ch::kinetic_limits,
-                                  ch::kinetic_planner, ch::pattern_state, ch::pattern_presets_roster})
+                                  ch::kinetic_planner, ch::pattern_state, ch::pattern_presets_roster,
+                                  ch::oscillator})
             REQUIRE(client->addSubscriptionWish(id, 0.0f, Priority::normal));
         REQUIRE(client->connect());
         step(200);
@@ -1385,4 +1389,72 @@ TEST_CASE("VD-K2-2: smoothness, handle_floor, trim_max and react_ms write on kin
     rig->step();
     REQUIRE(rig->del.nacks.size() == 1);
     CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
+}
+
+// ---- RFC-103: the oscillator (bd val-dzf) -------------------------------------------
+
+TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publishes 0x1140; a session's end clears it") {
+    auto rig = std::make_unique<Rig>();
+    // Published at attach: off, at the factory values.
+    {
+        const auto it = rig->del.lastState.find(ch::oscillator);
+        REQUIRE(it != rig->del.lastState.end());
+        REQUIRE(it->second.size() == 23);
+        CHECK(it->second[0] == std::byte{0});
+        CHECK(getF32(std::span<const std::byte>(it->second).subspan(1, 4)) == MotionOsc{}.frequency_hz);
+    }
+    IntentValueMap m{};
+    m.count = 6;
+    m.fields[0] = IntentValueField{1, IntentValue::ofBool(true)};
+    m.fields[1] = IntentValueField{2, IntentValue::ofF32(80.0f)};    // past osc_max_hz
+    m.fields[2] = IntentValueField{3, IntentValue::ofF32(0.05f)};
+    m.fields[3] = IntentValueField{4, IntentValue::ofU64(1)};        // square
+    m.fields[4] = IntentValueField{5, IntentValue::ofF32(0.333f)};   // two decimals
+    m.fields[5] = IntentValueField{6, IntentValue::ofF32(9.0f)};     // past the longest hold
+    REQUIRE(rig->client->sendIntent(ch::osc_set, m).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(rig->del.echoes == 1);
+    CHECK(echoed(rig->del.lastEcho, 1)->bool_val);
+    CHECK(echoed(rig->del.lastEcho, 2)->f32_val == OSC_MAX_HZ);
+    CHECK(echoed(rig->del.lastEcho, 5)->f32_val == doctest::Approx(0.33f));
+    CHECK(echoed(rig->del.lastEcho, 6)->f32_val == doctest::Approx(4.0f));
+    CHECK(g_osc.enabled);
+    CHECK(g_osc.frequency_hz == OSC_MAX_HZ);
+    CHECK(g_osc.amplitude == doctest::Approx(0.05f));
+    CHECK(g_osc.shape == 1);
+    // 0x1140: the applied parameters, then what renders, the census's.
+    g_census.osc_active = true;
+    g_census.osc_amplitude = 0.04f;
+    rig->step(60);
+    {
+        const auto it = rig->del.lastState.find(ch::oscillator);
+        REQUIRE(it != rig->del.lastState.end());
+        const std::span<const std::byte> b(it->second);
+        CHECK(b[0] == std::byte{1});
+        CHECK(getF32(b.subspan(1, 4)) == OSC_MAX_HZ);
+        CHECK(getF32(b.subspan(5, 4)) == doctest::Approx(0.05f));
+        CHECK(b[9] == std::byte{1});
+        CHECK(getF32(b.subspan(10, 4)) == doctest::Approx(0.33f));
+        CHECK(getF32(b.subspan(14, 4)) == doctest::Approx(4.0f));
+        CHECK(b[18] == std::byte{1});
+        CHECK(getF32(b.subspan(19, 4)) == doctest::Approx(0.04f));
+    }
+    // A NaN refuses the whole write: nothing moves.
+    IntentValueMap bad{};
+    bad.count = 2;
+    bad.fields[0] = IntentValueField{1, IntentValue::ofBool(false)};
+    bad.fields[1] = IntentValueField{3, IntentValue::ofF32(std::numeric_limits<float>::quiet_NaN())};
+    REQUIRE(rig->client->sendIntent(ch::osc_set, bad).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
+    CHECK(g_osc.enabled);
+    // A session's end clears enabled (SPEC 9.7), publishes it, moves cfg_gen.
+    const uint16_t gen = rig->hub->cfgGen();
+    rig->device.onSessionLeft(0x1234);
+    rig->step();
+    CHECK_FALSE(g_osc.enabled);
+    CHECK(rig->hub->cfgGen() != gen);
+    CHECK(rig->del.lastState[ch::oscillator][0] == std::byte{0});
 }

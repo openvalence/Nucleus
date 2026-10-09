@@ -236,6 +236,9 @@ private:
     void haltGenerator();
     void pushPattern();
     void publishPatternPlane(const MotionCensus& mo);
+    // 0x3140 osc-set and its 0x1140 twin (RFC-103, SPEC 9.7).
+    Result<IntentValueMap, NackCode> applyOsc(const IntentValueMap& requested, bool& cfgChanged);
+    void publishOscillator(const MotionCensus& mo, bool force);
 
     void serviceButtons(uint32_t nowMs);
     void homeFromButton();
@@ -352,6 +355,15 @@ private:
     std::array<std::array<std::byte, 7>, advpat::BASE_COUNT> _sentApMod{};
     std::array<std::byte, 4> _sentRoster{};
     bool _patPlaneSent = false;
+
+    // The oscillator as 0x3140 last set it: this copy IS the setting, pushed
+    // to the motion task on every change, never persisted (enabled boots
+    // false). _oscCleared: a session's end cleared enabled, a hub-side change
+    // whose cfg_gen bump follows its twin's publish.
+    MotionOsc _osc{};
+    std::array<std::byte, 23> _sentOsc{};
+    bool _oscDirty = false;
+    bool _oscCleared = false;
 
     // Debounced persist, one timer per blob: armed by every applied change,
     // re-armed by the next, so a slider drag costs ONE write after the

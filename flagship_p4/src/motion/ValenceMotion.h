@@ -187,6 +187,23 @@ struct MotionCensus {
     uint32_t strokes        = 0;   // rendered direction reversals
     float    distance_mm    = 0.0f;
     float    peak_mm_s      = 0.0f;
+    // ---- the oscillator (RFC-103), as 0x1140 publishes it ----
+    bool     osc_active     = false;  // rendering a nonzero amplitude at the plan's head
+    float    osc_amplitude  = 0.0f;   // that amplitude, window share (osc.amplitude_effective)
+};
+
+// The oscillator's parameters (RFC-103, SPEC 9.7) as 0x3140 speaks them: the
+// frequency in Hz, the amplitude a share of the window (the peak, half the
+// swing), the shape an osc_shapes number, each dwell a share of the moving
+// cycle. The defaults are the catalog's.
+struct MotionOsc {
+    bool    enabled      = false;
+    float   frequency_hz = 10.0f;
+    float   amplitude    = 0.01f;
+    uint8_t shape        = 0;
+    float   dwell_crest  = 0.0f;
+    float   dwell_trough = 0.0f;
+    bool operator==(const MotionOsc&) const = default;
 };
 
 // The engine's tuning as the 0x1030 / 0x1120 / 0x1122 cards speak it. The hub
@@ -350,5 +367,10 @@ MotionTuning motionDefaultTuning();
 // unapplied older one, which is the only one that matters). Values arrive
 // already clamped to the catalog bounds, which mirror the engine's own clamps.
 void motionSetTuning(const MotionTuning& t);
+
+// RFC-103: the oscillator's parameters, clamped by the delegate
+// (MotionArbiter::setOscillator()). Any task, never blocks; the planner takes
+// the newest at its next tick.
+void motionSetOscillator(const MotionOsc& o);
 
 }  // namespace valence

@@ -88,6 +88,20 @@ window is solved at the next sample, and the sampler evaluates it.
   driving planTick() and steerTick() apart; test_kinetic_wasm_trace
   re-recorded its 60 s fixture byte-identical through evaluate()].
 
+- **The oscillator (RFC-103, bd val-dzf).** Kinetic²'s stage
+  (`kinetic2/oscillator.hpp`) is summed into the strip by `fillStrip()`, over
+  the plan read `kOscLook` ticks past the strip's end while it renders, so the
+  steer follows it as it follows any plan. Its amplitude yields first under
+  the input set and never leaves the window, by an envelope smoothed over one
+  fade and fitted to the plan a fade ahead; a plan changed with less notice
+  than that can exceed a ceiling until the fade ends. It renders nothing
+  unhomed or uncommissioned; PAUSE cuts it at once, the strip carrying `cut`
+  so the kick closes the gap and no late plan is counted; an engine reset
+  stops it; a window move rescales it, never a step. Its parameters cross from
+  the hub task as a seqlocked post (`setOscillator()`), and it costs 5,176 B of
+  the arbiter's internal RAM [verified 2026-10-09 -- test_motion_arbiter, the
+  oscillator cases: the strip under 300 mm strokes at the input set keeps
+  every ceiling and the window, sheds to under a step at full speed].
 - **Map:** header-only, hardware-free `kinetic2::Engine`: a knot timeline (64
   knots per axis here), a window solver that re-plans every pending knot
   together, and a brake. The library is the sibling Kinetic checkout,
