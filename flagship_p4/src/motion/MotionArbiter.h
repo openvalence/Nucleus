@@ -37,6 +37,7 @@
 //   releaseRail, setEstopCutsPower, setMotorPowered, setCommissioned, the limit and window setters,
 //   forceHome, home, noteStream) never touch the engine.
 //   They write flags and scalars the owning tasks read on their next pass;
+//   setWindow() posts a request the planner applies (takeWindow());
 //   estop() and a power loss also park the emitter on the CALLING task,
 //   because an e-stop that waits for a tick is not one.
 // - homeSenseRose() is the one INTERRUPT-CONTEXT method; its own comment
@@ -303,9 +304,10 @@ public:
     void begin(uint64_t now_us);
     void applyTuning(const MotionTuning& t);
     bool accept(const MotionIntent& in, uint64_t now_us); // gates, clamp, commit
-    // The gates, the brake and return requests, the home cycle's seek
-    // producer, the one side-effecting engine sample, then the strip's
-    // publish. dt_s: the interval since the previous planTick().
+    // The window setWindow() posted, then the gates, the brake and return
+    // requests, the home cycle's seek producer, the one side-effecting engine
+    // sample, then the strip's publish. dt_s: the interval since the previous
+    // planTick().
     void planTick(uint64_t now_us, float dt_s);
     // Steer task. The strip at now_us, clamped to the backstop's frame, as
     // the feedforward and the residual kick; the fence, the steer and the
@@ -392,6 +394,9 @@ public:
     // delegate gates the change (at rest, homed, no source, no override).
     void setFlipped(bool on) { _flipped.store(on); }
     void setInputLimits(float v, float a, float j) { _in_v = v; _in_a = a; _in_j = j; }
+    // ONE WRITER, the hub task (bd val-8es): it posts the window and raises
+    // the frame-move flag; the planner applies it at its next accept() or
+    // planTick(), so winMin(), winMax() and rail() read it from then on.
     void setWindow(float lo, float hi, float rail);
     float forceHome(float stroke_mm);
     // Before either owning task runs. Until then, and on a build without one,
@@ -466,6 +471,18 @@ private:
         bool     continuous = false;
         std::array<float, kStripLen> p_mm{};
     };
+
+public:
+    // The strip as last published, copied under the lock, for host tests.
+    // Nothing on the board calls it.
+    PlanStrip publishedStrip() const {
+        if (_lock) _lock(true);
+        const PlanStrip s = _strip_pub;
+        if (_lock) _lock(false);
+        return s;
+    }
+
+private:
     // planTick() up to the strip: false when no plan renders this tick (the
     // e-stop, power and frame-move branches, a home cycle).
     bool planStep(uint64_t now_us, float dt_s);
@@ -484,6 +501,9 @@ private:
     // The window moved under a plan in flight: the pending knots stay and the
     // plan's state at now_us is restated in the new frame (bd val-17u).
     void reseedEngine(uint64_t now_us);
+    // Planner task: applies the window setWindow() last posted, if one is
+    // new and whole, and raises the frame-move flag. True when it applied.
+    bool takeWindow();
     // Stops as fast as the engine's current limits allow, from its own
     // state at at_us. False when there was nothing moving to stop.
     bool brakeEngine(uint64_t at_us);
@@ -629,12 +649,22 @@ private:
     // From applyTuning(): the samples grant's latency (sampleLatencyUs()).
     uint32_t _k2_latency_us   = sampleLatencyUs(motionDefaultTuning());
 
+    // The frame in force. The planner writes the window (takeWindow()), so
+    // a strip is never filled half in each frame; steerTick() reads it after
+    // the frame-move flag.
     float _win_min = 0.0f;
     float _win_max = DEFAULT_MAX_RAIL_MM;
     float _rail    = DEFAULT_MAX_RAIL_MM;
     // The configured max_rail, which force_home's stroke never shrinks: the
     // home cycle's search distance.
     float _max_rail = DEFAULT_MAX_RAIL_MM;
+    // The window setWindow() posted: a seqlock, odd while the hub task
+    // writes it. _win_taken, the planner's, is the post last applied.
+    std::atomic<uint32_t> _win_seq{0};
+    std::atomic<float>    _win_req_lo{0.0f};
+    std::atomic<float>    _win_req_hi{0.0f};
+    std::atomic<float>    _win_req_rail{0.0f};
+    uint32_t              _win_taken = 0;
 
     float _jog_v = DEFAULT_JOG_MAX_SPEED_MM_S;
     float _jog_a = DEFAULT_JOG_ACCEL_MM_S2;
@@ -690,12 +720,13 @@ private:
     std::atomic<uint32_t> _returns{0};
     // The bench bypass has been logged this boot. Planner task only.
     bool     _bench_noted = false;
-    // Set by setWindow()/forceHome() on any task, consumed by planTick(),
-    // read by steerTick(): the mm FRAME moved, the carriage did not.
-    volatile bool _frame_moved = false;
+    // Set by setWindow()/forceHome() on any task and by takeWindow(),
+    // consumed by planTick(), read by steerTick(): the mm FRAME moved, the
+    // carriage did not.
+    std::atomic<bool> _frame_moved{false};
     // Set by forceHome() before _frame_moved: the count re-origined, so the
     // planner resets rather than reseeds.
-    volatile bool _origin_moved = false;
+    std::atomic<bool> _origin_moved{false};
 
     // The home cycle. _homing is set by home() and cleared only by the
     // planner when the cycle ends; _home_req hands the start across; pause()

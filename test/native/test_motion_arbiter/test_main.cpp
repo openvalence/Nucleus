@@ -44,7 +44,33 @@ using valence::PatternSettings;
 namespace {
 
 uint64_t g_now_us = 1'000'000;
-uint64_t testNowUs() { return g_now_us; }
+
+// A window write landed INSIDE a planner tick, as a hub task preempting the
+// planner would (bd val-8es): at the clock read that times the solve (after
+// the frame-move block, before the strip fills), or at the strip's publish.
+// One shot; armed by the case, idle otherwise.
+struct WindowPost {
+    enum class At : uint8_t { none, clock, publish };
+    MotionArbiter* arb = nullptr;
+    At at = At::none;
+    float lo = 0.0f, hi = 0.0f, rail = 0.0f;
+    bool fired = false;
+    void fire(At where) {
+        if (arb == nullptr || at != where) return;
+        at = At::none;
+        fired = true;
+        arb->setWindow(lo, hi, rail);
+    }
+};
+WindowPost g_post;
+
+uint64_t testNowUs() {
+    g_post.fire(WindowPost::At::clock);
+    return g_now_us;
+}
+void testLock(bool hold) {
+    if (hold) g_post.fire(WindowPost::At::publish);
+}
 
 class TestEmitter final : public MotionEmitter {
 public:
@@ -135,7 +161,7 @@ public:
 // not of the arbiter's.
 struct Rig {
     TestEmitter emitter;
-    MotionArbiter arb{emitter, &testNowUs};
+    MotionArbiter arb{emitter, &testNowUs, &testLock};
 
     explicit Rig(bool powered = true) {
         arb.begin(g_now_us);
@@ -2848,6 +2874,113 @@ TEST_CASE("window moved mid-stream with the steer ahead of the planner: parked w
     CHECK(worst <= double(DEFAULT_MAX_SPEED_MM_S) + kKickMax);
     CHECK(last > 100.0);
     CHECK(r->arb.plannerStalls() == 0);
+}
+
+// bd val-8es: setWindow() runs on the hub task and the strip fills on the
+// planner. The val-17u sweep with the window dragged 80 mm in 2 mm writes,
+// each landed at a different point of the split ticks: before the planner,
+// inside its solve after the frame-move block, at the strip's publish, and
+// between the planner and the steer. Every published strip lies in one frame:
+// no step inside it beyond the speed ceiling, and it continues the strip
+// before it in mm across every re-target.
+TEST_CASE("window dragged mid-stream, writes landed inside planner ticks: every published strip is in one frame") {
+    constexpr float kRail = 400.0f;
+    float lo = 0.0f, hi = 320.0f;   // the hub's window, which it maps shares through
+    auto r = rig();
+    r->arb.setWindow(lo, hi, kRail);
+    r->arb.forceHome(kRail);
+    r->run(1000);
+    struct Disarm {
+        ~Disarm() { g_post = WindowPost{}; }
+    } disarm;
+
+    constexpr int kSegs = 20;
+    const float rate = 0.8f / (float(kSegs) * 0.1f);   // shares/s
+    const uint64_t first = g_now_us + 120'000;
+    const uint64_t last_knot = first + uint64_t(kSegs) * 100'000;
+    auto segment = [&](int i) {
+        MotionIntent in;
+        in.source = MotionSource::Stream;
+        in.target_mm = lo + (0.1f + rate * 0.1f * float(i + 1)) * (hi - lo);
+        in.duration_us = 100'000;
+        in.anchor_us = first + uint64_t(i) * 100'000;
+        in.has_end_vel = true;
+        in.end_vel_mm_s = i + 1 < kSegs ? rate * (hi - lo) : 0.0f;
+        return r->arb.accept(in, g_now_us);
+    };
+    auto shift = [&] {
+        lo += 2.0f;
+        hi += 2.0f;
+    };
+
+    // From the sweep's middle, one move every 10 ms: a write at the top of the
+    // tick, then a second one inside the solve, at the publish, or after the
+    // planner, in turn.
+    constexpr int kMoves = 20;
+    const uint64_t drag_from = first + 1'000'000;
+    int moves = 0, sent = 0;
+    std::array<int, 2> inside{};
+    const float step_max = float(DEFAULT_MAX_SPEED_MM_S) * 1e-3f;
+    float inner = 0.0f, handoff = 0.0f;
+    int strips = 0;
+    double worst_steer = 0.0;
+    auto prev = r->arb.publishedStrip();
+    while (g_now_us < last_knot + 500'000) {
+        while (sent < kSegs && g_now_us + 120'000 >= first + uint64_t(sent) * 100'000) REQUIRE(segment(sent++));
+        elapse(*r);
+        int site = -1;
+        if (moves < kMoves && g_now_us >= drag_from && (g_now_us - drag_from) % 10'000 == 0) {
+            site = moves++ % 3;
+            shift();
+            r->arb.setWindow(lo, hi, kRail);
+        }
+        if (site == 0 || site == 1) {
+            shift();
+            g_post = WindowPost{&r->arb, site == 0 ? WindowPost::At::clock : WindowPost::At::publish, lo, hi, kRail};
+        }
+        planOnly(*r);
+        if (site == 0 || site == 1) {
+            if (g_post.fired) ++inside[size_t(site)];
+            else r->arb.setWindow(lo, hi, kRail);
+            g_post = WindowPost{};
+        }
+
+        const auto s = r->arb.publishedStrip();
+        if (s.n > 0) {
+            ++strips;
+            for (size_t i = 1; i < s.n; ++i) inner = std::max(inner, std::fabs(s.p_mm[i] - s.p_mm[i - 1]));
+            if (prev.n > 0 && (s.gen == prev.gen || s.continuous) && s.t0_us >= prev.t0_us) {
+                const uint64_t k = (s.t0_us - prev.t0_us) / valence::kMotionTickUs;
+                if (k < prev.n) handoff = std::max(handoff, std::fabs(s.p_mm[0] - prev.p_mm[k]));
+            }
+        }
+        prev = s;
+
+        if (site == 2) {
+            shift();
+            r->arb.setWindow(lo, hi, kRail);
+        }
+        steerOnly(*r);
+        worst_steer = std::max(worst_steer, std::fabs(steeredMmS(r->emitter)));
+    }
+
+    const MotionCensus c = r->census();
+    MESSAGE(strips, " strips, step inside one ", inner, " mm (ceiling ", step_max, "), hand-off ", handoff,
+            " mm, writes inside the solve ", inside[0], ", at the publish ", inside[1], ", steer peak ", worst_steer,
+            " mm/s, end ", c.position_mm, " mm");
+    REQUIRE(moves == kMoves);
+    CHECK(lo == doctest::Approx(80.0f));
+    CHECK(inside[0] > 0);
+    CHECK(inside[1] > 0);
+    CHECK(inner <= step_max);
+    CHECK(handoff <= 0.01f);
+    CHECK(worst_steer <= double(DEFAULT_MAX_SPEED_MM_S) + kKickMax);
+    CHECK(r->arb.plannerStalls() == 0);
+    CHECK(c.emitter_faults == 0);
+    CHECK(c.rejected == 0);
+    CHECK(c.failures == 0);
+    CHECK_FALSE(c.busy);
+    CHECK(c.position_mm == doctest::Approx(lo + 0.9f * (hi - lo)).epsilon(1e-3));
 }
 
 // ---- the stream's expectation (Kinetic Engine::expect, bd val-g62) -----------

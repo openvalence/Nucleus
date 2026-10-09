@@ -198,11 +198,35 @@ ReturnStart MotionArbiter::returnToPause() {
 void MotionArbiter::setWindow(float lo, float hi, float rail) {
     if (!(std::isfinite(lo) && std::isfinite(hi) && std::isfinite(rail))) return;
     if (!(hi > lo)) return;
-    _win_min = lo;
-    _win_max = hi;
-    _rail    = rail > 0.0f ? rail : DEFAULT_MAX_RAIL_MM;
-    _max_rail = _rail;
+    // The flag before the post: raised after it, a planner that applied the
+    // post in between would see the flag again and move the frame twice.
+    _frame_moved = true;
+    _win_seq.fetch_add(1);   // odd: being written
+    _win_req_lo.store(lo);
+    _win_req_hi.store(hi);
+    _win_req_rail.store(rail > 0.0f ? rail : DEFAULT_MAX_RAIL_MM);
+    _win_seq.fetch_add(1);   // even: whole
+}
+
+bool MotionArbiter::takeWindow() {
+    // Mid-write or nothing new: the next pass takes it. Never spin here, the
+    // writer may be the task this one preempted.
+    const uint32_t seq = _win_seq.load();
+    if ((seq & 1u) != 0 || seq == _win_taken) return false;
+    const float lo   = _win_req_lo.load();
+    const float hi   = _win_req_hi.load();
+    const float rail = _win_req_rail.load();
+    if (_win_seq.load() != seq) return false;   // rewritten while read
+    _win_taken = seq;
+    // The flag before the fields, fenced: a steer preempting between them
+    // parks instead of reading a window half old and half new.
     _frame_moved = true;   // normalized units now mean different millimeters
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    _win_min  = lo;
+    _win_max  = hi;
+    _rail     = rail;
+    _max_rail = rail;
+    return true;
 }
 
 HomeStart MotionArbiter::home() {
@@ -277,6 +301,10 @@ void MotionArbiter::begin(uint64_t now_us) {
 }
 
 bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
+    // An intent sent after a window write is mapped by the hub through that
+    // window: it clamps and plans in it. The engine moves to it at the next
+    // planTick(), before any strip fills.
+    takeWindow();
     // The flip's way in (setFlipped()): a target in the mirrored frame is the
     // physical point rail minus it, and a velocity reverses.
     MotionIntent in = asked;
@@ -718,6 +746,9 @@ void MotionArbiter::applyTuning(const MotionTuning& t) {
 void MotionArbiter::planTick(uint64_t now_us, float dt_s) { fillStrip(now_us, planStep(now_us, dt_s)); }
 
 bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
+    // FIRST, before any reset, reseed or fill: the frame changes only here
+    // and in accept(), so every strip is built in one frame (bd val-8es).
+    takeWindow();
     if (_estop) {
         _brake_req.store(false);   // park already stopped it
         _returning = false;        // estop() dropped override with it
