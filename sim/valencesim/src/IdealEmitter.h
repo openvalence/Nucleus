@@ -9,10 +9,11 @@
 // - THE EMITTER IS IDEAL. Every edge on time, so late edges, re-steers and
 //   catch-ups read 0. That is the honest answer for a machine with no LP core,
 //   not a measurement of one.
-// - The LP core's FENCE is modeled as lp_quad.c applies it: an edge past it is
-//   withheld and counted. Its LEASE NEVER LAPSES here: the host's tick runs at
-//   its timer's resolution (bd val-x2o), far past kLeaseUs, so renew() is
-//   accepted and lapses() reads 0.
+// - The LP core's FENCE and LEASE are modeled as lp_quad.c applies them: an
+//   edge past the fence is withheld and counted; nothing renders before the
+//   first renew(), and kLeaseUs after the last one the word is stored 0 and a
+//   lapse counted. A host that advances it in steps longer than kLeaseUs
+//   without a renew between sees the board's stall, not an ideal render.
 // - Single-threaded: the caller's one thread steers and advances it.
 // See: flagship_p4/src/motion/MotionArbiter.h (the emitter seam)
 
@@ -46,14 +47,38 @@ public:
         _fence_hi = hi;
     }
 
-    void renew() override {}
+    // At the clock of the last advance(): the caller advances before it steers.
+    void renew() override {
+        _renewed_us = _last_us;
+        _live = true;
+    }
 
-    uint32_t lapses() const override { return 0; }
+    uint32_t lapses() const override { return _lapses; }
 
-    // Renders the live word over the interval since the previous call.
+    // Renders the live word over the interval since the previous call, up to
+    // the lease's end.
     void advance(uint64_t now_us) {
-        const double dt_s = double(now_us - _last_us) * 1e-6;
+        const uint64_t from_us = _last_us;
         _last_us = now_us;
+        if (!_live || now_us <= from_us) return;
+        const uint64_t lease_end_us = _renewed_us + kLeaseUs;
+        const bool lapse = now_us > lease_end_us;
+        render(double((lapse ? std::max(lease_end_us, from_us) : now_us) - from_us) * 1e-6);
+        if (lapse) {
+            _live = false;
+            _step_q8 = 0;
+            _phase = 0.0;
+            ++_lapses;
+        }
+    }
+
+    uint32_t edges() const { return _edges; }
+    uint32_t fenceHits() const { return _fence_hits; }
+    uint32_t stepQ8() const { return _step_q8; }
+    uint32_t faults() const { return _faults; }
+
+private:
+    void render(double dt_s) {
         if (_step_q8 == 0 || !(dt_s > 0.0)) return;
         const double edges_per_s = double(kLpClockHz) * 256.0 / double(_step_q8);
         _phase += (_forward ? edges_per_s : -edges_per_s) * dt_s;
@@ -70,12 +95,6 @@ public:
         _fence_hits += uint32_t(want > got ? want - got : got - want);
     }
 
-    uint32_t edges() const { return _edges; }
-    uint32_t fenceHits() const { return _fence_hits; }
-    uint32_t stepQ8() const { return _step_q8; }
-    uint32_t faults() const { return _faults; }
-
-private:
     int32_t  _count = 0;
     double   _phase = 0.0;   // fractional edge carried between ticks
     uint64_t _last_us = 0;
@@ -86,6 +105,9 @@ private:
     int32_t  _fence_lo = INT32_MIN;   // open until the arbiter's first write, as the LP core loads it
     int32_t  _fence_hi = INT32_MAX;
     uint32_t _fence_hits = 0;
+    uint64_t _renewed_us = 0;
+    bool     _live = false;   // unleased until the first renew(), as the LP core starts
+    uint32_t _lapses = 0;
 };
 
 }  // namespace valence

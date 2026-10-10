@@ -29,6 +29,7 @@
 #include "../../../flagship_p4/src/motion/MotionArbiter.cpp"
 #include "../../../flagship_p4/src/patterns/advanced/AdvancedPattern.cpp"
 #include "../../../flagship_p4/src/patterns/PatternEngine.cpp"
+#include "../../../sim/valencesim/src/IdealEmitter.h"
 
 using valence::MotionAnomaly;
 using valence::MotionArbiter;
@@ -2380,6 +2381,37 @@ TEST_CASE("lease: the core is unleased until the first tick, and an e-stop parks
     CHECK(r->emitter.q8 == 0);
     CHECK(r->emitter.live);   // the tick still renews: a lease is the HP alive, not motion allowed
     CHECK(r->census().lease_lapses == 0);
+}
+
+// bd val-3dx: the sim's and kinetic.wasm's emitter keeps the LP core's lease
+// (lp_quad.c), as TestEmitter does: unleased until the first renew, then the
+// word renders for kLeaseUs after the last renew, stores 0 and counts a lapse.
+TEST_CASE("lease: the ideal emitter holds still until a renew and lapses kLeaseUs after the last one") {
+    valence::IdealEmitter e;
+    const uint64_t t0 = 1'000'000;
+    const auto edgesFor = [](double mm_s, uint64_t us) { return mm_s * double(valence::kStepsPerMm) * double(us) * 1e-6; };
+    e.advance(t0);
+    e.steer(100.0f);
+    e.advance(t0 + 10'000);
+    CHECK(e.count() == 0);   // unleased: nothing renders before the first renew
+    e.renew();
+    e.advance(t0 + 11'000);
+    CHECK(double(e.count()) == doctest::Approx(edgesFor(100.0, 1000)).epsilon(0.05));
+    e.advance(t0 + 30'000);   // a 19 ms stall: the word renders to the lease's end only
+    CHECK(std::fabs(double(e.count()) - edgesFor(100.0, valence::kLeaseUs)) <= 2.0);
+    CHECK(e.lapses() == 1);
+    CHECK(e.stepQ8() == 0);
+    const int32_t held = e.count();
+    e.steer(100.0f);   // a steer without a renew renders nothing
+    e.advance(t0 + 31'000);
+    CHECK(e.count() == held);
+    e.renew();
+    for (uint64_t t = t0 + 32'000; t <= t0 + 52'000; t += valence::kMotionTickUs) {
+        e.advance(t);
+        e.renew();   // ticked at kMotionTickUs, the lease never lapses
+    }
+    CHECK(std::fabs(double(e.count() - held) - edgesFor(100.0, 21'000)) <= 2.0);
+    CHECK(e.lapses() == 1);
 }
 
 // Operator ruling 2026-10-06 (bd val-d11): a jog is live. The newest target

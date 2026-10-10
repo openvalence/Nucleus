@@ -80,7 +80,7 @@ frame of the travel window. The engine frame is that window normalized to
 | `kinetic_expect(h, window_ms)` | The window each later segment expects successors for (`MotionIntent::expect_us`, Kinetic `Engine::expect`): its free knot renders through toward a provisional successor instead of at rest. Create sets the hub's, the larger of `stream_quiet_release_ms` (500) and the horizon; 0 renders every free knot at rest. Kept by `kinetic_reset`. |
 | `kinetic_default_tuning(out)` / `kinetic_set_tuning(h, t)` | The factory set, and a whole set applied before the next segment (`kinetic_tuning` below). |
 | `kinetic_submit_segment(h, pos_e4, dur_ms, end_vel_e3, start_us)` | One 0x2101 segment, planned at the current clock. 1 accepted, 0 refused by the planner, -1 zero duration (dropped, as the hub drops it). |
-| `kinetic_step(h, dt_s, out)` | Advances the clock by `dt_s`, rounded to whole microseconds, evaluates, and writes one `kinetic_sample`. The board ticks at 1 ms. |
+| `kinetic_step(h, dt_s, out)` | Advances the clock by `dt_s`, rounded to whole microseconds, evaluates, and writes one `kinetic_sample`. The board ticks at 1 ms. A step longer than the LP core's lease (`kLeaseUs`, 4 ms) renders its first 4 ms and counts a lapse, as the board's LP core stops a steer no tick renewed. |
 | `kinetic_reset(h)` | Back to the create state at t = 0, keeping limits, window and tuning. |
 | `kinetic_now_us(h)`, `kinetic_destroy(h)`, `kinetic_version()` | The clock; release; the identity string (static storage). |
 

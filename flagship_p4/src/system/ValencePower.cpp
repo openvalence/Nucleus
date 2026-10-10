@@ -32,8 +32,9 @@ constexpr int        kTimeoutMs  = 10;
 constexpr float kShuntOhms = 0.001f;
 
 // SOVL sits at the motor switch's own over-current level (TPS48111, 15.2 A):
-// the INA adds a one-conversion detector, not a second, lower limit.
-// TODO(val-091.22): operator ruling on the SOVL trip level.
+// the INA adds a one-conversion detector, not a second, lower limit. 15 A is
+// the operator's ruling (2026-10-09, bd val-091.22), the level the board is
+// designed around; a built board's characterization may move it.
 constexpr float kShuntOverAmps = 15.0f;
 // BOVL: below the ~51 V bus-powered trip, above the 44.5 V regen clamp.
 constexpr float kBusOverVolts = 50.0f;
