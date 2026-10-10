@@ -22,11 +22,13 @@ P4, the hub box's PSRAM size at boot) are still owed on bd `val-9u0.5`.
 `Catalog32`, `encodeCatalog` into an unbounded buffer, at Valence 715e21c]:
 42 entries, 188 layout, 107 schema, 164 labels, 2 stores, 23,927 B encoded.
 With the power channel (val-091.22): 43 entries, 192 layout, 24,322 B. The
-machine's budget is 48 entries, 216 layout, 160 schema, 192 labels and
-27,648 B of encoded catalog. It kept the 48 / 200 / 160 / 192 and 26,214 B
+machine's budget is 48 entries, 240 layout, 160 schema, 192 labels and
+29,696 B of encoded catalog. It kept the 48 / 200 / 160 / 192 and 26,214 B
 (80% of 32,768) it had before RFC-077 until layout rose with the RFC-095
-dwells (val-091.67) and bytes with the section card headings (val-mwu:
-26,300 B in use [verified 2026-10-02 -- valencesim headroom line]).
+dwells (val-091.67) and bytes with the section card headings (val-mwu), then
+both with the oscillator, datagram_estop and the oscillator's drives (val-o9r:
+47 entries, 235 layout, 28,329 B in use [verified 2026-10-09 -- valencesim
+headroom line]).
 
 ## Per accessory, at 30 channels
 
@@ -49,23 +51,23 @@ catalog is.
 | Flag | Value | Arithmetic |
 |---|---|---|
 | `VALENCE_CATALOG_ENTRIES` | 234 | 48 + 6 x 31 |
-| `VALENCE_CATALOG_LAYOUT_FIELDS` | 414 | 216 + 6 x 33 |
+| `VALENCE_CATALOG_LAYOUT_FIELDS` | 438 | 240 + 6 x 33 |
 | `VALENCE_CATALOG_SCHEMA_FIELDS` | 340 | 160 + 6 x 30 |
 | `VALENCE_CATALOG_LABELS` | 576 | 192 + 6 x 64 |
 | `VALENCE_CATALOG_STORES` | 6 | the machine's 2, the accessories and relationships STOREs, one spare |
 | `VALENCE_CATALOG_SAFE_SLOTS` | 360 | 6 x 60; the machine's own catalog declares no `safe` |
-| `VALENCE_CATALOG_SCRATCH_BYTES` | 73,728 | (27,648 + 6 x 5,120) / 0.8 = 72,960, rounded up to 72 KiB |
+| `VALENCE_CATALOG_SCRATCH_BYTES` | 77,824 | (29,696 + 6 x 5,120) / 0.8 = 75,520, rounded up to 76 KiB |
 
-Cost: `Catalog32` at these flags is 107,424 B on the P4, of which the safe
-pool is 5,760 B [verified 2026-10-02 -- `sizeof` under riscv32-esp-elf-g++
-`-std=gnu++2b -O2` at Valence 482a2d6; 113,472 B at 3b8d6c8, where every field
-slot carried its own `safe`]. The hub's encode scratch is 72 KiB. Both live in
+Cost: `Catalog32` at these flags is 111,600 B on the P4, 104 B a layout
+field [verified 2026-10-09 -- `sizeof` under riscv32-esp-elf-g++
+`-std=gnu++2b -O2` at Valence f79567d; 109,104 B there at 414 layout fields].
+The hub's encode scratch is 76 KiB. Both live in
 the PSRAM `HubBox` (T2), never on a stack and never in static RAM. PSRAM free
 is 33.5 MB (`memory-budget.md`), so this is well under 1% of it.
 
-**Headroom as the hub computes it** [verified 2026-10-02 -- valencesim boot
-log at Valence 482a2d6]: 6 accessories; free 192 entries, 205 layout,
-231 schema, 360 safe, 36,144 B. `catalogHeadroom()` in `ValenceDevice.h` is
+**Headroom as the hub computes it** [verified 2026-10-09 -- valencesim boot
+log at Valence f79567d]: 6 accessories; free 187 entries, 203 layout,
+206 schema, 360 safe, 33,930 B. `catalogHeadroom()` in `ValenceDevice.h` is
 the one computation; the accessories roster (val-9u0.19) advertises its answer
 and nothing more.
 

@@ -5,18 +5,18 @@
 # FLAGS, never a #define in a source file: two translation units seeing two
 # values would be two Catalog32 types (ODR), and nothing would say so.
 #
-# Sizing (val-9u0.5, recomputed 2026-10-02 for the 32-id slice of RFC-076):
-# the machine budget is 48 / 216 / 160 / 192 and 27,648 B encoded. Layout rose
-# from 200 with the RFC-095 dwells (val-091.67: 17 layout fields), which would
-# otherwise have cost an accessory; bytes rose from 26,214 with the section
-# card headings (val-mwu) and move no flag: the scratch below still holds
-# them. Machine use is 44 entries, 210 layout, 123 schema and 26,300 B
-# encoded [verified 2026-10-02 -- valencesim headroom line, val-mwu]. Each
+# Sizing (val-9u0.5, recomputed 2026-10-09 for the oscillator's drives and
+# osc-drive stream, val-o9r): the machine budget is 48 / 240 / 160 / 192 and
+# 29,696 B encoded. Layout rose from 216 and bytes from 27,648 because the
+# oscillator (val-dzf), datagram_estop (val-7t8) and the drives had already
+# cost an accessory: the twin's headroom line read 5. Machine use is 47
+# entries, 235 layout and 28,329 B encoded [verified 2026-10-09 -- valencesim
+# headroom line: 6 accessories]. Each
 # accessory gets the per-accessory budget below. The accessory count is
 # the most that keeps the total entries at or under catalog_max_entries (256),
 # the floor every client is built to handle: (256 - 48) / 31 = 6.
-# The encode scratch keeps the 80% headroom floor over the machine's 27,648 B
-# plus 6 x 5,120 B, rounded up to 72 KiB: (27,648 + 30,720) / 0.8 = 72,960.
+# The encode scratch keeps the 80% headroom floor over the machine's 29,696 B
+# plus 6 x 5,120 B, rounded up to 76 KiB: (29,696 + 30,720) / 0.8 = 75,520.
 
 set(NUCLEUS_ACCESSORIES 6)
 # Per accessory: 30 channels (r 0x02-0x1F) + the accessory-status entry (r 0x01).
@@ -35,7 +35,7 @@ math(EXPR NUCLEUS_ACCESSORY_SAFE_FIELDS
 set(NUCLEUS_ACCESSORY_CATALOG_BYTES 5120)
 
 math(EXPR _entries "48 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_ENTRIES}")
-math(EXPR _layout  "216 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LAYOUT_FIELDS}")
+math(EXPR _layout  "240 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LAYOUT_FIELDS}")
 math(EXPR _schema  "160 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_SCHEMA_FIELDS}")
 math(EXPR _labels  "192 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LABELS}")
 math(EXPR _safe    "${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_SAFE_FIELDS}")
@@ -49,7 +49,7 @@ set(VALENCE_CAPACITY_DEFINITIONS
     # STOREs (RFC-076, RFC-078) are the host's own when they land.
     VALENCE_CATALOG_STORES=6
     VALENCE_CATALOG_SAFE_SLOTS=${_safe}
-    VALENCE_CATALOG_SCRATCH_BYTES=73728
+    VALENCE_CATALOG_SCRATCH_BYTES=77824
     NUCLEUS_ACCESSORIES=${NUCLEUS_ACCESSORIES}
     NUCLEUS_ACCESSORY_ENTRIES=${NUCLEUS_ACCESSORY_ENTRIES}
     NUCLEUS_ACCESSORY_LAYOUT_FIELDS=${NUCLEUS_ACCESSORY_LAYOUT_FIELDS}

@@ -135,6 +135,17 @@ using MotionOscillator = kinetic2::Oscillator<kStripLen, 150>;
 inline constexpr size_t kOscEdge = MotionOscillator::kPlanEdge;
 inline constexpr size_t kOscLook = MotionOscillator::lookahead(kMotionTickUs);
 inline constexpr size_t kPlanExt = kOscEdge + kStripLen + kOscLook + kOscEdge;
+static_assert(kOscDriveLeadUs == MotionOscillator::driveLeadUs(kMotionTickUs),
+              "the osc-drive grant's schedule latency is the oscillator's drive lead");
+static_assert(kOscDriveLeadUs / kMotionTickUs < kStripLen + kOscLook, "the plan read must reach the lead");
+// While a speed or position drive is bound, a plan drive point every this
+// many ticks. The oscillator holds its points from a fade behind its head to
+// the lead ahead: these and a 50 Hz axis over that span stay under kDriveMax.
+inline constexpr uint32_t kOscPlanDriveTicks = 16;
+inline constexpr uint64_t kOscDriveHeldUs = kOscDriveLeadUs + MotionOscillator::kFadeMaxUs;
+static_assert(kOscDriveHeldUs / (kOscPlanDriveTicks * kMotionTickUs) + kOscDriveHeldUs / 20000 <
+                  MotionOscillator::kDriveMax,
+              "plan points and a 50 Hz axis across the held span must fit the oscillator's drive points");
 
 // ---- homing -----------------------------------------------------------------
 // Home op 1 is the arbiter's own motion path, never the planner's (operator
@@ -416,6 +427,14 @@ public:
     // leaves the window, and renders nothing under ESTOP, PAUSE (cut at once,
     // the phase back at the trough), unhomed or uncommissioned.
     void setOscillator(const MotionOsc& o);
+    // SPEC 9.7: one osc-drive stream sample, each field 0 .. 1, stamped at_us
+    // on this clock. ONE WRITER, the hub task: a single-producer ring the
+    // planner drains every tick (feedOscillator()); a full ring drops the
+    // sample and counts it (oscDriveDropped()).
+    void postOscDrive(float amplitude, float frequency, uint64_t at_us);
+    // Planner task. Drive points the ring or the oscillator refused (its
+    // kDriveMax points held): counted, never waited on.
+    uint32_t oscDriveDropped() const { return _oscd_dropped + _oscd_ring_lost.load(); }
     float forceHome(float stroke_mm);
     // Before either owning task runs. Until then, and on a build without one,
     // the sense is absent and home() answers no_sense.
@@ -546,8 +565,20 @@ private:
     // new and whole, and raises the frame-move flag. True when it applied.
     bool takeWindow();
     // Planner task: hands the oscillator the parameters setOscillator() last
-    // posted, if new and whole.
+    // posted, if new and whole. Any drive bound (SPEC 9.7) is the oscillator's
+    // driven mode: a sine whose frequency and amplitude follow the points
+    // feedOscillator() gives it.
     void takeOscillator();
+    // Planner task, from fillStrip() every tick with the plan from t0
+    // (kOscEdge read before it). It drains the osc-drive ring; rendering,
+    // each sample becomes a drive point at its stamp, and while a speed or
+    // position drive is bound a point at t0 + kOscDriveLeadUs every
+    // kOscPlanDriveTicks from the plan there. Each parameter through its own
+    // drive: fixed its field, speed and position the plan, axis the newest
+    // sample (0 once stream_quiet_release_ms old).
+    void feedOscillator(uint64_t t0_us, const float* plan, bool render);
+    // One drive point at t_us, the axis sample's values or the newest held.
+    void drivePoint(uint64_t t_us, const float* plan, uint64_t t0_us);
     // Stops as fast as the engine's current limits allow, from its own
     // state at at_us. False when there was nothing moving to stop.
     bool brakeEngine(uint64_t at_us);
@@ -726,7 +757,32 @@ private:
     std::atomic<float>    _osc_req_amp{0.0f};
     std::atomic<float>    _osc_req_crest{0.0f};
     std::atomic<float>    _osc_req_trough{0.0f};
+    std::atomic<uint8_t>  _osc_req_fdrive{0};
+    std::atomic<uint8_t>  _osc_req_adrive{0};
+    std::array<std::atomic<float>, 4> _osc_req_fmap{};   // in_min, in_max, out_min, out_max
+    std::array<std::atomic<float>, 4> _osc_req_amap{};
     uint32_t              _osc_taken = 0;
+    // The parameters as posted, before the drives (planner task).
+    kinetic2::OscParams   _osc_base{};
+    MotionOscDrive        _osc_fdrive{.drive = 0};
+    MotionOscDrive        _osc_adrive{.drive = 0};
+    // The osc-drive samples: single producer (the hub task) writes a slot,
+    // then publishes head; single consumer (the planner) reads, then
+    // publishes tail.
+    struct OscDriveSample {
+        uint64_t t_us = 0;
+        float    amplitude = 0.0f;
+        float    frequency = 0.0f;
+    };
+    std::array<OscDriveSample, 16> _oscd_ring{};
+    std::atomic<uint32_t> _oscd_head{0};
+    std::atomic<uint32_t> _oscd_tail{0};
+    std::atomic<uint32_t> _oscd_ring_lost{0};
+    // The newest sample drained (planner task), its stamp the quiet test's.
+    bool                  _oscd_have = false;
+    OscDriveSample        _oscd_last{};
+    uint64_t              _oscd_plan_next_us = 0;
+    uint32_t              _oscd_dropped = 0;
 
     float _jog_v = DEFAULT_JOG_MAX_SPEED_MM_S;
     float _jog_a = DEFAULT_JOG_ACCEL_MM_S2;

@@ -238,5 +238,6 @@ bool motionStillFor(uint32_t window_us) { return g_sim.arbiter().stillFor(device
 
 void motionSetTuning(const MotionTuning& t) { g_sim.setTuning(t); }
 void motionSetOscillator(const MotionOsc& o) { g_sim.arbiter().setOscillator(o); }
+void motionOscDrive(float a, float f, uint64_t at_us) { g_sim.arbiter().postOscDrive(a, f, at_us); }
 
 }  // namespace valence

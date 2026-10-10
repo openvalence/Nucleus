@@ -65,6 +65,7 @@ inline constexpr uint16_t pattern_state    = 0x1200;  // STATE·pattern, family 
 inline constexpr uint16_t odometer         = 0x1020;  // STATE·machine, family 2 member 0 (was 0x1002)
 inline constexpr uint16_t motion_input     = 0x2100;  // STREAM·motion, family 0 member 0 (master)
 inline constexpr uint16_t motion_segment   = 0x2101;  // STREAM·motion, family 0 member 1
+inline constexpr uint16_t osc_drive        = 0x2140;  // STREAM·motion, family 4 member 0, MIRROR of oscillator
 // ---- telemetry channels the legacy :81 plane owned --------------------------
 inline constexpr uint16_t plan_strip       = 0x1110;  // STATE·motion, family 1 member 0 (master; was 0x1101)
 inline constexpr uint16_t power            = 0x1010;  // STATE·machine, family 1 member 0 (was 0x1001)
@@ -334,6 +335,28 @@ inline constexpr float home_speed_min = 5.0f;     // MIN_HOME_SPEED_MM_S; its ma
 inline constexpr float osc_max_hz = 100.0f;       // OSC_MAX_HZ, WELCOME limits osc_max_hz
 inline constexpr float osc_dwell_max = 4.0f;      // the longest hold, four moving cycles
 }  // namespace ceiling
+
+// The two driven oscillator parameters (SPEC 9.7) as 0x3140 keys them, from
+// key0: drive, in_min, in_max, out_min, out_max; 0x1140 mirrors them.
+struct OscDriveCard {
+    uint8_t key0;
+    std::string_view drive, in_min, in_max, out_min, out_max, unit;
+    float top;
+    std::string_view drive_desc, out_min_desc, out_max_desc;
+    std::array<std::string_view, 5> roles;
+};
+inline constexpr std::array<OscDriveCard, 2> kOscDriveCards{{
+    {7, "frequency_drive", "frequency_in_min", "frequency_in_max", "frequency_out_min", "frequency_out_max", "Hz",
+     ceiling::osc_max_hz, "What sets the frequency", "Frequency at the low input", "Frequency at the high input",
+     {valence::field_roles::osc_frequency_drive, valence::field_roles::osc_frequency_in_min,
+      valence::field_roles::osc_frequency_in_max, valence::field_roles::osc_frequency_out_min,
+      valence::field_roles::osc_frequency_out_max}},
+    {12, "amplitude_drive", "amplitude_in_min", "amplitude_in_max", "amplitude_out_min", "amplitude_out_max", "",
+     1.0f, "What sets the amplitude", "Amplitude at the low input", "Amplitude at the high input",
+     {valence::field_roles::osc_amplitude_drive, valence::field_roles::osc_amplitude_in_min,
+      valence::field_roles::osc_amplitude_in_max, valence::field_roles::osc_amplitude_out_min,
+      valence::field_roles::osc_amplitude_out_max}},
+}};
 
 // Fills `c` with this device's catalog. OUT-PARAM, never a return value: a
 // Catalog32 is ~22 KB of pooled field storage, so returning one by value
@@ -1013,6 +1036,28 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .role = roles::input_end_velocity});
     };
 
+    // ---- "osc-drive" -- STREAM, c2h, control: the oscillator's axis ---------
+    // SPEC 9.7 (RFC-103): samples-kind, the channel role osc.drive fixing the
+    // layout, amplitude then frequency, each 0 .. 1 and mapped through its
+    // parameter's bounds where that parameter's drive is axis. No input.*
+    // role: never motion input, never a source, never the rail
+    // (ValenceDevice::sourceForChannel()). A script's V8 and V9.  [4 + 4 = 8 B]
+    auto addOscDrive = [&]() {
+    c.addEntry({.id = ch::osc_drive, .name = "osc-drive",
+                .cls = ChannelClass::STREAM, .dir = Direction::c2h,
+                .access = AccessLevel::control, .maxRateHz = 50.0f,
+                .defaultPriority = Priority::normal,
+                .hasCategory = true, .category = valence::ui_categories::generator,
+                .hasRank = true, .rank = valence::ui_ranks::control,
+                .role = valence::channel_roles::osc_drive});
+    c.addLayoutField({.name = "amplitude", .type = PackedFieldType::f32, .unit = "norm", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                      .hasUnitId = true, .unitId = valence::unit_ids::normalized});
+    c.addLayoutField({.name = "frequency", .type = PackedFieldType::f32, .unit = "norm", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                      .hasUnitId = true, .unitId = valence::unit_ids::normalized});
+    };
+
     // ---- "plan-strip" — STATE, elevated, 45 Hz ------------------------------
     // THE PLANNER'S CURRENT SEGMENT: what the planner is executing right now,
     // as a strip you can draw. Together with 0x0080's raw/tgt/pos triple it
@@ -1592,8 +1637,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // the window leave (it yields first). The parameters' osc.* roles live on
     // the writer (SPEC 9.7, once per catalog); these mirror it by setting_key.
     // Session-volatile: nothing persists, enabled boots false, and a session
-    // ending clears it (ValenceDevice.cpp onSessionLeft()).
-    //   [1 + 4 + 4 + 1 + 4 + 4 + 1 + 4 = 23 B]
+    // ending clears it (ValenceDevice.cpp onSessionLeft()). The two drives and
+    // their bounds (SPEC 9.7) are appended, keys 7..16, frequency's then
+    // amplitude's (kOscDriveCards).
+    //   [1 + 4 + 4 + 1 + 4 + 4 + 1 + 4 + 2 x (1 + 4 x 4) = 57 B]
     auto addOscillator = [&]() {
     c.addEntry({.id = ch::oscillator, .name = "oscillator",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1640,6 +1687,33 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "amplitude_effective", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .group = "Oscillator", .desc = "Peak displacement the ceilings and window leave",
                       .role = roles::osc_amplitude_effective});
+    for (const OscDriveCard& d : kOscDriveCards) {
+        const MotionOscDrive dflt = d.key0 == 7 ? MotionOsc{}.frequency_drive : MotionOsc{}.amplitude_drive;
+        c.addSelectField({.name = d.drive, .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .hasMin = true, .hasMax = true, .min = 0.0f, .max = 3.0f,
+                          .dflt = SettingDefault::ofInt(dflt.drive), .group = "Oscillator",
+                          .desc = d.drive_desc,
+                          .step = 1.0f, .settingKey = d.key0, .hasSettingKey = true, .hasStep = true},
+                         {"fixed", "speed", "position", "axis"});
+        c.addLayoutField({.name = d.in_min, .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
+                          .dflt = SettingDefault::ofFloat(dflt.in_min), .group = "Oscillator",
+                          .desc = "Drive input at the low end",
+                          .settingKey = uint8_t(d.key0 + 1), .hasSettingKey = true});
+        c.addLayoutField({.name = d.in_max, .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
+                          .dflt = SettingDefault::ofFloat(dflt.in_max), .group = "Oscillator",
+                          .desc = "Drive input at the high end",
+                          .settingKey = uint8_t(d.key0 + 2), .hasSettingKey = true});
+        c.addLayoutField({.name = d.out_min, .type = PackedFieldType::f32, .unit = d.unit, .scale = 1.0f,
+                          .hasMin = true, .hasMax = true, .min = 0.0f, .max = d.top,
+                          .dflt = SettingDefault::ofFloat(dflt.out_min), .group = "Oscillator",
+                          .desc = d.out_min_desc,
+                          .settingKey = uint8_t(d.key0 + 3), .hasSettingKey = true});
+        c.addLayoutField({.name = d.out_max, .type = PackedFieldType::f32, .unit = d.unit, .scale = 1.0f,
+                          .hasMin = true, .hasMax = true, .min = 0.0f, .max = d.top,
+                          .dflt = SettingDefault::ofFloat(dflt.out_max), .group = "Oscillator",
+                          .desc = d.out_max_desc,
+                          .settingKey = uint8_t(d.key0 + 4), .hasSettingKey = true});
+    }
     };
 
     // ---- "pattern-advanced" — STATE, normal, on-change ----------------------
@@ -2219,6 +2293,23 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSchemaField({.key = 6, .name = "dwell_trough", .type = CborFieldType::f32_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_dwell_max,
                       .role = roles::osc_dwell_trough});
+    // SPEC 9.7 driven parameters: keys 7..11 frequency's, 12..16 amplitude's.
+    for (const OscDriveCard& d : kOscDriveCards) {
+        c.addSelectSchemaField({.key = d.key0, .name = d.drive, .type = CborFieldType::uint_t, .unit = "",
+                                .hasMin = true, .hasMax = true, .min = 0.0f, .max = 3.0f,
+                                .role = d.roles[0]},
+                               {"fixed", "speed", "position", "axis"});
+        c.addSchemaField({.key = uint8_t(d.key0 + 1), .name = d.in_min, .type = CborFieldType::f32_t, .unit = "",
+                          .role = d.roles[1]});
+        c.addSchemaField({.key = uint8_t(d.key0 + 2), .name = d.in_max, .type = CborFieldType::f32_t, .unit = "",
+                          .role = d.roles[2]});
+        c.addSchemaField({.key = uint8_t(d.key0 + 3), .name = d.out_min, .type = CborFieldType::f32_t,
+                          .unit = d.unit, .hasMin = true, .hasMax = true, .min = 0.0f, .max = d.top,
+                          .role = d.roles[3]});
+        c.addSchemaField({.key = uint8_t(d.key0 + 4), .name = d.out_max, .type = CborFieldType::f32_t,
+                          .unit = d.unit, .hasMin = true, .hasMax = true, .min = 0.0f, .max = d.top,
+                          .role = d.roles[4]});
+    }
     };
 
     // ---- "machine-admin" — INTENT, control ----------------------------------
@@ -2390,6 +2481,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     if (feat.has_motion) {
         addMotionInput();        // 0x2100 STREAM·motion, family 0 member 0
         addMotionSegment();      // 0x2101 STREAM·motion, family 0 member 1
+        addOscDrive();           // 0x2140 STREAM·motion, family 4 member 0
     }
     addConfigSet();              // 0x3000 INTENT·machine, family 0 member 0
     if (feat.has_motion) addModesSet();      // 0x3030 INTENT·machine, family 3 member 0

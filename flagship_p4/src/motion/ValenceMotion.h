@@ -192,10 +192,26 @@ struct MotionCensus {
     float    osc_amplitude  = 0.0f;   // that amplitude, window share (osc.amplitude_effective)
 };
 
+// What sets one driven oscillator parameter (SPEC 9.7): `drive` an osc_drives
+// number (0 fixed, 1 speed, 2 position, 3 axis), then SPEC 8.11's
+// linear_clamp bounds, in_min != in_max. speed reads mm/s and position mm of
+// the plan the oscillator rides, client frame; axis the osc-drive stream's
+// field, 0 .. 1. The factory drive is axis (operator ruling 2026-10-09, bd
+// val-o9r), so a script's V8/V9 drive it with no setup.
+struct MotionOscDrive {
+    uint8_t drive   = 3;
+    float   in_min  = 0.0f;
+    float   in_max  = 1.0f;
+    float   out_min = 0.0f;
+    float   out_max = 1.0f;
+    bool operator==(const MotionOscDrive&) const = default;
+};
+
 // The oscillator's parameters (RFC-103, SPEC 9.7) as 0x3140 speaks them: the
 // frequency in Hz, the amplitude a share of the window (the peak, half the
 // swing), the shape an osc_shapes number, each dwell a share of the moving
-// cycle. The defaults are the catalog's.
+// cycle, and what drives the frequency and the amplitude. A `fixed` drive
+// takes the parameter's own field. The defaults are the catalog's.
 struct MotionOsc {
     bool    enabled      = false;
     float   frequency_hz = 10.0f;
@@ -203,6 +219,8 @@ struct MotionOsc {
     uint8_t shape        = 0;
     float   dwell_crest  = 0.0f;
     float   dwell_trough = 0.0f;
+    MotionOscDrive frequency_drive{.out_max = OSC_MAX_HZ};
+    MotionOscDrive amplitude_drive{};
     bool operator==(const MotionOsc&) const = default;
 };
 
@@ -251,6 +269,11 @@ inline constexpr uint32_t kMotionTaskStackBytes = 24576;
 // that just elapsed, so execution trails a stamp by one tick.
 // schedule_latency_us (RFC-059) is built on it.
 inline constexpr uint32_t kMotionTickUs = 1000;
+// SPEC 9.7 / 5.4: the osc-drive grant's schedule_latency_us, the driven
+// oscillator's drive lead at kMotionTickUs (kinetic2::Oscillator::driveLeadUs(),
+// static_asserted in MotionArbiter.h): no drive point lands nearer than this
+// past the strip's head, so a player leading by it lands on its stamps.
+inline constexpr uint32_t kOscDriveLeadUs = 156000;
 
 // RFC-059 schedule_latency_us of a samples grant, the one home the hub's grant
 // and the arbiter both read. It is exact, not a budget: a sample is a knot
@@ -376,5 +399,9 @@ void motionSetTuning(const MotionTuning& t);
 // (MotionArbiter::setOscillator()). Any task, never blocks; the planner takes
 // the newest at its next tick.
 void motionSetOscillator(const MotionOsc& o);
+// SPEC 9.7: one osc-drive stream sample stamped at_us (hub clock), amplitude
+// and frequency each 0 .. 1, posted at arrival. Hub task, never blocks
+// (MotionArbiter::postOscDrive()).
+void motionOscDrive(float amplitude, float frequency, uint64_t at_us);
 
 }  // namespace valence

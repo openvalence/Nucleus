@@ -248,7 +248,27 @@ void MotionArbiter::setOscillator(const MotionOsc& o) {
     _osc_req_amp.store(o.amplitude);
     _osc_req_crest.store(o.dwell_crest);
     _osc_req_trough.store(o.dwell_trough);
+    _osc_req_fdrive.store(o.frequency_drive.drive);
+    _osc_req_adrive.store(o.amplitude_drive.drive);
+    const MotionOscDrive* d[2] = {&o.frequency_drive, &o.amplitude_drive};
+    std::array<std::atomic<float>, 4>* m[2] = {&_osc_req_fmap, &_osc_req_amap};
+    for (int k = 0; k < 2; ++k) {
+        (*m[k])[0].store(d[k]->in_min);
+        (*m[k])[1].store(d[k]->in_max);
+        (*m[k])[2].store(d[k]->out_min);
+        (*m[k])[3].store(d[k]->out_max);
+    }
     _osc_seq.fetch_add(1);   // even: whole
+}
+
+void MotionArbiter::postOscDrive(float amplitude, float frequency, uint64_t at_us) {
+    const uint32_t head = _oscd_head.load(std::memory_order_relaxed);
+    if (head - _oscd_tail.load(std::memory_order_acquire) >= _oscd_ring.size()) {
+        _oscd_ring_lost.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    _oscd_ring[head % _oscd_ring.size()] = {at_us, amplitude, frequency};
+    _oscd_head.store(head + 1, std::memory_order_release);
 }
 
 HomeStart MotionArbiter::home() {
@@ -698,9 +718,76 @@ void MotionArbiter::takeOscillator() {
     p.amplitude = !(amp > 0.0f) ? 0.0f : std::fmin(amp, 1.0f);
     p.dwell_crest = _osc_req_crest.load();
     p.dwell_trough = _osc_req_trough.load();
+    auto drive = [](uint8_t d, const std::array<std::atomic<float>, 4>& m) {
+        MotionOscDrive out;
+        out.drive = d <= 3 ? d : 0;
+        out.in_min = m[0].load();
+        out.in_max = m[1].load();
+        out.out_min = m[2].load();
+        out.out_max = m[3].load();
+        return out;
+    };
+    const MotionOscDrive fd = drive(_osc_req_fdrive.load(), _osc_req_fmap);
+    const MotionOscDrive ad = drive(_osc_req_adrive.load(), _osc_req_amap);
     if (_osc_seq.load() != seq) return;   // rewritten while read
     _osc_taken = seq;
+    _osc_base = p;
+    _osc_fdrive = fd;
+    _osc_adrive = ad;
+    // A bound drive is the driven mode: a sine, frequency and amplitude from
+    // the points alone (shape, dwells and the two fields unused).
+    p.driven = fd.drive != osc_drives::fixed || ad.drive != osc_drives::fixed;
     _osc.set(p);
+}
+
+void MotionArbiter::feedOscillator(uint64_t t0_us, const float* plan, bool render) {
+    // Drained every tick, rendering or not, so a sample never waits in the
+    // ring for an oscillator that is off.
+    const bool axis = render && (_osc_fdrive.drive == osc_drives::axis || _osc_adrive.drive == osc_drives::axis);
+    for (uint32_t tail = _oscd_tail.load(std::memory_order_relaxed);
+         tail != _oscd_head.load(std::memory_order_acquire); ++tail) {
+        _oscd_last = _oscd_ring[tail % _oscd_ring.size()];
+        _oscd_have = true;
+        _oscd_tail.store(tail + 1, std::memory_order_release);
+        if (axis) drivePoint(_oscd_last.t_us, plan, t0_us);
+    }
+    if (!render) return;
+    const bool fromPlan = _osc_fdrive.drive == osc_drives::speed || _osc_fdrive.drive == osc_drives::position ||
+                          _osc_adrive.drive == osc_drives::speed || _osc_adrive.drive == osc_drives::position;
+    if (fromPlan && t0_us >= _oscd_plan_next_us) {
+        _oscd_plan_next_us = t0_us + uint64_t(kOscPlanDriveTicks) * kMotionTickUs;
+        drivePoint(t0_us + kOscDriveLeadUs, plan, t0_us);
+    }
+}
+
+void MotionArbiter::drivePoint(uint64_t t_us, const float* plan, uint64_t t0_us) {
+    // The plan at t_us, clamped into what fillStrip() read: the position in
+    // mm, client frame, and the speed in mm/s by the grid's central difference.
+    constexpr int64_t kLast = int64_t(kStripLen + kOscLook) - 1;
+    const int64_t i = std::clamp<int64_t>((int64_t(t_us) - int64_t(t0_us)) / int64_t(kMotionTickUs), 0, kLast);
+    const float pos = _flipped.load() ? _rail - toMm(plan[i]) : toMm(plan[i]);
+    const float speed = std::fabs(plan[i + 1] - plan[i - 1]) * span() / (2e-6f * float(kMotionTickUs));
+    // SPEC 9.7: quiet for stream_quiet_release_ms, an axis-driven parameter
+    // reads 0.
+    const bool live = _oscd_have && (t_us < _oscd_last.t_us ||
+                                     t_us - _oscd_last.t_us < uint64_t(limits::stream_quiet_release_ms) * 1000u);
+    auto driven = [&](const MotionOscDrive& d, float own, float axis, float top) {
+        if (d.drive == osc_drives::fixed) return std::fmin(own, top);
+        if (d.drive == osc_drives::axis && !live) return 0.0f;
+        const float in = d.drive == osc_drives::speed ? speed : d.drive == osc_drives::position ? pos : axis;
+        if (!std::isfinite(in) || !(d.in_max != d.in_min)) return 0.0f;
+        // SPEC 8.11 linear_clamp.
+        const float c = std::fmin(std::fmax(in, std::fmin(d.in_min, d.in_max)), std::fmax(d.in_min, d.in_max));
+        const float out = d.out_min + (c - d.in_min) * (d.out_max - d.out_min) / (d.in_max - d.in_min);
+        return !(out > 0.0f) ? 0.0f : std::fmin(out, top);
+    };
+    const float hz = driven(_osc_fdrive, _osc_base.frequency, _oscd_last.frequency, OSC_MAX_HZ);
+    const float amp = driven(_osc_adrive, _osc_base.amplitude, _oscd_last.amplitude, 1.0f);
+    if (!_osc.drive(t_us, hz, amp)) {
+        ++_oscd_dropped;
+        GLOGW_EVERY_MS(1000, kTag, "OSC DRIVE: point dropped, the oscillator holds its most (%lu dropped)",
+                       static_cast<unsigned long>(_oscd_dropped));
+    }
 }
 
 kinetic2::State MotionArbiter::sampleEngine(uint64_t now_us) {
@@ -983,6 +1070,7 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
         _engine.peek(0, s.t0_us + uint64_t(_plan_ahead - k) * kMotionTickUs, kMotionTickUs, k,
                      plan + (_plan_ahead - k));
     }
+    feedOscillator(s.t0_us, plan, s.n != 0 && !_osc.idle());
     if (s.n != 0) {
         // THE OSCILLATOR (RFC-103): summed into the plan before the backstop,
         // so the steer follows it like any plan. It yields first under the

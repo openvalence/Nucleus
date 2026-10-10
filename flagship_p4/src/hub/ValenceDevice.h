@@ -362,9 +362,14 @@ private:
     // false). _oscCleared: a session's end cleared enabled, a hub-side change
     // whose cfg_gen bump follows its twin's publish.
     MotionOsc _osc{};
-    std::array<std::byte, 23> _sentOsc{};
+    std::array<std::byte, 57> _sentOsc{};
     bool _oscDirty = false;
     bool _oscCleared = false;
+
+    // The osc-drive stream (SPEC 9.7): each sample to the motion task at once.
+    void takeOscDrive(const BundleView& bundle);
+    // The osc_shapes number that renders: sine while a drive is bound.
+    uint8_t oscShapeRendered() const;
 
     // Debounced persist, one timer per blob: armed by every applied change,
     // re-armed by the next, so a slider drag costs ONE write after the

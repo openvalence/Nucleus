@@ -99,10 +99,27 @@ window is solved at the next sample, and the sampler evaluates it.
   unhomed or uncommissioned; PAUSE cuts it at once, the strip carrying `cut`
   so the kick closes the gap and no late plan is counted; an engine reset
   stops it; a window move rescales it, never a step. Its parameters cross from
-  the hub task as a seqlocked post (`setOscillator()`), and it costs 5,176 B of
-  the arbiter's internal RAM [verified 2026-10-09 -- test_motion_arbiter, the
-  oscillator cases: the strip under 300 mm strokes at the input set keeps
-  every ceiling and the window, sheds to under a step at full speed].
+  the hub task as a seqlocked post (`setOscillator()`) [verified 2026-10-09 --
+  test_motion_arbiter, the oscillator cases: the strip under 300 mm strokes at
+  the input set keeps every ceiling and the window, sheds to under a step at
+  full speed].
+  **Driven parameters (SPEC 9.7, bd val-o9r).** A bound drive puts the stage
+  in Kinetic's driven mode, a sine whose frequency and amplitude follow drive
+  points, the phase integrated (0x1140 then reports the sine). The osc-drive
+  stream's samples cross from the hub task at arrival through a
+  single-producer ring (`postOscDrive()`), and `feedOscillator()`, on the
+  planner, makes each a point at its stamp; a speed or position drive adds a
+  point every `kOscPlanDriveTicks` at `kOscDriveLeadUs` ahead from the plan
+  there. Each parameter is its field (`fixed`) or SPEC 8.11's linear_clamp of
+  the plan's speed (mm/s) or position (mm, client frame) or the newest sample
+  (`axis`, 0 once `stream_quiet_release_ms` quiet). No point lands nearer than
+  `kOscDriveLeadUs` (156 ms, the osc-drive grant's schedule latency); with
+  nothing asked for `kDriveQuietUs` it fades to rest; a point the stage cannot
+  hold is dropped and counted. The factory drive is `axis`. The stage, its
+  plan buffer and the drives cost about 8.9 KB of the arbiter's internal RAM
+  (`sizeof(MotionOscillator)` 7,288 B) [verified 2026-10-09 -- riscv32
+  `sizeof` at Kinetic 725d448; test_motion_arbiter, a 50 Hz drive sweeping
+  5 to 20 Hz keeps every ceiling and fades out on silence].
 - **Map:** header-only, hardware-free `kinetic2::Engine`: a knot timeline (64
   knots per axis here), a window solver that re-plans every pending knot
   together, and a brake. The library is the sibling Kinetic checkout,

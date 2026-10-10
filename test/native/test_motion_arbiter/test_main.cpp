@@ -3315,6 +3315,10 @@ MotionOsc oscOn(float hz, float amp, uint8_t shape = 0, float crest = 0.0f, floa
     o.shape = shape;
     o.dwell_crest = crest;
     o.dwell_trough = trough;
+    // The fixed drives: the parameters are the fields (SPEC 9.7). The factory
+    // drive is axis, which reads 0 with no osc-drive stream.
+    o.frequency_drive.drive = valence::osc_drives::fixed;
+    o.amplitude_drive.drive = valence::osc_drives::fixed;
     return o;
 }
 
@@ -3480,6 +3484,67 @@ TEST_CASE("oscillator under planned strokes: the strip never exceeds a ceiling o
     for (const size_t mid : {200 + 450, 200 + 750, 200 + 1050}) CHECK(amp[mid] * 500.0f < valence::kMmPerStep);
     REQUIRE(amp.size() > 200 + 5000);
     CHECK(*std::max_element(amp.begin() + 200 + 1400, amp.begin() + 200 + 5000) > 0.002f);
+}
+
+// SPEC 9.7 driven parameters on Kinetic's driven mode (bd val-o9r).
+TEST_CASE("oscillator drives: an osc-drive stream sweeping frequency moves it continuously inside every ceiling; silence fades it to rest") {
+    auto r = restRig(250.0f);
+    MotionOsc o = oscOn(1.0f, 0.001f, 1);   // a square asked: driven, it plays a sine
+    o.frequency_drive = {.drive = valence::osc_drives::axis, .out_max = OSC_MAX_HZ};
+    o.amplitude_drive = {.drive = valence::osc_drives::axis, .out_max = 0.02f};
+    r->arb.setOscillator(o);
+    // A player at 50 Hz, leading by the grant's schedule latency: amplitude
+    // 0.5 of 0.02 (5 mm), frequency 0.05 .. 0.2 of 100 Hz over two seconds.
+    Heads h;
+    const uint64_t t0 = g_now_us;
+    for (uint64_t t = 0; t < 2'000'000; t += 20'000) {
+        const float f = 0.05f + 0.15f * float(t) / 2e6f;
+        r->arb.postOscDrive(0.5f, f, g_now_us + valence::kOscDriveLeadUs);
+        for (int k = 0; k < 20; ++k) {
+            r->run(1000);
+            h.take(r->arb);
+        }
+    }
+    const MotionCensus c = r->census();
+    CHECK(c.osc_active);
+    CHECK(c.osc_amplitude == doctest::Approx(0.01f).epsilon(0.02));
+    // The period shortens as the frequency rises: early crossings 5 Hz-ish,
+    // late ones near the asked 20 Hz minus the lead.
+    const auto d = crossings(h.p, 250.0f, 400);
+    REQUIRE(d.size() > 10);
+    CHECK(d.front() > d.back());
+    CHECK(double(d.back()) == doctest::Approx(1000.0 / (100.0 * (0.05 + 0.15 * (2e6 - valence::kOscDriveLeadUs) / 2e6))).epsilon(0.1));
+    const GridPeaks g = gridPeaks(h.p);
+    CHECK(g.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
+    CHECK(g.a <= DEFAULT_ACCEL_MM_S2 + kFdA);
+    CHECK(g.j <= DEFAULT_INPUT_MAX_JERK_MM_S3 + kFdJ);
+    CHECK(r->arb.oscDriveDropped() == 0);
+    (void)t0;
+
+    // Silence: nothing is asked past stream_quiet_release_ms, it fades to rest.
+    runHeads(*r, uint64_t(valence::limits::stream_quiet_release_ms) * 1000u + valence::kOscDriveLeadUs + 400'000, h);
+    CHECK_FALSE(r->census().osc_active);
+    CHECK(r->census().osc_amplitude == 0.0f);
+    CHECK(r->census().backstops == 0);
+}
+
+TEST_CASE("oscillator drives: speed drives the amplitude from the plan it rides; fixed takes the field again") {
+    auto r = restRig(250.0f);
+    MotionOsc o = oscOn(10.0f, 0.004f);
+    // Faster plan, less oscillation: 0 mm/s gives 0.01, 200 mm/s and up 0;
+    // the frequency stays its field (10 Hz).
+    o.amplitude_drive = {.drive = valence::osc_drives::speed, .in_min = 0.0f, .in_max = 200.0f,
+                         .out_min = 0.01f, .out_max = 0.0f};
+    r->arb.setOscillator(o);
+    Heads h;
+    runHeads(*r, 800'000, h);
+    CHECK(r->census().osc_amplitude == doctest::Approx(0.01f).epsilon(0.02));
+    for (const size_t d : crossings(h.p, 250.0f, 500)) CHECK(d == doctest::Approx(100).epsilon(0.02));
+    CHECK(r->arb.oscDriveDropped() == 0);
+    o.amplitude_drive.drive = valence::osc_drives::fixed;
+    r->arb.setOscillator(o);
+    runHeads(*r, 1'000'000, h);
+    CHECK(r->census().osc_amplitude == doctest::Approx(0.004f).epsilon(0.02));
 }
 
 TEST_CASE("oscillator: dwells stretch its period; a square with a trough dwell is a pulse") {

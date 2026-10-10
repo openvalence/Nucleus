@@ -794,6 +794,8 @@ uint16_t ValenceDevice::scheduleHorizonMs(uint16_t channel_id) {
 // as a stream (chase_dense), plus the same hop.
 uint32_t ValenceDevice::scheduleLatencyUs(uint16_t channel_id) {
     if (channel_id == ch::motion_segment) return kMotionTickUs;
+    // SPEC 9.7: a driven point lands no nearer than the oscillator's lead.
+    if (channel_id == ch::osc_drive) return kOscDriveLeadUs;
     if (channel_id == ch::motion_input) return sampleLatencyUs(_tune);
     return 0;
 }
@@ -1118,9 +1120,18 @@ Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
     const auto* f4 = findField(requested, 4);  // shape
     const auto* f5 = findField(requested, 5);  // dwell_crest
     const auto* f6 = findField(requested, 6);  // dwell_trough
-    if (!(f1 || f2 || f3 || f4 || f5 || f6)) return Ret::err(NackCode::INVALID_VALUE);
+    // Keys 7..16: the two drives and their bounds (kOscDriveCards).
+    std::array<const IntentValueField*, 10> fd{};
+    bool any = f1 || f2 || f3 || f4 || f5 || f6;
+    for (uint8_t k = 0; k < fd.size(); ++k) {
+        fd[k] = findField(requested, uint8_t(7 + k));
+        any = any || fd[k] != nullptr;
+    }
+    if (!any) return Ret::err(NackCode::INVALID_VALUE);
     if (f1 && !boolOf(f1)) return refuseNotANumber(ch::osc_set, 1);
     for (const auto* f : {f2, f3, f4, f5, f6})
+        if (f && !numberOf(f)) return refuseNotANumber(ch::osc_set, f->key);
+    for (const auto* f : fd)
         if (f && !numberOf(f)) return refuseNotANumber(ch::osc_set, f->key);
     // Two decimals (SPEC 9.7).
     auto dwell = [](float v) { return std::round(clampf(v, 0.0f, ceiling::osc_dwell_max) * 100.0f) / 100.0f; };
@@ -1132,6 +1143,23 @@ Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
     if (f4) o.shape = uint8_t(wholeIn(*numberOf(f4), 0.0f, 3.0f));
     if (f5) o.dwell_crest = dwell(*numberOf(f5));
     if (f6) o.dwell_trough = dwell(*numberOf(f6));
+    // A drive's select, its input bounds as given, its output bounds clamped
+    // into the parameter's range; equal input bounds have no map (SPEC 8.11).
+    MotionOscDrive* drives[2] = {&o.frequency_drive, &o.amplitude_drive};
+    const float tops[2] = {ceiling::osc_max_hz, 1.0f};
+    for (int d = 0; d < 2; ++d) {
+        const auto** f = &fd[size_t(5 * d)];
+        MotionOscDrive& m = *drives[d];
+        if (f[0]) m.drive = uint8_t(wholeIn(*numberOf(f[0]), 0.0f, 3.0f));
+        if (f[1]) m.in_min = *numberOf(f[1]);
+        if (f[2]) m.in_max = *numberOf(f[2]);
+        if (f[3]) m.out_min = clampf(*numberOf(f[3]), 0.0f, tops[d]);
+        if (f[4]) m.out_max = clampf(*numberOf(f[4]), 0.0f, tops[d]);
+        if (!(m.in_min != m.in_max)) {
+            o = was;
+            return refuse(NackCode::INVALID_VALUE, "drive in_min equals in_max");
+        }
+    }
     if (!(o == was)) {
         motionSetOscillator(o);
         _oscDirty = true;
@@ -1142,26 +1170,49 @@ Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
     if (f1) applied.fields[n++] = {1, IntentValue::ofBool(o.enabled)};
     if (f2) applied.fields[n++] = {2, IntentValue::ofF32(o.frequency_hz)};
     if (f3) applied.fields[n++] = {3, IntentValue::ofF32(o.amplitude)};
-    if (f4) applied.fields[n++] = {4, IntentValue::ofU64(o.shape)};
+    if (f4) applied.fields[n++] = {4, IntentValue::ofU64(oscShapeRendered())};
     if (f5) applied.fields[n++] = {5, IntentValue::ofF32(o.dwell_crest)};
     if (f6) applied.fields[n++] = {6, IntentValue::ofF32(o.dwell_trough)};
+    for (int d = 0; d < 2; ++d) {
+        const MotionOscDrive& m = *drives[d];
+        const uint8_t k0 = uint8_t(7 + 5 * d);
+        if (fd[size_t(5 * d)]) applied.fields[n++] = {k0, IntentValue::ofU64(m.drive)};
+        const float v[4] = {m.in_min, m.in_max, m.out_min, m.out_max};
+        for (uint8_t i = 0; i < 4; ++i)
+            if (fd[size_t(5 * d + 1 + i)]) applied.fields[n++] = {uint8_t(k0 + 1 + i), IntentValue::ofF32(v[i])};
+    }
     applied.count = n;
     return Ret::ok(applied);
+}
+
+// While a drive is bound the oscillator is a sine whatever osc.shape holds
+// (Kinetic's driven mode is sine only): the twin and the ECHO name what plays.
+uint8_t ValenceDevice::oscShapeRendered() const {
+    const bool driven = _osc.frequency_drive.drive != osc_drives::fixed ||
+                        _osc.amplitude_drive.drive != osc_drives::fixed;
+    return driven ? 0 : _osc.shape;
 }
 
 // The parameters as applied, then what renders: osc.active and
 // osc.amplitude_effective from the census.
 void ValenceDevice::publishOscillator(const MotionCensus& mo, bool force) {
-    std::array<std::byte, 23> buf{};
+    std::array<std::byte, 57> buf{};
     size_t n = 0;
     packU8(buf, n, _osc.enabled ? 1 : 0);
     packF32(buf, n, _osc.frequency_hz);
     packF32(buf, n, _osc.amplitude);
-    packU8(buf, n, _osc.shape);
+    packU8(buf, n, oscShapeRendered());
     packF32(buf, n, _osc.dwell_crest);
     packF32(buf, n, _osc.dwell_trough);
     packU8(buf, n, mo.osc_active ? 1 : 0);
     packF32(buf, n, mo.osc_amplitude);
+    for (const MotionOscDrive* d : {&_osc.frequency_drive, &_osc.amplitude_drive}) {
+        packU8(buf, n, d->drive);
+        packF32(buf, n, d->in_min);
+        packF32(buf, n, d->in_max);
+        packF32(buf, n, d->out_min);
+        packF32(buf, n, d->out_max);
+    }
     publishIfChanged(*_hub, ch::oscillator, buf, n, _sentOsc, force);
     // RFC-011: a hub-side change bumps after its STATE is out.
     if (_oscCleared) {
@@ -1516,6 +1567,25 @@ void ValenceDevice::onEstop(uint8_t cause, uint8_t origin) {
     (void)origin;
 }
 
+// ---- 0x2140 osc-drive ingress ---------------------------------------------------
+// SPEC 9.7: each sample is {amplitude f32, frequency f32}, each 0 .. 1, timed
+// as any samples-kind bundle (resolved and lead-capped as 0x2100's) and handed
+// to the motion task at once: the driven oscillator places it at its stamp,
+// no nearer than kOscDriveLeadUs ahead, the grant's schedule latency.
+void ValenceDevice::takeOscDrive(const BundleView& bundle) {
+    const int64_t now64 = int64_t(deviceNowUs());
+    const uint32_t now32 = uint32_t(uint64_t(now64) & 0xFFFFFFFFull);
+    const int32_t leadCapUs = int32_t(limits::max_future_schedule_ms) * 1000;
+    auto unit = [](float v) { return !(v > 0.0f) ? 0.0f : std::fmin(v, 1.0f); };
+    for (uint8_t i = 0; i < bundle.sampleCount(); ++i) {
+        const int32_t delta = std::clamp<int32_t>(int32_t(bundle.sampleTimeUs(i) - now32), 0, leadCapUs);
+        const auto sample = bundle.sample(i);
+        if (sample.size() < 8) continue;
+        motionOscDrive(unit(getF32(sample.subspan(0, 4))), unit(getF32(sample.subspan(4, 4))),
+                       uint64_t(now64 + delta));
+    }
+}
+
 // ---- 0x2100 / 0x2101 stream ingress --------------------------------------------
 // Runs on the hub task, synchronously inside Hub::update(). The hub has
 // already validated the §5.4 caps, the granted rate, ownership and the
@@ -1525,6 +1595,10 @@ void ValenceDevice::onEstop(uint8_t cause, uint8_t origin) {
 // same convention the publishers above encode with.
 void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
                                    const BundleView& bundle) {
+    if (channel_id == ch::osc_drive) {
+        takeOscDrive(bundle);
+        return;
+    }
     const bool isSegment = (channel_id == ch::motion_segment);
     if (channel_id != ch::motion_input && !isSegment) return;
 
@@ -1906,6 +1980,7 @@ void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     publishPlanStrip(hub, mo);
     publishMotionDiag(hub, mo, _ingressDrops.total(), _segBundles);
     publishOdometer(hub, mo);
+    motionSetOscillator(_osc);
     publishOscillator(mo, true);
     if (boardFeatures().has_pattern) {
         pushPattern();

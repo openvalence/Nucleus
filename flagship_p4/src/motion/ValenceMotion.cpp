@@ -374,5 +374,6 @@ uint32_t motionSteerStackFree() { return g_motion.steerStackFree(); }
 
 void motionSetTuning(const MotionTuning& t) { g_motion.setTuning(t); }
 void motionSetOscillator(const MotionOsc& o) { g_motion.arbiter().setOscillator(o); }
+void motionOscDrive(float a, float f, uint64_t at_us) { g_motion.arbiter().postOscDrive(a, f, at_us); }
 
 }  // namespace valence

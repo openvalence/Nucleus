@@ -142,6 +142,13 @@ bool motionStillFor(uint32_t window_us) {
 MotionTuning motionDefaultTuning() { return MotionTuning{}; }
 void motionSetTuning(const MotionTuning&) {}
 void motionSetOscillator(const MotionOsc& o) { g_osc = o; }
+// The osc-drive posts, newest last.
+struct OscDrivePost {
+    float amplitude, frequency;
+    uint64_t at_us;
+};
+std::vector<OscDrivePost> g_oscDrives;
+void motionOscDrive(float a, float f, uint64_t at_us) { g_oscDrives.push_back({a, f, at_us}); }
 
 bool patternBegin() { return true; }
 void patternSetSettings(const PatternSettings&) { ++g_patPushes; }
@@ -1642,9 +1649,20 @@ TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publish
     {
         const auto it = rig->del.lastState.find(ch::oscillator);
         REQUIRE(it != rig->del.lastState.end());
-        REQUIRE(it->second.size() == 23);
+        REQUIRE(it->second.size() == 57);
         CHECK(it->second[0] == std::byte{0});
         CHECK(getF32(std::span<const std::byte>(it->second).subspan(1, 4)) == MotionOsc{}.frequency_hz);
+    }
+    // The fixed drives: the fields are the parameters (the factory drive is axis).
+    {
+        IntentValueMap d{};
+        d.count = 2;
+        d.fields[0] = IntentValueField{7, IntentValue::ofU64(osc_drives::fixed)};
+        d.fields[1] = IntentValueField{12, IntentValue::ofU64(osc_drives::fixed)};
+        REQUIRE(rig->client->sendIntent(ch::osc_set, d).has_value());
+        rig->step();
+        REQUIRE(rig->del.nacks.empty());
+        rig->del.echoes = 0;
     }
     IntentValueMap m{};
     m.count = 6;
@@ -1822,4 +1840,79 @@ TEST_CASE("VD-PERSIST-2: under ESTOP a due write goes whatever the strip shows; 
     g_census.homing = false;
     rig->step(1);
     CHECK(rig->persisted == kPersistConfig);
+}
+
+// ---- SPEC 9.7 driven parameters and the osc-drive stream (bd val-o9r) -------------
+
+TEST_CASE("VD-OSC-DRIVE: drives default to axis, clamp and echo; osc-drive samples reach the motion task at their stamps") {
+    auto rig = std::make_unique<Rig>();
+    // attach pushed the factory set.
+    CHECK(g_osc.frequency_drive.drive == osc_drives::axis);
+    CHECK(g_osc.amplitude_drive.drive == osc_drives::axis);
+    CHECK(g_osc.frequency_drive.out_max == OSC_MAX_HZ);
+    CHECK(g_osc.amplitude_drive.out_max == 1.0f);
+    {
+        const auto it = rig->del.lastState.find(ch::oscillator);
+        REQUIRE(it != rig->del.lastState.end());
+        REQUIRE(it->second.size() == 57);
+        CHECK(it->second[23] == std::byte{osc_drives::axis});
+        CHECK(it->second[40] == std::byte{osc_drives::axis});
+    }
+    CHECK_FALSE(rig->device.sourceForChannel(ch::osc_drive).has_value());
+
+    IntentValueMap m{};
+    m.count = 4;
+    m.fields[0] = IntentValueField{7, IntentValue::ofU64(osc_drives::speed)};
+    m.fields[1] = IntentValueField{11, IntentValue::ofF32(500.0f)};   // past osc_max_hz
+    m.fields[2] = IntentValueField{13, IntentValue::ofF32(0.2f)};
+    m.fields[3] = IntentValueField{14, IntentValue::ofF32(0.8f)};
+    REQUIRE(rig->client->sendIntent(ch::osc_set, m).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(echoed(rig->del.lastEcho, 7)->u64_val == osc_drives::speed);
+    CHECK(echoed(rig->del.lastEcho, 11)->f32_val == OSC_MAX_HZ);
+    CHECK(echoed(rig->del.lastEcho, 13)->f32_val == doctest::Approx(0.2f));
+    CHECK(g_osc.frequency_drive.drive == osc_drives::speed);
+    CHECK(g_osc.amplitude_drive.in_min == doctest::Approx(0.2f));
+    CHECK(g_osc.amplitude_drive.in_max == doctest::Approx(0.8f));
+
+    // Equal input bounds have no map: refused, nothing moves.
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(13, IntentValue::ofF32(0.8f))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
+    CHECK(rig->del.nacks[0].detail == "drive in_min equals in_max");
+    CHECK(g_osc.amplitude_drive.in_min == doctest::Approx(0.2f));
+
+    // While a drive is bound the twin names the sine that plays.
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(4, IntentValue::ofU64(1))).has_value());
+    rig->step();
+    CHECK(echoed(rig->del.lastEcho, 4)->u64_val == 0);
+    CHECK(rig->del.lastState.find(ch::oscillator)->second[9] == std::byte{0});
+    CHECK(g_osc.shape == 1);
+    CHECK(rig->device.scheduleLatencyUs(ch::osc_drive) == kOscDriveLeadUs);
+
+    // Two samples 10 ms and 30 ms ahead: each handed over at arrival with its
+    // stamp, the frequency clamped into 0 .. 1.
+    g_oscDrives.clear();
+    const uint32_t now32 = uint32_t(g_clock.nowUs());
+    std::vector<std::byte> b(6 + 2 * 2 + 8 * 2, std::byte{0});
+    std::span<std::byte> out(b);
+    putU32(out.subspan(0, 4), now32 + 10'000);
+    out[4] = std::byte{2};
+    putU16(out.subspan(8, 2), 20'000);   // t_off[1] = 20 ms
+    putF32(out.subspan(10, 4), 0.5f);
+    putF32(out.subspan(14, 4), 0.25f);
+    putF32(out.subspan(18, 4), 0.75f);
+    putF32(out.subspan(22, 4), 1.5f);
+    const auto parsed = BundleView::parse(std::span<const std::byte>(b), 8);
+    REQUIRE(parsed.isOk());
+    rig->device.onStreamBundle(ch::osc_drive, 1, parsed.value());
+    REQUIRE(g_oscDrives.size() == 2);
+    CHECK(g_oscDrives[0].amplitude == 0.5f);
+    CHECK(g_oscDrives[0].frequency == 0.25f);
+    CHECK(g_oscDrives[0].at_us == g_clock.nowUs() + 10'000);
+    CHECK(g_oscDrives[1].amplitude == 0.75f);
+    CHECK(g_oscDrives[1].frequency == 1.0f);
+    CHECK(g_oscDrives[1].at_us == g_clock.nowUs() + 30'000);
 }
