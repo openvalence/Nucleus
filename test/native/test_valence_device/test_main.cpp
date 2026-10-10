@@ -1161,6 +1161,72 @@ TEST_CASE("VD-HOME-6: a failed cycle is logged in words with its leg; nothing is
     CHECK(stateF32(*rig, ch::machine_config, 33) == 0.0f);   // never measured
 }
 
+// bd val-3kd: while a real cycle's measurement stands, max_rail and the
+// window never reach past the stop it found.
+TEST_CASE("VD-HOME-7: after a real home, max_rail and the window clamp to the measured stroke, echoed") {
+    auto rig = std::make_unique<Rig>();
+    REQUIRE(rig->device.config().window_max == factory::window_max);   // 500, set before any home
+    completeHome(*rig, 267.69f);
+    CHECK(rig->device.config().max_rail == doctest::Approx(267.69f));
+    CHECK(rig->device.config().window_max == doctest::Approx(267.69f));   // the adoption cut it
+    CHECK(stateF32(*rig, ch::machine_config, 4) == doctest::Approx(267.69f));
+    CHECK(stateF32(*rig, ch::machine_config, 33) == doctest::Approx(267.69f));   // measured_stroke
+
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(8, IntentValue::ofF32(500.0f))).has_value());
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(2, IntentValue::ofF32(400.0f))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(echoed(rig->del.lastEcho, 2) != nullptr);
+    CHECK(echoed(rig->del.lastEcho, 2)->f32_val == doctest::Approx(267.69f));
+    CHECK(rig->device.config().max_rail == doctest::Approx(267.69f));
+    CHECK(stateF32(*rig, ch::machine_config, 24) == doctest::Approx(267.69f));
+
+    // Shorter than the measurement is the owner's to choose.
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(8, IntentValue::ofF32(200.0f))).has_value());
+    rig->step();
+    REQUIRE(echoed(rig->del.lastEcho, 8) != nullptr);
+    CHECK(echoed(rig->del.lastEcho, 8)->f32_val == 200.0f);
+
+    // A window bound past the stop has no legal nearest value.
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(1, IntentValue::ofF32(300.0f))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
+    CHECK(rig->del.nacks[0].detail == "window past the measured stroke");
+
+    // Unhomed, a longer rail's search can be asked for again.
+    g_census.homed = false;
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(8, IntentValue::ofF32(500.0f))).has_value());
+    rig->step();
+    REQUIRE(echoed(rig->del.lastEcho, 8) != nullptr);
+    CHECK(echoed(rig->del.lastEcho, 8)->f32_val == 500.0f);
+}
+
+TEST_CASE("VD-HOME-8: force_home measures nothing; a window wholly past the stop never blocks the adoption") {
+    // Homed by assertion only: the catalog ceiling, as before any home.
+    auto rig = std::make_unique<Rig>();
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(8, IntentValue::ofF32(800.0f))).has_value());
+    rig->step();
+    REQUIRE(echoed(rig->del.lastEcho, 8) != nullptr);
+    CHECK(echoed(rig->del.lastEcho, 8)->f32_val == 800.0f);
+
+    IntentValueMap win{};
+    win.count = 2;
+    win.fields[0] = IntentValueField{1, IntentValue::ofF32(300.0f)};
+    win.fields[1] = IntentValueField{2, IntentValue::ofF32(400.0f)};
+    REQUIRE(rig->client->sendIntent(ch::config_set, win).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    completeHome(*rig, 267.69f);
+    CHECK(rig->device.config().max_rail == doctest::Approx(267.69f));
+    CHECK(rig->device.config().window_min == 300.0f);   // left to the arbiter's hold
+    CHECK(rig->device.config().window_max == 400.0f);
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(3, IntentValue::ofF32(60.0f))).has_value());
+    rig->step();
+    CHECK(rig->del.nacks.empty());
+    CHECK(rig->device.config().jog_speed == 60.0f);
+}
+
 TEST_CASE("VD-MODES-9: home_speed writes on modes-set key 9, clamped, published at 0x1030's tail, stored") {
     auto rig = std::make_unique<Rig>();
     persistBitsOver(*rig, 2500);

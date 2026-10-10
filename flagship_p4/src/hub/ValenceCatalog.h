@@ -622,7 +622,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // rail; a completed home writes the usable length it measured into it
     // through config-set key 8's
     // own writer (operator ruling 2026-10-03, Valence RFC-101), so after a
-    // home the setting IS the measurement. `measured_stroke` (field 10, below)
+    // home the setting IS the measurement. While that home stands, max_rail
+    // and the window clamp to the measurement (ValenceDevice::applyConfig(),
+    // bd val-3kd); unhomed, max_rail can be raised for a longer rail's search.
+    // `measured_stroke` (field 10, below)
     // is this boot's raw measurement, read-only; a client never writes one
     // from the other.
     auto addMachineConfig = [&]() {

@@ -89,6 +89,7 @@ constexpr const char* kTag = "hub";
 constexpr const char* kDetailEstop = "e-stop latched";
 constexpr const char* kDetailPaused = "paused";
 constexpr const char* kDetailReturning = "returning to the paused position";
+constexpr const char* kDetailPastStroke = "window past the measured stroke";
 
 // Quiet time after the last applied change before a blob's persist is due,
 // the same for both blobs. It coalesces a burst (a slider drag streams
@@ -575,10 +576,23 @@ Ret ValenceDevice::applyConfig(const IntentValueMap& requested, bool& cfgChanged
         if (keys[k] != nullptr && !numberOf(keys[k])) return refuseNotANumber(ch::config_set, uint8_t(k + 1));
 
     // The window arrives in the client frame (RFC-088) and is stored physical.
-    const float rail = motionCensus().rail_mm;
+    const MotionCensus mo = motionCensus();
+    const float rail = mo.rail_mm;
     StoredConfig next = _cfg;
     for (size_t k = 0; k < keys.size(); ++k)
         if (keys[k] != nullptr) setConfigKey(next, uint8_t(k + 1), *numberOf(keys[k]), rail, _modes.flipped);
+
+    // While a real cycle's measurement stands (force_home measures nothing),
+    // nothing stored reaches past the stop it found (SPEC 9.6 RFC-101, bd
+    // val-3kd): max_rail clamps to it and a window set before the home is cut
+    // at it. A window wholly past it has no legal nearest value: a window
+    // write is refused, any other write leaves it to the arbiter's hold.
+    if (mo.homed && mo.home_rail_mm > 0.0f) {
+        const float stroke = std::clamp(mo.home_rail_mm, ceiling::rail_min, ceiling::rail_mm);
+        next.max_rail = std::min(next.max_rail, stroke);
+        if (next.window_min < stroke) next.window_max = std::min(next.window_max, stroke);
+        else if (f1 != nullptr || f2 != nullptr) return refuse(NackCode::INVALID_VALUE, kDetailPastStroke);
+    }
 
     // The one refusal of finite values: an inverted window has no legal
     // nearest value, so it is rejected rather than silently reordered.

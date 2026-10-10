@@ -1,7 +1,7 @@
 """Write the hub's config-set keys (0x3000). python hub_config.py [win_min win_max jog_v jog_a in_v in_a in_j [max_rail]]
 No arguments restores keys 1 to 7: window 0 to 100 and the factory jog and input limits (valence_config.h DEFAULT_*).
-Key 8 (max_rail) is written only when an eighth argument is given: the hub clamps key 8 to the catalog ceiling,
-not to the stroke a home measured, so a default write would put the window and the LP fence past the stop (val-3kd)."""
+Key 8 (max_rail) is written only when an eighth argument is given; after a real home the hub clamps it and the window
+to the measured stroke (val-3kd)."""
 import os, sys, time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'Valence', 'tools')))  # the sibling Valence checkout
 import valence_probe as sp, websocket
