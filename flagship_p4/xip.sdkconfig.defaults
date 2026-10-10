@@ -1,0 +1,7 @@
+# Kconfig overlay for the flagship_p4_bench_xip env (platformio.ini), listed
+# last in its SDKCONFIG_DEFAULTS. Code and rodata are copied to PSRAM at boot
+# and run from there, so an esp_flash erase/write takes a mutex instead of
+# disabling the cache and parking the other core (bd val-5gh).
+# Moves the memory map: turning it off in an existing build dir needs a clean
+# build (platformio.ini trap 1).
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
