@@ -981,6 +981,45 @@ TEST_CASE("RFC-095: a dwell lands as a hold segment, a live plan at rest on the 
     CHECK(r->census().anom[size_t(kinetic2::AnomalyKind::DwellZeroed)] == 0);
 }
 
+// bd val-0ep: a submit in the later half of a piece commits the curve through
+// its knot (Engine::commitHorizon); until the knot's time the census reads
+// that piece, never the segment after it.
+TEST_CASE("val-0ep: a commit through a knot keeps the plan census on the piece in flight") {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    auto segment = [&](float mm, uint32_t dur_us, uint64_t start) {
+        MotionIntent in;
+        in.source = MotionSource::Stream;
+        in.target_mm = mm;
+        in.duration_us = dur_us;
+        in.anchor_us = start;
+        return r->arb.accept(in, g_now_us);
+    };
+    const uint64_t t0 = g_now_us + 10'000;
+    REQUIRE(segment(300.0f, 400'000, t0));
+    REQUIRE(segment(100.0f, 400'000, t0 + 400'000));
+    r->run(310'000);
+    const MotionCensus before = r->census();
+    REQUIRE(before.target_mm == doctest::Approx(300.0f).epsilon(1e-3));
+    REQUIRE(before.plan_elapsed_us > 250'000u);
+
+    REQUIRE(segment(200.0f, 400'000, t0 + 800'000));
+    r->run(1000);
+    const MotionCensus c = r->census();
+    CHECK(c.target_mm == doctest::Approx(300.0f).epsilon(1e-3));
+    CHECK(c.plan_start == doctest::Approx(before.plan_start));
+    CHECK(double(c.plan_duration_us) == doctest::Approx(double(before.plan_duration_us)).epsilon(1e-3));
+    CHECK(double(c.plan_elapsed_us) == doctest::Approx(double(before.plan_elapsed_us) + 1000.0).epsilon(1e-3));
+
+    // Past the knot the next segment reads from it.
+    r->run(t0 + 401'000 - g_now_us);
+    const MotionCensus n = r->census();
+    CHECK(n.target_mm == doctest::Approx(100.0f).epsilon(1e-3));
+    CHECK(n.plan_start == doctest::Approx(c.plan_end));
+    CHECK(n.plan_elapsed_us < 5'000u);
+}
+
 // Homed at 0 mm, the window 100..300 mm, under the factory tuning.
 std::unique_ptr<Rig> rigAtOrigin() {
     auto r = rig();

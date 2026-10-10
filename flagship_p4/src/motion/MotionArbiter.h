@@ -471,6 +471,19 @@ private:
     // the plan (val-hlj).
     PlanRead _plan_read{};
     bool     _plan_busy = false;
+    // The segment the last read reported (engine frame, engine clock) and
+    // Engine::segStart's time at that read. A commit through a knot moves
+    // segStart to the knot while the committed curve still renders toward
+    // it; until the knot's time the read keeps the piece that began before
+    // it (val-0ep).
+    struct SegRead {
+        float    from_p = 0.0f, to_p = 0.0f;
+        uint64_t from_us = 0, to_us = 0;
+        uint8_t  flags = 0;
+    };
+    SegRead  _seg_read{};
+    uint64_t _seg_eng_us = 0;
+    bool     _seg_through = false;
 
     // THE STRIP: the plan's position at t0_us + i * kMotionTickUs, mm, for i
     // in [0, n). n is 0 (steer nothing) or kStripLen. gen is the engine reset

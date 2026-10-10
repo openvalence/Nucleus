@@ -476,6 +476,9 @@ void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
     _plan_read = PlanRead{};
     _plan_read.pos = _plan_read.start = _plan_read.target = p_norm;
     _plan_busy = false;
+    _seg_read    = SegRead{p_norm, p_norm, now_us, now_us, 0};
+    _seg_eng_us  = now_us;
+    _seg_through = false;
     // The steer re-anchors its feedforward here and steers nothing from a
     // strip published before this reset (steerTick()); the oscillation stops
     // with the plan it rode.
@@ -511,6 +514,8 @@ void MotionArbiter::reseedEngine(uint64_t now_us) {
     _k2_dirty = true;
     _k2_brake_from_p = restate(_k2_brake_from_p);
     _k2_brake_to_p   = restate(_k2_brake_to_p);
+    _seg_read.from_p = restate(_seg_read.from_p);
+    _seg_read.to_p   = restate(_seg_read.to_p);
     // The plan the strip was cut from, and the oscillation in millimeters:
     // its amplitude is a window share, so it moves to the new window's
     // through its fade, never in a step.
@@ -1448,6 +1453,11 @@ MotionArbiter::PlanRead MotionArbiter::readPlan(const kinetic2::State& st, uint6
     r.vel      = st.v;
     r.start    = st.p;
     r.target   = st.p;
+    uint64_t seg_us = 0;
+    const kinetic2::State seg = _engine.segStart(0, &seg_us);
+    const bool seg_moved = seg_us != _seg_eng_us;
+    _seg_eng_us = seg_us;
+    SegRead s;
     if (now_us < _k2_brake_to_us) {
         // A brake renders: PAUSE, a generator's stop, a starved stream.
         r.mode       = uint8_t(PlanStyle::settle);
@@ -1455,24 +1465,57 @@ MotionArbiter::PlanRead MotionArbiter::readPlan(const kinetic2::State& st, uint6
         r.target     = _k2_brake_to_p;
         r.duration_s = float(_k2_brake_to_us - _k2_brake_from_us) * 1e-6f;
         r.elapsed_s  = now_us > _k2_brake_from_us ? float(now_us - _k2_brake_from_us) * 1e-6f : 0.0f;
+        s = SegRead{_k2_brake_from_p, _k2_brake_to_p, _k2_brake_from_us, _k2_brake_to_us, 0};
+        _seg_through = false;
     } else if (_engine.pending() > 0) {
         // The segment in flight: from its authored start (Engine::segStart,
         // the knot retired before it or the accept on an axis at rest) to the
-        // first pending knot at its solved time.
+        // first pending knot at its solved time. A commit through a knot
+        // (Engine::commitHorizon) moves segStart to that knot at its time,
+        // still ahead: until then the piece in flight runs toward it from
+        // where the last read's began, or from the knot that read was
+        // heading for once that has passed. The plan sitting on the knot at
+        // its time tells it from a re-plan off a brake, which leaves
+        // segStart at the brake's end (val-0ep).
         const kinetic2::Solved& k = _engine.solved(0, 0);
-        uint64_t seg_us = 0;
-        const kinetic2::State seg = _engine.segStart(0, &seg_us);
+        bool through = seg_us > now_us && _seg_through;
+        if (seg_us > now_us && seg_moved) {
+            float at_seg = 0.0f;
+            _engine.peek(0, seg_us, kMotionTickUs, 1, &at_seg);
+            through = std::fabs(at_seg - seg.p) < 1e-5f;
+            if (through) {
+                const bool passed = _seg_read.to_us <= now_us;
+                s.from_p  = passed ? _seg_read.to_p : _seg_read.from_p;
+                s.from_us = passed ? _seg_read.to_us : _seg_read.from_us;
+                s.flags   = passed ? 0 : _seg_read.flags;
+            }
+        } else if (through) {
+            s = _seg_read;
+        }
+        if (through) {
+            s.to_p  = seg.p;
+            s.to_us = seg_us;
+        } else {
+            s = SegRead{seg.p, k.p, seg_us, k.t_us, 0};
+            // RFC-100 from the solver (registry plan_flags).
+            if (k.share < 1.0f) s.flags |= plan_flags::shaped;
+            if (k.stretched_s > 0.0f) s.flags |= plan_flags::stretched;
+            if (k.clamped) s.flags |= plan_flags::clamped;
+        }
+        _seg_through = through;
         r.mode       = uint8_t(_k2_chase ? PlanStyle::chase : PlanStyle::waveform);
         r.plan_kind  = kPlanKindBezier;
-        r.start      = seg.p;
-        r.target     = k.p;
-        r.duration_s = k.t_us > seg_us ? float(k.t_us - seg_us) * 1e-6f : 0.0f;
-        r.elapsed_s  = now_us > seg_us ? std::fmin(float(now_us - seg_us) * 1e-6f, r.duration_s) : 0.0f;
-        // RFC-100 from the solver (registry plan_flags).
-        if (k.share < 1.0f) r.flags |= plan_flags::shaped;
-        if (k.stretched_s > 0.0f) r.flags |= plan_flags::stretched;
-        if (k.clamped || _k2_window_clamped) r.flags |= plan_flags::clamped;
+        r.start      = s.from_p;
+        r.target     = s.to_p;
+        r.duration_s = s.to_us > s.from_us ? float(s.to_us - s.from_us) * 1e-6f : 0.0f;
+        r.elapsed_s  = now_us > s.from_us ? std::fmin(float(now_us - s.from_us) * 1e-6f, r.duration_s) : 0.0f;
+        r.flags      = s.flags;
+        if (_k2_window_clamped) r.flags |= plan_flags::clamped;
+    } else {
+        s = SegRead{st.p, st.p, now_us, now_us, 0};
+        _seg_through = false;
     }
+    _seg_read = s;
     return r;
 }
 
