@@ -1634,6 +1634,48 @@ TEST_CASE("VD-TR-4: home_speed and datagram_estop take a trial: live, marked, ne
     CHECK(stateU8(*rig, ch::machine_modes, 7) == 0x00);
 }
 
+// bd val-cem: the push of any config write hands the arbiter max_rail as its
+// rail (setWindow()), so a flipped window is mirrored about the max_rail the
+// same write leaves, never the rail of before it. The rig's motion layer is a
+// census: each step below sets the rail the arbiter's takeWindow() would.
+TEST_CASE("VD-FLIP-2: flipped, a write of max_rail and the window together lands the window where it was asked") {
+    auto rig = std::make_unique<Rig>();
+    g_census.rail_mm = rig->device.config().max_rail;   // 500, the factory rail
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(8, IntentValue::ofU64(1))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+
+    const auto write = [&](float lo, float hi, float rail) {
+        IntentValueMap m{};
+        m.count = 3;
+        m.fields[0] = IntentValueField{1, IntentValue::ofF32(lo)};
+        m.fields[1] = IntentValueField{2, IntentValue::ofF32(hi)};
+        m.fields[2] = IntentValueField{8, IntentValue::ofF32(rail)};
+        REQUIRE(rig->client->sendIntent(ch::config_set, m).has_value());
+        rig->step();
+        g_census.rail_mm = rig->device.config().max_rail;
+        rig->step();
+    };
+    // A longer rail: before the fix the window moved by the rail's change.
+    write(50.0f, 150.0f, 800.0f);
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(echoed(rig->del.lastEcho, 1)->f32_val == doctest::Approx(50.0f));
+    CHECK(echoed(rig->del.lastEcho, 2)->f32_val == doctest::Approx(150.0f));
+    CHECK(rig->device.config().window_min == doctest::Approx(650.0f));
+    CHECK(rig->device.config().window_max == doctest::Approx(750.0f));
+    CHECK(stateF32(*rig, ch::machine_config, 0) == doctest::Approx(50.0f));
+    CHECK(stateF32(*rig, ch::machine_config, 4) == doctest::Approx(150.0f));
+
+    // A shorter one: before the fix the window was mirrored past it and refused.
+    write(20.0f, 120.0f, 300.0f);
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(rig->device.config().window_min == doctest::Approx(180.0f));
+    CHECK(rig->device.config().window_max == doctest::Approx(280.0f));
+    CHECK(stateF32(*rig, ch::machine_config, 0) == doctest::Approx(20.0f));
+    CHECK(stateF32(*rig, ch::machine_config, 4) == doctest::Approx(120.0f));
+    CHECK(stateF32(*rig, ch::machine_config, 24) == doctest::Approx(300.0f));
+}
+
 // ---- RFC-087 supersede (bd val-dz9) ---------------------------------------------
 
 namespace {

@@ -636,12 +636,10 @@ Ret ValenceDevice::applyConfig(const IntentValueMap& requested, bool& cfgChanged
     for (size_t k = 0; k < keys.size(); ++k)
         if (keys[k] != nullptr && !numberOf(keys[k])) return refuseNotANumber(ch::config_set, uint8_t(k + 1));
 
-    // The window arrives in the client frame (RFC-088) and is stored physical.
     const MotionCensus mo = motionCensus();
-    const float rail = mo.rail_mm;
     StoredConfig next = _cfg;
-    for (size_t k = 0; k < keys.size(); ++k)
-        if (keys[k] != nullptr) setConfigKey(next, uint8_t(k + 1), *numberOf(keys[k]), rail, _modes.flipped);
+    for (size_t k = 2; k < keys.size(); ++k)
+        if (keys[k] != nullptr) setConfigKey(next, uint8_t(k + 1), *numberOf(keys[k]), 0.0f, false);
 
     // While a real cycle's measurement stands (force_home measures nothing),
     // max_rail never reaches past the stop it found (SPEC 9.6 RFC-101, bd
@@ -649,6 +647,13 @@ Ret ValenceDevice::applyConfig(const IntentValueMap& requested, bool& cfgChanged
     const bool measured = mo.homed && mo.home_rail_mm > 0.0f;
     const float stroke = measured ? std::clamp(mo.home_rail_mm, ceiling::rail_min, ceiling::rail_mm) : ceiling::rail_mm;
     next.max_rail = std::min(next.max_rail, stroke);
+
+    // The window arrives in the client frame (RFC-088) and is stored physical,
+    // mirrored about the rail the arbiter holds once this write is pushed:
+    // the max_rail it leaves, never the census rail of before it (bd val-cem).
+    const float rail = next.max_rail;
+    for (size_t k = 0; k < 2; ++k)
+        if (keys[k] != nullptr) setConfigKey(next, uint8_t(k + 1), *numberOf(keys[k]), rail, _modes.flipped);
 
     // The window is held inside max_rail, so inside the stop too (SPEC 9.6
     // RFC-101, bd val-8yv). A window write wholly past it has no legal nearest
@@ -1990,17 +1995,19 @@ std::expected<void, stored::ConfigReject> ValenceDevice::adoptConfigBlob(std::sp
 
 // The stored values are the live ones with every trialed key put back to its
 // pre-trial value (SPEC 9.3: a trial value is never persisted before its
-// commit). The window baseline is in the client frame, mapped by the flip and
-// rail of now; the flip is refused while a window key is on trial.
+// commit). The window baseline is in the client frame, mapped by the flip of
+// now about the stored max_rail; the flip is refused while a window key is on
+// trial.
 size_t ValenceDevice::encodeConfigBlob(std::span<std::byte> out, uint16_t cfgGen) const {
     StoredConfig c = _cfg;
     MotionTuning t = _tune;
     StoredModes m = _modes;
     if (_hub != nullptr && _hub->trialCount() > 0) {
-        const float rail = motionCensus().rail_mm;
-        for (uint8_t k = 1; k <= 8; ++k)
+        // Keys 3-8 first: the window is mirrored about the max_rail they
+        // leave, as a revert's applyConfig() mirrors it.
+        for (const uint8_t k : std::array<uint8_t, 8>{3, 4, 5, 6, 7, 8, 1, 2})
             if (const auto b = _hub->trialBaselineOf(ch::config_set, k))
-                setConfigKey(c, k, baselineNumber(k, *b), rail, _modes.flipped);
+                setConfigKey(c, k, baselineNumber(k, *b), c.max_rail, _modes.flipped);
         for (const uint8_t k : kTuningKeys)
             if (const auto b = _hub->trialBaselineOf(ch::kinetic_set, k)) (void)setTuningKey(t, k, baselineNumber(k, *b));
         if (const auto b = _hub->trialBaselineOf(ch::modes_set, 9)) t.home_speed = baselineNumber(9, *b);
