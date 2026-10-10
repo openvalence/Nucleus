@@ -1739,3 +1739,23 @@ TEST_CASE("VD-DGRAM: datagram_estop is configure tier, drives the datagram switc
     CHECK(estopDatagramEnabled());
     CHECK(modesByte() == std::byte{1});
 }
+
+// ---- RFC-096: the section separator is the registry's -----------------------------
+
+TEST_CASE("VD-GROUP: every group string in the catalog that has a section spells the registry's separator") {
+    auto rig = std::make_unique<Rig>();
+    const Catalog32& c = rig->catalog;
+    int sectioned = 0;
+    auto check = [&](std::string_view g) {
+        CAPTURE(std::string(g));
+        CHECK(sectionedByRegistry(g));
+        if (g.find('/') != std::string_view::npos) ++sectioned;
+    };
+    for (uint16_t i = 0; i < c.count; ++i) {
+        for (const LayoutField& f : c.layoutFields(c.entries[i])) check(f.group);
+        for (const SchemaField& f : c.schemaFields(c.entries[i])) check(f.group);
+    }
+    CHECK(sectioned > 0);
+    CHECK_FALSE(sectionedByRegistry("Tuning/Planner"));
+    CHECK_FALSE(sectionedByRegistry("Tuning /Planner"));
+}

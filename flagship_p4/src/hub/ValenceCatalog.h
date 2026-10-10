@@ -191,8 +191,10 @@ inline constexpr std::array<const char*, 4> kSourceLabels{"Jog", "Stream", "Clas
 
 // Card headings under the subgroups the folded categories became (RFC-094,
 // RENDERING §3). "<subgroup> / <card>": the first " / " names the section the
-// card sits under (Valence RFC-096 draft, a presentation convention; on the
-// wire it stays one free-text `group`, SPEC §8.8). Every drawn field of a
+// card sits under (RFC-096, RENDERING 3; the registry pins the spelling as
+// limits::group_section_separator; on the wire it stays one free-text
+// `group`, SPEC §8.8). Every sectioned heading lives here, checked against
+// the registry below. Every drawn field of a
 // `motion` entry that was `tuning`, and of a `system` entry that was
 // `library`, carries one. Masks and retired padding are never drawn and stay
 // ungrouped.
@@ -211,6 +213,24 @@ inline constexpr std::string_view replanning       = "Tuning / Re-planning";
 inline constexpr std::string_view pattern_presets  = "Library / Pattern presets";
 inline constexpr std::string_view safety           = "Tuning / Safety";
 }  // namespace card
+
+// RFC-096: true when a group string has no section, or its first '/' sits in
+// the registry's separator, spelled exactly.
+constexpr bool sectionedByRegistry(std::string_view group) {
+    const size_t at = group.find('/');
+    if (at == std::string_view::npos) return true;
+    constexpr std::string_view sep = valence::limits::group_section_separator;
+    const size_t lead = sep.find('/');
+    return at >= lead && group.substr(at - lead, sep.size()) == sep;
+}
+static_assert([] {
+    for (const std::string_view g : {card::active_plan, card::planner, card::anomalies, card::plan_time,
+                                     card::stream_ingress, card::motion_behavior, card::streaming,
+                                     card::sample_streams, card::curve, card::ceilings, card::replanning,
+                                     card::pattern_presets, card::safety})
+        if (!sectionedByRegistry(g)) return false;
+    return true;
+}(), "a card heading's section separator is the registry's (RFC-096)");
 
 // ---- motion-anomaly EVENT: the `body` (40) sub-map keys ---------------------
 // These are the CHANNEL'S OWN schema keys, exactly as valence::safety_body is
