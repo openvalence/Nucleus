@@ -59,7 +59,7 @@ def image_version(path):
 def diag_head(ip, timeout=10.0):
     """(version, img) from the /diag header, or (None, None) if nothing answered.
 
-    The header is '# <hub> <FIRMWARE_VERSION> slot=.. img=<valid|pending> ..';
+    The header is '# <hub> <FIRMWARE_VERSION> git=.. slot=.. img=<valid|pending> ..';
     img= is 'valid' once the image bought itself. ?from= past the end returns
     the header and the footer and nothing between, so this costs two lines
     rather than the whole archive.
