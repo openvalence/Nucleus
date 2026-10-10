@@ -177,6 +177,8 @@ MotorSwitchStatus motorSwitchStatus() { return g_switch; }
 bool motorSwitchFaultLine() { return false; }
 uint32_t motorSwitchStackFree() { return 0; }
 std::optional<float> motorSwitchThermVolts() { return std::nullopt; }
+PowerNow g_powerNow{};
+PowerNow motorSwitchPower() { return g_powerNow; }
 
 button::Gesture homeButtonTake() { return std::exchange(g_homeGesture, button::Gesture::none); }
 button::Gesture pairButtonTake() { return std::exchange(g_pairGesture, button::Gesture::none); }
@@ -240,7 +242,7 @@ struct Rig {
     RecordingClient del{};
     std::optional<Client> client{};
 
-    // motionHz > 0 also subscribes 0x1100 at that rate; hubStatus, 0x0006.
+    // motionHz > 0 also subscribes 0x1100 at that rate; hubStatus, 0x0006 and 0x1010.
     explicit Rig(AccessLevel role = AccessLevel::control, float motionHz = 0.0f, bool hubStatus = false) {
         g_census = MotionCensus{};
         g_census.homed = true;
@@ -264,6 +266,7 @@ struct Rig {
         g_stillWindowUs = 0;
         g_anomalies.clear();
         g_linkTcp = LinkTcp{};
+        g_powerNow = PowerNow{};
         REQUIRE(buildValenceCatalog(catalog, boardFeatures()));
         device.setUnvouchedRole(role);
         device.setSetupWritten(kSetupRequiredMask);
@@ -294,7 +297,10 @@ struct Rig {
                                   ch::oscillator, ch::plan_strip})
             REQUIRE(client->addSubscriptionWish(id, 0.0f, Priority::normal));
         if (motionHz > 0.0f) REQUIRE(client->addSubscriptionWish(ch::motion, motionHz, Priority::elevated));
-        if (hubStatus) REQUIRE(client->addSubscriptionWish(channels::hub_status, 1.0f, Priority::background));
+        if (hubStatus) {
+            REQUIRE(client->addSubscriptionWish(channels::hub_status, 1.0f, Priority::background));
+            REQUIRE(client->addSubscriptionWish(ch::power, 1.0f, Priority::background));
+        }
         REQUIRE(client->connect());
         step(200);
         REQUIRE(client->state() == ClientSessionState::LIVE);
@@ -2527,8 +2533,38 @@ TEST_CASE("VD-PWR: the power layout tags bus voltage and power draw as two roles
     const CatalogEntry* e = cat->find(ch::power);
     REQUIRE(e != nullptr);
     const auto f = cat->layoutFields(*e);
-    REQUIRE(f.size() == 5);
+    REQUIRE(f.size() == 3);
     CHECK((f[0].role == "telemetry.power.bus" && f[0].unitId == unit_ids::v));
-    CHECK((f[3].name == "draw_w10" && f[3].role == "telemetry.power.draw" && f[3].unitId == unit_ids::w));
-    CHECK(layoutWireSize(f) == 10);
+    CHECK((f[1].name == "draw_w10" && f[1].role == "telemetry.power.draw" && f[1].unitId == unit_ids::w));
+    CHECK(layoutWireSize(f) == 6);
+    CHECK(e->maxRateHz == 1.0f);
+}
+
+TEST_CASE("VD-PWR-PACK: 0x1010 carries the switch task's reading in mV and tenths of a watt, 65535 for none") {
+    auto rig = std::make_unique<Rig>(AccessLevel::control, 0.0f, true);
+    const CatalogEntry* e = rig->catalog.find(ch::power);
+    REQUIRE(e != nullptr);   // the board advertises it (boardFeatures, val-9hr)
+    REQUIRE(layoutWireSize(rig->catalog.layoutFields(*e)) == 4);
+    auto packed = [&]() {
+        const auto it = rig->del.lastState.find(ch::power);
+        REQUIRE(it != rig->del.lastState.end());
+        REQUIRE(it->second.size() == 4);
+        const std::span<const std::byte> s(it->second);
+        return std::pair{getU16(s.subspan(0, 2)), getU16(s.subspan(2, 2))};
+    };
+
+    g_powerNow = {36.0f, 12.34f};
+    rig->step(2500);
+    CHECK(packed() == std::pair<uint16_t, uint16_t>{36000, 123});
+
+    // A failed read: both fields go no reading, never 0.
+    g_powerNow = {};
+    rig->step(2500);
+    CHECK(packed() == std::pair<uint16_t, uint16_t>{65535, 65535});
+
+    // Voltage without a draw, a real 0 W, and a reading past the field saturating under none.
+    g_powerNow = {70.0f, 0.0f};
+    rig->step(2500);
+    CHECK(packed() == std::pair<uint16_t, uint16_t>{65534, 0});
+    g_powerNow = {};
 }

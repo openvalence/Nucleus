@@ -463,6 +463,16 @@ void publishOdometer(Hub& hub, const MotionCensus& m) {
     publishPacked(hub, ch::odometer, buf, n);
 }
 
+// Layout per ValenceCatalog.h's power entry: 4 B. A value the switch task has
+// no reading for goes out as 65535, never 0 (PowerHandoff's none, kept as is).
+void publishPower(Hub& hub, const PowerNow& p) {
+    std::array<std::byte, 4> buf{};
+    size_t n = 0;
+    packU16(buf, n, PowerHandoff::half(p.bus_v, 1000.0f));   // bus_mV
+    packU16(buf, n, PowerHandoff::half(p.draw_w, 10.0f));    // draw_w10
+    publishPacked(hub, ch::power, buf, n);
+}
+
 // Layout per ValenceCatalog.h's machine-modes entry: 13 B, plus home_style
 // only where has_drive put it in the catalog.
 void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, bool horizonOpen,
@@ -2123,6 +2133,7 @@ void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     publishPlanStrip(hub, mo);
     publishMotionDiag(hub, mo, _ingressDrops.total(), _segBundles);
     publishOdometer(hub, mo);
+    if (boardFeatures().has_current_sensor) publishPower(hub, motorSwitchPower());
     motionSetOscillator(_osc);
     publishOscillator(mo, true);
     if (boardFeatures().has_pattern) {
@@ -2327,6 +2338,7 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _lastSlowMs = nowMs;
         publishMotionDiag(*_hub, mo, _ingressDrops.total(), _segBundles);
         publishOdometer(*_hub, mo);
+        if (boardFeatures().has_current_sensor) publishPower(*_hub, motorSwitchPower());
     }
 
     if (_tuneDirty != 0) {
