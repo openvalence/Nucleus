@@ -1465,7 +1465,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .group = card::safety,
                       .desc = "E-stop from any device on the network",
                       .settingKey = 10, .hasSettingKey = true,
-                      .hasRank = true, .rank = valence::ui_ranks::control},
+                      .hasRank = true, .rank = valence::ui_ranks::advanced},
                      {"off", "on"});
     };
 
