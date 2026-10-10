@@ -191,7 +191,7 @@ struct MotionCensus {
     float    peak_mm_s      = 0.0f;
     // ---- the oscillator (RFC-103), as 0x1140 publishes it ----
     bool     osc_active     = false;  // rendering a nonzero amplitude at the plan's head
-    float    osc_amplitude  = 0.0f;   // that amplitude, window share (osc.amplitude_effective)
+    float    osc_amplitude  = 0.0f;   // that amplitude, peak mm (osc.amplitude_effective)
     bool     osc_stream_live = false; // an osc-drive stream is live: under stream_quiet_release_ms past its newest stamp
 };
 
@@ -199,8 +199,10 @@ struct MotionCensus {
 // number (0 fixed, 1 speed, 2 position, 3 axis), then SPEC 8.11's
 // linear_clamp bounds, in_min != in_max. speed reads mm/s and position mm of
 // the plan the oscillator rides, client frame; axis the osc-drive stream's
-// field, 0 .. 1. The factory drive is axis (operator ruling 2026-10-09, bd
-// val-o9r), so a script's V8/V9 drive it with no setup.
+// field, 0 .. 1. The outputs are the parameter's unit: Hz, or the
+// amplitude's mm (Valence RFC-112 item 3). The factory drive is axis
+// (operator ruling 2026-10-09, bd val-o9r), so a script's V8/V9 drive it
+// with no setup.
 struct MotionOscDrive {
     uint8_t drive   = 3;
     float   in_min  = 0.0f;
@@ -211,19 +213,21 @@ struct MotionOscDrive {
 };
 
 // The oscillator's parameters (RFC-103, SPEC 9.7) as 0x3140 speaks them: the
-// frequency in Hz, the amplitude a share of the window (the peak, half the
-// swing), the shape an osc_shapes number, each dwell a share of the moving
-// cycle, and what drives the frequency and the amplitude. A `fixed` drive
-// takes the parameter's own field. The defaults are the catalog's.
+// frequency in Hz, the amplitude in mm (the peak, half the swing; static,
+// no window change rescales it, Valence RFC-112), the shape an osc_shapes
+// number, each dwell a share of the moving cycle, and what drives the
+// frequency and the amplitude. A `fixed` drive takes the parameter's own
+// field. The defaults are the catalog's: 5 mm by hand, and a full V8 asks
+// 20 mm, about the most the factory speed ceiling lets a 10 Hz sine keep.
 struct MotionOsc {
     bool    enabled      = false;
     float   frequency_hz = 10.0f;
-    float   amplitude    = 0.01f;
+    float   amplitude    = 5.0f;
     uint8_t shape        = 0;
     float   dwell_crest  = 0.0f;
     float   dwell_trough = 0.0f;
     MotionOscDrive frequency_drive{.out_max = OSC_MAX_HZ};
-    MotionOscDrive amplitude_drive{};
+    MotionOscDrive amplitude_drive{.out_max = 20.0f};
     bool operator==(const MotionOsc&) const = default;
 };
 

@@ -333,6 +333,7 @@ inline constexpr float jerk_min   = 1000.0f;
 inline constexpr float jerk_max   = 50000000.0f;  // MAX_JERK_MM_S3
 inline constexpr float home_speed_min = 5.0f;     // MIN_HOME_SPEED_MM_S; its max is speed_max
 inline constexpr float osc_max_hz = 100.0f;       // OSC_MAX_HZ, WELCOME limits osc_max_hz
+inline constexpr float osc_amp_mm = 1000.0f;      // OSC_MAX_AMPLITUDE_MM, half of rail_mm
 inline constexpr float osc_dwell_max = 4.0f;      // the longest hold, four moving cycles
 }  // namespace ceiling
 
@@ -342,17 +343,19 @@ struct OscDriveCard {
     uint8_t key0;
     std::string_view drive, in_min, in_max, out_min, out_max, unit;
     float top;
+    bool has_unit_id;
+    uint8_t unit_id;
     std::string_view drive_desc, out_min_desc, out_max_desc;
     std::array<std::string_view, 5> roles;
 };
 inline constexpr std::array<OscDriveCard, 2> kOscDriveCards{{
     {7, "frequency_drive", "frequency_in_min", "frequency_in_max", "frequency_out_min", "frequency_out_max", "Hz",
-     ceiling::osc_max_hz, "What sets the frequency", "Frequency at the low input", "Frequency at the high input",
+     ceiling::osc_max_hz, false, 0, "What sets the frequency", "Frequency at the low input", "Frequency at the high input",
      {valence::field_roles::osc_frequency_drive, valence::field_roles::osc_frequency_in_min,
       valence::field_roles::osc_frequency_in_max, valence::field_roles::osc_frequency_out_min,
       valence::field_roles::osc_frequency_out_max}},
-    {12, "amplitude_drive", "amplitude_in_min", "amplitude_in_max", "amplitude_out_min", "amplitude_out_max", "",
-     1.0f, "What sets the amplitude", "Amplitude at the low input", "Amplitude at the high input",
+    {12, "amplitude_drive", "amplitude_in_min", "amplitude_in_max", "amplitude_out_min", "amplitude_out_max", "mm",
+     ceiling::osc_amp_mm, true, valence::unit_ids::mm, "What sets the amplitude", "Amplitude at the low input", "Amplitude at the high input",
      {valence::field_roles::osc_amplitude_drive, valence::field_roles::osc_amplitude_in_min,
       valence::field_roles::osc_amplitude_in_max, valence::field_roles::osc_amplitude_out_min,
       valence::field_roles::osc_amplitude_out_max}},
@@ -1663,11 +1666,12 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .desc = "Cycles a second, holds aside",
                       .step = 0.1f, .settingKey = 2, .hasSettingKey = true, .hasStep = true,
                       .hasUnitId = true, .unitId = valence::unit_ids::hz});
-    c.addLayoutField({.name = "amplitude", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+    c.addLayoutField({.name = "amplitude", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_amp_mm,
                       .dflt = SettingDefault::ofFloat(MotionOsc{}.amplitude), .group = "Oscillator",
-                      .desc = "Peak displacement, share of the window",
-                      .step = 0.001f, .settingKey = 3, .hasSettingKey = true, .hasStep = true});
+                      .desc = "Peak displacement",
+                      .step = 0.1f, .settingKey = 3, .hasSettingKey = true, .hasStep = true,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
     c.addSelectField({.name = "shape", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 3.0f,
                       .dflt = SettingDefault::ofInt(0), .group = "Oscillator",
@@ -1687,9 +1691,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "active", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .group = "Oscillator", .desc = "Rendering now",
                       .role = roles::osc_active});
-    c.addLayoutField({.name = "amplitude_effective", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
+    c.addLayoutField({.name = "amplitude_effective", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
                       .group = "Oscillator", .desc = "Peak displacement the ceilings and window leave",
-                      .role = roles::osc_amplitude_effective});
+                      .role = roles::osc_amplitude_effective,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
     for (const OscDriveCard& d : kOscDriveCards) {
         const MotionOscDrive dflt = d.key0 == 7 ? MotionOsc{}.frequency_drive : MotionOsc{}.amplitude_drive;
         c.addSelectField({.name = d.drive, .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
@@ -1710,12 +1715,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = d.top,
                           .dflt = SettingDefault::ofFloat(dflt.out_min), .group = "Oscillator",
                           .desc = d.out_min_desc,
-                          .settingKey = uint8_t(d.key0 + 3), .hasSettingKey = true});
+                          .settingKey = uint8_t(d.key0 + 3), .hasSettingKey = true,
+                          .hasUnitId = d.has_unit_id, .unitId = d.unit_id});
         c.addLayoutField({.name = d.out_max, .type = PackedFieldType::f32, .unit = d.unit, .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = d.top,
                           .dflt = SettingDefault::ofFloat(dflt.out_max), .group = "Oscillator",
                           .desc = d.out_max_desc,
-                          .settingKey = uint8_t(d.key0 + 4), .hasSettingKey = true});
+                          .settingKey = uint8_t(d.key0 + 4), .hasSettingKey = true,
+                          .hasUnitId = d.has_unit_id, .unitId = d.unit_id});
     }
     };
 
@@ -2283,9 +2290,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSchemaField({.key = 2, .name = "frequency", .type = CborFieldType::f32_t, .unit = "Hz",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_max_hz,
                       .role = roles::osc_frequency, .hasUnitId = true, .unitId = valence::unit_ids::hz});
-    c.addSchemaField({.key = 3, .name = "amplitude", .type = CborFieldType::f32_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
-                      .role = roles::osc_amplitude});
+    c.addSchemaField({.key = 3, .name = "amplitude", .type = CborFieldType::f32_t, .unit = "mm",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_amp_mm,
+                      .role = roles::osc_amplitude, .hasUnitId = true, .unitId = valence::unit_ids::mm});
     c.addSelectSchemaField({.key = 4, .name = "shape", .type = CborFieldType::uint_t, .unit = "",
                             .hasMin = true, .hasMax = true, .min = 0.0f, .max = 3.0f,
                             .role = roles::osc_shape},
@@ -2308,10 +2315,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                           .role = d.roles[2]});
         c.addSchemaField({.key = uint8_t(d.key0 + 3), .name = d.out_min, .type = CborFieldType::f32_t,
                           .unit = d.unit, .hasMin = true, .hasMax = true, .min = 0.0f, .max = d.top,
-                          .role = d.roles[3]});
+                          .role = d.roles[3], .hasUnitId = d.has_unit_id, .unitId = d.unit_id});
         c.addSchemaField({.key = uint8_t(d.key0 + 4), .name = d.out_max, .type = CborFieldType::f32_t,
                           .unit = d.unit, .hasMin = true, .hasMax = true, .min = 0.0f, .max = d.top,
-                          .role = d.roles[4]});
+                          .role = d.roles[4], .hasUnitId = d.has_unit_id, .unitId = d.unit_id});
     }
     };
 

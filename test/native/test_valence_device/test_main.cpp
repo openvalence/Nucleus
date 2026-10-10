@@ -1831,7 +1831,7 @@ TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publish
     m.count = 6;
     m.fields[0] = IntentValueField{1, IntentValue::ofBool(true)};
     m.fields[1] = IntentValueField{2, IntentValue::ofF32(150.0f)};   // past osc_max_hz
-    m.fields[2] = IntentValueField{3, IntentValue::ofF32(0.05f)};
+    m.fields[2] = IntentValueField{3, IntentValue::ofF32(5000.0f)};  // mm, past the ceiling
     m.fields[3] = IntentValueField{4, IntentValue::ofU64(1)};        // square
     m.fields[4] = IntentValueField{5, IntentValue::ofF32(0.333f)};   // two decimals
     m.fields[5] = IntentValueField{6, IntentValue::ofF32(9.0f)};     // past the longest hold
@@ -1841,15 +1841,16 @@ TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publish
     REQUIRE(rig->del.echoes == 1);
     CHECK(echoed(rig->del.lastEcho, 1)->bool_val);
     CHECK(echoed(rig->del.lastEcho, 2)->f32_val == OSC_MAX_HZ);
+    CHECK(echoed(rig->del.lastEcho, 3)->f32_val == OSC_MAX_AMPLITUDE_MM);
     CHECK(echoed(rig->del.lastEcho, 5)->f32_val == doctest::Approx(0.33f));
     CHECK(echoed(rig->del.lastEcho, 6)->f32_val == doctest::Approx(4.0f));
     CHECK(g_osc.enabled);
     CHECK(g_osc.frequency_hz == OSC_MAX_HZ);
-    CHECK(g_osc.amplitude == doctest::Approx(0.05f));
+    CHECK(g_osc.amplitude == OSC_MAX_AMPLITUDE_MM);
     CHECK(g_osc.shape == 1);
     // 0x1140: the applied parameters, then what renders, the census's.
     g_census.osc_active = true;
-    g_census.osc_amplitude = 0.04f;
+    g_census.osc_amplitude = 4.0f;
     rig->step(60);
     {
         const auto it = rig->del.lastState.find(ch::oscillator);
@@ -1857,12 +1858,34 @@ TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publish
         const std::span<const std::byte> b(it->second);
         CHECK(b[0] == std::byte{1});
         CHECK(getF32(b.subspan(1, 4)) == OSC_MAX_HZ);
-        CHECK(getF32(b.subspan(5, 4)) == doctest::Approx(0.05f));
+        CHECK(getF32(b.subspan(5, 4)) == OSC_MAX_AMPLITUDE_MM);
         CHECK(b[9] == std::byte{1});
         CHECK(getF32(b.subspan(10, 4)) == doctest::Approx(0.33f));
         CHECK(getF32(b.subspan(14, 4)) == doctest::Approx(4.0f));
         CHECK(b[18] == std::byte{1});
-        CHECK(getF32(b.subspan(19, 4)) == doctest::Approx(0.04f));
+        CHECK(getF32(b.subspan(19, 4)) == doctest::Approx(4.0f));
+    }
+    // Valence RFC-112: the four amplitude fields are mm to the ceiling, on
+    // the intent and on the twin.
+    {
+        auto mm = [](std::string_view name, std::string_view unit, bool hasUnitId, uint8_t unitId, bool hasMax,
+                     float max) {
+            CAPTURE(name);
+            CHECK(unit == "mm");
+            CHECK(hasUnitId);
+            CHECK(unitId == valence::unit_ids::mm);
+            if (name != "amplitude_effective") CHECK((hasMax && max == OSC_MAX_AMPLITUDE_MM));
+        };
+        auto amplitude = [](std::string_view n) {
+            return n == "amplitude" || n == "amplitude_out_min" || n == "amplitude_out_max" ||
+                   n == "amplitude_effective";
+        };
+        size_t seen = 0;
+        for (const LayoutField& f : rig->catalog.layoutFields(*rig->catalog.find(ch::oscillator)))
+            if (amplitude(f.name)) mm(f.name, f.unit, f.hasUnitId, f.unitId, f.hasMax, f.max), ++seen;
+        for (const SchemaField& f : rig->catalog.schemaFields(*rig->catalog.find(ch::osc_set)))
+            if (amplitude(f.name)) mm(f.name, f.unit, f.hasUnitId, f.unitId, f.hasMax, f.max), ++seen;
+        CHECK(seen == 7);
     }
     // A NaN refuses the whole write: nothing moves.
     IntentValueMap bad{};
@@ -2013,7 +2036,8 @@ TEST_CASE("VD-OSC-DRIVE: drives default to axis, clamp and echo; osc-drive sampl
     CHECK(g_osc.frequency_drive.drive == osc_drives::axis);
     CHECK(g_osc.amplitude_drive.drive == osc_drives::axis);
     CHECK(g_osc.frequency_drive.out_max == OSC_MAX_HZ);
-    CHECK(g_osc.amplitude_drive.out_max == 1.0f);
+    CHECK(g_osc.amplitude_drive.out_max == 20.0f);   // mm: a full V8
+    CHECK(g_osc.amplitude == 5.0f);                  // mm by hand
     {
         const auto it = rig->del.lastState.find(ch::oscillator);
         REQUIRE(it != rig->del.lastState.end());

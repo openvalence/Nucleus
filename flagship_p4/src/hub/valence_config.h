@@ -34,9 +34,9 @@
 
 #define FIRMWARE_MAJOR_MINOR "0.1"
 #if NUCLEUS_BENCH_NO_MOTOR
-#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".39-p4hub-bench"
+#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".40-p4hub-bench"
 #else
-#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".39-p4hub"
+#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".40-p4hub"
 #endif
 
 // Identity strings for WELCOME key 37 (RFC-016a). Static storage, so the views
@@ -77,6 +77,10 @@
 // (0.05 mm at 100 Hz under the factory set, test_motion_arbiter). NOT MEASURED
 // on the loaded drive (bd val-ael).
 #define OSC_MAX_HZ                  100.0f
+// The largest peak osc.amplitude takes, mm: half the longest rail configValid
+// accepts (ceiling::rail_mm), the most any window could hold (Valence RFC-112
+// item 1). The window and the ceilings narrow it at render, never the write.
+#define OSC_MAX_AMPLITUDE_MM        1000.0f
 
 #ifdef __cplusplus
 namespace valence {

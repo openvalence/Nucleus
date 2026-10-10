@@ -98,11 +98,20 @@ window is solved at the next sample, and the sampler evaluates it.
   than that can exceed a ceiling until the fade ends. It renders nothing
   unhomed or uncommissioned; PAUSE cuts it at once, the strip carrying `cut`
   so the kick closes the gap and no late plan is counted; an engine reset
-  stops it; a window move rescales it, never a step. Its parameters cross from
-  the hub task as a seqlocked post (`setOscillator()`) [verified 2026-10-09 --
-  test_motion_arbiter, the oscillator cases: the strip under 300 mm strokes at
-  the input set keeps every ceiling and the window, sheds to under a step at
-  full speed].
+  stops it. Its parameters cross from the hub task as a seqlocked post
+  (`setOscillator()`) [verified 2026-10-09 -- test_motion_arbiter, the
+  oscillator cases: the strip under 300 mm strokes at the input set keeps
+  every ceiling and the window, sheds to under a step at full speed].
+  **Millimeters (Valence RFC-112, ahead of the pinned SPEC).** The amplitude,
+  its drive's out bounds and osc.amplitude_effective are a peak in mm, capped
+  by `OSC_MAX_AMPLITUDE_MM` and nothing else. The stage runs in mm, rail
+  frame: `fillStrip()` converts the plan it reads, the ceilings are the input
+  set's mm, the window is the backstop's, so a window move changes none of it
+  and Kinetic's `rescale()` is never called. A swing wider than the room is
+  narrowed about the plan, never shifted [verified 2026-10-10 --
+  test_motion_arbiter: 5 mm by hand and a 10 mm V8 hold through a window a
+  fifth the size; a window edge 3 mm from the rest narrows it to 3 mm about
+  the rest, and the room given back plays 5 mm again].
   **Driven parameters (SPEC 9.7, bd val-o9r; Valence RFC-110, ahead of the
   pinned SPEC).** A parameter driven by a live input, a speed or position
   drive or an `axis` drive while an osc-drive stream is live (under

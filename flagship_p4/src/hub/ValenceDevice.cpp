@@ -1194,14 +1194,16 @@ Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
         _oscSession = _hub != nullptr ? _hub->intentSession() : 0;
     }
     if (f2) o.frequency_hz = clampf(*numberOf(f2), 0.0f, ceiling::osc_max_hz);
-    if (f3) o.amplitude = clampf(*numberOf(f3), 0.0f, 1.0f);
+    // A length, clamped to the ceiling and nothing else: the window and the
+    // ceilings narrow it at render (Valence RFC-112 items 1 and 2).
+    if (f3) o.amplitude = clampf(*numberOf(f3), 0.0f, ceiling::osc_amp_mm);
     if (f4) o.shape = uint8_t(wholeIn(*numberOf(f4), 0.0f, 3.0f));
     if (f5) o.dwell_crest = dwell(*numberOf(f5));
     if (f6) o.dwell_trough = dwell(*numberOf(f6));
     // A drive's select, its input bounds as given, its output bounds clamped
     // into the parameter's range; equal input bounds have no map (SPEC 8.11).
     MotionOscDrive* drives[2] = {&o.frequency_drive, &o.amplitude_drive};
-    const float tops[2] = {ceiling::osc_max_hz, 1.0f};
+    const float tops[2] = {ceiling::osc_max_hz, ceiling::osc_amp_mm};
     for (int d = 0; d < 2; ++d) {
         const auto** f = &fd[size_t(5 * d)];
         MotionOscDrive& m = *drives[d];
