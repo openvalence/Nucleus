@@ -33,6 +33,11 @@
 
 namespace valence {
 
+// The PAIR button, pressed once: the delegate takes it at the next hub tick
+// and opens the presence window, as the board's press does
+// (ValenceDevice::serviceButtons). The thread that calls pass().
+void simPairPress();
+
 // The board's three NVS keys, as blobs a front stores where it likes.
 enum class SimBlob : uint8_t { cfg = 1, presets = 2, iid = 3 };
 

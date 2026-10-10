@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string_view>
+#include <utility>
 
 #include "SimMotion.h"
 #include "SimMotorSwitch.h"
@@ -20,10 +21,15 @@
 namespace valence {
 
 uint32_t deviceFreeHeapBytes() { return 0; }
-// The twin has no buttons: the pairing_window option stands in for PAIR, and
-// HOME's reboot has no meaning for a desktop process.
+// The twin has no HOME button: its reboot has no meaning for a desktop
+// process. PAIR is the front's simPairPress(); the pairing_window option opens
+// the same window at boot.
+namespace {
+button::Gesture g_pairPress = button::Gesture::none;
+}  // namespace
 button::Gesture homeButtonTake() { return button::Gesture::none; }
-button::Gesture pairButtonTake() { return button::Gesture::none; }
+button::Gesture pairButtonTake() { return std::exchange(g_pairPress, button::Gesture::none); }
+void simPairPress() { g_pairPress = button::Gesture::press; }
 // The twin has no drive: DRV_ALM never asserts.
 bool driveAlarmTake() { return false; }
 // The twin has no e-stop wired: it reads present and released, always.
