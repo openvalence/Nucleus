@@ -1643,7 +1643,7 @@ TEST_CASE("VD-K2-2: smoothness, handle_floor, trim_max and react_ms write on kin
 
 // ---- RFC-103: the oscillator (bd val-dzf) -------------------------------------------
 
-TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publishes 0x1140; a session's end clears it") {
+TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publishes 0x1140; its session's end clears it") {
     auto rig = std::make_unique<Rig>();
     // Published at attach: off, at the factory values.
     {
@@ -1711,9 +1711,9 @@ TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publish
     REQUIRE(rig->del.nacks.size() == 1);
     CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
     CHECK(g_osc.enabled);
-    // A session's end clears enabled (SPEC 9.7), publishes it, moves cfg_gen.
+    // Its session's end clears enabled (SPEC 9.7), publishes it, moves cfg_gen.
     const uint16_t gen = rig->hub->cfgGen();
-    rig->device.onSessionLeft(0x1234);
+    rig->device.onSessionLeft(rig->client->sessionId());
     rig->step();
     CHECK_FALSE(g_osc.enabled);
     CHECK(rig->hub->cfgGen() != gen);
@@ -1915,4 +1915,80 @@ TEST_CASE("VD-OSC-DRIVE: drives default to axis, clamp and echo; osc-drive sampl
     CHECK(g_oscDrives[1].amplitude == 0.75f);
     CHECK(g_oscDrives[1].frequency == 1.0f);
     CHECK(g_oscDrives[1].at_us == g_clock.nowUs() + 30'000);
+}
+
+// ---- the session behind osc.enabled (Valence rfc-ns5c) ----------------------
+
+TEST_CASE("VD-OSC-SESSION: only the end of the session that set osc.enabled clears it, its silence included") {
+    auto rig = std::make_unique<Rig>();
+    const uint32_t mine = rig->client->sessionId();
+    REQUIRE(mine != 0);
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(1, IntentValue::ofBool(true))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(g_osc.enabled);
+    // Another session's end, by either door: it stays on, nothing published.
+    const uint16_t gen = rig->hub->cfgGen();
+    rig->device.onSessionStale(mine + 1);
+    rig->device.onSessionLeft(mine + 1);
+    rig->step();
+    CHECK(g_osc.enabled);
+    CHECK(rig->hub->cfgGen() == gen);
+    CHECK(rig->del.lastState[ch::oscillator][0] == std::byte{1});
+    // A write that leaves osc.enabled out keeps its writer.
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(2, IntentValue::ofF32(12.0f))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    // The writer falls silent: the hub's own STALE door clears it.
+    bool cleared = false;
+    for (int i = 0; i < 6000 && !cleared; ++i) {
+        g_clock.advanceUs(10'000);
+        rig->hub->update(g_clock.nowUs());
+        rig->device.tick(g_clock.nowUs() / 1000);
+        cleared = !g_osc.enabled;
+    }
+    CHECK(cleared);
+    CHECK(rig->hub->cfgGen() != gen);
+}
+
+TEST_CASE("VD-OSC-SESSION-2: the stale hook clears the writer's setting and publishes it") {
+    auto rig = std::make_unique<Rig>();
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(1, IntentValue::ofBool(true))).has_value());
+    rig->step();
+    REQUIRE(g_osc.enabled);
+    const uint16_t gen = rig->hub->cfgGen();
+    rig->device.onSessionStale(rig->client->sessionId());
+    rig->step();
+    CHECK_FALSE(g_osc.enabled);
+    CHECK(rig->hub->cfgGen() != gen);
+    CHECK(rig->del.lastState[ch::oscillator][0] == std::byte{0});
+    // WELCOME limits key 7 is the frequency bound.
+    CHECK(rig->device.oscMaxHz() == OSC_MAX_HZ);
+}
+
+TEST_CASE("VD-HOME-OSC: home op 1 is refused INTERLOCK while the oscillator is on or renders; off, it starts") {
+    auto rig = std::make_unique<Rig>();
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(1, IntentValue::ofBool(true))).has_value());
+    rig->step();
+    REQUIRE(g_osc.enabled);
+    REQUIRE(rig->client->sendIntent(ch::home, homeOp1()).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INTERLOCK);
+    CHECK(rig->del.nacks[0].detail == "oscillating: disable the oscillator first");
+    CHECK(g_homeCalls == 0);
+    // Disabled, but a stream still renders it.
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(1, IntentValue::ofBool(false))).has_value());
+    rig->step();
+    g_census.osc_active = true;
+    REQUIRE(rig->client->sendIntent(ch::home, homeOp1()).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 2);
+    CHECK(rig->del.nacks[1].code == NackCode::INTERLOCK);
+    CHECK(g_homeCalls == 0);
+    g_census.osc_active = false;
+    REQUIRE(rig->client->sendIntent(ch::home, homeOp1()).has_value());
+    rig->step();
+    CHECK(rig->del.nacks.size() == 2);
+    CHECK(g_homeCalls == 1);
 }

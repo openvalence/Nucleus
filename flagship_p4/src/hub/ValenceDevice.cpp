@@ -1136,8 +1136,12 @@ Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
     // Two decimals (SPEC 9.7).
     auto dwell = [](float v) { return std::round(clampf(v, 0.0f, ceiling::osc_dwell_max) * 100.0f) / 100.0f; };
     const MotionOsc was = _osc;
+    const uint32_t wasSession = _oscSession;
     MotionOsc& o = _osc;
-    if (f1) o.enabled = *boolOf(f1);
+    if (f1) {
+        o.enabled = *boolOf(f1);
+        _oscSession = _hub != nullptr ? _hub->intentSession() : 0;
+    }
     if (f2) o.frequency_hz = clampf(*numberOf(f2), 0.0f, ceiling::osc_max_hz);
     if (f3) o.amplitude = clampf(*numberOf(f3), 0.0f, 1.0f);
     if (f4) o.shape = uint8_t(wholeIn(*numberOf(f4), 0.0f, 3.0f));
@@ -1157,6 +1161,7 @@ Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
         if (f[4]) m.out_max = clampf(*numberOf(f[4]), 0.0f, tops[d]);
         if (!(m.in_min != m.in_max)) {
             o = was;
+            _oscSession = wasSession;
             return refuse(NackCode::INVALID_VALUE, "drive in_min equals in_max");
         }
     }
@@ -1453,6 +1458,10 @@ Ret ValenceDevice::applyHome(const IntentValueMap& requested) {
                                     (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
             if (overrideOn || _returnPending) return refuse(NackCode::INTERLOCK, "override latched: return first");
             if (c.busy && !c.homing) return refuse(NackCode::INTERLOCK, "moving: pause first");
+            // Operator ruling 2026-10-09 (Valence rfc-ns5c item 3): a home
+            // cycle is the one thing an oscillating machine refuses.
+            if (_osc.enabled || c.osc_active)
+                return refuse(NackCode::INTERLOCK, "oscillating: disable the oscillator first");
             switch (motionHome()) {
                 case HomeStart::started:
                     break;
@@ -1689,18 +1698,24 @@ void ValenceDevice::onSessionJoined(uint32_t session_id) {
 
 void ValenceDevice::onSessionLeft(uint32_t session_id) {
     GLOGI(kTag, "session %lu left", static_cast<unsigned long>(session_id));
-    // SPEC 9.7: no oscillation outlives the hand that enabled it. The hub does
-    // not tell the delegate which session wrote 0x3140, so any session's end
-    // clears it: never late, and early while several are attached (bd Valence rfc-ns5c).
-    if (_osc.enabled) {
-        _osc.enabled = false;
-        motionSetOscillator(_osc);
-        _oscDirty = true;
-        _oscCleared = true;
-        GLOGI(kTag, "oscillator off: session %lu left", static_cast<unsigned long>(session_id));
-    }
-    (void)session_id;
+    oscSessionEnded(session_id, "left");
 }
+
+void ValenceDevice::onSessionStale(uint32_t session_id) { oscSessionEnded(session_id, "went stale"); }
+
+// SPEC 9.7: no oscillation outlives the hand that enabled it. A writer the hub
+// did not name (0) is cleared by any session's end, never late.
+void ValenceDevice::oscSessionEnded(uint32_t session_id, const char* how) {
+    if (!_osc.enabled || (_oscSession != 0 && _oscSession != session_id)) return;
+    _osc.enabled = false;
+    motionSetOscillator(_osc);
+    _oscDirty = true;
+    _oscCleared = true;
+    GLOGI(kTag, "oscillator off: session %lu %s", static_cast<unsigned long>(session_id), how);
+    (void)how;
+}
+
+float ValenceDevice::oscMaxHz() { return OSC_MAX_HZ; }
 
 // §11.4: every transition lands in _owner, the jog's SOURCE_CONFLICT answer.
 // A release (owner 0) comes on a session's way out, whether it went STALE or

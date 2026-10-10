@@ -188,6 +188,8 @@ public:
                         const BundleView& bundle) override;
     void onSessionJoined(uint32_t session_id) override;
     void onSessionLeft(uint32_t session_id) override;
+    void onSessionStale(uint32_t session_id) override;
+    float oscMaxHz() override;
     void onSourceOwnership(uint8_t source_id, uint32_t owner_session, uint8_t reason) override;
     uint8_t sourceKind(uint8_t source_id) override;
     bool sourceQuiet(uint8_t source_id) override;
@@ -359,12 +361,17 @@ private:
 
     // The oscillator as 0x3140 last set it: this copy IS the setting, pushed
     // to the motion task on every change, never persisted (enabled boots
-    // false). _oscCleared: a session's end cleared enabled, a hub-side change
-    // whose cfg_gen bump follows its twin's publish.
+    // false). _oscSession: the session that last wrote osc.enabled, 0 when
+    // none is known. _oscCleared: that session's end cleared enabled, a
+    // hub-side change whose cfg_gen bump follows its twin's publish.
     MotionOsc _osc{};
     std::array<std::byte, 57> _sentOsc{};
+    uint32_t _oscSession = 0;
     bool _oscDirty = false;
     bool _oscCleared = false;
+    // SPEC 9.7: the end of the session behind osc.enabled (any door, STALE
+    // included) clears it; another session's end does not.
+    void oscSessionEnded(uint32_t session_id, const char* how);
 
     // The osc-drive stream (SPEC 9.7): each sample to the motion task at once.
     void takeOscDrive(const BundleView& bundle);
