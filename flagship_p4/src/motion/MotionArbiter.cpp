@@ -1026,6 +1026,29 @@ bool MotionArbiter::stripAt(const PlanStrip& s, uint64_t t_us, float& p_mm) {
     return true;
 }
 
+bool MotionArbiter::stillFor(uint64_t now_us, uint32_t window_us) const {
+    if (_lock) _lock(true);
+    const PlanStrip& s = _strip_pub;
+    bool still = true;
+    if (s.n > 0) {
+        const size_t last = size_t(s.n) - 1;
+        const uint64_t end_us = now_us + window_us;
+        const size_t i0 = now_us > s.t0_us ? size_t(std::min<uint64_t>((now_us - s.t0_us) / kMotionTickUs, last)) : 0;
+        // The entry at or after the window's end, so the scan covers it.
+        const size_t i1 = end_us > s.t0_us
+                              ? size_t(std::min<uint64_t>((end_us - s.t0_us + kMotionTickUs - 1) / kMotionTickUs, last))
+                              : 0;
+        float lo = s.p_mm[i0], hi = lo;
+        for (size_t i = i0 + 1; i <= i1; ++i) {
+            lo = std::fmin(lo, s.p_mm[i]);
+            hi = std::fmax(hi, s.p_mm[i]);
+        }
+        still = hi - lo < kMmPerStep;
+    }
+    if (_lock) _lock(false);
+    return still;
+}
+
 // ---- the steer's tick -------------------------------------------------------
 
 void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {

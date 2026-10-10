@@ -137,8 +137,9 @@ public:
 
     // The device half of one hub tick. Call on the hub task right after
     // Hub::update(). Returns the kPersist* bits whose debounced write is due
-    // NOW; each is returned once, so a composition that cannot write yet
-    // holds the bits itself. The config blob takes the hub's cfgGen() at
+    // NOW, which waits for a still window (ValenceDevice.cpp kPersistStillUs);
+    // each is returned once, so a composition that cannot write yet holds the
+    // bits itself. The config blob takes the hub's cfgGen() at
     // write time.
     uint8_t tick(uint32_t nowMs);
 

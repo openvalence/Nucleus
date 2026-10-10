@@ -20,7 +20,8 @@
 //   the pending knots and the solver's fixed arrays), so the engine is sampled
 //   on the planner and nowhere else (T1, memory-budget.md T21).
 // - THE ENGINE IS TOUCHED BY THE PLANNER ONLY. The steer reads the plan as the
-//   arbiter's strip under g_strip_mux. Every other cross-task reader goes
+//   arbiter's strip under g_strip_mux, and the hub task's persist gate scans
+//   it there (motionStillFor()). Every other cross-task reader goes
 //   through _pub, a plain POD the planner refreshes under _mux; census()
 //   copies it under the same lock and calls nothing.
 // See: ValenceMotion.h, MotionArbiter.h, .claude/rules/motion-control.md,
@@ -125,7 +126,7 @@ private:
 };
 
 // The strip's lock (MotionArbiter::Lock): held for one PlanStrip copy on either
-// motion task, never anything else.
+// motion task, or one stillFor() scan on the hub task, never anything else.
 portMUX_TYPE g_strip_mux = portMUX_INITIALIZER_UNLOCKED;
 void stripLock(bool hold) {
     if (hold) portENTER_CRITICAL(&g_strip_mux);
@@ -368,6 +369,7 @@ void motionSetWindow(float lo, float hi, float rail) { g_motion.arbiter().setWin
 void motionNoteStream(uint32_t b, uint32_t s, uint32_t d) { g_motion.arbiter().noteStream(b, s, d); }
 float motionForceHome(float stroke_mm) { return g_motion.arbiter().forceHome(stroke_mm); }
 MotionCensus motionCensus() { return g_motion.census(); }
+bool motionStillFor(uint32_t window_us) { return g_motion.arbiter().stillFor(espNowUs(), window_us); }
 uint32_t motionSteerStackFree() { return g_motion.steerStackFree(); }
 
 void motionSetTuning(const MotionTuning& t) { g_motion.setTuning(t); }

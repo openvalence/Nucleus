@@ -225,6 +225,9 @@ per sample, decoded in numpy; board `val-091.3`].
   beyond the poll grid]. Never move edge rendering back to an HP-resident
   renderer. A cache-off window longer than `kLeaseUs` during motion now stops
   the carriage by design: the steer task cannot renew the lease through it.
+  So a settings write waits for a still window: the published strip still
+  for `kPersistStillUs` from now, or ESTOP, never a home cycle
+  (`ValenceDevice.cpp`, operator ruling 2026-10-09, bd val-4rr).
 - **The fence: two words, `g_fence_lo` and `g_fence_hi`, in `g_pos`'s frame.**
   No edge takes the count below the low word or above the high one; an edge
   past it is withheld (no store, no count, `g_fence_hits`), its deadline still

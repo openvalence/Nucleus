@@ -515,6 +515,12 @@ public:
         if (_lock) _lock(false);
         return s;
     }
+    // Any task. True when the published strip holds the plan within a step
+    // from now_us through now_us + window_us (past its end the last entry
+    // holds), or no strip renders. One scan of at most window_us /
+    // kMotionTickUs + 1 entries under the strip lock, nothing copied. The
+    // home cycle's seek producer never draws on the strip: ask the census.
+    bool stillFor(uint64_t now_us, uint32_t window_us) const;
 
 private:
     // planTick() up to the strip: false when no plan renders this tick (the

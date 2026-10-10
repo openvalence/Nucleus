@@ -1020,6 +1020,32 @@ TEST_CASE("val-0ep: a commit through a knot keeps the plan census on the piece i
     CHECK(n.plan_elapsed_us < 5'000u);
 }
 
+// bd val-4rr: the persist gate's question, answered from the published strip.
+TEST_CASE("val-4rr: stillFor is true at rest and before a move, false once the move starts inside the window") {
+    constexpr uint32_t kWindowUs = 60000;
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    CHECK(r->arb.stillFor(g_now_us, kWindowUs));
+
+    const uint64_t t0 = g_now_us;
+    MotionIntent in;
+    in.source = MotionSource::Stream;
+    in.target_mm = 200.0f;
+    in.duration_us = 300'000;
+    in.anchor_us = t0 + 100'000;
+    REQUIRE(r->arb.accept(in, g_now_us));
+    r->run(1000);
+    CHECK(r->arb.stillFor(g_now_us, kWindowUs));   // the move starts 39 ms past the window
+    r->run(69'000);
+    CHECK_FALSE(r->arb.stillFor(g_now_us, kWindowUs));   // 30 ms of it inside the window
+    r->run(150'000);
+    CHECK_FALSE(r->arb.stillFor(g_now_us, kWindowUs));
+    r->run(2'000'000);
+    REQUIRE(std::fabs(r->census().velocity_mm_s) < 1e-3f);
+    CHECK(r->arb.stillFor(g_now_us, kWindowUs));
+}
+
 // Homed at 0 mm, the window 100..300 mm, under the factory tuning.
 std::unique_ptr<Rig> rigAtOrigin() {
     auto r = rig();

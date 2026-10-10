@@ -12,7 +12,11 @@
 //   value, and a generic client sits at syncing forever. The hub seeds 0x0003
 //   safety, 0x000A pending-pairing and 0x000D roster itself.
 // - The persist debounce (kCfgPersistDebounceMs) is the wear bound on the P4's
-//   NVS pages; the arithmetic lives on ValenceHub.cpp's file header. What a
+//   NVS pages; the arithmetic lives on ValenceHub.cpp's file header. A due
+//   write then waits for a STILL WINDOW (kPersistStillUs, tick()): a flash
+//   write turns the cache off, the motion tasks cannot renew the LP lease, and
+//   the carriage would stop mid-motion (operator ruling 2026-10-09, bd
+//   val-4rr). Settings apply in RAM at once; only the write waits. What a
 //   blob holds is StoredState.h's and PatternPresetStore's; background_run is
 //   in neither, on purpose (bd val-wcm, pending ruling).
 // See: Valence SPEC.md §4.2, §6.3, §9.1, §9.3, §11.2, §11.4
@@ -99,6 +103,15 @@ constexpr const char* kDetailPastStroke = "window past the measured stroke";
 // operator lets go: a write per INTENT would put an NVS commit, and now and
 // then a sector erase, on the hub task at the intent rate.
 constexpr uint32_t kCfgPersistDebounceMs = 2000;
+
+// A due persist is written only while the published plan holds the carriage
+// still for this long from now (motionStillFor()), under ESTOP, and never
+// during a home cycle; until then it stays armed and coalesces, one write of
+// the latest state. The worst-case NVS erase+write plus margin, inside the
+// published strip (MotionArbiter.h kStripLen): the operator's starting
+// value, NOT MEASURED on the P4.
+// TODO(val-ggj): set it from the bench measurement.
+constexpr uint32_t kPersistStillUs = 60000;
 
 // A HOME hold's brake gets this long to reach rest before the ESTOP cuts
 // power anyway. The arbiter brakes at the input decel, well under a second
@@ -2164,12 +2177,16 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         publishHubStatus();
     }
 
+    const bool cfgDue = _persistArmed && int32_t(nowMs - _persistDueMs) >= 0;
+    const bool presetsDue = _presetsArmed && int32_t(nowMs - _presetsDueMs) >= 0;
+    if (!(cfgDue || presetsDue)) return 0;
+    if (!mo.estop && (mo.homing || !motionStillFor(kPersistStillUs))) return 0;
     uint8_t due = 0;
-    if (_persistArmed && int32_t(nowMs - _persistDueMs) >= 0) {
+    if (cfgDue) {
         _persistArmed = false;
         due |= kPersistConfig;
     }
-    if (_presetsArmed && int32_t(nowMs - _presetsDueMs) >= 0) {
+    if (presetsDue) {
         _presetsArmed = false;
         due |= kPersistPresets;
     }

@@ -132,6 +132,13 @@ HomeStart motionHome() {
     return g_homeAnswer;
 }
 MotionCensus motionCensus() { return g_census; }
+// The plan strip's answer (MotionArbiter::stillFor()), and the window asked.
+bool g_still = true;
+uint32_t g_stillWindowUs = 0;
+bool motionStillFor(uint32_t window_us) {
+    g_stillWindowUs = window_us;
+    return g_still;
+}
 MotionTuning motionDefaultTuning() { return MotionTuning{}; }
 void motionSetTuning(const MotionTuning&) {}
 void motionSetOscillator(const MotionOsc& o) { g_osc = o; }
@@ -221,6 +228,8 @@ struct Rig {
         g_estop = estop::Reading{};
         g_estop.known = true;
         g_datagramOn = true;
+        g_still = true;
+        g_stillWindowUs = 0;
         REQUIRE(buildValenceCatalog(catalog, boardFeatures()));
         device.setUnvouchedRole(role);
         device.setSetupWritten(kSetupRequiredMask);
@@ -256,10 +265,16 @@ struct Rig {
         for (int i = 0; i < rounds; ++i) {
             g_clock.advanceUs(1000);
             hub->update(g_clock.nowUs());
-            device.tick(g_clock.nowUs() / 1000);
+            const uint8_t due = device.tick(g_clock.nowUs() / 1000);
+            persisted |= due;
+            if (due != 0) ++persistWrites;
             client->update(g_clock.nowUs());
         }
     }
+
+    // The kPersist* bits tick() has returned, and the ticks that returned any.
+    uint8_t persisted = 0;
+    int persistWrites = 0;
 
     uint16_t snapshotSeq() {
         const auto it = del.lastState.find(0x0003);
@@ -1758,4 +1773,53 @@ TEST_CASE("VD-GROUP: every group string in the catalog that has a section spells
     CHECK(sectioned > 0);
     CHECK_FALSE(sectionedByRegistry("Tuning/Planner"));
     CHECK_FALSE(sectionedByRegistry("Tuning /Planner"));
+}
+
+// ---- bd val-4rr: a persist waits for a still window -------------------------------
+
+TEST_CASE("VD-PERSIST-1: a save requested mid-stroke lands in the next still window, once, never during motion") {
+    auto rig = std::make_unique<Rig>();
+    rig->step(3000);
+    rig->persisted = 0;
+    rig->persistWrites = 0;
+    g_still = false;   // a stroke in flight
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(9, IntentValue::ofF32(30.0f))).has_value());
+    rig->step(3000);   // past the debounce
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(rig->persisted == 0);
+    CHECK(g_stillWindowUs >= 60000u);
+    // A second change while moving coalesces into the same write.
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(9, IntentValue::ofF32(35.0f))).has_value());
+    rig->step(3000);
+    CHECK(rig->persisted == 0);
+
+    g_still = true;
+    rig->step(1);
+    CHECK(rig->persisted == kPersistConfig);
+    CHECK(rig->persistWrites == 1);
+    rig->step(3000);
+    CHECK(rig->persistWrites == 1);
+}
+
+TEST_CASE("VD-PERSIST-2: under ESTOP a due write goes whatever the strip shows; a home cycle holds it") {
+    {
+        auto rig = std::make_unique<Rig>();
+        rig->step(3000);
+        rig->persisted = 0;
+        g_still = false;
+        g_census.estop = true;
+        REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(9, IntentValue::ofF32(30.0f))).has_value());
+        rig->step(3000);
+        CHECK(rig->persisted == kPersistConfig);
+    }
+    auto rig = std::make_unique<Rig>();
+    rig->step(3000);
+    rig->persisted = 0;
+    g_census.homing = true;
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(9, IntentValue::ofF32(30.0f))).has_value());
+    rig->step(3000);
+    CHECK(rig->persisted == 0);
+    g_census.homing = false;
+    rig->step(1);
+    CHECK(rig->persisted == kPersistConfig);
 }

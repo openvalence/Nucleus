@@ -354,6 +354,10 @@ void motionNoteStream(uint32_t bundles, uint32_t samples, uint32_t dropped);
 float motionForceHome(float stroke_mm);
 
 MotionCensus motionCensus();
+// Any task. The published plan holds the carriage still from now for
+// window_us, or no plan renders (MotionArbiter::stillFor()); a home cycle
+// moves without one, so read census.homing too.
+bool motionStillFor(uint32_t window_us);
 // The steer task's stack high-water headroom, bytes; the planner's is the
 // census's stack_free. 0 before motionBegin(). Any task.
 uint32_t motionSteerStackFree();
