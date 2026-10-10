@@ -25,7 +25,7 @@ socket, no clock and no thread. Two fronts drive it:
 | Delegate and every STATE publisher | `flagship_p4/src/hub/ValenceDevice.cpp`, compiled verbatim | real |
 | Motion planner | `../Kinetic` (`kinetic2::Engine`, Kinetic²), the sibling checkout `kinetic.pin` names | real |
 | Arbiter: gates, window clamp, limit sets, feedforward, census | `flagship_p4/src/motion/MotionArbiter.cpp`, compiled verbatim | real |
-| Motion task plumbing | `src/SimMotion.cpp` | a ring on the one hub thread instead of FreeRTOS queues; census refreshed every pass, not at 50 Hz |
+| Motion task plumbing | `src/SimMotion.cpp` | a ring on the one hub thread instead of FreeRTOS queues; census refreshed every pass, not at 100 Hz |
 | Emitter and position truth | `src/SimMotion.cpp` | ideal: renders the arbiter's steering word exactly, so `late`, `resteers`, `catchups` and `stack_free` read 0 |
 | Generators: classic (seven patterns) and advanced (the modulators), two rail sources (RFC-093), the brake | `flagship_p4/src/patterns/PatternEngine.cpp`, compiled verbatim | real |
 | Pattern task plumbing | `src/SimPattern.cpp` | ticked every pass on the one hub thread instead of its own FreeRTOS task |

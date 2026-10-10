@@ -2100,6 +2100,8 @@ void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     _hub = &hub;
     _catalog = &catalog;
     _anomTokens = kAnomalyEventBurst;
+    if (const CatalogEntry* e = catalog.find(ch::motion)) _motionPace.granted_rate_hz = e->maxRateHz;
+    if (const CatalogEntry* e = catalog.find(ch::plan_strip)) _stripPace.granted_rate_hz = e->maxRateHz;
     // The declaration's one home is the composition's setEstopCutsPower().
     motionSetEstopCutsPower(hub.estopCutsPower());
     hub.publishControlOwnerStateIfPresent();
@@ -2246,8 +2248,7 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _hub->latchEstop(safety_causes::fault, uint8_t(AccessLevel::configure));
     }
     // The motion plane, from ONE census so no two channels disagree about the
-    // same instant. 0x1100 publishes at rate under its 60 Hz ceiling; 0x1110 is
-    // a strip that is only news while a plan runs.
+    // same instant. 0x1100 and 0x1110 publish at their catalog ceilings.
     const MotionCensus mo = motionCensus();
 
     // Every tick, not at the 1 Hz publish: a slot's counter dies with its
@@ -2298,13 +2299,16 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
               mo.home_fail_why != nullptr ? mo.home_fail_why : "no reason recorded",
               mo.homed ? "" : ", unhomed");
     }
-    if (uint32_t(nowMs - _lastMotionMs) >= 33u) {
-        _lastMotionMs = nowMs;
+    if (_motionPace.dueForPush(nowMs, true)) {
+        _motionPace.markPushed(nowMs);
         publishMotion(*_hub, mo, patternActive());
     }
-    if (uint32_t(nowMs - _lastPlanMs) >= 50u) {
-        _lastPlanMs = nowMs;
+    if (_stripPace.dueForPush(nowMs, true)) {
+        _stripPace.markPushed(nowMs);
         publishPlanStrip(*_hub, mo);
+    }
+    if (uint32_t(nowMs - _lastOscMs) >= 50u) {
+        _lastOscMs = nowMs;
         publishOscillator(mo, false);   // what renders moves with the plan
     }
     if (_oscDirty) {

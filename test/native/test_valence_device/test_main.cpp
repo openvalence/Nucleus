@@ -31,6 +31,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <memory>
@@ -196,6 +197,7 @@ struct RecordedNack {
 class RecordingClient final : public ClientDelegate {
 public:
     std::map<uint16_t, std::vector<std::byte>> lastState;
+    std::map<uint16_t, int> stateCount;
     std::vector<RecordedNack> nacks;
     int echoes = 0;
     IntentValueMap lastEcho{};
@@ -204,6 +206,7 @@ public:
     void onStateChange(ClientSessionState) override {}
     void onState(uint16_t channel_id, uint16_t, std::span<const std::byte> payload) override {
         lastState[channel_id] = std::vector<std::byte>(payload.begin(), payload.end());
+        ++stateCount[channel_id];
     }
     void onEcho(uint16_t, const IntentValueMap& applied, uint16_t) override {
         ++echoes;
@@ -232,7 +235,8 @@ struct Rig {
     RecordingClient del{};
     std::optional<Client> client{};
 
-    explicit Rig(AccessLevel role = AccessLevel::control) {
+    // motionHz > 0 also subscribes 0x1100 at that rate.
+    explicit Rig(AccessLevel role = AccessLevel::control, float motionHz = 0.0f) {
         g_census = MotionCensus{};
         g_census.homed = true;
         g_census.motor_on = true;
@@ -259,6 +263,8 @@ struct Rig {
         hub.emplace(catalog, g_clock, hubRng, device);
         device.attach(*hub, catalog);
         link.emplace(g_clock, hubRng);
+        // A 13th wish takes WELCOME past the link's default 250 B; a WS frame has room.
+        if (motionHz > 0.0f) link->profileA().mtu = 1024;
         REQUIRE(hub->attachTransport(link->endpointA()));
         ClientIdentity id;
         id.instance_id.fill(std::byte{0});
@@ -280,6 +286,7 @@ struct Rig {
                                   ch::kinetic_planner, ch::pattern_state, ch::pattern_presets_roster,
                                   ch::oscillator, ch::plan_strip})
             REQUIRE(client->addSubscriptionWish(id, 0.0f, Priority::normal));
+        if (motionHz > 0.0f) REQUIRE(client->addSubscriptionWish(ch::motion, motionHz, Priority::elevated));
         REQUIRE(client->connect());
         step(200);
         REQUIRE(client->state() == ClientSessionState::LIVE);
@@ -1572,6 +1579,23 @@ TEST_CASE("VD-PLAN-1: plan-strip positions are i32 window shares, declared so, n
     CHECK(int32_t(getU32(s.subspan(10, 4))) == 66000);
     CHECK(int16_t(getU16(s.subspan(14, 2))) == -1500);
     CHECK(getU32(s.subspan(16, 4)) == 400000u);
+}
+
+// The P4's and the twin's hub tick is 5 ms (bd val-7ur). 0x1100 at a 60 Hz
+// grant must arrive at 60 Hz, and 0x1110 under a rate-0 grant at no more
+// than its 45 Hz ceiling.
+TEST_CASE("VD-RATE: on the 5 ms hub tick 0x1100 meets its 60 Hz grant and 0x1110 holds its 45 Hz ceiling") {
+    auto rig = std::make_unique<Rig>(AccessLevel::control, 60.0f);
+    rig->del.stateCount.clear();
+    for (int i = 0; i < 1200; ++i) {   // 6 s
+        g_clock.advanceUs(5000);
+        g_census.position_mm = float(i % 100);   // moving, so no push repeats a value
+        rig->hub->update(g_clock.nowUs());
+        (void)rig->device.tick(g_clock.nowUs() / 1000);
+        rig->client->update(g_clock.nowUs());
+    }
+    CHECK(std::abs(rig->del.stateCount[ch::motion] - 360) <= 2);
+    CHECK(std::abs(rig->del.stateCount[ch::plan_strip] - 270) <= 2);
 }
 
 TEST_CASE("VD-MODES-9: home_speed writes on modes-set key 9, clamped, published at 0x1030's tail, stored") {
