@@ -1075,7 +1075,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // Normalized units, matching the engine's own domain (1.0 == the full
     // stroke window): positions scale 10000, velocity scale 1000.
     // durationUs/elapsedUs stay µs u32. RFC-100 appends the plan.flags byte.
-    // [1+1+2+2+2+2+4+4+1 = 19 B]
+    // Positions are i32: a plan outside the window (an override jog, a window
+    // written away from the carriage) is a share below 0 or far above 1, which
+    // a u16 or an i16 at this scale cannot carry (bd val-vik).
+    // [1+1+4+4+4+2+4+4+1 = 25 B]
     auto addPlanStrip = [&]() {
     c.addEntry({.id = ch::plan_strip, .name = "plan-strip",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1097,13 +1100,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .desc = "Planning mode of the motion core",
                       .role = roles::plan_style},
                      {"idle", "waveform", "chase", "settle", "hold"});
-    c.addLayoutField({.name = "start_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
+    c.addLayoutField({.name = "start_norm", .type = PackedFieldType::i32, .unit = "norm",   .scale = 10000.0f,
                       .group = card::active_plan, .desc = "Start of the current plan",
                       .role = roles::plan_start});
-    c.addLayoutField({.name = "end_norm",   .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
+    c.addLayoutField({.name = "end_norm",   .type = PackedFieldType::i32, .unit = "norm",   .scale = 10000.0f,
                       .group = card::active_plan, .desc = "End of the current plan",
                       .role = roles::plan_end});
-    c.addLayoutField({.name = "cur_norm",   .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
+    c.addLayoutField({.name = "cur_norm",   .type = PackedFieldType::i32, .unit = "norm",   .scale = 10000.0f,
                       .group = card::active_plan, .desc = "Setpoint the plan is producing now",
                       .role = roles::plan_current});
     c.addLayoutField({.name = "cur_vel",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f,

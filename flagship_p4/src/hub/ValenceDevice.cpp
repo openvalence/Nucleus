@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string_view>
 
@@ -97,6 +98,14 @@ constexpr const char* kDetailPaused = "paused";
 constexpr const char* kDetailReturning = "returning to the paused position";
 constexpr const char* kDetailPastStroke = "window past the measured stroke";
 
+// 0x4100's ceiling: a burst of this many anomaly events, then one per
+// kAnomalyEventMs. A planner in trouble records anomalies at its plan rate,
+// and every EVENT channel a session holds shares one bounded queue, so an
+// uncapped feed would push the safety and log events out of it. 0x1111's
+// counters keep the exact count; the seq gap shows what the cap skipped.
+constexpr uint32_t kAnomalyEventBurst = 8;
+constexpr uint32_t kAnomalyEventMs = 100;
+
 // Quiet time after the last applied change before a blob's persist is due,
 // the same for both blobs. It coalesces a burst (a slider drag streams
 // 0x3120 writes; a rename follows a save) into ONE flash write after the
@@ -162,6 +171,7 @@ void packU8(std::span<std::byte> o, size_t& n, uint8_t v)   { n += putU8(o.subsp
 void packU16(std::span<std::byte> o, size_t& n, uint16_t v) { n += putU16(o.subspan(n), v); }
 void packI16(std::span<std::byte> o, size_t& n, int16_t v)  { packU16(o, n, uint16_t(v)); }
 void packU32(std::span<std::byte> o, size_t& n, uint32_t v) { n += putU32(o.subspan(n), v); }
+void packI32(std::span<std::byte> o, size_t& n, int32_t v)  { packU32(o, n, uint32_t(v)); }
 void packF32(std::span<std::byte> o, size_t& n, float v)    { n += putF32(o.subspan(n), v); }
 
 // A packed field's wire value is value*scale, SATURATED at the type. Saturating
@@ -178,6 +188,14 @@ int16_t wireI16(float v, float scale) {
     if (x >= 32767.0f) return 32767;
     if (x <= -32768.0f) return -32768;
     return int16_t(x >= 0.0f ? x + 0.5f : x - 0.5f);
+}
+int32_t wireI32(float v, float scale) {
+    const float x = v * scale;
+    if (!std::isfinite(x)) return 0;
+    // The largest floats below 2^31 in magnitude: the conversion stays defined.
+    if (x >= 2147483520.0f) return std::numeric_limits<int32_t>::max();
+    if (x <= -2147483648.0f) return std::numeric_limits<int32_t>::min();
+    return int32_t(x >= 0.0f ? x + 0.5f : x - 0.5f);
 }
 
 const IntentValueField* findField(const IntentValueMap& m, uint8_t key) {
@@ -254,6 +272,23 @@ void setConfigKey(StoredConfig& c, uint8_t key, float v, float rail, bool flippe
         case 8: c.max_rail    = clampf(v, ceiling::rail_min, ceiling::rail_mm); break;
         default: break;
     }
+}
+
+// The narrowest window the hub stores when it has to place one itself.
+constexpr float kWindowFloorMm = 1.0f;
+
+// SPEC 9.6 (RFC-101): the stored window lies inside [0, max_rail], held there
+// by every write. A window wholly past max_rail has no nearest legal value: it
+// collapses onto the rail's far end, kWindowFloorMm wide, where the arbiter's
+// own clamp already held the carriage. True when it collapsed.
+bool holdWindowInRail(StoredConfig& c) {
+    if (c.window_min < c.max_rail) {
+        c.window_max = std::min(c.window_max, c.max_rail);
+        return false;
+    }
+    c.window_max = c.max_rail;
+    c.window_min = std::max(0.0f, c.max_rail - kWindowFloorMm);
+    return true;
 }
 
 // The 0x3120 schema's keys in wire order (ValenceCatalog.h, kinetic-set).
@@ -366,7 +401,7 @@ void publishMotion(Hub& hub, const MotionCensus& m, bool genRunning) {
 }
 
 void publishPlanStrip(Hub& hub, const MotionCensus& m) {
-    std::array<std::byte, 19> buf{};
+    std::array<std::byte, 25> buf{};
     size_t n = 0;
     // flags: active, live_mode, grad_mode. live_mode and grad_mode named a
     // legacy interpolator split that has no counterpart in this engine.
@@ -374,9 +409,9 @@ void publishPlanStrip(Hub& hub, const MotionCensus& m) {
     // style: the planner's style (MotionArbiter.cpp PlanStyle), or `hold` for a hold segment, so a long dwell
     // reads as a live plan and never as a stall.
     packU8(buf, n, m.plan_hold ? kPlanStyleHold : m.mode);
-    packU16(buf, n, wireU16(m.plan_start, 10000.0f));
-    packU16(buf, n, wireU16(m.plan_end, 10000.0f));
-    packU16(buf, n, wireU16(m.plan_cur, 10000.0f));
+    packI32(buf, n, wireI32(m.plan_start, 10000.0f));
+    packI32(buf, n, wireI32(m.plan_end, 10000.0f));
+    packI32(buf, n, wireI32(m.plan_cur, 10000.0f));
     packI16(buf, n, wireI16(m.plan_vel, 1000.0f));
     packU32(buf, n, m.plan_duration_us);
     packU32(buf, n, m.plan_elapsed_us);
@@ -609,16 +644,23 @@ Ret ValenceDevice::applyConfig(const IntentValueMap& requested, bool& cfgChanged
         if (keys[k] != nullptr) setConfigKey(next, uint8_t(k + 1), *numberOf(keys[k]), rail, _modes.flipped);
 
     // While a real cycle's measurement stands (force_home measures nothing),
-    // nothing stored reaches past the stop it found (SPEC 9.6 RFC-101, bd
-    // val-3kd): max_rail clamps to it and a window set before the home is cut
-    // at it. A window wholly past it has no legal nearest value: a window
-    // write is refused, any other write leaves it to the arbiter's hold.
-    if (mo.homed && mo.home_rail_mm > 0.0f) {
-        const float stroke = std::clamp(mo.home_rail_mm, ceiling::rail_min, ceiling::rail_mm);
-        next.max_rail = std::min(next.max_rail, stroke);
-        if (next.window_min < stroke) next.window_max = std::min(next.window_max, stroke);
-        else if (f1 != nullptr || f2 != nullptr) return refuse(NackCode::INVALID_VALUE, kDetailPastStroke);
-    }
+    // max_rail never reaches past the stop it found (SPEC 9.6 RFC-101, bd
+    // val-3kd).
+    const bool measured = mo.homed && mo.home_rail_mm > 0.0f;
+    const float stroke = measured ? std::clamp(mo.home_rail_mm, ceiling::rail_min, ceiling::rail_mm) : ceiling::rail_mm;
+    next.max_rail = std::min(next.max_rail, stroke);
+
+    // The window is held inside max_rail, so inside the stop too (SPEC 9.6
+    // RFC-101, bd val-8yv). A window write wholly past it has no legal nearest
+    // value and is refused; any other write collapses such a window, logged.
+    if (next.window_min >= next.max_rail && (f1 != nullptr || f2 != nullptr))
+        return refuse(NackCode::INVALID_VALUE,
+                      measured && next.window_min >= stroke ? kDetailPastStroke : "window past max_rail");
+    const StoredConfig asked = next;
+    if (holdWindowInRail(next))
+        GLOGW(kTag, "window %.1f..%.1f mm lies past max_rail %.1f mm: held at %.1f..%.1f mm, set the window again",
+              double(asked.window_min), double(asked.window_max), double(next.max_rail), double(next.window_min),
+              double(next.window_max));
 
     // The one refusal of finite values: an inverted window has no legal
     // nearest value, so it is rejected rather than silently reordered.
@@ -1043,7 +1085,7 @@ void ValenceDevice::pushPattern() {
     // The client frame: the generator reads the mirrored census, and the
     // arbiter mirrors its strokes back (RFC-088).
     const Window w = clientWindow(motionCensus().rail_mm);
-    s.frame = {w.lo, w.hi, _cfg.input_speed, _cfg.input_accel};
+    s.frame = {w.lo, w.hi, _cfg.input_speed, _cfg.input_accel, _cfg.input_jerk};
     patternSetSettings(s);
 }
 
@@ -1215,6 +1257,36 @@ bool ValenceDevice::oscDriven(bool streamLive) const {
 // The parameters as applied, shape and dwells as they play (the written ones
 // kept), then what renders: osc.active and osc.amplitude_effective from the
 // census.
+// Every anomaly is taken, so the handoff never fills behind the bucket; one
+// the bucket has no token for is dropped here. The kind rides event_kind and
+// is mirrored into body key 1 (SPEC 9.4); t_us is the low 32 bits (anom_body).
+void ValenceDevice::publishAnomalies(uint32_t nowMs) {
+    const uint32_t refill = uint32_t(nowMs - _anomRefillMs) / kAnomalyEventMs;
+    if (refill > 0) {
+        _anomTokens = std::min(kAnomalyEventBurst, _anomTokens + refill);
+        _anomRefillMs += refill * kAnomalyEventMs;
+    }
+    MotionAnomaly a;
+    while (motionTakeAnomaly(a)) {
+        if (_anomTokens == 0) continue;
+        --_anomTokens;
+        EventMsg ev{};
+        ev.channel_id = ch::motion_anomaly;
+        ev.timestamp = nowMs;
+        ev.event_kind = a.kind;
+        ev.has_body = true;
+        ev.body_count = 5;
+        ev.body[0] = IntentValueField{anom_body::kind, IntentValue::ofU64(a.kind)};
+        ev.body[1] = IntentValueField{anom_body::seq, IntentValue::ofU64(a.seq)};
+        ev.body[2] = IntentValueField{anom_body::target, IntentValue::ofF32(a.target)};
+        ev.body[3] = IntentValueField{anom_body::detail, IntentValue::ofF32(a.detail)};
+        ev.body[4] = IntentValueField{anom_body::t_us, IntentValue::ofU64(uint32_t(a.t_us))};
+        std::array<std::byte, 96> buf{};
+        const size_t n = encodeEvent(ev, std::span<std::byte>(buf));
+        if (n > 0) _hub->publishEvent(ch::motion_anomaly, std::span<const std::byte>(buf.data(), n));
+    }
+}
+
 void ValenceDevice::publishOscillator(const MotionCensus& mo, bool force) {
     const bool driven = oscDriven(mo.osc_stream_live);
     // SPEC 4.2: the reported shape or dwells moving with a stream's liveness
@@ -1906,6 +1978,10 @@ std::expected<void, stored::ConfigReject> ValenceDevice::adoptConfigBlob(std::sp
         stored::decodeConfig(blob, motionDefaultTuning(), _cfg, _tune, _modes, cfgGen);
     if (!adopted) return adopted;
     _cfgDirty = false;
+    // A blob written before the window was held inside max_rail (bd val-8yv).
+    if (holdWindowInRail(_cfg))
+        GLOGW(kTag, "stored window lies past max_rail %.1f mm: held at %.1f..%.1f mm, set the window again",
+              double(_cfg.max_rail), double(_cfg.window_min), double(_cfg.window_max));
     // The engine adopts through the live write's own door, never a side path.
     motionSetTuning(_tune);
     estopDatagramSetEnabled(_modes.datagram_estop);
@@ -2009,6 +2085,7 @@ bool ValenceDevice::adoptPresetsBlob(std::span<const std::byte> blob) {
 void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     _hub = &hub;
     _catalog = &catalog;
+    _anomTokens = kAnomalyEventBurst;
     // The declaration's one home is the composition's setEstopCutsPower().
     motionSetEstopCutsPower(hub.estopCutsPower());
     hub.publishControlOwnerStateIfPresent();
@@ -2220,6 +2297,7 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _oscDirty = false;
         publishOscillator(mo, false);
     }
+    publishAnomalies(nowMs);
     if (uint32_t(nowMs - _lastSlowMs) >= 1000u) {
         _lastSlowMs = nowMs;
         publishMotionDiag(*_hub, mo, _ingressDrops.total(), _segBundles);

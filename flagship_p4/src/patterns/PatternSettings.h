@@ -32,13 +32,15 @@
 namespace valence {
 
 // The stroke frame, in millimeters: the machine-driven window every stroke is
-// mapped into, and the input ceilings its speed knob and brake are scaled by.
+// mapped into, and the input ceilings its speed knob, its brake and every
+// half-stroke's least time are scaled by.
 // Filled by the delegate from the 0x1000 config it owns (C-1).
 struct PatternFrame {
     float win_min     = 0.0f;
     float win_max     = 0.0f;
     float input_speed = 0.0f;   // mm/s
     float input_accel = 0.0f;   // mm/s2
+    float input_jerk  = 0.0f;   // mm/s3; 0 bounds nothing
 
     bool operator==(const PatternFrame&) const = default;
 };

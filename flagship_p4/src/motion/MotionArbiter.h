@@ -346,7 +346,11 @@ public:
     // that landed more than a step off the strip the steer was rendering.
     uint32_t plannerStalls() const { return _planner_stalls; }
     uint32_t latePlans() const { return _late_plans; }
-    // Returns the kinds drained, bit k = kinetic2::AnomalyKind k.
+    // The engine's oldest anomaly, counted for the census as it leaves; false
+    // when none is left.
+    bool popAnomaly(MotionAnomaly& out);
+    // Every anomaly, counted and dropped. Returns the kinds, bit k =
+    // kinetic2::AnomalyKind k.
     uint32_t drainAnomalies();
     // Every census field the arbiter owns. The emitter's counters (edges,
     // late, resteers, catchups, step_q8, emitter_faults) and stack_free are

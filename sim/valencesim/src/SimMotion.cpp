@@ -114,8 +114,18 @@ public:
                 _arb.evaluate(now_us, dt_s);
             }
         }
-        _arb.drainAnomalies();
+        handOverAnomalies();
         refreshSnapshot(now_us);
+    }
+
+    // The board's handoff (ValenceMotion.cpp): counted as they leave the
+    // engine, a full ring drops the newest.
+    bool takeAnomaly(MotionAnomaly& out) {
+        if (_anom_count == 0) return false;
+        out = _anoms[_anom_head];
+        _anom_head = (_anom_head + 1) % _anoms.size();
+        --_anom_count;
+        return true;
     }
 
     MotionArbiter& arbiter() { return _arb; }
@@ -170,6 +180,15 @@ private:
         _arb.planTick(t_us, dt_s);
     }
 
+    void handOverAnomalies() {
+        MotionAnomaly a;
+        while (_arb.popAnomaly(a)) {
+            if (_anom_count == _anoms.size()) continue;
+            _anoms[(_anom_head + _anom_count) % _anoms.size()] = a;
+            ++_anom_count;
+        }
+    }
+
     void refreshSnapshot(uint64_t now_us) {
         MotionCensus c = _arb.snapshot(now_us);
         c.edges          = _emitter.edges();
@@ -193,6 +212,9 @@ private:
     uint64_t _plan_delay_us = 0;
     std::optional<uint64_t> _solve_at_us;   // a delayed solve's start
     MotionCensus _pub{};
+    std::array<MotionAnomaly, 16> _anoms{};   // the board's kAnomalyHandoffDepth
+    size_t _anom_head = 0;
+    size_t _anom_count = 0;
 };
 
 // File scope, not a stack local: the arbiter holds a KB-scale engine.
@@ -234,6 +256,7 @@ void motionSetWindow(float lo, float hi, float rail) { g_sim.arbiter().setWindow
 void motionNoteStream(uint32_t b, uint32_t s, uint32_t d) { g_sim.arbiter().noteStream(b, s, d); }
 float motionForceHome(float stroke_mm) { return g_sim.arbiter().forceHome(stroke_mm); }
 MotionCensus motionCensus() { return g_sim.census(); }
+bool motionTakeAnomaly(MotionAnomaly& out) { return g_sim.takeAnomaly(out); }
 bool motionStillFor(uint32_t window_us) { return g_sim.arbiter().stillFor(deviceNowUs(), window_us); }
 
 void motionSetTuning(const MotionTuning& t) { g_sim.setTuning(t); }

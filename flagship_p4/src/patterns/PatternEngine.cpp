@@ -5,13 +5,17 @@
 //   twin and test_pattern_engine.
 // - A half-stroke is a WAVEFORM intent: a target, the duration the pattern's
 //   own speed and accel imply, and zero end velocity (a stroke reverses AT
-//   rest). The arbiter plans it at arrival under the INPUT ceilings; an
-//   infeasible one is the engine's infeasible policy to resolve, never ours.
+//   rest). The arbiter plans it at arrival under the INPUT ceilings, and
+//   tick() never sends one shorter than the planner renders under them
+//   (fitSeconds()): a stroke is slowed to fit, never trimmed (bd val-hnq).
 // See: PatternEngine.h, lib/strokeengine_patterns/VENDORED.md
 
 #include "PatternEngine.h"
 
+#include <algorithm>
 #include <cmath>
+
+#include "kinetic2/profile.hpp"
 
 namespace valence {
 namespace {
@@ -42,6 +46,23 @@ constexpr uint64_t kMaxHoldUs = uint64_t(kMaxStrokeS * 1e6f);
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 uint32_t strokeUs(float seconds) { return uint32_t(clampf(seconds, kMinStrokeS, kMaxStrokeS) * 1e6f); }
+
+// The planner renders a rest-to-rest half-stroke as a Bezier piece, slower
+// than the time-optimal profile under the same ceilings: up to 1.12 of it
+// across test_motion_arbiter's narrow-window sweep. This keeps a margin.
+constexpr float kRenderSlack = 1.2f;
+
+// The least time of a d mm half-stroke the planner renders whole under the
+// frame's input ceilings: Kinetic's fastest rest-to-rest move (Profile::point),
+// widened by kRenderSlack. Anything shorter keeps its deadline and is trimmed
+// toward its start. 0 while any ceiling is unset.
+float fitSeconds(float d, const PatternFrame& f) {
+    if (!(f.input_speed > 0.0f && f.input_accel > 0.0f && f.input_jerk > 0.0f)) return 0.0f;
+    float t = 0.0f;
+    (void)kinetic2::Profile::point(kinetic2::State{0.0f, 0.0f, 0.0f}, d, 0,
+                                   kinetic2::Limits{f.input_speed, f.input_accel, f.input_jerk}, 0.0f, &t);
+    return t * kRenderSlack;
+}
 
 }  // namespace
 
@@ -128,7 +149,12 @@ std::optional<MotionIntent> PatternEngine::tick(uint64_t now_us, const PatternIn
         return std::nullopt;
     }
     ++_stroke_index;
-    _due_us = now_us + st->duration_us;
+    // Both generators time a stroke by their own knobs; neither may ask for
+    // one the input ceilings cannot render whole.
+    const uint32_t duration_us =
+        st->moves ? std::max(st->duration_us, strokeUs(fitSeconds(std::fabs(st->target_mm - fromMm(in)), _s.frame)))
+                  : st->duration_us;
+    _due_us = now_us + duration_us;
     _stroke_end_us = _due_us;
     _have_prev = true;
     _prev_target_mm = st->target_mm;
@@ -138,7 +164,7 @@ std::optional<MotionIntent> PatternEngine::tick(uint64_t now_us, const PatternIn
     MotionIntent it;
     it.source       = _source;
     it.target_mm    = st->target_mm;
-    it.duration_us  = st->duration_us;
+    it.duration_us  = duration_us;
     it.has_end_vel  = true;
     it.end_vel_mm_s = 0.0f;
     return it;

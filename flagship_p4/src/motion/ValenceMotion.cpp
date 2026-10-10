@@ -58,6 +58,11 @@ constexpr const char* kTag = "motion";
 // reads the plan planTick() sampled; it never samples the engine.
 constexpr uint32_t kPublishUs = 20000;
 
+// Anomalies the planner hands the hub task per refresh before it drops the
+// newest: the hub takes them every tick, so more than a refresh's worth only
+// waits behind a stalled hub. 24 B each, internal RAM.
+constexpr UBaseType_t kAnomalyHandoffDepth = 16;
+
 // ---- the emitter's one door -------------------------------------------------
 
 uint64_t espNowUs() { return static_cast<uint64_t>(esp_timer_get_time()); }
@@ -150,6 +155,9 @@ public:
     HomeStart home();                        // any task: request, wake
     void setTuning(const MotionTuning& t);   // any task: overwrite the one slot
     MotionCensus census() const;
+    bool takeAnomaly(MotionAnomaly& out) {   // the hub task: never blocks
+        return _anomQueue != nullptr && xQueueReceive(_anomQueue, &out, 0) == pdTRUE;
+    }
     MotionArbiter& arbiter() { return _arb; }
     void wakeFromIsr();                      // the home sense's rise
     uint32_t steerStackFree() const { return _steer ? uint32_t(uxTaskGetStackHighWaterMark(_steer)) : 0; }
@@ -160,6 +168,7 @@ private:
     void planRun();
     void steerRun();
     void drain(uint64_t now_us);
+    void handOverAnomalies();
     void refreshSnapshot(uint64_t now_us);
 
     // Declaration order is construction order: the arbiter binds the emitter.
@@ -176,6 +185,9 @@ private:
     // Depth ONE, written with xQueueOverwrite: the newest tuning set is the
     // only one worth applying, and the writer never waits on the planner.
     QueueHandle_t _tuneQueue = nullptr;
+    // The planner's anomalies on their way to 0x4100, the hub task the one
+    // reader (motionTakeAnomaly()).
+    QueueHandle_t _anomQueue = nullptr;
 
     // THE cross-task snapshot. Written by refreshSnapshot() on the planner,
     // read by census() on any task, both under _mux.
@@ -203,6 +215,8 @@ bool MotionTask::begin() {
     if (_queue == nullptr) return false;
     _tuneQueue = xQueueCreate(1, sizeof(MotionTuning));
     if (_tuneQueue == nullptr) return false;
+    _anomQueue = xQueueCreate(kAnomalyHandoffDepth, sizeof(MotionAnomaly));
+    if (_anomQueue == nullptr) return false;
     // Neither task exists yet, so this caller is the arbiter's one owner.
     _arb.setHomeSense(homeSenseBegin(&parkSeekFromIsr, &wakeMotionFromIsr));
     _arb.begin(espNowUs());
@@ -276,6 +290,12 @@ void MotionTask::drain(uint64_t now_us) {
     while (xQueueReceive(_queue, &in, 0) == pdTRUE) _arb.accept(in, now_us);
 }
 
+// Counted as they leave the engine; a full queue drops the newest.
+void MotionTask::handOverAnomalies() {
+    MotionAnomaly a;
+    while (_arb.popAnomaly(a)) (void)xQueueSend(_anomQueue, &a, 0);
+}
+
 void MotionTask::refreshSnapshot(uint64_t now_us) {
     MotionCensus c = _arb.snapshot(now_us);
     c.edges          = ulp_g_edges;
@@ -310,7 +330,7 @@ void MotionTask::planRun() {
         _arb.planTick(now_us, dt_s);
         if (now_us >= next_pub_us) {
             next_pub_us = now_us + kPublishUs;
-            _arb.drainAnomalies();
+            handOverAnomalies();
             // The steer's counters and _backstop_on are read as single
             // words, at most one steer old.
             refreshSnapshot(now_us);
@@ -369,6 +389,7 @@ void motionSetWindow(float lo, float hi, float rail) { g_motion.arbiter().setWin
 void motionNoteStream(uint32_t b, uint32_t s, uint32_t d) { g_motion.arbiter().noteStream(b, s, d); }
 float motionForceHome(float stroke_mm) { return g_motion.arbiter().forceHome(stroke_mm); }
 MotionCensus motionCensus() { return g_motion.census(); }
+bool motionTakeAnomaly(MotionAnomaly& out) { return g_motion.takeAnomaly(out); }
 bool motionStillFor(uint32_t window_us) { return g_motion.arbiter().stillFor(espNowUs(), window_us); }
 uint32_t motionSteerStackFree() { return g_motion.steerStackFree(); }
 

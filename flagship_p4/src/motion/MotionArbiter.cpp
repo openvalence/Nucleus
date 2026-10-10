@@ -1589,18 +1589,28 @@ void MotionArbiter::homeEnd(const char* why, uint64_t now_us) {
 // Drains the engine's anomaly ring into the per-kind table 0x1111 publishes.
 // A kind past the table is DROPPED rather than folded into a neighbor: a
 // miscounted kind reads as a diagnosis that never happened.
+bool MotionArbiter::popAnomaly(MotionAnomaly& out) {
+    EngineAnomaly a;
+    if (!_engine.popAnomaly(a)) return false;
+    if (a.kind < kAnomalyKinds) ++_anom[a.kind];
+    ++_anomalies;
+    // A failure is a refused knot.
+    if (a.kind == uint8_t(kinetic2::AnomalyKind::KnotRefused)) ++_k2_failures;
+    out.kind   = a.kind;
+    out.seq    = a.seq;
+    out.t_us   = a.t_us;
+    // The engine plans the physical frame; a flipped client's window runs the
+    // other way (RFC-088).
+    out.target = _flipped.load() ? 1.0f - a.target : a.target;
+    out.detail = a.detail;
+    return true;
+}
+
 uint32_t MotionArbiter::drainAnomalies() {
     uint32_t kinds = 0;
-    EngineAnomaly a;
-    while (_engine.popAnomaly(a)) {
-        if (a.kind < kAnomalyKinds) {
-            ++_anom[a.kind];
-            kinds |= 1u << a.kind;
-        }
-        ++_anomalies;
-        // A failure is a refused knot.
-        if (a.kind == uint8_t(kinetic2::AnomalyKind::KnotRefused)) ++_k2_failures;
-    }
+    MotionAnomaly a;
+    while (popAnomaly(a))
+        if (a.kind < kAnomalyKinds) kinds |= 1u << a.kind;
     return kinds;
 }
 

@@ -84,6 +84,8 @@ MotionOsc g_osc{};
 int g_patPushes = 0;
 // The fake e-stop reading: what the BoardIo task would have published.
 estop::Reading g_estop{};
+// The planner's handoff: anomalies waiting for the hub task, oldest first.
+std::vector<MotionAnomaly> g_anomalies;
 
 }  // namespace
 
@@ -132,6 +134,12 @@ HomeStart motionHome() {
     return g_homeAnswer;
 }
 MotionCensus motionCensus() { return g_census; }
+bool motionTakeAnomaly(MotionAnomaly& out) {
+    if (g_anomalies.empty()) return false;
+    out = g_anomalies.front();
+    g_anomalies.erase(g_anomalies.begin());
+    return true;
+}
 // The plan strip's answer (MotionArbiter::stillFor()), and the window asked.
 bool g_still = true;
 uint32_t g_stillWindowUs = 0;
@@ -191,6 +199,7 @@ public:
     std::vector<RecordedNack> nacks;
     int echoes = 0;
     IntentValueMap lastEcho{};
+    std::vector<EventMsg> anomalyEvents;   // 0x4100, decoded
 
     void onStateChange(ClientSessionState) override {}
     void onState(uint16_t channel_id, uint16_t, std::span<const std::byte> payload) override {
@@ -204,6 +213,12 @@ public:
         nacks.push_back({n.code, n.has_detail ? std::string(n.detail) : std::string()});
     }
     void onPendingDropped(uint16_t) override {}
+    void onEvent(uint16_t channel_id, std::span<const std::byte> payload) override {
+        if (channel_id != ch::motion_anomaly) return;
+        const auto ev = decodeEvent(payload);
+        REQUIRE(ev.isOk());
+        anomalyEvents.push_back(ev.value());
+    }
 };
 
 // Heap, not stack: the catalog and the hub are tens of KB each.
@@ -237,6 +252,7 @@ struct Rig {
         g_datagramOn = true;
         g_still = true;
         g_stillWindowUs = 0;
+        g_anomalies.clear();
         REQUIRE(buildValenceCatalog(catalog, boardFeatures()));
         device.setUnvouchedRole(role);
         device.setSetupWritten(kSetupRequiredMask);
@@ -258,10 +274,11 @@ struct Rig {
         client->addSubscriptionWish(0x0003, 0.0f, Priority::critical);
         client->addSubscriptionWish(ch::pattern_advanced, 0.0f, Priority::normal);
         client->addSubscriptionWish(ch::pattern_adv_mod_crest, 0.0f, Priority::normal);
+        client->addSubscriptionWish(ch::motion_anomaly, 0.0f, Priority::normal);
         // The STATE every writer moves, so a refused write is seen to move none.
         for (const uint16_t id : {ch::machine_config, ch::machine_modes, ch::kinetic_limits,
                                   ch::kinetic_planner, ch::pattern_state, ch::pattern_presets_roster,
-                                  ch::oscillator})
+                                  ch::oscillator, ch::plan_strip})
             REQUIRE(client->addSubscriptionWish(id, 0.0f, Priority::normal));
         REQUIRE(client->connect());
         step(200);
@@ -1386,7 +1403,7 @@ TEST_CASE("VD-HOME-7: after a real home, max_rail and the window clamp to the me
     CHECK(echoed(rig->del.lastEcho, 8)->f32_val == 500.0f);
 }
 
-TEST_CASE("VD-HOME-8: force_home measures nothing; a window wholly past the stop never blocks the adoption") {
+TEST_CASE("VD-HOME-8: force_home measures nothing; a window wholly past the stop never blocks the adoption, it collapses") {
     // Homed by assertion only: the catalog ceiling, as before any home.
     auto rig = std::make_unique<Rig>();
     REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(8, IntentValue::ofF32(800.0f))).has_value());
@@ -1403,12 +1420,158 @@ TEST_CASE("VD-HOME-8: force_home measures nothing; a window wholly past the stop
     REQUIRE(rig->del.nacks.empty());
     completeHome(*rig, 267.69f);
     CHECK(rig->device.config().max_rail == doctest::Approx(267.69f));
-    CHECK(rig->device.config().window_min == 300.0f);   // left to the arbiter's hold
-    CHECK(rig->device.config().window_max == 400.0f);
+    // Onto the rail's far end, where the arbiter's clamp already held it (val-8yv).
+    CHECK(rig->device.config().window_min == doctest::Approx(266.69f));
+    CHECK(rig->device.config().window_max == doctest::Approx(267.69f));
     REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(3, IntentValue::ofF32(60.0f))).has_value());
     rig->step();
     CHECK(rig->del.nacks.empty());
     CHECK(rig->device.config().jog_speed == 60.0f);
+}
+
+// bd val-8yv: SPEC 9.6 holds the travel window inside max_rail on every write
+// of it, and 0x1000 never publishes a window past it.
+TEST_CASE("VD-HOME-9: a max_rail write holds the window inside it; a window write wholly past it is refused") {
+    auto rig = std::make_unique<Rig>();
+    logCapture();
+    clearLog();
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(2, IntentValue::ofF32(400.0f))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(stateF32(*rig, ch::machine_config, 4) == 400.0f);
+
+    // The soak's repro: the window's top edge follows max_rail down.
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(8, IntentValue::ofF32(100.0f))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(rig->device.config().window_max == 100.0f);
+    CHECK(stateF32(*rig, ch::machine_config, 0) == 0.0f);      // window_min
+    CHECK(stateF32(*rig, ch::machine_config, 4) == 100.0f);    // window_max
+    CHECK(stateF32(*rig, ch::machine_config, 24) == 100.0f);   // max_rail
+
+    // A window wholly past it has no nearest legal value, also with max_rail
+    // in the same write.
+    IntentValueMap win{};
+    win.count = 2;
+    win.fields[0] = IntentValueField{1, IntentValue::ofF32(200.0f)};
+    win.fields[1] = IntentValueField{2, IntentValue::ofF32(300.0f)};
+    REQUIRE(rig->client->sendIntent(ch::config_set, win).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
+    CHECK(rig->del.nacks[0].detail == "window past max_rail");
+    win.count = 3;
+    win.fields[2] = IntentValueField{8, IntentValue::ofF32(80.9f)};
+    REQUIRE(rig->client->sendIntent(ch::config_set, win).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 2);
+    CHECK(rig->del.nacks[1].code == NackCode::INVALID_VALUE);
+    CHECK(rig->device.config().window_min == 0.0f);
+    CHECK(rig->device.config().window_max == 100.0f);
+    CHECK(rig->device.config().max_rail == 100.0f);
+
+    // A window straddling a max_rail written with it is cut, echoed post-clamp.
+    win.fields[0] = IntentValueField{1, IntentValue::ofF32(50.0f)};
+    win.fields[1] = IntentValueField{2, IntentValue::ofF32(300.0f)};
+    win.fields[2] = IntentValueField{8, IntentValue::ofF32(250.0f)};
+    REQUIRE(rig->client->sendIntent(ch::config_set, win).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 2);
+    REQUIRE(echoed(rig->del.lastEcho, 2) != nullptr);
+    CHECK(echoed(rig->del.lastEcho, 2)->f32_val == 250.0f);
+    CHECK(stateF32(*rig, ch::machine_config, 4) == 250.0f);
+
+    // max_rail written under a window wholly inside the old rail collapses it
+    // onto the new rail's end, logged.
+    win.count = 2;
+    win.fields[0] = IntentValueField{1, IntentValue::ofF32(200.0f)};
+    win.fields[1] = IntentValueField{2, IntentValue::ofF32(240.0f)};
+    REQUIRE(rig->client->sendIntent(ch::config_set, win).has_value());
+    rig->step();
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(8, IntentValue::ofF32(150.0f))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 2);
+    CHECK(stateF32(*rig, ch::machine_config, 0) == 149.0f);
+    CHECK(stateF32(*rig, ch::machine_config, 4) == 150.0f);
+    CHECK(logged("window 200.0..240.0 mm lies past max_rail 150.0 mm: held at 149.0..150.0 mm, set the window again"));
+}
+
+// bd val-ku3: the catalog declares 0x4100 motion-anomaly; every anomaly the
+// planner hands over goes out as one EVENT, under the hub's cap.
+TEST_CASE("VD-ANOM-1: each planner anomaly is one 0x4100 event, kind and body per the schema, capped") {
+    auto rig = std::make_unique<Rig>();
+    g_anomalies.push_back({3, 10, 0x100001234ull, 0.25f, 0.5f});   // knot_trimmed
+    g_anomalies.push_back({6, 11, 0x100001240ull, 0.75f, 1.25f});  // piece_over_ceiling
+    g_anomalies.push_back({1, 12, 0x100001250ull, 0.5f, 12.0f});   // settle
+    rig->step();
+    CHECK(g_anomalies.empty());
+    REQUIRE(rig->del.anomalyEvents.size() == 3);
+    const EventMsg& e = rig->del.anomalyEvents[1];
+    CHECK(e.channel_id == ch::motion_anomaly);
+    CHECK(e.event_kind == 6);
+    REQUIRE(e.has_body);
+    REQUIRE(e.body_count == 5);
+    std::map<uint8_t, IntentValue> body;
+    for (uint32_t i = 0; i < e.body_count; ++i) body[e.body[i].key] = e.body[i].value;
+    CHECK(body[anom_body::kind].u64_val == 6);
+    CHECK(body[anom_body::seq].u64_val == 11);
+    CHECK(body[anom_body::target].f32_val == 0.75f);
+    CHECK(body[anom_body::detail].f32_val == 1.25f);
+    CHECK(body[anom_body::t_us].u64_val == 0x1240u);   // low 32 bits
+    CHECK(rig->del.anomalyEvents[0].event_kind == 3);
+    CHECK(rig->del.anomalyEvents[2].event_kind == 1);
+
+    // A planner recording at its plan rate: a burst goes out, the rest is
+    // taken and dropped (0x1111 counts it), never queued behind the cap.
+    rig->step(1000);
+    rig->del.anomalyEvents.clear();
+    for (uint16_t s = 0; s < 50; ++s) g_anomalies.push_back({3, uint16_t(100 + s), 0, 0.5f, 0.1f});
+    rig->step(1);
+    CHECK(g_anomalies.empty());
+    CHECK(rig->del.anomalyEvents.size() == kAnomalyEventBurst);
+    rig->step(1000);
+    CHECK(rig->del.anomalyEvents.size() == kAnomalyEventBurst);
+    g_anomalies.push_back({5, 200, 0, 0.5f, -95.0f});
+    rig->step(1);
+    REQUIRE(rig->del.anomalyEvents.size() == kAnomalyEventBurst + 1);
+    CHECK(rig->del.anomalyEvents.back().event_kind == 5);
+}
+
+// bd val-vik: a plan outside the window is a share below 0 or past 6.5535,
+// which the old u16 positions saturated or could not carry.
+TEST_CASE("VD-PLAN-1: plan-strip positions are i32 window shares, declared so, negative and past 6.5535") {
+    auto rig = std::make_unique<Rig>();
+    const CatalogEntry* e = rig->catalog.find(ch::plan_strip);
+    REQUIRE(e != nullptr);
+    const auto fields = rig->catalog.layoutFields(*e);
+    int i32s = 0;
+    for (const LayoutField& f : fields) {
+        if (f.name == "start_norm" || f.name == "end_norm" || f.name == "cur_norm") {
+            CHECK(f.type == PackedFieldType::i32);
+            CHECK(f.scale == 10000.0f);
+            ++i32s;
+        }
+    }
+    CHECK(i32s == 3);
+    REQUIRE(layoutWireSize(fields) == 25);
+
+    g_census.busy = true;
+    g_census.plan_start = -0.25f;   // below the window
+    g_census.plan_end = 7.5f;       // the soak's carriage, far past it
+    g_census.plan_cur = 6.6f;
+    g_census.plan_vel = -1.5f;
+    g_census.plan_duration_us = 400000;
+    g_census.plan_elapsed_us = 1000;
+    rig->step(100);
+    const auto it = rig->del.lastState.find(ch::plan_strip);
+    REQUIRE(it != rig->del.lastState.end());
+    REQUIRE(it->second.size() == 25);
+    const std::span<const std::byte> s(it->second);
+    CHECK(int32_t(getU32(s.subspan(2, 4))) == -2500);
+    CHECK(int32_t(getU32(s.subspan(6, 4))) == 75000);
+    CHECK(int32_t(getU32(s.subspan(10, 4))) == 66000);
+    CHECK(int16_t(getU16(s.subspan(14, 2))) == -1500);
+    CHECK(getU32(s.subspan(16, 4)) == 400000u);
 }
 
 TEST_CASE("VD-MODES-9: home_speed writes on modes-set key 9, clamped, published at 0x1030's tail, stored") {

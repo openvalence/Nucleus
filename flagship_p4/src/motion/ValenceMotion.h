@@ -253,6 +253,16 @@ struct MotionTuning {
     bool operator==(const MotionTuning&) const = default;
 };
 
+// One planner anomaly as 0x4100 motion-anomaly carries it (ValenceCatalog.h,
+// anom_body): kinetic2::Anomaly, its target in the client frame (RFC-088).
+struct MotionAnomaly {
+    uint8_t  kind   = 0;      // kinetic2::AnomalyKind
+    uint16_t seq    = 0;      // the engine's rolling id: a gap is an anomaly never handed over
+    uint64_t t_us   = 0;      // motion core time
+    float    target = 0.0f;   // the knot's position, 0..1 across the window
+    float    detail = 0.0f;   // per kind (kinetic2::AnomalyKind)
+};
+
 // Each motion task's stack (the planner's and the steer's), in bytes, and the
 // ONE home for that number (C-1): the create sites and main.cpp's high-water
 // watch table read it here, so the reported total can never drift from the
@@ -378,6 +388,10 @@ void motionNoteStream(uint32_t bundles, uint32_t samples, uint32_t dropped);
 float motionForceHome(float stroke_mm);
 
 MotionCensus motionCensus();
+// Hub task, never blocks. The oldest planner anomaly not yet taken, false when
+// none. The planner hands each over once it is counted on 0x1111; a full
+// handoff drops the newest, which the counters keep and the seq gap shows.
+bool motionTakeAnomaly(MotionAnomaly& out);
 // Any task. The published plan holds the carriage still from now for
 // window_us, or no plan renders (MotionArbiter::stillFor()); a home cycle
 // moves without one, so read census.homing too.

@@ -30,6 +30,7 @@
 #include "../../../flagship_p4/src/patterns/advanced/AdvancedPattern.cpp"
 #include "../../../flagship_p4/src/patterns/PatternEngine.cpp"
 
+using valence::MotionAnomaly;
 using valence::MotionArbiter;
 using valence::MotionCensus;
 using valence::MotionEmitter;
@@ -3825,4 +3826,79 @@ TEST_CASE("oscillator: a window write while it rides the rest neither stops nor 
     CHECK(step <= 2.0 * 3.1416 * 10.0 * 5.0 * 1e-3 * 1.05);
     // Its amplitude moved to the new window's share through the fade.
     CHECK(r->census().osc_amplitude == doctest::Approx(0.01f));
+}
+
+// bd val-hnq: a half-stroke timed shorter than the input ceilings render kept
+// its deadline and was trimmed toward its start. In a 5 mm window that was
+// every other stroke, one per tick, with the carriage all but still.
+TEST_CASE("generators in a 5 mm window: every half-stroke renders whole at the stroke rate, nothing trimmed (val-hnq)") {
+    auto classic = std::make_unique<ClassicGenerator>();
+    auto advanced = std::make_unique<AdvancedGenerator>();
+    for (const bool adv : {false, true}) {
+        CAPTURE(adv);
+        auto r = rig();
+        r->arb.forceHome(500.0f);
+        r->arb.setWindow(100.0f, 105.0f, 500.0f);
+        r->run(1000);
+        PatternSettings s;
+        s.frame = {100.0f, 105.0f, DEFAULT_MAX_SPEED_MM_S, DEFAULT_ACCEL_MM_S2, DEFAULT_INPUT_MAX_JERK_MM_S3};
+        if (adv) {
+            // 0.75 mm strokes at full master speed.
+            s.adv_running = true;
+            s.ap.master.set(100);
+            s.ap.setBase(advpat::DEPTH_MAX, 15);
+            s.ap.setBase(advpat::DEPTH_MIN, 0);
+        } else {
+            // The soak's probe: Teasing Pounding, 0.75 mm strokes at 73 % speed.
+            s.running = true;
+            s.setPattern(1);
+            s.speed = 73.0f;
+            s.depth = 15.0f;
+            s.stroke = 71.0f;
+        }
+        PatternEngine& gen = adv ? static_cast<PatternEngine&>(*advanced) : *classic;
+        REQUIRE(r->arb.acquireRail(adv ? MotionSource::Advanced : MotionSource::Pattern));
+        gen.apply(s);
+        for (int i = 0; i < 1000; ++i) generatorPass(*r, gen, nullptr);   // into the window
+        r->arb.drainAnomalies();
+        const MotionCensus c0 = r->census();
+        float lo = 1e9f, hi = -1e9f;
+        for (int i = 0; i < 2000; ++i) {
+            generatorPass(*r, gen, nullptr);
+            r->arb.drainAnomalies();
+            lo = std::min(lo, r->census().position_mm);
+            hi = std::max(hi, r->census().position_mm);
+        }
+        const MotionCensus c = r->census();
+        CHECK(c.anomalies == c0.anomalies);
+        // The stroke rate, never the tick's: 2 s at 200 plans a second was the bug.
+        CHECK(c.plans - c0.plans >= 50);
+        CHECK(c.plans - c0.plans <= 200);
+        // The whole 0.75 mm stroke, both ends.
+        CHECK(lo <= 100.05f);
+        CHECK(hi >= 100.70f);
+    }
+}
+
+// bd val-ku3: an anomaly leaves the engine once, counted for 0x1111 and handed
+// on for 0x4100 with its target in the client frame.
+TEST_CASE("popAnomaly: each anomaly is counted as it leaves, its target in the flipped client's frame") {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    r->arb.setFlipped(true);
+    r->run(1000);
+    REQUIRE(r->arb.acquireRail(MotionSource::Pattern));
+    // 100 mm in 5 ms: no ceiling renders it, so the knot is trimmed.
+    REQUIRE(r->arb.accept(MotionIntent{MotionSource::Pattern, 100.0f, 5000}, g_now_us));
+    r->run(20'000);
+    const uint32_t before = r->census().anomalies;
+    MotionAnomaly a;
+    REQUIRE(r->arb.popAnomaly(a));
+    CHECK(a.kind == uint8_t(kinetic2::AnomalyKind::KnotTrimmed));
+    CHECK(a.target == doctest::Approx(100.0f / 500.0f));   // 0.8 in the engine's physical frame
+    CHECK(r->census().anomalies == before + 1);
+    CHECK(r->census().anom[a.kind] >= 1);
+    r->arb.drainAnomalies();
+    CHECK_FALSE(r->arb.popAnomaly(a));
 }

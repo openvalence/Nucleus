@@ -242,6 +242,9 @@ private:
     // 0x3140 osc-set and its 0x1140 twin (RFC-103, SPEC 9.7).
     Result<IntentValueMap, NackCode> applyOsc(const IntentValueMap& requested, bool& cfgChanged);
     void publishOscillator(const MotionCensus& mo, bool force);
+    // 0x4100 motion-anomaly: every anomaly the planner handed over, as events
+    // under a token bucket (SPEC 9.4 events.anomaly). Hub task, from tick().
+    void publishAnomalies(uint32_t nowMs);
 
     void serviceButtons(uint32_t nowMs);
     void homeFromButton();
@@ -404,6 +407,10 @@ private:
     uint32_t _lastPlanMs = 0;
     uint32_t _lastSlowMs = 0;
     uint32_t _lastStatusMs = 0;
+    // publishAnomalies()'s bucket: events it may still send, and the hub-ms
+    // its last refill counts from.
+    uint32_t _anomTokens = 0;
+    uint32_t _anomRefillMs = 0;
 
     // One byte, relaxed: a stale reading is a stale reading either way, and
     // nothing orders against it.
