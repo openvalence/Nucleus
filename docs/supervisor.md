@@ -171,7 +171,9 @@ drops and raises `SV_W_LINK_DROP`.
   trim pin and hold it), `TRIM_RELATCH`.
 
 The P4 side, for val-091.21: read IDENT at boot (section 6); heartbeat and
-STATUS poll from the hub task; on an EN-node drop (G23) read STATUS, publish
+STATUS poll from the motor-switch task, the power bus's one owner after the
+self-check's verdict (val-9hr; it reads STATUS once a second today, for
++BUS on 0x1010); on an EN-node drop (G23) read STATUS, publish
 the latched faults over Valence, clear once the cause is gone.
 
 **Shared-bus risk.** SPEC L87 put Qwiic on its own bus so that a hung

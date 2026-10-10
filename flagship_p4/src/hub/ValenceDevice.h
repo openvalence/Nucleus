@@ -56,12 +56,14 @@ public:
 // the host twin both build their catalog from it, so the twin can never serve
 // a different etag by drifting a flag.
 // Operator ruling 2026-09-21: the board acts like a normal machine with no
-// motor, no Modbus drive and no current sensor. The motion plane is REAL --
-// the arbiter, the engine and the LP emitter are all live -- so it is
-// advertised, and so is the pattern generator that drives it
-// (flagship_p4/src/patterns/); the two absent subsystems are what stays gated.
+// motor and no Modbus drive. The motion plane is REAL -- the arbiter, the
+// engine and the LP emitter are all live -- so it is advertised, and so is
+// the pattern generator that drives it (flagship_p4/src/patterns/). The
+// board has since gained its power monitor (U11, val-091.22): 0x1010 is
+// advertised, and the twin models its supply (SimMotorSwitch.cpp).
 inline DeviceFeatures boardFeatures() {
     DeviceFeatures feat{};
+    feat.has_current_sensor = true;
     feat.has_motion  = true;
     feat.has_drive   = false;  // no Modbus drive on this board (val-091)
     feat.has_pattern = true;

@@ -9,7 +9,6 @@
 #include <optional>
 
 #include <driver/gpio.h>
-#include <driver/i2c_master.h>
 #include <esp_err.h>
 #include <nvs.h>
 
@@ -43,26 +42,9 @@ aim::ProbeOutcome g_driveOutcome = aim::ProbeOutcome::pending;
 
 // ---- the reads ---------------------------------------------------------------
 
-// One block from the board monitor: write the register id, read its length.
-// The private bus belongs to ValencePower; the monitor joins it per read.
-esp_err_t readMonitorBlock(uint8_t reg, uint8_t* out, size_t len) {
-    i2c_master_bus_handle_t bus = powerI2cBus();
-    if (bus == nullptr) return ESP_ERR_INVALID_STATE;
-    i2c_device_config_t cfg{};
-    cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
-    cfg.device_address = SV_I2C_ADDR;
-    cfg.scl_speed_hz = 400000;
-    i2c_master_dev_handle_t dev = nullptr;
-    esp_err_t err = i2c_master_bus_add_device(bus, &cfg, &dev);
-    if (err != ESP_OK) return err;
-    err = i2c_master_transmit_receive(dev, &reg, 1, out, len, 10);
-    i2c_master_bus_rm_device(dev);
-    return err;
-}
-
 void checkBoardMonitor(const selfcheck::BusWindowMv& busWindow) {
     std::array<uint8_t, SV_IDENT_LEN> ident{};
-    esp_err_t err = readMonitorBlock(SV_REG_IDENT, ident.data(), ident.size());
+    esp_err_t err = boardMonitorRead(SV_REG_IDENT, ident);
     if (err != ESP_OK) {
         g_table.record(Check::board_monitor, Verdict::fail,
                        "no answer at 0x%02x (%s): monitor missing or blank",
@@ -78,7 +60,7 @@ void checkBoardMonitor(const selfcheck::BusWindowMv& busWindow) {
         return;
     }
     std::array<uint8_t, SV_STATUS_LEN> status{};
-    err = readMonitorBlock(SV_REG_STATUS, status.data(), status.size());
+    err = boardMonitorRead(SV_REG_STATUS, status);
     SvStatus s{};
     const int e = (err == ESP_OK) ? sv_status_decode(status.data(), status.size(), &s) : -1;
     if (e != SV_OK) {

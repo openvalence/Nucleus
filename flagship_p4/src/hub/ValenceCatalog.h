@@ -259,7 +259,7 @@ inline constexpr uint8_t t_us   = 5;  // engine time at record, µs (low 32 bits
 // get the minimal catalog unless they say otherwise; the board's values come
 // from boardFeatures() (ValenceDevice.h).
 struct DeviceFeatures {
-    bool has_current_sensor = false;  // bus current measured
+    bool has_current_sensor = false;  // system voltage and draw measured (0x1010)
     bool has_power_monitor  = false;  // power monitor die temperature
     // Gates the MOTION PLANE: the motion/plan/diag/tuning STATE channels, both
     // c2h motion streams, move/home, the anomaly event, and the two
@@ -1143,50 +1143,40 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                        {"shaped", "stretched", "clamped"});
     };
 
-    // ---- "power" — STATE, background, 10 Hz ---------------------------------
-    // Bus voltage / current / power / die temperature, feeding the BUS A/V and DIE
-    // degC meter tiles.
+    // ---- "power" — STATE, background, 1 Hz ----------------------------------
+    // The system voltage and the draw (RFC-109 telemetry.power.bus and
+    // telemetry.power.draw), as motorSwitchPower() hands them over: the
+    // board's switch task reads them once a second, the twin models them.
     //
     // *** DECLARED ONLY WHEN THE HARDWARE EXISTS. *** A machine with no
-    // INA228 does not advertise this channel at all — its ABSENCE answers
-    // "can this hub measure power?". Publishing zeros instead would be
-    // indistinguishable from an idle machine, the same class of lie as a
-    // dead gauge.
+    // power sensing does not advertise this channel at all: its ABSENCE
+    // answers "can this hub measure power?".
     //
-    // hasCurrentSensor() gates bus V/A, hasPowerMonitor() adds die temp
-    // separately, so a rig with a shunt but no thermal sensor advertises a
-    // 3-field entry rather than a 4-field one with a permanently-zero
-    // column. Byte offsets differ between those builds; that is fine and is
-    // precisely why the catalog is fetched per firmware and etag-keyed
-    // rather than assumed.
+    // 65535 in either field is NO READING (a failed read, a monitor that has
+    // not answered, or MOTOR_V+ standing in for +BUS while the switch is off),
+    // never a value; a reading saturates at 65534. 0 is a real 0.
     //
-    // i_bus_mA lives HERE, not on 0x0080, deliberately: it is a slow,
-    // background diagnostic, and putting it on the 60 Hz motion snapshot
-    // would grow the highest-rate channel to carry a value nothing on the
-    // motion path reads.  [2+2+2+2 = 8 B, or +2 = 10 B with a power monitor]
+    // The draw is the motor path's (U11 sits after the motor switch); the
+    // logic rails are not on its shunt. The descs are shared with the twin,
+    // which must serve this etag, so they name its model.
+    //   [2+2 = 4 B, or +2 = 6 B with a power monitor]
     auto addPower = [&]() {
     if (feat.has_current_sensor) {
         c.addEntry({.id = ch::power, .name = "power",
                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
-                    .access = AccessLevel::watch, .maxRateHz = 10.0f,
+                    .access = AccessLevel::watch, .maxRateHz = 1.0f,
                     .defaultPriority = Priority::background,
                     .hasCategory = true, .category = valence::ui_categories::system,
                     .hasRank = true, .rank = valence::ui_ranks::diagnostic});
         c.addLayoutField({.name = "bus_mV",  .type = PackedFieldType::u16, .unit = "V", .scale = 1000.0f,
-                          .group = "Power", .desc = "DC bus voltage at the motor drive",
+                          .group = "Power", .desc = "System supply voltage; virtual machine: its nominal 36 V",
                           .role = roles::telemetry_power_bus,
                           .hasUnitId = true, .unitId = valence::unit_ids::v});
-        c.addLayoutField({.name = "peak_mA", .type = PackedFieldType::u16, .unit = "A", .scale = 1000.0f,
-                          .group = "Power",
-                          .desc = "Peak bus current since last reset"});
-        c.addLayoutField({.name = "i_bus_mA", .type = PackedFieldType::i16, .unit = "A", .scale = 1000.0f,
-                          .group = "Power", .desc = "Bus current, signed by the drive",
-                          .role = roles::telemetry_current});
         // TODO(RFC-109): `telemetry.power.draw` is a drafted role, and
         // `telemetry.power.bus` narrows to voltage there; the literal becomes
         // the generated constant when the RFC lands, or goes if it is refused.
         c.addLayoutField({.name = "draw_w10", .type = PackedFieldType::u16, .unit = "W", .scale = 10.0f,
-                          .group = "Power", .desc = "Power drawn from the bus",
+                          .group = "Power", .desc = "Power the motor draws; virtual machine: a modeled holding draw",
                           .role = "telemetry.power.draw",
                           .hasUnitId = true, .unitId = valence::unit_ids::w});
         if (feat.has_power_monitor) {
