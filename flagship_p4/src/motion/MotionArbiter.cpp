@@ -31,6 +31,10 @@ constexpr float kTrackHz = 50.0f;
 // as a stroke, so dither around a standstill never inflates the odometer.
 constexpr float kStrokeMinMm = 1.0f;
 
+// A late plan is counted past one step and logged past ten: a gap of a step
+// or two is the ordinary re-plan seam (bd val-alf).
+constexpr float kLatePlanLogMm = 10.0f * kMmPerStep;
+
 bool isGenerator(MotionSource s) { return s == MotionSource::Pattern || s == MotionSource::Advanced; }
 
 [[maybe_unused]] const char* sourceName(uint8_t id) {
@@ -1065,7 +1069,10 @@ void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
             const float d = p_plan_mm - p_was;
             if (std::fabs(d) > kMmPerStep && !s.cut) {
                 ++_late_plans;
-                GLOGW_EVERY_MS(1000, kTag, "LATE PLAN: %.3f mm off the strip in flight, closed by the kick", double(d));
+                _late_plan_max_mm = std::fmax(_late_plan_max_mm, std::fabs(d));
+                if (std::fabs(d) > kLatePlanLogMm)
+                    GLOGW_EVERY_MS(1000, kTag, "LATE PLAN: %.3f mm off the strip in flight, closed by the kick (largest %.3f mm)",
+                                   double(d), double(_late_plan_max_mm));
             }
             const float lo = std::fmin(backstopLo(), _p_cmd_mm);
             const float hi = std::fmax(backstopHi(), _p_cmd_mm);

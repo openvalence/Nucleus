@@ -81,8 +81,9 @@ window is solved at the next sample, and the sampler evaluates it.
   position. A new plan landing off the strip the steer was rendering (a
   solve longer than `react_us`) moves the previous command by the gap, so
   the gap closes at the bounded kick, never as a burst (`latePlans()`,
-  logged). The first steer after a tick the steer held (an e-stop, power, a
-  frame move, no strip) starts its feedforward from the plan itself.
+  counted past one step, logged past ten). The first steer after a tick
+  the steer held (an e-stop, power, a frame move, no strip) starts its
+  feedforward from the plan itself.
   `evaluate()` is both halves on one task: the sim, kinetic-wasm and the
   native suites [verified 2026-10-08 -- test_motion_arbiter, the strip cases
   driving planTick() and steerTick() apart; test_kinetic_wasm_trace

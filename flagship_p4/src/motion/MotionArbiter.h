@@ -666,6 +666,7 @@ private:
     bool      _strip_starved = false;
     uint32_t  _planner_stalls = 0;
     uint32_t  _late_plans = 0;
+    float     _late_plan_max_mm = 0.0f;   // the largest late-plan gap since boot
 
     // Kinetic² boundary state, planner task only. The newest knot the engine
     // holds (or the rest point after a reset, or a brake's end): a segment
