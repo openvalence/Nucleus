@@ -34,6 +34,7 @@
 #include "motion/ValenceMotion.h"
 #include "patterns/PatternPresetStore.h"
 #include "patterns/PatternSettings.h"
+#include "system/TcpTally.h"
 #include "system/ValenceMotorSwitch.h"
 #include "valence/hub/hub.hpp"
 
@@ -88,8 +89,8 @@ CatalogHeadroom catalogHeadroom(const Catalog32& c, size_t encodedBytes);
 // the clock the linked ValenceMotion implementation reads, or every stream
 // anchor lands at the wrong instant. deviceFreeHeapBytes(): the 0x0006 heap
 // figure; 0 where the host has no meaningful answer. deviceLinkTcp(): the
-// 0x0006 TCP segment totals of the WebSocket binding since boot (u32, wrap);
-// zeros where the host has no TCP of its own to count.
+// WebSocket binding's TCP segment totals since boot (u32, wrap), behind
+// 0x0006 `resent`; zeros where the host has no TCP of its own to count.
 struct LinkTcp {
     uint32_t sent = 0;     // segments occupying sequence space, resends included
     uint32_t resent = 0;   // of those, retransmissions
@@ -428,6 +429,8 @@ private:
     // One byte, relaxed: a stale reading is a stale reading either way, and
     // nothing orders against it.
     std::atomic<int8_t> _linkRssi{0};
+    // 0x0006 `resent`: the trailing window over deviceLinkTcp(), hub task only.
+    tcptally::ResentWindow _resentWindow{};
 };
 
 }  // namespace valence

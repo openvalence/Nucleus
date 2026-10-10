@@ -2498,25 +2498,37 @@ TEST_CASE("VD-LEADCAP: a bundle stamped past the lead cap moves earlier whole, i
     CHECK(g_intents[0].anchor_us == now + cap - 5000);
 }
 
-TEST_CASE("VD-TCP: hub-status carries the binding's TCP totals at bytes 16 and 20, little-endian u32") {
+TEST_CASE("VD-TCP: hub-status carries the binding's resent share at bytes 16-17, hundredths of a percent") {
     auto rig = std::make_unique<Rig>(AccessLevel::control, 0.0f, true);
-    g_linkTcp = LinkTcp{0xFFFFFFF0u, 7u};
+    g_linkTcp = LinkTcp{1000u, 10u};
     rig->step(2500);
     const auto it = rig->del.lastState.find(channels::hub_status);
     REQUIRE(it != rig->del.lastState.end());
-    REQUIRE(it->second.size() == 24);
+    REQUIRE(it->second.size() == 18);
     const std::span<const std::byte> s(it->second);
-    CHECK(getU32(s.subspan(16, 4)) == 0xFFFFFFF0u);
-    CHECK(getU32(s.subspan(20, 4)) == 7u);
-    // The catalog declares the same two fields, in order, after motor_fault.
+    // 10 of 1000 since the attach-time snapshot of zeros: 1 %.
+    CHECK(getU16(s.subspan(16, 2)) == 100u);
     const CatalogEntry* e = rig->catalog.find(channels::hub_status);
     REQUIRE(e != nullptr);
     const auto fields = rig->catalog.layoutFields(*e);
-    REQUIRE(fields.size() == 9);
-    CHECK(fields[7].name == "tcp_sent");
-    CHECK(fields[7].role == "link.tcp_sent");
-    CHECK(fields[8].name == "tcp_resent");
-    CHECK(fields[8].role == "link.tcp_resent");
-    CHECK((fields[7].hasScope && fields[7].scope == 3 && fields[8].hasScope && fields[8].scope == 3));
+    REQUIRE(fields.size() == 8);
+    CHECK(fields[7].name == "resent");
+    CHECK(fields[7].role == "link.resent");
+    CHECK(fields[7].scale == 100.0f);
     CHECK(fields[2].role == "link.rssi");
+}
+
+TEST_CASE("VD-PWR: the power layout tags bus voltage and power draw as two roles, in volts and watts") {
+    auto cat = std::make_unique<Catalog32>();
+    DeviceFeatures feat = boardFeatures();
+    feat.has_current_sensor = true;
+    feat.has_power_monitor = true;
+    REQUIRE(buildValenceCatalog(*cat, feat));
+    const CatalogEntry* e = cat->find(ch::power);
+    REQUIRE(e != nullptr);
+    const auto f = cat->layoutFields(*e);
+    REQUIRE(f.size() == 5);
+    CHECK((f[0].role == "telemetry.power.bus" && f[0].unitId == unit_ids::v));
+    CHECK((f[3].name == "draw_w10" && f[3].role == "telemetry.power.draw" && f[3].unitId == unit_ids::w));
+    CHECK(layoutWireSize(f) == 10);
 }

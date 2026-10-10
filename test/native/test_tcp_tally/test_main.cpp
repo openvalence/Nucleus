@@ -63,3 +63,43 @@ TEST_CASE("TT-05: another port, a listen pcb or no watched port count nothing") 
     CHECK(classify(l, kPort) == Kind::none);
     CHECK(classify(seg(1000, 1000, 100), 0) == Kind::none);
 }
+
+TEST_CASE("TW-01: the window reads resent over sent, hundredths of a percent, rounded") {
+    ResentWindow w;
+    CHECK(w.push(0, 100, 0) == kNoReading);          // one snapshot is not a rate
+    CHECK(w.push(1000, 1100, 10) == 100);            // 10 of 1000
+    CHECK(w.push(2000, 1103, 11) == 110);            // 11 of 1003 = 1.0967 %
+}
+
+TEST_CASE("TW-02: nothing sent in the window is no reading, never 0") {
+    ResentWindow w;
+    w.push(0, 500, 5);
+    CHECK(w.push(1000, 500, 5) == kNoReading);
+}
+
+TEST_CASE("TW-03: ten seconds and the old resends slide out") {
+    ResentWindow w;
+    w.push(0, 0, 0);
+    w.push(1000, 100, 50);
+    for (uint32_t t = 2; t <= 11; ++t) w.push(t * 1000, 100 + (t - 1) * 100, 50);
+    CHECK(w.push(12000, 1200, 50) == 0);
+}
+
+TEST_CASE("TW-04: a publish inside a second replaces the newest, so bursts never shrink the window") {
+    ResentWindow w;
+    w.push(0, 0, 0);
+    for (int i = 0; i < 20; ++i) w.push(500, 100, 1);
+    CHECK(w.push(900, 200, 2) == 100);               // still measured from t=0
+}
+
+TEST_CASE("TW-05: totals wrap modulo 2^32") {
+    ResentWindow w;
+    w.push(0, 0xFFFFFF00u, 0xFFFFFFF0u);
+    CHECK(w.push(1000, 0x00000064u, 0x00000002u) == 506);    // 18 of 356 resent
+}
+
+TEST_CASE("TW-06: never above 100 %") {
+    ResentWindow w;
+    w.push(0, 0, 0);
+    CHECK(w.push(1000, 10, 50) == 10000);
+}
