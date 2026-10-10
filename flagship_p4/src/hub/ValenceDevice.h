@@ -309,7 +309,8 @@ private:
     std::array<uint32_t, 4> _owner{};
     // RFC-098: the motion task's intent count (accepted plus rejected) when
     // the last jog was submitted. The jog's slot stays held until the count
-    // moves past it, so a jog admitted this tick is never quiet.
+    // moves past it, so a jog admitted this tick is never quiet. A jog the
+    // motion door refused never moves it (bd val-u8a).
     std::optional<uint32_t> _jogMark;
     // A `return` is running: set on its acceptance, cleared when the
     // arbiter's census.returns moves past _returnsAtRequest, or by ESTOP.

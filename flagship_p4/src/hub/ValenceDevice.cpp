@@ -1352,8 +1352,11 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     MotionIntent in;
     in.source    = MotionSource::Manual;
     in.target_mm = *numberOf(f1);
-    _jogMark = c.intents + c.rejected;
+    // The mark is the count before the submit, so a move the planner takes at
+    // once still reads as taken; it is stored only once the submit lands, so
+    // a refused move leaves the last submitted move's mark (sourceQuiet()).
     if (!motionSubmit(in)) return refuse(NackCode::INTERLOCK, "motion path refused the intent");
+    _jogMark = c.intents + c.rejected;
 
     // Ground truth: echo the post-clamp position, against the SAME bounds the
     // arbiter clamps a Manual intent to: the whole rail under override, the
@@ -1862,8 +1865,9 @@ uint8_t ValenceDevice::sourceKind(uint8_t source_id) {
 }
 
 // RFC-098: a generator is quiet once stopped and no longer driving (its stop's
-// brake done); the jog once the motion task took the move and the plan is at
-// rest. A refused jog submitted nothing, so its slot is quiet at rest.
+// brake done); the jog once the motion task took the last move submitted and
+// the plan is at rest. A refused jog submitted nothing and marks nothing, so
+// it never holds the slot (bd val-u8a).
 bool ValenceDevice::sourceQuiet(uint8_t source_id) {
     switch (MotionSource(source_id)) {
         case MotionSource::Manual: {

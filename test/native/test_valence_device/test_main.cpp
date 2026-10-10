@@ -100,7 +100,10 @@ uint64_t deviceNowUs() { return g_clock.nowUs(); }
 uint32_t deviceFreeHeapBytes() { return 0; }
 
 bool motionBegin() { return true; }
+// False: the motion door refuses the intent, as a full queue does.
+bool g_submitOk = true;
 bool motionSubmit(const MotionIntent& in) {
+    if (!g_submitOk) return false;
     ++g_submits;
     g_intents.push_back(in);
     return true;
@@ -248,6 +251,7 @@ struct Rig {
         g_homeCalls = 0;
         g_driveAlarm = false;
         g_submits = g_patPushes = 0;
+        g_submitOk = true;
         g_intents.clear();
         g_switch = MotorSwitchStatus{};
         g_switch.state = motorswitch::State::on;
@@ -1036,6 +1040,116 @@ TEST_CASE("VD-23: a move with no position is refused, never read as position 0")
     REQUIRE(rig->del.nacks.size() == 1);
     CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
     CHECK(g_submits == 0);
+}
+
+// ---- SPEC 11.4: a refused move takes nothing (bd val-u8a) ------------------------
+
+namespace {
+
+// A second control session on its own link, subscribed to control-owner. The
+// rig's step() updates only its own client, so stepping goes through here.
+struct Peer {
+    XorShift32 rng;
+    std::optional<InProcessLink> link{};
+    RecordingClient del{};
+    std::optional<Client> client{};
+
+    Peer(Rig& rig, uint8_t instance) : rng(5000u + instance) {
+        link.emplace(g_clock, rng);
+        link->profileA().mtu = 1024;   // control-owner is 216 B
+        REQUIRE(rig.hub->attachTransport(link->endpointA()));
+        ClientIdentity id;
+        id.instance_id.fill(std::byte{0});
+        id.instance_id[0] = std::byte{instance};
+        id.hasToken = false;
+        id.client_kind = "sim";
+        id.client_name = "peer";
+        client.emplace(id, link->endpointB(), g_clock, rng, del);
+        const auto etag = rig.hub->catalogEtag();
+        client->setCachedEtag(std::span<const std::byte, limits::etag_bytes>(etag.data(), limits::etag_bytes));
+        REQUIRE(client->addSubscriptionWish(channels::control_owner, 0.0f, Priority::normal));
+        REQUIRE(client->connect());
+        step(rig, 200);
+        REQUIRE(client->state() == ClientSessionState::LIVE);
+    }
+
+    void step(Rig& rig, int rounds = 16) {
+        for (int i = 0; i < rounds; ++i) {
+            rig.step(1);
+            client->update(g_clock.nowUs());
+        }
+    }
+
+    // control-owner's owner of the jog source (slot 0, Manual), 0 = unowned.
+    uint32_t jogOwner() const {
+        const auto it = del.lastState.find(channels::control_owner);
+        REQUIRE(it != del.lastState.end());
+        REQUIRE(it->second.size() >= 5);
+        return getU32(std::span<const std::byte>(it->second).subspan(1, 4));
+    }
+};
+
+}  // namespace
+
+TEST_CASE("VD-OWN-1: a move refused after it took the jog source releases it; another session's move is accepted") {
+    auto rig = std::make_unique<Rig>();
+    Peer b(*rig, 9);
+    REQUIRE(rig->client->sessionId() != 0);
+    REQUIRE(b.jogOwner() == 0);
+
+    g_submitOk = false;
+    REQUIRE(rig->client->sendIntent(ch::move, moveTo(100.0f)).has_value());
+    b.step(*rig);
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INTERLOCK);
+    CHECK(b.jogOwner() == 0);
+
+    g_submitOk = true;
+    REQUIRE(b.client->sendIntent(ch::move, moveTo(200.0f)).has_value());
+    b.step(*rig);
+    CHECK(b.del.nacks.empty());
+    CHECK(b.del.echoes == 1);
+    CHECK(b.jogOwner() == b.client->sessionId());
+    REQUIRE(g_intents.size() == 1);
+    CHECK(g_intents[0].target_mm == 200.0f);
+}
+
+// The source a session already owns stays owned through its refused move (the
+// hub's rule), so the refusal must not pin it either: once the move it did
+// submit settles, the source goes quiet and another session's move lands.
+TEST_CASE("VD-OWN-2: a refused move by the jog's owner leaves the source to go quiet; another session's move is accepted") {
+    auto rig = std::make_unique<Rig>();
+    Peer b(*rig, 9);
+    const uint32_t a = rig->client->sessionId();
+
+    REQUIRE(rig->client->sendIntent(ch::move, moveTo(100.0f)).has_value());
+    b.step(*rig);
+    REQUIRE(rig->del.echoes == 1);
+    REQUIRE(b.jogOwner() == a);
+    // The planner takes the move and drives it.
+    g_census.intents = 1;
+    g_census.busy = true;
+    b.step(*rig);
+    REQUIRE(b.jogOwner() == a);
+
+    g_submitOk = false;
+    REQUIRE(rig->client->sendIntent(ch::move, moveTo(150.0f)).has_value());
+    b.step(*rig);
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INTERLOCK);
+    CHECK(b.jogOwner() == a);
+
+    // The submitted move settles: the jog has nothing left to execute.
+    g_census.busy = false;
+    b.step(*rig);
+    CHECK(b.jogOwner() == 0);
+
+    g_submitOk = true;
+    REQUIRE(b.client->sendIntent(ch::move, moveTo(200.0f)).has_value());
+    b.step(*rig);
+    CHECK(b.del.nacks.empty());
+    CHECK(b.del.echoes == 1);
+    CHECK(b.jogOwner() == b.client->sessionId());
 }
 
 // ---- DRV_ALM: the drive's own alarm reaches the hub as a fault latch (val-091.29) --
