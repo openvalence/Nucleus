@@ -1649,7 +1649,7 @@ TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publish
     IntentValueMap m{};
     m.count = 6;
     m.fields[0] = IntentValueField{1, IntentValue::ofBool(true)};
-    m.fields[1] = IntentValueField{2, IntentValue::ofF32(80.0f)};    // past osc_max_hz
+    m.fields[1] = IntentValueField{2, IntentValue::ofF32(150.0f)};   // past osc_max_hz
     m.fields[2] = IntentValueField{3, IntentValue::ofF32(0.05f)};
     m.fields[3] = IntentValueField{4, IntentValue::ofU64(1)};        // square
     m.fields[4] = IntentValueField{5, IntentValue::ofF32(0.333f)};   // two decimals

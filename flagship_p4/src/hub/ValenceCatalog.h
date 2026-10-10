@@ -331,7 +331,7 @@ inline constexpr float accel_max  = 100000.0f;    // MAX_ACCEL_MM_S2
 inline constexpr float jerk_min   = 1000.0f;
 inline constexpr float jerk_max   = 50000000.0f;  // MAX_JERK_MM_S3
 inline constexpr float home_speed_min = 5.0f;     // MIN_HOME_SPEED_MM_S; its max is speed_max
-inline constexpr float osc_max_hz = 20.0f;        // OSC_MAX_HZ, WELCOME limits osc_max_hz
+inline constexpr float osc_max_hz = 100.0f;       // OSC_MAX_HZ, WELCOME limits osc_max_hz
 inline constexpr float osc_dwell_max = 4.0f;      // the longest hold, four moving cycles
 }  // namespace ceiling
 

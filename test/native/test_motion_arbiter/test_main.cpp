@@ -3411,6 +3411,27 @@ TEST_CASE("oscillator: boots off; enabled at rest it swings the asked amplitude 
     CHECK(r->census().backstops == 0);
 }
 
+// Operator ruling 2026-10-09 (bd val-dzf): OSC_MAX_HZ is 100.
+TEST_CASE("oscillator at OSC_MAX_HZ: 100 Hz is taken, renders inside every ceiling, ten steer samples a period") {
+    auto r = restRig(250.0f);
+    r->arb.setOscillator(oscOn(OSC_MAX_HZ, 0.01f));   // 5 mm asked: the ceilings shed it
+    Heads h;
+    runHeads(*r, 1'200'000, h);
+    const MotionCensus c = r->census();
+    CHECK(c.osc_active);
+    MESSAGE("amplitude at 100 Hz: ", c.osc_amplitude * 500.0f, " mm");
+    CHECK(c.osc_amplitude > 0.0f);
+    CHECK(c.osc_amplitude * 500.0f < 0.3f);
+    const GridPeaks g = gridPeaks(h.p);
+    CHECK(g.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
+    CHECK(g.a <= DEFAULT_ACCEL_MM_S2 + kFdA);
+    CHECK(g.j <= DEFAULT_INPUT_MAX_JERK_MM_S3 + kFdJ);
+    const auto d = crossings(h.p, 250.0f, 600);
+    REQUIRE(d.size() > 10);
+    for (const size_t ticks : d) CHECK(ticks == 10);
+    CHECK(r->census().backstops == 0);
+}
+
 TEST_CASE("oscillator under planned strokes: the strip never exceeds a ceiling or leaves the window, and sheds to nothing at full speed") {
     // The same strokes with and without it: the plan is the engine's alone.
     auto play = [](bool osc, std::vector<float>* amp) {

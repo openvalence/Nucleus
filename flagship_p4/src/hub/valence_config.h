@@ -71,10 +71,12 @@
 #define MAX_JERK_MM_S3              50000000.0f
 
 // ---- The oscillator (RFC-103): the highest frequency it renders -------------
-// WELCOME limits osc_max_hz and the catalog's osc.frequency bound. NOT
-// MEASURED: a conservative start on the 1 ms strip, 50 samples a period. Raise
-// it only on a bench measurement of the loaded drive (bd val-ael).
-#define OSC_MAX_HZ                  20.0f
+// WELCOME limits osc_max_hz and the catalog's osc.frequency bound. Operator
+// ruling 2026-10-09 (bd val-dzf): 100 Hz, ten samples a period on the 1 ms
+// strip; the yield-first budget still holds the amplitude under every ceiling
+// (0.05 mm at 100 Hz under the factory set, test_motion_arbiter). NOT MEASURED
+// on the loaded drive (bd val-ael).
+#define OSC_MAX_HZ                  100.0f
 
 #ifdef __cplusplus
 namespace valence {
