@@ -4,7 +4,9 @@
 Three steps, and the third is the one that makes this a deploy rather than an
 upload: read the version the hub is REPORTING now, push the image, then wait
 until a hub answers with a DIFFERENT version. "Upload completed" is not
-"deployed" (C-8); the only evidence that counts is the running hub's identity.
+"deployed" (C-8); the only evidence that counts is the running hub's own
+FIRMWARE_VERSION, read off the /diag header. WELCOME identity carries
+MAJOR.MINOR only (RFC-102), which a patch flash never moves.
 
 Constraints:
 - RAW BODY, NEVER MULTIPART. The firmware streams the request straight into
@@ -13,8 +15,6 @@ Constraints:
 - THE TOKEN IS NEVER A COMMAND-LINE ARGUMENT by default: it is read out of the
   git-ignored flagship_p4/src/secrets.h, the same file the firmware compiles
   it from, so the two cannot drift. --token overrides for a foreign board.
-- The version read is a tokenless-capable WATCH session: WELCOME carries the
-  identity map regardless of tier, so a 429 on the mint never blocks a deploy.
 - THE IMAGE IS CHECKED BEFORE IT LEAVES THE HOST. --image and --expect are
   both required, and the FIRMWARE_VERSION string compiled into the .bin must
   equal --expect or nothing is sent. There is no default image: two build
@@ -35,10 +35,6 @@ import urllib.error
 import urllib.request
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-sys.path.insert(0, os.path.abspath(os.path.join(_ROOT, "..", "Valence", "tools")))
-
-import valence_probe as sp  # noqa: E402
-import websocket  # noqa: E402
 
 SECRETS = os.path.join(_ROOT, "flagship_p4", "src", "secrets.h")
 
@@ -60,50 +56,21 @@ def image_version(path):
     return found.pop().decode() if len(found) == 1 else None
 
 
-def hub_version(ip, port, timeout=5.0):
-    """The fw_version the running hub reports, or None if nothing answered."""
-    token = sp.mint_uitoken(ip, retries=2, timeout=2.0)   # best effort; watch tier is enough
-    try:
-        ws = websocket.create_connection("ws://%s:%d/" % (ip, port),
-                                         subprotocols=[sp.WS_SUBPROTOCOL], timeout=timeout)
-    except Exception:
-        return None
-    try:
-        sp.send_frame(ws, sp.FRAME["HELLO"], 0,
-                      sp.build_hello("probe", "ota.py", os.urandom(8), token=token))
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            got = sp.recv_frame(ws, deadline)
-            if got is None:
-                return None
-            if got[0]["type"] == sp.FRAME["WELCOME"]:
-                w = sp.cb_decode_full(got[1])
-                ident = w.get(sp.K["identity"]) or {}
-                v = ident.get(2) if isinstance(ident, dict) else None   # identity_keys 2
-                return v.decode() if isinstance(v, bytes) else v
-    except Exception:
-        return None
-    finally:
-        try:
-            ws.close()
-        except Exception:
-            pass
-    return None
+def diag_head(ip, timeout=10.0):
+    """(version, img) from the /diag header, or (None, None) if nothing answered.
 
-
-def image_state(ip, timeout=10.0):
-    """The img= field of the /diag header: 'valid' once the image bought itself.
-
-    ?from= past the end returns the header and the footer and nothing between,
-    so this costs two lines rather than the whole archive.
+    The header is '# <hub> <FIRMWARE_VERSION> slot=.. img=<valid|pending> ..';
+    img= is 'valid' once the image bought itself. ?from= past the end returns
+    the header and the footer and nothing between, so this costs two lines
+    rather than the whole archive.
     """
     try:
         with urllib.request.urlopen("http://%s/diag?from=4294967295" % ip, timeout=timeout) as r:
             head = r.read().decode("utf-8", "replace").splitlines()[0]
     except Exception:
-        return None
-    m = re.search(r"\bimg=(\w+)", head)
-    return m.group(1) if m else None
+        return None, None
+    m = re.match(r"#\s+\S+\s+(\S+)\s.*img=(\w+)", head)
+    return (m.group(1), m.group(2)) if m else (None, None)
 
 
 def post_image(ip, image, token, timeout):
@@ -123,7 +90,6 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ip", default="192.168.1.118")
-    ap.add_argument("--port", type=int, default=82, help="the Valence WS port, for the version read")
     ap.add_argument("--image", required=True,
                     help="flagship_p4/.pio/build/<env>/firmware.bin; no default (bd val-bep)")
     ap.add_argument("--token", default=None, help="overrides the value read from secrets.h")
@@ -153,7 +119,7 @@ def main():
             print("FAIL: %s" % err)
             return 1
 
-    before = hub_version(args.ip, args.port)
+    before, _ = diag_head(args.ip)
     print("running : %s" % (before or "<no answer>"))
 
     status, body, secs, sent = post_image(args.ip, args.image, token, args.timeout)
@@ -172,21 +138,21 @@ def main():
     seen = None
     while time.time() < deadline:
         time.sleep(3.0)
-        now = hub_version(args.ip, args.port)
+        now, img = diag_head(args.ip)
         if not now or now == before:
             continue
         if seen != now:
             seen = now
             print("booted  : %s (%.0f s), waiting for it to buy itself" % (now, time.time() - t0))
-        if image_state(args.ip) == "valid":
+        if img == "valid":
             print("deployed: %s, image bought (%.0f s after the upload)" % (now, time.time() - t0))
             if now != args.expect:
                 print("FAIL: expected %s" % args.expect)
                 return 1
             return 0
-    back = hub_version(args.ip, args.port)
+    back, img = diag_head(args.ip)
     print("FAIL: %s after %.0f s, img=%s -- the image never bought itself"
-          % (back or "<no answer>", args.wait, image_state(args.ip)))
+          % (back or "<no answer>", args.wait, img))
     return 1
 
 

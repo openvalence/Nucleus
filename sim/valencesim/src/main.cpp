@@ -256,7 +256,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     // Non-fatal, as on the P4: a port another twin holds only costs discovery.
-    if (opt.discovery) discovery.begin(opt.discoveryPort, valence::SimCore::kHubName, FIRMWARE_VERSION, opt.wsPort);
+    if (opt.discovery) discovery.begin(opt.discoveryPort, valence::SimCore::kHubName, FIRMWARE_MAJOR_MINOR, opt.wsPort);
     std::string err;
     std::unique_ptr<ix::HttpServer> http = startUiTokenHttp(core->minter(), opt.httpPort, err);
     if (!http) {

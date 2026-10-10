@@ -3,9 +3,13 @@
 // valence_config.h -- the machine constants the catalog advertises and the hub
 // identifies itself with
 // Constraints:
-// - ONE HOME for each of these on this board. FIRMWARE_VERSION is what the
-//   boot banner and WELCOME identity both read; never spell a version anywhere
-//   else.
+// - ONE HOME for each of these on this board; never spell a version anywhere
+//   else. FIRMWARE_MAJOR_MINOR is the only version on the wire (WELCOME
+//   identity fw_version, DISCOVER_REPLY fw_version; SPEC 1.4, 4.2-5,
+//   RFC-102), edited by hand when MAJOR or MINOR moves. FIRMWARE_VERSION is
+//   the local build string (boot log, /diag, tools/ota.py --expect): it adds
+//   the patch, bumped every flash, and the build tags, and never rides the
+//   wire.
 // - The DEFAULT_*/MAX_* block below is the SOURCE the catalog's
 //   valence::factory and valence::ceiling tables mirror. ValenceCatalog.h may
 //   not include this file (it is library-only by contract), so ValenceHub.cpp
@@ -19,7 +23,8 @@
 //   flagship_p4_bench) defines it to 1. It makes the motion arbiter's
 //   motor-power gate advisory so the devkit can run patterns with the switch
 //   off, and it suffixes FIRMWARE_VERSION with "-bench" so that image can
-//   never pass for a release in WELCOME identity. Nothing else may read it.
+//   never pass for a release in /diag or at ota.py's --expect. Nothing else
+//   may read it.
 // See: .claude/rules/governance.md (C-1), ValenceCatalog.h, MotionArbiter.h
 // (the gate), bd val-091.58
 
@@ -27,10 +32,11 @@
 #define NUCLEUS_BENCH_NO_MOTOR 0
 #endif
 
+#define FIRMWARE_MAJOR_MINOR "0.1"
 #if NUCLEUS_BENCH_NO_MOTOR
-#define FIRMWARE_VERSION "0.1.34-p4hub-bench"
+#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".34-p4hub-bench"
 #else
-#define FIRMWARE_VERSION "0.1.34-p4hub"
+#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".34-p4hub"
 #endif
 
 // Identity strings for WELCOME key 37 (RFC-016a). Static storage, so the views

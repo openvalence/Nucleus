@@ -67,7 +67,7 @@ TEST_CASE("probe parse: a valid probe gets the 76-byte U-02 reply, nonce echoed"
 
 TEST_CASE("reply encode: identity, live state and the pairing bit") {
     DiscoveryResponder r;
-    r.setIdentity("nucleus-p4", "0.1.7-p4hub", 82);
+    r.setIdentity("nucleus-p4", "0.1", 82);
     r.setLive(0xFEEDC0DE00000001ull, kEtag, false);
     std::array<std::byte, valence::kDiscoverProbeBytes> probe{};
     REQUIRE(valence::encodeDiscoverProbe({1, 0xDEADBEEFu}, probe) == probe.size());
@@ -78,7 +78,7 @@ TEST_CASE("reply encode: identity, live state and the pairing bit") {
     const DiscoverReply& d = reply.value();
     CHECK(d.nonce == 0xDEADBEEFu);
     CHECK(valence::discoverString(d.hub_name) == "nucleus-p4");
-    CHECK(valence::discoverString(d.fw_version) == "0.1.7-p4hub");
+    CHECK(valence::discoverString(d.fw_version) == "0.1");
     CHECK(d.hub_instance_id == 0xFEEDC0DE00000001ull);
     CHECK(d.proto_ver == valence::kProtocolVersion);
     CHECK(d.ws_port == 82);

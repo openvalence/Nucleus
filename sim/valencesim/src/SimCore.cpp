@@ -140,7 +140,7 @@ bool SimCore::begin(const SimConfig& opt, IClock& clock, ISimStore& store) {
     }
     log.logf('I', "valencesim: state %s: config %s, cfg_gen %u", opt.storeName, haveStored ? "stored" : "factory",
              unsigned(hub.cfgGen()));
-    hub.setIdentity(VALENCE_PRODUCT, FIRMWARE_VERSION, kHubName);
+    hub.setIdentity(VALENCE_PRODUCT, FIRMWARE_MAJOR_MINOR, kHubName);
     // No motor switch on a desktop by default: ESTOP is a halt that keeps
     // home (SPEC 11.2). motorSwitch models the board's, which cuts power.
     hub.setEstopCutsPower(opt.motorSwitch);

@@ -105,7 +105,8 @@ reboot. No forwarding hop exists: the sockets are on the P4.
 
 - `python tools/ota.py --image <bin> --expect <version> [--ip <ip>] [--dry-run]`.
   It refuses an image whose compiled FIRMWARE_VERSION is not `--expect`
-  (there is no default image), reads the running version off the hub, pushes
+  (there is no default image), reads the running FIRMWARE_VERSION off the
+  hub's `/diag` header (WELCOME identity carries MAJOR.MINOR only, RFC-102), pushes
   the image, then waits for a NEW version AND for that image to buy itself.
   Both, or it is not a deploy.
 - The token lives in git-ignored `flagship_p4/src/secrets.h`

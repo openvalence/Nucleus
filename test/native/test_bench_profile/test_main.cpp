@@ -13,6 +13,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -100,6 +101,11 @@ struct Rig {
 TEST_CASE("bench profile: the version says so, and the constant is the macro") {
     CHECK(valence::kBenchNoMotor);
     CHECK(std::string_view(FIRMWARE_VERSION).ends_with("-bench"));
+    // RFC-102: the wire version is MAJOR.MINOR alone; the build string extends it.
+    const std::string_view wire = FIRMWARE_MAJOR_MINOR;
+    CHECK(wire.find_first_not_of("0123456789.") == std::string_view::npos);
+    CHECK(std::count(wire.begin(), wire.end(), '.') == 1);
+    CHECK(std::string_view(FIRMWARE_VERSION).starts_with(FIRMWARE_MAJOR_MINOR "."));
 }
 
 TEST_CASE("bench profile: motion runs with the switch reporting off, and the census stays honest") {

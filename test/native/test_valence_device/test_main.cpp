@@ -455,6 +455,19 @@ TEST_CASE("VD-05: unpowered, a return with travel left is refused with the motor
     CHECK_FALSE(overrideLatched(*rig));
 }
 
+// RFC-102 (SPEC 4.5, 6.3): an op the hub does not implement is refused, never
+// ignored. Safety op 2 is a retired number.
+TEST_CASE("VD-UNSUP: an op the hub does not implement is NACKed UNSUPPORTED_OP and latches nothing") {
+    auto rig = std::make_unique<Rig>();
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(2)).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::UNSUPPORTED_OP);
+    CHECK_FALSE(rig->hub->pauseLatched());
+    CHECK_FALSE(rig->hub->estopLatched());
+    CHECK_FALSE(overrideLatched(*rig));
+}
+
 // ---- bd val-urd: every refusal names its reason ---------------------------------
 
 TEST_CASE("VD-06: a move under a latched e-stop carries 'e-stop latched'") {
