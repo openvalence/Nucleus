@@ -1428,8 +1428,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .settingKey = 8, .hasSettingKey = true,
                       .hasRank = true, .rank = valence::ui_ranks::control},
                      {"off", "on"});
-    // RFC-099, append-only: bits as enabled_mask's. None is trialable: each is
-    // gated on live state (ValenceDevice.cpp), so this mask reads 0.
+    // RFC-099, append-only: bits as enabled_mask's. home_speed and
+    // datagram_estop take trials; the horizon and the flip are gated on live
+    // state and refuse one (ValenceDevice::trialBaseline()).
     if (feat.has_drive) {
     c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Settings on trial, not stored yet",
@@ -1464,7 +1465,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .group = card::safety,
                       .desc = "E-stop from any device on the network",
                       .settingKey = 10, .hasSettingKey = true,
-                      .hasRank = true, .rank = valence::ui_ranks::control},
+                      .hasRank = true, .rank = valence::ui_ranks::advanced},
                      {"off", "on"});
     };
 
