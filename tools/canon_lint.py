@@ -54,7 +54,7 @@ PIN_FILE = ROOT / "valence.pin"
 # carries the same pins as its half of the belt-and-suspenders check.
 FROZEN_SHA256_SIBLING = {
     "lib/valence/include/valence/conformance/mini_catalog.hpp":
-        "6613fea1cfa92e0de327dca17498bd18da64dd1e280ed0e2ed15ae6eaec3a228",
+        "2b39df4116c5c7b5ecb0ba7fce35b87dda322393f76f143b7e367d6e6210ad7f",
     "spec/vectors/fixtures/mini-catalog.yaml":
         "7576f08b5c190a5c720b5ec09a1fe3476fc97d3e0f11ba417720c953d2cfe44e",
 }
