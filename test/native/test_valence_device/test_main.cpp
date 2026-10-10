@@ -1600,6 +1600,40 @@ TEST_CASE("VD-MODES-9: home_speed writes on modes-set key 9, clamped, published 
     CHECK(stateF32(*rig, ch::machine_modes, 8) == ceiling::home_speed_min);
 }
 
+// bd val-39e: both are accepted at all times, so a trial of either restores
+// unconditionally (SPEC 9.3 "Trial writes" item 5). machine-modes without a
+// drive: trial_mask at 7 (bit 2 home_speed, bit 3 datagram_estop), home_speed
+// at 8, datagram_estop at 12.
+TEST_CASE("VD-TR-4: home_speed and datagram_estop take a trial: live, marked, never stored, reverted") {
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
+    persistBitsOver(*rig, 2500);
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(9, IntentValue::ofF32(25.0f)), std::nullopt, false,
+                                    true).has_value());
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(10, IntentValue::ofU64(0)), std::nullopt, false, true)
+                .has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(rig->hub->trialCount() == 2);
+    CHECK(stateF32(*rig, ch::machine_modes, 8) == 25.0f);
+    CHECK(stateU8(*rig, ch::machine_modes, 12) == 0);
+    CHECK_FALSE(estopDatagramEnabled());
+    CHECK(stateU8(*rig, ch::machine_modes, 7) == 0x0C);
+    CHECK(storedF32(*rig, kBlobHomeSpeed) == doctest::Approx(factory::home_speed));
+    std::array<std::byte, stored::kConfigBlobBytes> blob{};
+    REQUIRE(rig->device.encodeConfigBlob(blob, rig->hub->cfgGen()) == blob.size());
+    CHECK(blob[stored::kConfigV8Bytes] == std::byte{1});
+    CHECK((persistBitsOver(*rig, 2500) & kPersistConfig) == 0);
+
+    REQUIRE(rig->client->sendIntent(channels::settings_trial, oneKey(1, IntentValue::ofU64(trial_ops::revert)))
+                .has_value());
+    rig->step();
+    CHECK(rig->hub->trialCount() == 0);
+    CHECK(stateF32(*rig, ch::machine_modes, 8) == doctest::Approx(factory::home_speed));
+    CHECK(stateU8(*rig, ch::machine_modes, 12) == 1);
+    CHECK(estopDatagramEnabled());
+    CHECK(stateU8(*rig, ch::machine_modes, 7) == 0x00);
+}
+
 // ---- RFC-087 supersede (bd val-dz9) ---------------------------------------------
 
 namespace {

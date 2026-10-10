@@ -194,10 +194,10 @@ public:
     uint8_t sourceKind(uint8_t source_id) override;
     bool sourceQuiet(uint8_t source_id) override;
     std::optional<BlobView> readBlob(uint8_t ns, uint8_t store_id, uint8_t slot) override;
-    // RFC-099 trial writes. Trialable: 0x3000 keys 1-8 and 0x3120 every key
-    // but 7. Never chase_dense, the horizon or the flip: each is refused on
-    // live state, so a revert could be refused too. No 0x3030 key is
-    // trialable.
+    // RFC-099 trial writes. Trialable: 0x3000 keys 1-8, 0x3120 every key but
+    // 7, 0x3030 keys 9 and 10 (home_speed, datagram_estop). Never chase_dense,
+    // the horizon or the flip: each is refused on live state, so a revert
+    // could be refused too.
     std::optional<IntentValue> trialBaseline(uint16_t channel_id, uint8_t key) override;
     Result<IntentValueMap, NackCode> applyTrialIntent(uint16_t channel_id, const IntentValueMap& requested,
                                                       AccessLevel role, bool& cfgChanged) override;

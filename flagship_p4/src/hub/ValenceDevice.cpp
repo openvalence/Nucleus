@@ -1995,6 +1995,7 @@ std::expected<void, stored::ConfigReject> ValenceDevice::adoptConfigBlob(std::sp
 size_t ValenceDevice::encodeConfigBlob(std::span<std::byte> out, uint16_t cfgGen) const {
     StoredConfig c = _cfg;
     MotionTuning t = _tune;
+    StoredModes m = _modes;
     if (_hub != nullptr && _hub->trialCount() > 0) {
         const float rail = motionCensus().rail_mm;
         for (uint8_t k = 1; k <= 8; ++k)
@@ -2002,8 +2003,10 @@ size_t ValenceDevice::encodeConfigBlob(std::span<std::byte> out, uint16_t cfgGen
                 setConfigKey(c, k, baselineNumber(k, *b), rail, _modes.flipped);
         for (const uint8_t k : kTuningKeys)
             if (const auto b = _hub->trialBaselineOf(ch::kinetic_set, k)) (void)setTuningKey(t, k, baselineNumber(k, *b));
+        if (const auto b = _hub->trialBaselineOf(ch::modes_set, 9)) t.home_speed = baselineNumber(9, *b);
+        if (const auto b = _hub->trialBaselineOf(ch::modes_set, 10)) m.datagram_estop = baselineNumber(10, *b) != 0.0f;
     }
-    return stored::encodeConfig(out, c, t, _modes, cfgGen);
+    return stored::encodeConfig(out, c, t, m, cfgGen);
 }
 
 // ---- RFC-099 trial writes ---------------------------------------------------
@@ -2024,6 +2027,10 @@ std::optional<IntentValue> ValenceDevice::trialBaseline(uint16_t channel_id, uin
         }
     }
     if (channel_id == ch::kinetic_set && key != kChaseDenseKey) return tuningKeyValue(_tune, key);
+    // home_speed and datagram_estop are accepted at all times; the horizon and
+    // the flip are gated on live state (applyModes()) and refuse a trial.
+    if (channel_id == ch::modes_set && key == 9) return IntentValue::ofF32(_tune.home_speed);
+    if (channel_id == ch::modes_set && key == 10) return IntentValue::ofU64(_modes.datagram_estop ? 1 : 0);
     return std::nullopt;
 }
 
