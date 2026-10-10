@@ -30,13 +30,6 @@
 
 namespace valence {
 
-struct PowerReading {
-    float bus_v;       // VBUS on MOTOR_V+
-    float current_a;   // motor current; regen reads negative
-    float power_w;     // |V x I| as the part computes it, always >= 0
-    float die_c;
-};
-
 // Probes, identifies and configures U11; logs the detected part. Returns
 // false when no supported part answered. Call once, from app_main.
 bool powerBegin();

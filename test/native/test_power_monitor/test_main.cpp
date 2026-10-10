@@ -10,6 +10,8 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
+#include <span>
 
 #include "../../../flagship_p4/src/system/PowerMonitor.h"
 
@@ -18,7 +20,59 @@ namespace ina = valence::ina2xx;
 
 namespace {
 constexpr float kShunt = 0.001f;   // R2 on the Flagship
+
+// U11 as a register file: each part's register widths and reserved bits.
+// A read at the wrong width fails, where silicon would hand back the wrong
+// bytes. Reset clears every register to 0; power-on values are not modeled.
+struct FakeIna {
+    PowerChip part;
+    uint16_t device_id;                // what 0x3F answers
+    uint16_t manufacturer = ina::kManufacturerTi;
+    std::map<uint8_t, uint32_t> regs{};
+    bool bus_down = false;
+    bool drops_shunt_cal = false;      // a part that does not hold SHUNT_CAL
+    int wrong_width = 0;
+
+    size_t width(uint8_t reg) const {
+        if (reg == ina::kRegPower) return 3;
+        if (reg == 0x04 || reg == ina::kRegVbus || reg == ina::kRegCurrent) return part == PowerChip::ina228 ? 3 : 2;
+        return 2;
+    }
+    bool read(uint8_t reg, std::span<uint8_t> out) {
+        if (bus_down) return false;
+        if (out.size() != width(reg)) {
+            ++wrong_width;
+            return false;
+        }
+        const uint32_t v = reg == ina::kRegManufacturerId ? manufacturer
+                         : reg == ina::kRegDeviceId       ? device_id
+                                                          : regs[reg];
+        for (size_t i = 0; i < out.size(); ++i) out[i] = uint8_t(v >> (8 * (out.size() - 1 - i)));
+        return true;
+    }
+    bool write16(uint8_t reg, uint16_t v) {
+        if (bus_down) return false;
+        if (reg == ina::kRegConfig && (v & ina::kConfigReset) != 0) {
+            regs.clear();
+            return true;
+        }
+        if (reg == ina::kRegConfig && part == PowerChip::ina237) v &= uint16_t(~ina::kConfigTempComp);   // reserved
+        if (reg == ina::kRegShuntCal) v = drops_shunt_cal ? 0 : uint16_t(v & 0x7FFF);   // bit 15 reserved
+        regs[reg] = v;
+        return true;
+    }
+};
+
+// One boot as ValencePower.cpp runs it: identify, scale, configure.
+PowerChip boot(FakeIna& f) {
+    const ina::Identity id = ina::identifyPart(f);
+    if (id.chip == PowerChip::none) return id.chip;
+    const auto s = ina::powerScaleFor(id.chip, kShunt);
+    if (!ina::configure(f, s, ina::encodeShuntOverLimit(15.0f, kShunt), ina::encodeBusOverLimit(50.0f)))
+        return PowerChip::none;
+    return id.chip;
 }
+}  // namespace
 
 TEST_CASE("identify: DEVICE_ID and the TEMPCOMP probe must agree") {
     CHECK(ina::identify(0x5449, 0x2281, true) == PowerChip::ina228);
@@ -110,4 +164,78 @@ TEST_CASE("register values: ADCRANGE set, alert latched active-low") {
     CHECK((ina::kConfig & ina::kConfigTempComp) == 0);
     CHECK(ina::kDiagAlrtLatch == 0x8000);
     CHECK((ina::kAdcConfig >> 12) == 0xF);
+}
+
+TEST_CASE("fake: each part boots, identified by DEVICE_ID and the probe, configured alike") {
+    for (FakeIna f : {FakeIna{PowerChip::ina228, 0x2281}, FakeIna{PowerChip::ina237, 0x0000},
+                      FakeIna{PowerChip::ina237, 0x2370}}) {
+        CAPTURE(f.device_id);
+        CHECK(boot(f) == f.part);
+        CHECK(f.regs[ina::kRegConfig] == ina::kConfigAdcRange);   // the probe's TEMPCOMP cleared
+        CHECK(f.regs[ina::kRegAdcConfig] == ina::kAdcConfig);
+        CHECK(f.regs[ina::kRegShuntCal] == 4096);
+        CHECK(f.regs[ina::kRegSovl] == 12000);
+        CHECK(f.regs[ina::kRegBovl] == 16000);
+        CHECK(f.regs[ina::kRegDiagAlrt] == ina::kDiagAlrtLatch);
+        CHECK(f.wrong_width == 0);
+    }
+}
+
+TEST_CASE("fake: a contradiction, a stranger, a dead bus or a lost SHUNT_CAL boots nothing") {
+    FakeIna lying{PowerChip::ina237, 0x2281};   // an INA228 id, a dead TEMPCOMP
+    CHECK(boot(lying) == PowerChip::none);
+    FakeIna stranger{PowerChip::ina228, 0x2281, 0x1234};
+    CHECK(boot(stranger) == PowerChip::none);
+    FakeIna down{PowerChip::ina228, 0x2281};
+    down.bus_down = true;
+    CHECK(boot(down) == PowerChip::none);
+    FakeIna amnesiac{PowerChip::ina237, 0x0000};
+    amnesiac.drops_shunt_cal = true;
+    CHECK(ina::identifyPart(amnesiac).chip == PowerChip::ina237);
+    CHECK(boot(amnesiac) == PowerChip::none);
+}
+
+TEST_CASE("fake: readPower reads each part at its own width into the same SI values") {
+    // 36 V, 5 A, 180 W, 30 C. INA228: VBUS 184320 and CURRENT 64000 in bits
+    // 23:4, POWER 720000 at 3.2 x 78.125 uW, DIETEMP 3840 at 7.8125 mC.
+    FakeIna a{PowerChip::ina228, 0x2281};
+    REQUIRE(boot(a) == PowerChip::ina228);
+    a.regs[ina::kRegVbus] = 184320u << 4;
+    a.regs[ina::kRegCurrent] = 64000u << 4;
+    a.regs[ina::kRegPower] = 720000;
+    a.regs[ina::kRegDieTemp] = 3840;
+    // INA237: VBUS 11520 at 3.125 mV, CURRENT 4000 at 1.25 mA, POWER 720000
+    // at 0.2 x 1.25 mW, DIETEMP 240 in bits 15:4 at 125 mC.
+    FakeIna b{PowerChip::ina237, 0x0000};
+    REQUIRE(boot(b) == PowerChip::ina237);
+    b.regs[ina::kRegVbus] = 11520;
+    b.regs[ina::kRegCurrent] = 4000;
+    b.regs[ina::kRegPower] = 720000;
+    b.regs[ina::kRegDieTemp] = 240u << 4;
+    for (FakeIna* f : {&a, &b}) {
+        const auto r = ina::readPower(*f, ina::powerScaleFor(f->part, kShunt));
+        REQUIRE(r.has_value());
+        CHECK(r->bus_v == doctest::Approx(36.0));
+        CHECK(r->current_a == doctest::Approx(5.0));
+        CHECK(r->power_w == doctest::Approx(180.0));
+        CHECK(r->die_c == doctest::Approx(30.0));
+        CHECK(f->wrong_width == 0);
+    }
+    // Regen reads negative: -4 A is -3200 counts on the INA237.
+    b.regs[ina::kRegCurrent] = uint16_t(int16_t(-3200));
+    CHECK(ina::readPower(b, ina::powerScaleFor(PowerChip::ina237, kShunt))->current_a == doctest::Approx(-4.0));
+    // The other part's widths never read.
+    CHECK_FALSE(ina::readPower(b, ina::powerScaleFor(PowerChip::ina228, kShunt)).has_value());
+    CHECK(b.wrong_width == 1);
+}
+
+TEST_CASE("fake: the ALERT flags read back through DIAG_ALRT on both parts") {
+    for (FakeIna f : {FakeIna{PowerChip::ina228, 0x2281}, FakeIna{PowerChip::ina237, 0x0000}}) {
+        REQUIRE(boot(f) == f.part);
+        f.regs[ina::kRegDiagAlrt] |= ina::kFlagShuntOver | ina::kFlagMemOk;
+        const auto flags = ina::read16(f, ina::kRegDiagAlrt);
+        REQUIRE(flags.has_value());
+        CHECK((*flags & ina::kFlagShuntOver) != 0);
+        CHECK((*flags & ina::kFlagBusOver) == 0);
+    }
 }

@@ -16,15 +16,27 @@
 // - The limit registers (SOVL, BOVL) and DIAG_ALRT have the same layout and
 //   the same LSBs on both parts; only the measurement registers differ.
 // - Units at this surface are SI floats; raw counts never leave this file.
+// - The boot and read sequences take a register port, never the bus: the
+//   IDF glue passes its I2C device, test_power_monitor a fake register file
+//   that models each part's widths and its reserved bits.
 // See: Hardware flagship/SPEC.md (2026-09-24 U11 row), bd val-091.22
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 namespace valence {
 
 enum class PowerChip : uint8_t { none, ina228, ina237 };
+
+struct PowerReading {
+    float bus_v;       // VBUS on MOTOR_V+
+    float current_a;   // motor current; regen reads negative
+    float power_w;     // |V x I| as the part computes it, always >= 0
+    float die_c;
+};
 
 constexpr const char* powerChipName(PowerChip c) {
     switch (c) {
@@ -163,6 +175,70 @@ constexpr uint16_t encodeBusOverLimit(float volts) {
     if (counts >= 32767.0f) return 0x7FFF;
     if (counts <= 0.0f) return 0;
     return uint16_t(counts + 0.5f);
+}
+
+// ---- sequences over a register port -------------------------------------------------
+// Port: bool read(uint8_t reg, std::span<uint8_t> out) and
+// bool write16(uint8_t reg, uint16_t value), register bytes big-endian.
+
+template <class Port>
+std::optional<uint16_t> read16(Port& port, uint8_t reg) {
+    std::array<uint8_t, 2> b{};
+    if (!port.read(reg, b)) return std::nullopt;
+    return be16(b);
+}
+
+struct Identity {
+    uint16_t  manufacturer = 0;
+    uint16_t  device       = 0;
+    PowerChip chip         = PowerChip::none;
+};
+
+// Resets the part and leaves TEMPCOMP set on an INA228; configure()
+// overwrites CONFIG. An I2C error at any step leaves chip none.
+template <class Port>
+Identity identifyPart(Port& port) {
+    Identity id;
+    const auto m = read16(port, kRegManufacturerId);
+    const auto d = read16(port, kRegDeviceId);
+    if (!m || !d) return id;
+    id.manufacturer = *m;
+    id.device = *d;
+    if (!port.write16(kRegConfig, kConfigReset) || !port.write16(kRegConfig, kConfigTempComp)) return id;
+    if (const auto cfg = read16(port, kRegConfig)) id.chip = identify(*m, *d, (*cfg & kConfigTempComp) != 0);
+    return id;
+}
+
+// sovl and bovl are register counts (encodeShuntOverLimit(),
+// encodeBusOverLimit()). True only when SHUNT_CAL reads back as written.
+template <class Port>
+bool configure(Port& port, const PowerScale& s, uint16_t sovl, uint16_t bovl) {
+    return port.write16(kRegConfig, kConfig)
+        && port.write16(kRegAdcConfig, kAdcConfig)
+        && port.write16(kRegShuntCal, s.shunt_cal)
+        && port.write16(kRegSovl, sovl)
+        && port.write16(kRegBovl, bovl)
+        && port.write16(kRegDiagAlrt, kDiagAlrtLatch)
+        && read16(port, kRegShuntCal) == s.shunt_cal;
+}
+
+// VBUS and CURRENT are read at the part's width; POWER is 3 bytes and
+// DIETEMP 2 on both. nullopt on any I2C error.
+template <class Port>
+std::optional<PowerReading> readPower(Port& port, const PowerScale& s) {
+    std::array<uint8_t, 3> vbus{}, cur{}, pwr{};
+    std::array<uint8_t, 2> temp{};
+    const std::span<uint8_t> vb(vbus.data(), s.meas_bytes);
+    const std::span<uint8_t> cu(cur.data(), s.meas_bytes);
+    if (!port.read(kRegVbus, vb) || !port.read(kRegCurrent, cu) || !port.read(kRegPower, pwr)
+        || !port.read(kRegDieTemp, temp))
+        return std::nullopt;
+    return PowerReading{
+        .bus_v     = float(decodeMeasurement(vb)) * s.vbus_lsb_v,
+        .current_a = float(decodeMeasurement(cu)) * s.current_lsb_a,
+        .power_w   = float(decodePower(pwr)) * s.power_lsb_w,
+        .die_c     = decodeDieTempC(temp),
+    };
 }
 
 }  // namespace ina2xx

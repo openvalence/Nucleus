@@ -43,46 +43,16 @@ i2c_master_dev_handle_t g_dev = nullptr;
 PowerChip  g_chip  = PowerChip::none;
 ina2xx::PowerScale g_scale = {};
 
-bool readReg(uint8_t reg, std::span<uint8_t> out) {
-    return i2c_master_transmit_receive(g_dev, &reg, 1, out.data(), out.size(), kTimeoutMs) == ESP_OK;
-}
-
-std::optional<uint16_t> readReg16(uint8_t reg) {
-    std::array<uint8_t, 2> b{};
-    if (!readReg(reg, b)) return std::nullopt;
-    return ina2xx::be16(b);
-}
-
-bool writeReg16(uint8_t reg, uint16_t value) {
-    const std::array<uint8_t, 3> b{reg, uint8_t(value >> 8), uint8_t(value)};
-    return i2c_master_transmit(g_dev, b.data(), b.size(), kTimeoutMs) == ESP_OK;
-}
-
-// Decides the part. Leaves the chip freshly reset with TEMPCOMP possibly set;
-// configure() overwrites CONFIG.
-PowerChip identifyPart(uint16_t& manufacturer, uint16_t& device) {
-    const auto m = readReg16(ina2xx::kRegManufacturerId);
-    const auto d = readReg16(ina2xx::kRegDeviceId);
-    if (!m || !d) return PowerChip::none;
-    manufacturer = *m;
-    device = *d;
-    if (!writeReg16(ina2xx::kRegConfig, ina2xx::kConfigReset)) return PowerChip::none;
-    if (!writeReg16(ina2xx::kRegConfig, ina2xx::kConfigTempComp)) return PowerChip::none;
-    const auto cfg = readReg16(ina2xx::kRegConfig);
-    if (!cfg) return PowerChip::none;
-    return ina2xx::identify(*m, *d, (*cfg & ina2xx::kConfigTempComp) != 0);
-}
-
-bool configure() {
-    using namespace ina2xx;
-    return writeReg16(kRegConfig, kConfig)
-        && writeReg16(kRegAdcConfig, kAdcConfig)
-        && writeReg16(kRegShuntCal, g_scale.shunt_cal)
-        && writeReg16(kRegSovl, encodeShuntOverLimit(kShuntOverAmps, kShuntOhms))
-        && writeReg16(kRegBovl, encodeBusOverLimit(kBusOverVolts))
-        && writeReg16(kRegDiagAlrt, kDiagAlrtLatch)
-        && readReg16(kRegShuntCal) == g_scale.shunt_cal;
-}
+// The register port PowerMonitor.h's sequences take, on U11's device handle.
+struct I2cPort {
+    bool read(uint8_t reg, std::span<uint8_t> out) {
+        return i2c_master_transmit_receive(g_dev, &reg, 1, out.data(), out.size(), kTimeoutMs) == ESP_OK;
+    }
+    bool write16(uint8_t reg, uint16_t value) {
+        const std::array<uint8_t, 3> b{reg, uint8_t(value >> 8), uint8_t(value)};
+        return i2c_master_transmit(g_dev, b.data(), b.size(), kTimeoutMs) == ESP_OK;
+    }
+};
 
 }  // namespace
 
@@ -111,15 +81,17 @@ bool powerBegin() {
         return false;
     }
 
-    uint16_t manufacturer = 0, device = 0;
-    const PowerChip chip = identifyPart(manufacturer, device);
+    I2cPort port;
+    const ina2xx::Identity id = ina2xx::identifyPart(port);
+    const PowerChip chip = id.chip;
     if (chip == PowerChip::none) {
         GLOGE(kTag, "unrecognized part at 0x%02x (mfr 0x%04x, id 0x%04x): current sensing off",
-              unsigned(kAddress), unsigned(manufacturer), unsigned(device));
+              unsigned(kAddress), unsigned(id.manufacturer), unsigned(id.device));
         return false;
     }
     g_scale = ina2xx::powerScaleFor(chip, kShuntOhms);
-    if (!configure()) {
+    if (!ina2xx::configure(port, g_scale, ina2xx::encodeShuntOverLimit(kShuntOverAmps, kShuntOhms),
+                           ina2xx::encodeBusOverLimit(kBusOverVolts))) {
         GLOGE(kTag, "%s configure failed: current sensing off", powerChipName(chip));
         return false;
     }
@@ -127,7 +99,7 @@ bool powerBegin() {
     powerTakeAlerts();   // start with the latch clear
 
     GLOGI(kTag, "%s at 0x%02x (id 0x%04x), %.3f mA/LSB, SOVL %.1f A, BOVL %.1f V",
-          powerChipName(chip), unsigned(kAddress), unsigned(device),
+          powerChipName(chip), unsigned(kAddress), unsigned(id.device),
           double(g_scale.current_lsb_a * 1000.0f), double(kShuntOverAmps), double(kBusOverVolts));
     if (const auto r = powerRead())
         GLOGI(kTag, "bus %.2f V, current %.3f A, die %.1f C", double(r->bus_v),
@@ -141,24 +113,14 @@ i2c_master_bus_handle_t powerI2cBus() { return g_bus; }
 
 std::optional<PowerReading> powerRead() {
     if (g_chip == PowerChip::none) return std::nullopt;
-    std::array<uint8_t, 3> vbus{}, cur{}, pwr{};
-    std::array<uint8_t, 2> temp{};
-    const std::span<uint8_t> vb(vbus.data(), g_scale.meas_bytes);
-    const std::span<uint8_t> cu(cur.data(), g_scale.meas_bytes);
-    if (!readReg(ina2xx::kRegVbus, vb) || !readReg(ina2xx::kRegCurrent, cu)
-        || !readReg(ina2xx::kRegPower, pwr) || !readReg(ina2xx::kRegDieTemp, temp))
-        return std::nullopt;
-    return PowerReading{
-        .bus_v     = float(ina2xx::decodeMeasurement(vb)) * g_scale.vbus_lsb_v,
-        .current_a = float(ina2xx::decodeMeasurement(cu)) * g_scale.current_lsb_a,
-        .power_w   = float(ina2xx::decodePower(pwr)) * g_scale.power_lsb_w,
-        .die_c     = ina2xx::decodeDieTempC(temp),
-    };
+    I2cPort port;
+    return ina2xx::readPower(port, g_scale);
 }
 
 std::optional<uint16_t> powerTakeAlerts() {
     if (g_chip == PowerChip::none) return std::nullopt;
-    return readReg16(ina2xx::kRegDiagAlrt);
+    I2cPort port;
+    return ina2xx::read16(port, ina2xx::kRegDiagAlrt);
 }
 
 }  // namespace valence
