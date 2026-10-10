@@ -403,8 +403,13 @@ private:
     // targets this object, which lives in PSRAM (HubBox).
     std::atomic<uint32_t> _lateSamples{0};
 
-    uint32_t _lastMotionMs = 0;
-    uint32_t _lastPlanMs = 0;
+    // 0x1100 and 0x1110 publish at their catalog max_rate_hz on the schedule
+    // a grant is paced by (Valence subscription.hpp), so every grant up to
+    // that ceiling is met and none is pushed past it, a rate-0 grant included
+    // (bd val-7ur). attach() sets the rates.
+    SubscriptionEntry _motionPace{};
+    SubscriptionEntry _stripPace{};
+    uint32_t _lastOscMs = 0;
     uint32_t _lastSlowMs = 0;
     uint32_t _lastStatusMs = 0;
     // publishAnomalies()'s bucket: events it may still send, and the hub-ms
