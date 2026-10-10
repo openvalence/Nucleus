@@ -1,6 +1,7 @@
 // check.mjs -- Integral's in-process front, end to end in node: boot, a
 // valence-js session over an in-memory socket, the catalog against its etag,
-// one jog that moves the carriage. Exit 0 pass, 1 fail.
+// one jog that moves the carriage, a discovery probe before and after a PAIR
+// press. Exit 0 pass, 1 fail.
 //
 //   node sim/valencesim/wasm/check.mjs [build/integral.js] [--etag HEX]
 //
@@ -9,7 +10,7 @@
 
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { createSession, CH, PRIORITY, toHex, fromHex } from '../../../../Valence/clients/js/index.js';
+import { createSession, CH, PRIORITY, toHex, fromHex, encodeDiscoverProbe, decodeDiscoverReply } from '../../../../Valence/clients/js/index.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -156,6 +157,21 @@ if (live) {
 
 await until(() => false, 50);
 ok('state blob reported dirty and non-empty', dirtySeen && stateBlob().length > 0, stateBlob().length + ' B');
+
+// ---- the host's datagrams: the board's responder, then the PAIR press ----------
+function probe(src, nonce) {
+  const n = call((ip, p, len) => M._integral_datagram(p, len, ip, 8282, cell), encodeDiscoverProbe(nonce), src);
+  return n ? decodeDiscoverReply(bytesAt(u32(cell), n)) : null;
+}
+const r1 = probe(0x0a000001, 0x1234abcd);
+ok('a probe gets the Virtual reply', !!r1 && r1.nonce === 0x1234abcd && r1.hub_name === 'Virtual' && r1.ws_port === 8282
+  && r1.catalog_etag === bootEtag, JSON.stringify(r1));
+ok('the same source inside its window gets none', probe(0x0a000001, 1) === null);
+ok('no window before the press', !!r1 && !r1.pairing_window_open);
+M._integral_pair_press();
+await until(() => false, 30);
+const r2 = probe(0x0a000002, 7);
+ok('PAIR press opens the presence window', !!r2 && r2.pairing_window_open, JSON.stringify(r2 && r2.flags));
 clearInterval(timer);
 console.log(fails ? '\nFAIL (' + fails + ')' : '\nALL PASS');
 process.exit(fails ? 1 : 0);
