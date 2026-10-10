@@ -26,6 +26,7 @@
 #include <optional>
 #include <string_view>
 
+#include "ValenceEstopDatagram.h"
 #include "geiger/geiger.h"
 #include "motion/StreamIntent.h"
 #include "motion/ValenceMotion.h"
@@ -414,13 +415,13 @@ void publishOdometer(Hub& hub, const MotionCensus& m) {
     publishPacked(hub, ch::odometer, buf, n);
 }
 
-// Layout per ValenceCatalog.h's machine-modes entry: 12 B, plus home_style
+// Layout per ValenceCatalog.h's machine-modes entry: 13 B, plus home_style
 // only where has_drive put it in the catalog.
 void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, bool horizonOpen,
                          bool flipOpen) {
-    std::array<std::byte, 13> buf{};
+    std::array<std::byte, 14> buf{};
     const bool drive = boardFeatures().has_drive;
-    const size_t len = drive ? 13 : 12;
+    const size_t len = drive ? 14 : 13;
     size_t n = 0;
     packU8(buf, n, 0);   // blend_mode_reserved
     packU8(buf, n, 0);   // stream_speed_reserved
@@ -429,17 +430,19 @@ void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, 
     // its styles runs here. schedule_horizon drops while a segments grant is
     // live (applyModes()). flipped drops whenever applyModes() would refuse it
     // (flipOpen()). home_speed is accepted at all times; a cycle reads it at
-    // its start.
+    // its start. datagram_estop is accepted at all times.
     const uint8_t horizonBit = drive ? 0x02 : 0x01;
     const uint8_t flipBit = uint8_t(horizonBit << 1);
     const uint8_t homeSpeedBit = uint8_t(flipBit << 1);
-    packU8(buf, n, uint8_t((horizonOpen ? horizonBit : 0) | (flipOpen ? flipBit : 0) | homeSpeedBit));
+    const uint8_t datagramBit = uint8_t(homeSpeedBit << 1);
+    packU8(buf, n, uint8_t((horizonOpen ? horizonBit : 0) | (flipOpen ? flipBit : 0) | homeSpeedBit | datagramBit));
     packU8(buf, n, 2);   // motion_backend, read-only: quadrature, the LP-core emitter
     if (drive) packU8(buf, n, 0);   // home_style
     packU8(buf, n, m.horizon);      // schedule_horizon
     packU8(buf, n, m.flipped ? 1 : 0);   // flipped
     packU8(buf, n, uint8_t(hub.trialMask(ch::machine_modes)));   // trial_mask (RFC-099)
     packF32(buf, n, t.home_speed);   // home_speed
+    packU8(buf, n, m.datagram_estop ? 1 : 0);   // datagram_estop
     publishPacked(hub, ch::machine_modes, std::span<const std::byte>(buf).first(len), n);
 }
 
@@ -687,9 +690,10 @@ void ValenceDevice::noteTuning(const MotionTuning& next, bool& cfgChanged) {
     _tune = next;
 }
 
-// Keys 7 (schedule_horizon), 8 (flipped) and 9 (home_speed, clamped to its
-// catalog bounds); the whole request is validated before anything is
-// applied. A horizon change is refused INTERLOCK while a segments grant is
+// Keys 7 (schedule_horizon), 8 (flipped), 9 (home_speed, clamped to its
+// catalog bounds) and 10 (datagram_estop, RFC-053 item 3, pushed to the
+// datagram switch at once); the whole request is validated before anything
+// is applied. A horizon change is refused INTERLOCK while a segments grant is
 // live: the grant advertised the old value for its life (SPEC 5.4), and the
 // library re-reads this one on every bundle.
 // Key 8 (flipped, RFC-088) is gated in the spec's order: SOURCE_CONFLICT while
@@ -699,15 +703,18 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
     const auto* f7 = findField(requested, 7);   // schedule_horizon
     const auto* f8 = findField(requested, 8);   // flipped
     const auto* f9 = findField(requested, 9);   // home_speed
-    if (!f7 && !f8 && !f9) return Ret::err(NackCode::INVALID_VALUE);
+    const auto* f10 = findField(requested, 10);   // datagram_estop
+    if (!f7 && !f8 && !f9 && !f10) return Ret::err(NackCode::INVALID_VALUE);
     if (f7 && !numberOf(f7)) return refuseNotANumber(ch::modes_set, 7);
     if (f8 && !boolOf(f8)) return refuseNotANumber(ch::modes_set, 8);
     if (f9 && !numberOf(f9)) return refuseNotANumber(ch::modes_set, 9);
+    if (f10 && !boolOf(f10)) return refuseNotANumber(ch::modes_set, 10);
     StoredModes nextModes = _modes;
     if (f7) nextModes.horizon = uint8_t(wholeIn(*numberOf(f7), 0.0f, float(kHorizonMs.size() - 1)));
     if (nextModes.horizon != _modes.horizon && publishGrantLive(ch::motion_segment))
         return Ret::err(NackCode::INTERLOCK);
     if (f8) nextModes.flipped = *boolOf(f8);
+    if (f10) nextModes.datagram_estop = *boolOf(f10);
     if (nextModes.flipped != _modes.flipped) {
         const MotionCensus c = motionCensus();
         if (railOwned()) return Ret::err(NackCode::SOURCE_CONFLICT);
@@ -722,6 +729,7 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
     MotionTuning next = _tune;
     if (f7) applied.fields[n++] = {7, IntentValue::ofU64(nextModes.horizon)};
     if (f8) applied.fields[n++] = {8, IntentValue::ofU64(nextModes.flipped ? 1 : 0)};
+    if (f10) applied.fields[n++] = {10, IntentValue::ofU64(nextModes.datagram_estop ? 1 : 0)};
     if (f9) {
         next.home_speed = clampf(*numberOf(f9), tuning_bounds::home_speed_min, tuning_bounds::home_speed_max);
         applied.fields[n++] = {9, IntentValue::ofF32(next.home_speed)};
@@ -733,6 +741,10 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
         motionSetFlipped(nextModes.flipped);
         GLOGW(kTag, "FLIP %s: position 0 is the %s end", nextModes.flipped ? "on" : "off",
               nextModes.flipped ? "far" : "home");
+    }
+    if (nextModes.datagram_estop != _modes.datagram_estop) {
+        estopDatagramSetEnabled(nextModes.datagram_estop);
+        GLOGW(kTag, "ESTOP datagrams %s", nextModes.datagram_estop ? "latch" : "are ignored");
     }
     _modes = nextModes;
     // Same card, same publish and persist path as the tuning (tick()).
@@ -1766,6 +1778,7 @@ std::expected<void, stored::ConfigReject> ValenceDevice::adoptConfigBlob(std::sp
     _cfgDirty = false;
     // The engine adopts through the live write's own door, never a side path.
     motionSetTuning(_tune);
+    estopDatagramSetEnabled(_modes.datagram_estop);
     return {};
 }
 

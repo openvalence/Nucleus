@@ -80,6 +80,9 @@ struct StoredModes {
     // 0x3000 keys accepted at least once, same bits as kSetupRequiredMask.
     // Only ever gains bits; a factory-fresh or migrated hub starts at 0.
     uint8_t setup_written = 0;
+    // RFC-053 item 3: an ESTOP datagram latches (ValenceEstopDatagram.h).
+    // Default on; a blob older than v9 takes it.
+    bool    datagram_estop = true;
 
     bool operator==(const StoredModes&) const = default;
 };
@@ -116,7 +119,7 @@ inline constexpr float    home_speed_max    = ceiling::speed_max;
 namespace stored {
 
 inline constexpr uint32_t kConfigMagic   = 0x56434647u;  // "VCFG"
-inline constexpr uint8_t  kConfigVersion = 8;            // bump on ANY layout change
+inline constexpr uint8_t  kConfigVersion = 9;            // bump on ANY layout change
 // v1, the 40 B struct dump this codec replaced (u16 version), is retired:
 // refused, never migrated.
 inline constexpr uint8_t  kConfigOldestVersion = 2;
@@ -125,13 +128,14 @@ inline constexpr size_t   kConfigV2Bytes = 4 + 1 + 2 + 32 + 32 + 8 + 7;
 // v3 appends the schedule_horizon ordinal (u8), v4 the flip (u8, 0/1), v5
 // the setup_written mask (u8), v6 the home speed (f32, mm/s), v7 a retired
 // u8 and the reaction horizon (u32, us), v8 smoothness, handle_floor and
-// trim_max (3 x f32).
+// trim_max (3 x f32), v9 datagram_estop (u8, 0/1).
 inline constexpr size_t   kConfigV3Bytes = kConfigV2Bytes + 1;
 inline constexpr size_t   kConfigV4Bytes = kConfigV3Bytes + 1;
 inline constexpr size_t   kConfigV5Bytes = kConfigV4Bytes + 1;
 inline constexpr size_t   kConfigV6Bytes = kConfigV5Bytes + 4;
 inline constexpr size_t   kConfigV7Bytes = kConfigV6Bytes + 1 + 4;
-inline constexpr size_t   kConfigBlobBytes = kConfigV7Bytes + 3 * 4;
+inline constexpr size_t   kConfigV8Bytes = kConfigV7Bytes + 3 * 4;
+inline constexpr size_t   kConfigBlobBytes = kConfigV8Bytes + 1;
 
 // 0 for a version this firmware cannot read.
 inline constexpr size_t configBytesFor(uint8_t version) {
@@ -141,7 +145,8 @@ inline constexpr size_t configBytesFor(uint8_t version) {
          : version == 5 ? kConfigV5Bytes
          : version == 6 ? kConfigV6Bytes
          : version == 7 ? kConfigV7Bytes
-         : version == 8 ? kConfigBlobBytes : 0;
+         : version == 8 ? kConfigV8Bytes
+         : version == 9 ? kConfigBlobBytes : 0;
 }
 
 static_assert([] {
@@ -158,7 +163,7 @@ enum class ConfigReject : uint8_t {
     BadSize,          // shorter than the header, or not its version's length
     BadConfig,        // a 0x1000 value non-finite or outside its bounds
     BadTuning,        // a 0x1120 or 0x1122 value outside its bounds
-    BadModes,         // a 0x1030 value outside its bounds, or the flip byte not 0/1
+    BadModes,         // a 0x1030 value outside its bounds, or a 0/1 byte not 0/1
 };
 
 inline const char* configRejectName(ConfigReject r) {
@@ -245,6 +250,7 @@ inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
     put(out, n, t.react_us);
     for (float v : {t.smoothness, t.handle_floor, t.trim_max})
         put(out, n, v);
+    put(out, n, uint8_t(m.datagram_estop));
     return n;
 }
 
@@ -297,6 +303,11 @@ inline std::expected<void, ConfigReject> decodeConfig(std::span<const std::byte>
     if (version >= 8)
         for (float* f : {&t.smoothness, &t.handle_floor, &t.trim_max})
             *f = get<float>(in, n);
+    if (version >= 9) {
+        const uint8_t d = get<uint8_t>(in, n);
+        if (d > 1) return Err(ConfigReject::BadModes);
+        m.datagram_estop = d != 0;
+    }
 
     if (!configValid(c)) return Err(ConfigReject::BadConfig);
     if (!tuningValid(t)) return Err(ConfigReject::BadTuning);

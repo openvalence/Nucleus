@@ -159,7 +159,7 @@ TEST_CASE("config blob: v8 carries smoothness, handle_floor and trim_max; a v7 b
     CHECK(t == want);
     CHECK(c == sampleConfig());
     CHECK(gen == 30);
-    // Re-encoded, it is a v8 blob carrying the seeded values.
+    // Re-encoded, it is a current-version blob carrying the seeded values.
     std::array<std::byte, stored::kConfigBlobBytes> v8{};
     REQUIRE(stored::encodeConfig(v8, c, t, got, gen) == v8.size());
     CHECK(v8[4] == std::byte{stored::kConfigVersion});
@@ -444,6 +444,31 @@ TEST_CASE("config blob: v4 carries the flip; a v3 blob migrates to unflipped") {
     // The flip byte is a bool: anything but 0 or 1 is rejected whole.
     b[stored::kConfigV4Bytes - 1] = std::byte{2};
     CHECK_FALSE(stored::decodeConfig(b, kFactory, c, t, got, gen));
+}
+
+TEST_CASE("config blob: v9 carries datagram_estop; a v8 blob migrates to on") {
+    std::array<std::byte, stored::kConfigBlobBytes> b{};
+    valence::StoredModes m;
+    m.datagram_estop = false;
+    REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), m, 12) == b.size());
+    StoredConfig c;
+    MotionTuning t;
+    valence::StoredModes got;
+    uint16_t gen = 0;
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, got, gen));
+    CHECK_FALSE(got.datagram_estop);
+
+    std::array<std::byte, stored::kConfigV8Bytes> v8{};
+    std::memcpy(v8.data(), b.data(), v8.size());
+    v8[4] = std::byte{8};
+    REQUIRE(stored::decodeConfig(v8, kFactory, c, t, got, gen));
+    CHECK(got.datagram_estop);
+
+    // A bool: anything but 0 or 1 is rejected whole.
+    b[stored::kConfigV8Bytes] = std::byte{2};
+    const auto r = stored::decodeConfig(b, kFactory, c, t, got, gen);
+    REQUIRE_FALSE(r);
+    CHECK(r.error() == Reject::BadModes);
 }
 
 TEST_CASE("config blob: v5 carries the first-run record; an older blob migrates uncommissioned") {

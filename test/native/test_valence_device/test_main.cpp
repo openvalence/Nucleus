@@ -3,7 +3,8 @@
 // - ValenceDevice.cpp is compiled verbatim into this one translation unit,
 //   driven by a real Hub over InProcessLink. The motion, pattern, motor
 //   switch, button and e-stop doors are fakes below: the composition's seam,
-//   never the board.
+//   never the board. The datagram switch is one of them; what it does when
+//   off is test_estop_datagram's.
 // - The capacity macros are defined here, before any Valence include, and this
 //   binary has no other translation unit that sees Catalog32. They only need
 //   to hold the machine's own catalog; the board's values live in
@@ -155,6 +156,10 @@ bool driveAlarmTake() { return std::exchange(g_driveAlarm, false); }
 
 estop::Reading estopInputRead() { return g_estop; }
 
+bool g_datagramOn = true;
+void estopDatagramSetEnabled(bool on) { g_datagramOn = on; }
+bool estopDatagramEnabled() { return g_datagramOn; }
+
 }  // namespace valence
 
 // ---- rig ------------------------------------------------------------------------
@@ -198,7 +203,7 @@ struct Rig {
     RecordingClient del{};
     std::optional<Client> client{};
 
-    Rig() {
+    explicit Rig(AccessLevel role = AccessLevel::control) {
         g_census = MotionCensus{};
         g_census.homed = true;
         g_census.motor_on = true;
@@ -215,8 +220,9 @@ struct Rig {
         g_switch.state = motorswitch::State::on;
         g_estop = estop::Reading{};
         g_estop.known = true;
+        g_datagramOn = true;
         REQUIRE(buildValenceCatalog(catalog, boardFeatures()));
-        device.setUnvouchedRole(AccessLevel::control);
+        device.setUnvouchedRole(role);
         device.setSetupWritten(kSetupRequiredMask);
         hub.emplace(catalog, g_clock, hubRng, device);
         device.attach(*hub, catalog);
@@ -1679,4 +1685,57 @@ TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publish
     CHECK_FALSE(g_osc.enabled);
     CHECK(rig->hub->cfgGen() != gen);
     CHECK(rig->del.lastState[ch::oscillator][0] == std::byte{0});
+}
+
+// ---- RFC-053 item 3: the datagram_estop setting -----------------------------------
+
+TEST_CASE("VD-DGRAM: datagram_estop is configure tier, drives the datagram switch and survives a reboot") {
+    {
+        auto rig = std::make_unique<Rig>();
+        REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(10, IntentValue::ofU64(0))).has_value());
+        rig->step();
+        REQUIRE(rig->del.nacks.size() == 1);
+        CHECK(rig->del.nacks[0].code == NackCode::ACCESS_DENIED);
+        CHECK(estopDatagramEnabled());
+    }
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
+    const auto modesByte = [&] {
+        const auto it = rig->del.lastState.find(ch::machine_modes);
+        REQUIRE(it != rig->del.lastState.end());
+        return it->second.back();
+    };
+    CHECK(modesByte() == std::byte{1});
+
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(10, IntentValue::ofU64(0))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(rig->del.lastEcho.count == 1);
+    CHECK(rig->del.lastEcho.fields[0].key == 10);
+    CHECK(rig->del.lastEcho.fields[0].value.u64_val == 0);
+    CHECK_FALSE(estopDatagramEnabled());
+    CHECK(modesByte() == std::byte{0});
+
+    // Stored, and a reboot adopts it off. The rig's tuning is the struct's
+    // zeros, which no stored blob passes, so the adopted blob carries a valid set.
+    std::array<std::byte, stored::kConfigBlobBytes> blob{};
+    REQUIRE(rig->device.encodeConfigBlob(blob, 3) == blob.size());
+    CHECK(blob[stored::kConfigV8Bytes] == std::byte{0});
+    MotionTuning tune;
+    tune.chase_dense_us = 20000;
+    StoredModes modes;
+    modes.datagram_estop = false;
+    REQUIRE(stored::encodeConfig(blob, StoredConfig{}, tune, modes, 3) == blob.size());
+    estopDatagramSetEnabled(true);
+    {
+        auto fresh = std::make_unique<ValenceDevice>();
+        uint16_t gen = 0;
+        REQUIRE(fresh->adoptConfigBlob(blob, gen));
+        CHECK_FALSE(estopDatagramEnabled());
+    }
+
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(10, IntentValue::ofU64(1))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(estopDatagramEnabled());
+    CHECK(modesByte() == std::byte{1});
 }

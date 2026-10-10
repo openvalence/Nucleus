@@ -209,6 +209,7 @@ inline constexpr std::string_view curve            = "Tuning / Curve";
 inline constexpr std::string_view ceilings         = "Tuning / Ceilings";
 inline constexpr std::string_view replanning       = "Tuning / Re-planning";
 inline constexpr std::string_view pattern_presets  = "Library / Pattern presets";
+inline constexpr std::string_view safety           = "Tuning / Safety";
 }  // namespace card
 
 // ---- motion-anomaly EVENT: the `body` (40) sub-map keys ---------------------
@@ -1270,10 +1271,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // category rather than more fields on 0x0081 (see ch::machine_modes for
     // the enabled_mask arithmetic that makes the split structural).
     //
-    // Layout [12 B, 13 B with has_drive]: u8 enums the catalog names, then
-    // the f32 home_speed appended at the tail, so a generic client renders it
-    // without knowing this device exists. ValenceDevice.cpp's
-    // publishMachineModes() packs the same bytes.
+    // Layout [13 B, 14 B with has_drive]: u8 enums the catalog names, then
+    // the f32 home_speed and the u8 datagram_estop appended at the tail, so a
+    // generic client renders them without knowing this device exists.
+    // ValenceDevice.cpp's publishMachineModes() packs the same bytes.
     auto addMachineModes = [&]() {
     c.addEntry({.id = ch::machine_modes, .name = "machine-modes",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1296,22 +1297,22 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasRank = true, .rank = valence::ui_ranks::hidden});
     // Bit i gates the i-th setting-annotated field, same rule as 0x0081.
     // No reserved byte and not motion_backend carries a setting_key, so
-    // home_style (where it exists) is bit 0, then schedule_horizon, flipped
-    // and home_speed.
+    // home_style (where it exists) is bit 0, then schedule_horizon, flipped,
+    // home_speed and datagram_estop.
     if (feat.has_drive) {
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
                             .desc = "Settings the machine accepts right now",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
-                           {"home_style", "schedule_horizon", "flipped", "home_speed"});
+                           {"home_style", "schedule_horizon", "flipped", "home_speed", "datagram_estop"});
     } else {
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
                             .desc = "Settings the machine accepts right now",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
-                           {"schedule_horizon", "flipped", "home_speed"});
+                           {"schedule_horizon", "flipped", "home_speed", "datagram_estop"});
     }
     // Which path actually drives the motor. READ-ONLY: the backend is what is
     // soldered, so there is no choice for a setting to make.
@@ -1366,13 +1367,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                         .scale = 1.0f, .desc = "Settings on trial, not stored yet",
                         .role = roles::meta_trial_pending,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
-                       {"home_style", "schedule_horizon", "flipped", "home_speed"});
+                       {"home_style", "schedule_horizon", "flipped", "home_speed", "datagram_estop"});
     } else {
     c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Settings on trial, not stored yet",
                         .role = roles::meta_trial_pending,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
-                       {"schedule_horizon", "flipped", "home_speed"});
+                       {"schedule_horizon", "flipped", "home_speed", "datagram_estop"});
     }
     // The home cycle's approach speed (MotionArbiter.h, homing): the re-touch
     // runs at a quarter of it, and the arbiter holds it to jog_speed. Applied
@@ -1386,6 +1387,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .settingKey = 9, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = valence::ui_ranks::advanced,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
+    // RFC-053 item 3: whether an ESTOP datagram on the SPEC 13.8 port latches
+    // (ValenceEstopDatagram.h); DISCOVER_REPLY bit1 follows it. Default on;
+    // its writer key is configure tier (modes-set key 10). Stored. Append-
+    // only, after home_speed.
+    c.addSelectField({.name = "datagram_estop", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .dflt = SettingDefault::ofInt(1),
+                      .group = card::safety,
+                      .desc = "E-stop from any device on the network",
+                      .settingKey = 10, .hasSettingKey = true,
+                      .hasRank = true, .rank = valence::ui_ranks::control},
+                     {"off", "on"});
     };
 
     // ---- "kinetic-*" — STATE, motion, section Tuning ----------------------
@@ -2073,7 +2085,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .defaultPriority = Priority::normal});
     // KEY 1 IS DELIBERATELY UNUSED. It held "blend_mode"; see the field
     // comment on machine-modes' `blend_mode_reserved`. ValenceDevice::
-    // applyModes reads only keys 7, 8 and 9, and refuses a request
+    // applyModes reads only keys 7, 8, 9 and 10, and refuses a request
     // carrying none of them with NACK(INVALID_VALUE).
     //
     // KEY 2 IS ALSO DELIBERATELY UNUSED. It briefly held "transport" (the WS/
@@ -2105,6 +2117,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 9, .name = "home_speed", .type = CborFieldType::f32_t, .unit = "mm/s",
                       .hasMin = true, .hasMax = true, .min = ceiling::home_speed_min, .max = ceiling::speed_max});
+    // RFC-053 item 3: configure tier to change, above the entry's control.
+    c.addSchemaField({.key = 10, .name = "datagram_estop", .type = CborFieldType::uint_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                      .access = AccessLevel::configure, .hasAccess = true});
     };
 
     // ---- "kinetic-set" — INTENT, control, 5 Hz ---------------------------

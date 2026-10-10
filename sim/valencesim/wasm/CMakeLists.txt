@@ -35,7 +35,8 @@ add_executable(integral
     "${NUCLEUS_ROOT}/flagship_p4/src/motion/MotionArbiter.cpp"
     "${NUCLEUS_ROOT}/flagship_p4/src/patterns/PatternEngine.cpp"
     "${NUCLEUS_ROOT}/flagship_p4/src/patterns/advanced/AdvancedPattern.cpp"
-    "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceDevice.cpp")
+    "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceDevice.cpp"
+    "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceEstopDatagram.cpp")
 
 target_include_directories(integral PRIVATE
     "${SIM_ROOT}/src"

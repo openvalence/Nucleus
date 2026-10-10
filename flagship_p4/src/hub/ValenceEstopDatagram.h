@@ -122,8 +122,9 @@ private:
 // latches. Binding resets the gate; nullptr unbinds (datagrams read disabled).
 void estopDatagramBind(Hub* hub);
 
-// RFC-053 item 3's runtime switch, on from boot. Hub task.
-// TODO(val-7t8): the catalog-exposed, NVS-persisted setting drives this.
+// RFC-053 item 3's runtime switch, on from boot. machine-modes
+// datagram_estop drives it (ValenceDevice: the stored value at adoption,
+// before the hub task starts, then every modes-set write). Hub task.
 void estopDatagramSetEnabled(bool on);
 bool estopDatagramEnabled();
 
