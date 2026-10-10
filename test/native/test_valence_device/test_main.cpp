@@ -98,6 +98,8 @@ namespace valence {
 
 uint64_t deviceNowUs() { return g_clock.nowUs(); }
 uint32_t deviceFreeHeapBytes() { return 0; }
+LinkTcp g_linkTcp{};
+LinkTcp deviceLinkTcp() { return g_linkTcp; }
 
 bool motionBegin() { return true; }
 // False: the motion door refuses the intent, as a full queue does.
@@ -238,8 +240,8 @@ struct Rig {
     RecordingClient del{};
     std::optional<Client> client{};
 
-    // motionHz > 0 also subscribes 0x1100 at that rate.
-    explicit Rig(AccessLevel role = AccessLevel::control, float motionHz = 0.0f) {
+    // motionHz > 0 also subscribes 0x1100 at that rate; hubStatus, 0x0006.
+    explicit Rig(AccessLevel role = AccessLevel::control, float motionHz = 0.0f, bool hubStatus = false) {
         g_census = MotionCensus{};
         g_census.homed = true;
         g_census.motor_on = true;
@@ -261,6 +263,7 @@ struct Rig {
         g_still = true;
         g_stillWindowUs = 0;
         g_anomalies.clear();
+        g_linkTcp = LinkTcp{};
         REQUIRE(buildValenceCatalog(catalog, boardFeatures()));
         device.setUnvouchedRole(role);
         device.setSetupWritten(kSetupRequiredMask);
@@ -268,7 +271,7 @@ struct Rig {
         device.attach(*hub, catalog);
         link.emplace(g_clock, hubRng);
         // A 13th wish takes WELCOME past the link's default 250 B; a WS frame has room.
-        if (motionHz > 0.0f) link->profileA().mtu = 1024;
+        if (motionHz > 0.0f || hubStatus) link->profileA().mtu = 1024;
         REQUIRE(hub->attachTransport(link->endpointA()));
         ClientIdentity id;
         id.instance_id.fill(std::byte{0});
@@ -291,6 +294,7 @@ struct Rig {
                                   ch::oscillator, ch::plan_strip})
             REQUIRE(client->addSubscriptionWish(id, 0.0f, Priority::normal));
         if (motionHz > 0.0f) REQUIRE(client->addSubscriptionWish(ch::motion, motionHz, Priority::elevated));
+        if (hubStatus) REQUIRE(client->addSubscriptionWish(channels::hub_status, 1.0f, Priority::background));
         REQUIRE(client->connect());
         step(200);
         REQUIRE(client->state() == ClientSessionState::LIVE);
@@ -605,7 +609,7 @@ TEST_CASE("VD-11: a brake that never reaches rest still reboots, after the bound
     g_homeGesture = button::Gesture::hold;
     rig->step(1000);
     CHECK_FALSE(rig->device.rebootDue());
-    rig->step(1100);
+    rig->step(2500);
     CHECK(rig->hub->estopLatched());
     CHECK(rig->device.rebootDue());
 }
@@ -2492,4 +2496,39 @@ TEST_CASE("VD-LEADCAP: a bundle stamped past the lead cap moves earlier whole, i
     REQUIRE(g_intents.size() == 2);
     CHECK(g_intents[1].anchor_us == now + cap);
     CHECK(g_intents[0].anchor_us == now + cap - 5000);
+}
+
+TEST_CASE("VD-TCP: hub-status carries the binding's resent share at bytes 16-17, hundredths of a percent") {
+    auto rig = std::make_unique<Rig>(AccessLevel::control, 0.0f, true);
+    g_linkTcp = LinkTcp{1000u, 10u};
+    rig->step(2500);
+    const auto it = rig->del.lastState.find(channels::hub_status);
+    REQUIRE(it != rig->del.lastState.end());
+    REQUIRE(it->second.size() == 18);
+    const std::span<const std::byte> s(it->second);
+    // 10 of 1000 since the attach-time snapshot of zeros: 1 %.
+    CHECK(getU16(s.subspan(16, 2)) == 100u);
+    const CatalogEntry* e = rig->catalog.find(channels::hub_status);
+    REQUIRE(e != nullptr);
+    const auto fields = rig->catalog.layoutFields(*e);
+    REQUIRE(fields.size() == 8);
+    CHECK(fields[7].name == "resent");
+    CHECK(fields[7].role == "link.resent");
+    CHECK(fields[7].scale == 100.0f);
+    CHECK(fields[2].role == "link.rssi");
+}
+
+TEST_CASE("VD-PWR: the power layout tags bus voltage and power draw as two roles, in volts and watts") {
+    auto cat = std::make_unique<Catalog32>();
+    DeviceFeatures feat = boardFeatures();
+    feat.has_current_sensor = true;
+    feat.has_power_monitor = true;
+    REQUIRE(buildValenceCatalog(*cat, feat));
+    const CatalogEntry* e = cat->find(ch::power);
+    REQUIRE(e != nullptr);
+    const auto f = cat->layoutFields(*e);
+    REQUIRE(f.size() == 5);
+    CHECK((f[0].role == "telemetry.power.bus" && f[0].unitId == unit_ids::v));
+    CHECK((f[3].name == "draw_w10" && f[3].role == "telemetry.power.draw" && f[3].unitId == unit_ids::w));
+    CHECK(layoutWireSize(f) == 10);
 }

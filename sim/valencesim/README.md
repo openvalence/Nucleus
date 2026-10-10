@@ -42,6 +42,7 @@ socket, no clock and no thread. Two fronts drive it:
 | Log channel 0x0008 | a Geiger sink in `src/main.cpp`, Warn and above into `Hub::publishLog`, as the board's `system/ValenceLogBridge.cpp` | same contract: Warn floor, the hub's own truncation and replay ring; no task-name gate, because every drain here is on the hub thread |
 | Motor switch (`system/MotorSwitch.h` state machine) | `src/SimMotorSwitch.cpp` | absent by default: power on from boot, hub-status reads `on`, ESTOP is a halt that keeps home (`estop_cuts_power` false). `--motor-switch` runs the board's own machine on the hub clock with healthy readings (an RC pre-charge into 150 uF through 100 R), declares `estop_cuts_power` true, and enables at boot; `--msw-fault` injects one fault-line window |
 | Hub-status (0x0006) heap figure | reported as 0 | the `deviceFreeHeapBytes()` contract in `ValenceDevice.h`: 0 where the host has no meaningful answer |
+| Hub-status (0x0006) `tcp_sent` / `tcp_resent` | reported as 0 | the `deviceLinkTcp()` contract in `ValenceDevice.h`: the board counts its lwIP segments (`system/ValenceTcpTally.cpp`); the twin has no TCP stack of its own, so a client reads no loss rather than a modeled one |
 | Drive link (RS485 Modbus to the drive, `system/ValenceDriveLink.h`) and DRV_ALM | `driveAlarmTake()` in `src/main.cpp` | absent: the twin has no drive, so DRV_ALM never asserts and the delegate's drive-alarm latch never fires; the latch itself is suite `test_valence_device`'s |
 
 Parity is one-way: the firmware is never edited to close a sim gap. Anything

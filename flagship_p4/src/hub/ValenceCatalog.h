@@ -494,7 +494,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                             AccessLevel::control});// 10 retired (bypass_off)
 
     // ---- "hub-status" — STATE, background, 1 Hz -----------------------------
-    // Slow health telemetry.  [4+4+1+1+4+1+1 = 16 B]
+    // Slow health telemetry.  [4+4+1+1+4+1+1+2 = 18 B]
     c.addEntry({.id = valence::channels::hub_status, .name = "hub-status",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
@@ -502,7 +502,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "heap_free", .type = PackedFieldType::u32, .unit = "B",     .scale = 1.0f});
     c.addLayoutField({.name = "uptime_s",  .type = PackedFieldType::u32, .unit = "s",     .scale = 1.0f,
                       .role = roles::telemetry_uptime});
-    c.addLayoutField({.name = "rssi",      .type = PackedFieldType::i8,  .unit = "dBm",   .scale = 1.0f});
+    // TODO(RFC-109): `link.rssi` is a drafted role; the literal becomes the
+    // generated constant when the RFC lands, or goes if it is refused.
+    c.addLayoutField({.name = "rssi",      .type = PackedFieldType::i8,  .unit = "dBm",   .scale = 1.0f,
+                      .role = "link.rssi"});
     c.addLayoutField({.name = "sessions",  .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
     // `log_dropped` (field 5, appended 10 -> 14 B): SPEC §9.4's VISIBLE drop
     // counter for the log plane. A bounded log that silently eats lines under
@@ -524,6 +527,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectField({.name = "motor_fault", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .desc = "Reason the motor switch last latched off"},
                      {"none", "switch_fault", "en_node", "inrush", "precharge"});
+    // `resent` (field 8, appended 16 -> 18 B): the share of the WebSocket
+    // binding's TCP segments the hub sent again over the last 10 s, every
+    // session together, in hundredths of a percent; 65535 = nothing sent in
+    // the window (system/TcpTally.h says what counts).
+    // TODO(RFC-109): `link.resent` is a drafted role; the literal becomes the
+    // generated constant when the RFC lands, or goes if it is refused.
+    // RFC-109's link_drops and heap_block append after it.
+    c.addLayoutField({.name = "resent", .type = PackedFieldType::u16, .unit = "%", .scale = 100.0f,
+                      .desc = "TCP segments sent again, last 10 s", .role = "link.resent",
+                      .hasScope = true, .scope = valence::value_scopes::window,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
 
     // ---- "session-events" — EVENT, watch ------------------------------------
     // Payload keys match Hub::emitTakeoverEvent(): {1:"source", 2:"session"}.
@@ -1130,7 +1144,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     };
 
     // ---- "power" — STATE, background, 10 Hz ---------------------------------
-    // Bus voltage / current / die temperature, feeding the BUS A/V and DIE
+    // Bus voltage / current / power / die temperature, feeding the BUS A/V and DIE
     // degC meter tiles.
     //
     // *** DECLARED ONLY WHEN THE HARDWARE EXISTS. *** A machine with no
@@ -1149,7 +1163,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // i_bus_mA lives HERE, not on 0x0080, deliberately: it is a slow,
     // background diagnostic, and putting it on the 60 Hz motion snapshot
     // would grow the highest-rate channel to carry a value nothing on the
-    // motion path reads.  [2+2+2 = 6 B, or +2 = 8 B with a power monitor]
+    // motion path reads.  [2+2+2+2 = 8 B, or +2 = 10 B with a power monitor]
     auto addPower = [&]() {
     if (feat.has_current_sensor) {
         c.addEntry({.id = ch::power, .name = "power",
@@ -1160,13 +1174,21 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                     .hasRank = true, .rank = valence::ui_ranks::diagnostic});
         c.addLayoutField({.name = "bus_mV",  .type = PackedFieldType::u16, .unit = "V", .scale = 1000.0f,
                           .group = "Power", .desc = "DC bus voltage at the motor drive",
-                          .role = roles::telemetry_power_bus});
+                          .role = roles::telemetry_power_bus,
+                          .hasUnitId = true, .unitId = valence::unit_ids::v});
         c.addLayoutField({.name = "peak_mA", .type = PackedFieldType::u16, .unit = "A", .scale = 1000.0f,
                           .group = "Power",
                           .desc = "Peak bus current since last reset"});
         c.addLayoutField({.name = "i_bus_mA", .type = PackedFieldType::i16, .unit = "A", .scale = 1000.0f,
                           .group = "Power", .desc = "Bus current, signed by the drive",
                           .role = roles::telemetry_current});
+        // TODO(RFC-109): `telemetry.power.draw` is a drafted role, and
+        // `telemetry.power.bus` narrows to voltage there; the literal becomes
+        // the generated constant when the RFC lands, or goes if it is refused.
+        c.addLayoutField({.name = "draw_w10", .type = PackedFieldType::u16, .unit = "W", .scale = 10.0f,
+                          .group = "Power", .desc = "Power drawn from the bus",
+                          .role = "telemetry.power.draw",
+                          .hasUnitId = true, .unitId = valence::unit_ids::w});
         if (feat.has_power_monitor) {
             c.addLayoutField({.name = "die_c10", .type = PackedFieldType::i16, .unit = "C", .scale = 10.0f,
                               .group = "Power", .desc = "Power monitor die temperature",
