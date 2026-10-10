@@ -834,6 +834,149 @@ TEST_CASE("VD-22: NaN and infinity are refused INVALID_VALUE naming the field, a
     }
 }
 
+// ---- RFC-089: the preset writer's per-verb set (SPEC 8.7) ------------------------
+
+namespace {
+
+IntentValueMap presetOp(uint8_t op) {
+    IntentValueMap m{};
+    m.count = 1;
+    m.fields[0] = IntentValueField{1, IntentValue::ofU64(op)};
+    return m;
+}
+
+std::array<uint8_t, PatternPresetStore::kPayloadBytes> testPayload() {
+    std::array<uint8_t, PatternPresetStore::kPayloadBytes> p{};
+    for (size_t i = 0; i < p.size(); ++i) p[i] = uint8_t(3 * i + 1);
+    return p;
+}
+
+// A store-item document over testPayload() in `out`; returns its bytes.
+std::span<const std::byte> presetItem(std::span<std::byte> out, uint8_t slot, std::string_view name,
+                                      std::string_view kind, size_t payloadBytes, bool digest) {
+    static const auto payload = testPayload();
+    StoreItem it;
+    it.slot = slot;
+    it.name = name;
+    it.kind = kind;
+    it.payload = std::as_bytes(std::span(payload)).first(payloadBytes);
+    it.has_digest = digest;
+    const size_t n = encodeStoreItem(it, out);
+    REQUIRE(n > 0);
+    return out.first(n);
+}
+
+}  // namespace
+
+TEST_CASE("VD-STORE-1: save without a slot picks the lowest free one and echoes it; a full store names itself") {
+    auto rig = std::make_unique<Rig>();
+    for (uint8_t i = 0; i < PatternPresetStore::kCapacity; ++i) {
+        REQUIRE(rig->client->sendIntent(ch::pattern_presets_cmd,
+                                        plus(presetOp(store_ops::save), 3, IntentValue::ofTstr("p"))).has_value());
+        rig->step();
+        REQUIRE(rig->del.nacks.empty());
+        REQUIRE(echoed(rig->del.lastEcho, 2) != nullptr);
+        CHECK(echoed(rig->del.lastEcho, 2)->u64_val == i);
+    }
+    REQUIRE(rig->client->sendIntent(ch::pattern_presets_cmd,
+                                    plus(presetOp(store_ops::save), 3, IntentValue::ofTstr("p"))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
+    CHECK(rig->del.nacks[0].detail == "pattern presets full");
+}
+
+TEST_CASE("VD-STORE-2: a verb missing its slot or name is refused; a field the verb does not use is not echoed") {
+    auto rig = std::make_unique<Rig>();
+    for (const uint8_t op : {store_ops::load, store_ops::delete_item, store_ops::rename}) {
+        rig->del.nacks.clear();
+        REQUIRE(rig->client->sendIntent(ch::pattern_presets_cmd,
+                                        plus(presetOp(op), 3, IntentValue::ofTstr("p"))).has_value());
+        rig->step();
+        REQUIRE(rig->del.nacks.size() == 1);
+        CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
+        CHECK(rig->del.nacks[0].detail == "slot required");
+    }
+    for (const uint8_t op : {store_ops::save, store_ops::rename}) {
+        rig->del.nacks.clear();
+        REQUIRE(rig->client->sendIntent(ch::pattern_presets_cmd,
+                                        plus(presetOp(op), 2, IntentValue::ofU64(3))).has_value());
+        rig->step();
+        REQUIRE(rig->del.nacks.size() == 1);
+        CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
+        CHECK(rig->del.nacks[0].detail == "name required");
+    }
+
+    rig->del.nacks.clear();
+    REQUIRE(rig->client->sendIntent(ch::pattern_presets_cmd,
+                                    plus(plus(presetOp(store_ops::save), 2, IntentValue::ofU64(3)), 3,
+                                         IntentValue::ofTstr("p"))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    std::array<std::byte, 160> buf{};
+    const auto item = presetItem(buf, 3, "p", kPresetKind, PatternPresetStore::kPayloadBytes, true);
+    const int echoes = rig->del.echoes;
+    REQUIRE(rig->client->sendIntent(ch::pattern_presets_cmd,
+                                    plus(plus(plus(presetOp(store_ops::delete_item), 2, IntentValue::ofU64(3)), 3,
+                                              IntentValue::ofTstr("p")), 4, IntentValue::ofBstr(item)))
+                .has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(rig->del.echoes == echoes + 1);
+    CHECK(rig->del.lastEcho.count == 2);
+    CHECK(echoed(rig->del.lastEcho, 3) == nullptr);
+    CHECK(echoed(rig->del.lastEcho, 4) == nullptr);
+}
+
+TEST_CASE("VD-STORE-3: an import stores the document's payload unread; its address, kind, size and digest are checked") {
+    auto rig = std::make_unique<Rig>();
+    std::array<std::byte, 160> buf{};
+    auto import = [&](uint8_t slot, std::string_view name, std::span<const std::byte> item) {
+        rig->del.nacks.clear();
+        REQUIRE(rig->client->sendIntent(ch::pattern_presets_cmd,
+                                        plus(plus(plus(presetOp(store_ops::save), 2, IntentValue::ofU64(slot)), 3,
+                                                  IntentValue::ofTstr(name)), 4, IntentValue::ofBstr(item)))
+                    .has_value());
+        rig->step();
+    };
+    auto refused = [&](const char* detail) {
+        REQUIRE(rig->del.nacks.size() == 1);
+        CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
+        CHECK(rig->del.nacks[0].detail == detail);
+        CHECK(rig->device.readBlob(blob_ns::store, kPresetStoreId, 5) == std::nullopt);
+    };
+
+    import(5, "warm", presetItem(buf, 6, "warm", kPresetKind, PatternPresetStore::kPayloadBytes, true));
+    refused("item slot or name differs");
+    import(5, "warm", presetItem(buf, 5, "cold", kPresetKind, PatternPresetStore::kPayloadBytes, true));
+    refused("item slot or name differs");
+    import(5, "warm", presetItem(buf, 5, "warm", "pattern.other", PatternPresetStore::kPayloadBytes, true));
+    refused("item kind");
+    import(5, "warm", presetItem(buf, 5, "warm", kPresetKind, PatternPresetStore::kPayloadBytes - 1, false));
+    refused("item size");
+    {
+        auto item = presetItem(buf, 5, "warm", kPresetKind, PatternPresetStore::kPayloadBytes, true);
+        buf[item.size() - 1] ^= std::byte{0x01};   // the digest is the document's last member
+        import(5, "warm", item);
+        refused("item digest");
+    }
+
+    const auto item = presetItem(buf, 5, "warm", kPresetKind, PatternPresetStore::kPayloadBytes, false);
+    import(5, "warm", item);
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(echoed(rig->del.lastEcho, 2)->u64_val == 5);
+    REQUIRE(echoed(rig->del.lastEcho, 4) != nullptr);
+    CHECK(echoed(rig->del.lastEcho, 4)->kind == IntentValue::Kind::Bstr);
+    const auto blob = rig->device.readBlob(blob_ns::store, kPresetStoreId, 5);
+    REQUIRE(blob.has_value());
+    const auto doc = decodeStoreItem(blob->bytes);
+    REQUIRE(doc.isOk());
+    CHECK(doc.value().name == "warm");
+    const auto want = testPayload();
+    REQUIRE(doc.value().payload.size() == want.size());
+    CHECK(std::memcmp(doc.value().payload.data(), want.data(), want.size()) == 0);
+}
+
 TEST_CASE("VD-23: a move with no position is refused, never read as position 0") {
     auto rig = std::make_unique<Rig>();
     REQUIRE(rig->client->sendIntent(ch::move, IntentValueMap{}).has_value());

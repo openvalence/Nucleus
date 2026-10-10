@@ -2284,16 +2284,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
 
     // ---- "pattern-presets-cmd" — INTENT, control ----------------------------
     // The CRUD writer behind the 0x5220 store / 0x1220 roster pair (RFC-021).
-    // {1:"op", 2:"slot", 3:"name"}. `op` is the registered action.store op
-    // select (RFC-067): options index-aligned with registry store_ops, no
-    // option beyond them, index 0 the mandatory non-empty filler (SPEC 8.9).
-    // delete is destructive by registration (SPEC 8.8), so no mask restates it.
-    //
-    // `slot` addresses directly — the client picks it (normally the roster's
-    // first free entry), there is no name-keyed dedup the way the retired
-    // HTTP handler had. `name` is required for save/rename, ignored for
-    // load/delete. See ValenceDevice::applyPresets for exactly what each op
-    // does and PatternPresetStore.h for the backend.
+    // {1:"op", 2:"slot", 3:"name", 4:"item"}. `op` is the registered
+    // action.store op select (RFC-067): options index-aligned with registry
+    // store_ops, no option beyond them, index 0 the mandatory non-empty
+    // filler (SPEC 8.9). delete is destructive by registration (SPEC 8.8), so
+    // no mask restates it. slot, name and item carry the store.* roles and
+    // the per-verb set of SPEC 8.7 (RFC-089); ValenceDevice::applyPresets
+    // enforces it and PatternPresetStore.h is the backend.
     auto addPatternPresetsCmd = [&]() {
     c.addEntry({.id = ch::pattern_presets_cmd, .name = "pattern-presets-cmd",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
@@ -2304,8 +2301,12 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                             .role = "action.store"},
                            {"reserved", "save", "load", "delete", "rename"});
     c.addSchemaField({.key = 2, .name = "slot", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = float(kPresetCapacity - 1)});
-    c.addSchemaField({.key = 3, .name = "name", .type = CborFieldType::tstr_t, .unit = ""});
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = float(kPresetCapacity - 1),
+                      .role = roles::store_slot});
+    c.addSchemaField({.key = 3, .name = "name", .type = CborFieldType::tstr_t, .unit = "",
+                      .role = roles::store_name});
+    c.addSchemaField({.key = 4, .name = "item", .type = CborFieldType::bstr_t, .unit = "",
+                      .role = roles::store_item});
     };
 
     // ---- invoke every device-channel builder above in ASCENDING NEW-ID ORDER --

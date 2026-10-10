@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -69,8 +70,15 @@ public:
         return n;
     }
 
-    // The slot IS the address: the client picks it. Overwrites. false on an
-    // out-of-range slot or a name that is empty or does not fit.
+    // The lowest empty slot, for a save that names none (RFC-089).
+    std::optional<uint8_t> freeSlot() const {
+        for (uint8_t i = 0; i < kCapacity; ++i)
+            if (!_slots[i].used()) return i;
+        return std::nullopt;
+    }
+
+    // Overwrites. false on an out-of-range slot or a name that is empty or
+    // does not fit.
     bool save(uint8_t i, std::string_view name, const Payload& payload) {
         if (i >= kCapacity || !nameFits(name)) return false;
         Slot& s = _slots[i];

@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <optional>
 #include <string_view>
 
@@ -914,57 +915,87 @@ Ret ValenceDevice::applyPatternAdvanced(const IntentValueMap& requested) {
 
 // The four SPEC §8.7 verbs; the op-select ordinals are the registry's store_ops
 // (RFC-067), which the catalog's labels {reserved, save, load, delete, rename}
-// index-align with. save captures LIVE state (a client payload, an import, is
-// not offered); load applies through the same clamps an intent takes into the
-// advanced generator's knobs, starting nothing, and its truth arrives on the
-// ordinary pattern-plane STATE. The echoed name is the STORE's copy.
+// index-align with. The per-verb argument set is RFC-089's: slot required but
+// on save, where its absence picks the lowest free slot; name required by
+// save and rename; a field the verb does not use is ignored and not echoed.
+// save captures LIVE state, or imports the store-item document in `item`,
+// whose slot and name must equal the request's and whose kind, payload size
+// and digest are checked, the payload never decoded. load applies through the
+// same clamps an intent takes into the advanced generator's knobs, starting
+// nothing, and its truth arrives on the ordinary pattern-plane STATE. The
+// echoed name is the STORE's copy; an imported item echoes as sent.
 Ret ValenceDevice::applyPresets(const IntentValueMap& requested) {
     const auto* opF = findField(requested, 1);
     const auto* slotF = findField(requested, 2);
     if (opF && !numberOf(opF)) return refuseNotANumber(ch::pattern_presets_cmd, 1);
     if (slotF && !numberOf(slotF)) return refuseNotANumber(ch::pattern_presets_cmd, 2);
     const auto op = numberOf(opF);
-    const auto slotV = numberOf(slotF);
-    if (!op || !slotV || *slotV < 0.0f || *slotV >= float(PatternPresetStore::kCapacity))
-        return Ret::err(NackCode::INVALID_VALUE);
-    const uint8_t slot = uint8_t(wholeIn(*slotV, 0.0f, float(PatternPresetStore::kCapacity - 1)));
-    const auto* nameF = findField(requested, 3);
-    const std::string_view name =
-        (nameF && nameF->value.kind == IntentValue::Kind::Tstr) ? nameF->value.tstr_val : std::string_view{};
-
+    if (!op) return Ret::err(NackCode::INVALID_VALUE);
     const uint32_t verb = wholeIn(*op, 0.0f, 255.0f);
+    std::optional<uint8_t> slot;
+    if (const auto slotV = numberOf(slotF)) {
+        if (*slotV < 0.0f || *slotV >= float(PatternPresetStore::kCapacity)) return Ret::err(NackCode::INVALID_VALUE);
+        slot = uint8_t(wholeIn(*slotV, 0.0f, float(PatternPresetStore::kCapacity - 1)));
+    } else if (verb != store_ops::save) {
+        return refuse(NackCode::INVALID_VALUE, "slot required");
+    }
+    const auto* nameF = findField(requested, 3);
+    const bool hasName = nameF && nameF->value.kind == IntentValue::Kind::Tstr;
+    const std::string_view name = hasName ? nameF->value.tstr_val : std::string_view{};
+    if (!hasName && (verb == store_ops::save || verb == store_ops::rename))
+        return refuse(NackCode::INVALID_VALUE, "name required");
+    const auto* itemF = verb == store_ops::save ? findField(requested, 4) : nullptr;
+
     switch (verb) {
-        case store_ops::save:
-            if (!_presets.save(slot, name, _pat.capturePreset())) return Ret::err(NackCode::INVALID_VALUE);
-            GLOGI(kTag, "preset saved: slot %u", unsigned(slot));
+        case store_ops::save: {
+            if (!slot) slot = _presets.freeSlot();
+            if (!slot) return refuse(NackCode::INVALID_VALUE, "pattern presets full");
+            PatternPresetStore::Payload payload = _pat.capturePreset();
+            if (itemF) {
+                if (itemF->value.kind != IntentValue::Kind::Bstr) return refuse(NackCode::INVALID_VALUE, "item");
+                const auto doc = decodeStoreItem(itemF->value.bstr_val);
+                if (!doc) return refuse(NackCode::INVALID_VALUE, "item malformed");
+                if (doc.value().slot != *slot || doc.value().name != name)
+                    return refuse(NackCode::INVALID_VALUE, "item slot or name differs");
+                if (doc.value().kind != std::string_view(kPresetKind)) return refuse(NackCode::INVALID_VALUE, "item kind");
+                if (doc.value().payload.size() != payload.size()) return refuse(NackCode::INVALID_VALUE, "item size");
+                if (storeItemDoneStatus(doc.value()) != BlobDoneStatus::VerifiedComplete)
+                    return refuse(NackCode::INVALID_VALUE, "item digest");
+                std::memcpy(payload.data(), doc.value().payload.data(), payload.size());
+            }
+            if (!_presets.save(*slot, name, payload)) return Ret::err(NackCode::INVALID_VALUE);
+            GLOGI(kTag, "preset %s: slot %u", itemF ? "imported" : "saved", unsigned(*slot));
             break;
+        }
         case store_ops::load: {
             if (motionCensus().estop) return refuse(NackCode::ESTOP_ACTIVE, kDetailEstop);
-            const PatternPresetStore::Slot* s = _presets.slot(slot);
+            const PatternPresetStore::Slot* s = _presets.slot(*slot);
             if (s == nullptr) return Ret::err(NackCode::INVALID_VALUE);
             _pat.applyPreset(s->payload);
             _patDirty = true;
-            GLOGI(kTag, "preset loaded: slot %u", unsigned(slot));
+            GLOGI(kTag, "preset loaded: slot %u", unsigned(*slot));
             break;
         }
         case store_ops::delete_item:
-            if (!_presets.remove(slot)) return Ret::err(NackCode::INVALID_VALUE);
-            GLOGI(kTag, "preset deleted: slot %u", unsigned(slot));
+            if (!_presets.remove(*slot)) return Ret::err(NackCode::INVALID_VALUE);
+            GLOGI(kTag, "preset deleted: slot %u", unsigned(*slot));
             break;
         case store_ops::rename:
-            if (!_presets.rename(slot, name)) return Ret::err(NackCode::INVALID_VALUE);
+            if (!_presets.rename(*slot, name)) return Ret::err(NackCode::INVALID_VALUE);
             break;
         default:
             return Ret::err(NackCode::INVALID_VALUE);
     }
+    // The item view lives in the request frame, which outlives the ECHO's
+    // encode (Hub::handleIntent). An import's ECHO is past the idempotency
+    // ring's slot, so it is sent but not kept for a duplicate id.
     IntentValueMap applied{};
     applied.fields[0] = {1, IntentValue::ofU64(verb)};
-    applied.fields[1] = {2, IntentValue::ofU64(slot)};
+    applied.fields[1] = {2, IntentValue::ofU64(*slot)};
     applied.count = 2;
-    if (verb == 1 || verb == 4) {
-        applied.fields[2] = {3, IntentValue::ofTstr(_presets.slot(slot)->nameView())};
-        applied.count = 3;
-    }
+    if (verb == store_ops::save || verb == store_ops::rename)
+        applied.fields[applied.count++] = {3, IntentValue::ofTstr(_presets.slot(*slot)->nameView())};
+    if (itemF) applied.fields[applied.count++] = {4, itemF->value};
     return Ret::ok(applied);
 }
 
