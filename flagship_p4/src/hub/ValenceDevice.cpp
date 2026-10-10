@@ -537,6 +537,15 @@ void publishIfChanged(Hub& hub, uint16_t id, const std::array<std::byte, N>& buf
     publishPacked(hub, id, buf, written);
 }
 
+// SPEC 5.4 (RFC-090): a c2h bundle stamped past now plus its cap moves earlier
+// as a whole, every spacing kept; stamps are never clamped one by one. The hub
+// moved it already against its own clock; this holds it against now32.
+BundleView leadCapped(const BundleView& bundle, uint32_t now32, uint32_t capUs, bool& moved) {
+    BundleView b = bundle;
+    moved = b.clampLead(now32, capUs);
+    return b;
+}
+
 }  // namespace
 
 // ---- HubDelegate ---------------------------------------------------------------
@@ -1165,19 +1174,21 @@ Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
             return refuse(NackCode::INVALID_VALUE, "drive in_min equals in_max");
         }
     }
+    const bool driven = oscDriven(motionCensus().osc_stream_live);
     if (!(o == was)) {
         motionSetOscillator(o);
         _oscDirty = true;
         cfgChanged = true;
+        _oscDrivenShown = driven;   // this write's cfg_gen covers what it reports
     }
     IntentValueMap applied{};
     uint32_t n = 0;
     if (f1) applied.fields[n++] = {1, IntentValue::ofBool(o.enabled)};
     if (f2) applied.fields[n++] = {2, IntentValue::ofF32(o.frequency_hz)};
     if (f3) applied.fields[n++] = {3, IntentValue::ofF32(o.amplitude)};
-    if (f4) applied.fields[n++] = {4, IntentValue::ofU64(oscShapeRendered())};
-    if (f5) applied.fields[n++] = {5, IntentValue::ofF32(o.dwell_crest)};
-    if (f6) applied.fields[n++] = {6, IntentValue::ofF32(o.dwell_trough)};
+    if (f4) applied.fields[n++] = {4, IntentValue::ofU64(driven ? 0 : o.shape)};
+    if (f5) applied.fields[n++] = {5, IntentValue::ofF32(driven ? 0.0f : o.dwell_crest)};
+    if (f6) applied.fields[n++] = {6, IntentValue::ofF32(driven ? 0.0f : o.dwell_trough)};
     for (int d = 0; d < 2; ++d) {
         const MotionOscDrive& m = *drives[d];
         const uint8_t k0 = uint8_t(7 + 5 * d);
@@ -1190,25 +1201,36 @@ Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
     return Ret::ok(applied);
 }
 
-// While a drive is bound the oscillator is a sine whatever osc.shape holds
-// (Kinetic's driven mode is sine only): the twin and the ECHO name what plays.
-uint8_t ValenceDevice::oscShapeRendered() const {
-    const bool driven = _osc.frequency_drive.drive != osc_drives::fixed ||
-                        _osc.amplitude_drive.drive != osc_drives::fixed;
-    return driven ? 0 : _osc.shape;
+// Driven by a live input (a speed or position drive, or an axis drive with a
+// live osc-drive stream) the oscillator is a sine with no dwells, Kinetic's
+// driven mode; an axis drive with no live stream is fixed (bd val-o9r,
+// Valence RFC-110 item 3, ahead of the pinned SPEC 9.7).
+bool ValenceDevice::oscDriven(bool streamLive) const {
+    auto live = [&](uint8_t d) {
+        return d == osc_drives::speed || d == osc_drives::position || (d == osc_drives::axis && streamLive);
+    };
+    return live(_osc.frequency_drive.drive) || live(_osc.amplitude_drive.drive);
 }
 
-// The parameters as applied, then what renders: osc.active and
-// osc.amplitude_effective from the census.
+// The parameters as applied, shape and dwells as they play (the written ones
+// kept), then what renders: osc.active and osc.amplitude_effective from the
+// census.
 void ValenceDevice::publishOscillator(const MotionCensus& mo, bool force) {
+    const bool driven = oscDriven(mo.osc_stream_live);
+    // SPEC 4.2: the reported shape or dwells moving with a stream's liveness
+    // is a hub-side change; a kept sine with no dwells reports no change.
+    if (driven != _oscDrivenShown) {
+        _oscDrivenShown = driven;
+        if (_osc.shape != 0 || _osc.dwell_crest != 0.0f || _osc.dwell_trough != 0.0f) _oscHubChange = true;
+    }
     std::array<std::byte, 57> buf{};
     size_t n = 0;
     packU8(buf, n, _osc.enabled ? 1 : 0);
     packF32(buf, n, _osc.frequency_hz);
     packF32(buf, n, _osc.amplitude);
-    packU8(buf, n, oscShapeRendered());
-    packF32(buf, n, _osc.dwell_crest);
-    packF32(buf, n, _osc.dwell_trough);
+    packU8(buf, n, driven ? 0 : _osc.shape);
+    packF32(buf, n, driven ? 0.0f : _osc.dwell_crest);
+    packF32(buf, n, driven ? 0.0f : _osc.dwell_trough);
     packU8(buf, n, mo.osc_active ? 1 : 0);
     packF32(buf, n, mo.osc_amplitude);
     for (const MotionOscDrive* d : {&_osc.frequency_drive, &_osc.amplitude_drive}) {
@@ -1220,8 +1242,8 @@ void ValenceDevice::publishOscillator(const MotionCensus& mo, bool force) {
     }
     publishIfChanged(*_hub, ch::oscillator, buf, n, _sentOsc, force);
     // RFC-011: a hub-side change bumps after its STATE is out.
-    if (_oscCleared) {
-        _oscCleared = false;
+    if (_oscHubChange) {
+        _oscHubChange = false;
         _hub->bumpConfigGeneration();
     }
 }
@@ -1460,7 +1482,11 @@ Ret ValenceDevice::applyHome(const IntentValueMap& requested) {
             if (c.busy && !c.homing) return refuse(NackCode::INTERLOCK, "moving: pause first");
             // Operator ruling 2026-10-09 (Valence rfc-ns5c item 3): a home
             // cycle is the one thing an oscillating machine refuses.
-            if (_osc.enabled || c.osc_active)
+            // A live stream renders it while an axis drive is bound, osc.enabled
+            // or not (RFC-110 item 2).
+            const bool streamed = c.osc_stream_live && (_osc.frequency_drive.drive == osc_drives::axis ||
+                                                        _osc.amplitude_drive.drive == osc_drives::axis);
+            if (_osc.enabled || streamed || c.osc_active)
                 return refuse(NackCode::INTERLOCK, "oscillating: disable the oscillator first");
             switch (motionHome()) {
                 case HomeStart::started:
@@ -1578,17 +1604,19 @@ void ValenceDevice::onEstop(uint8_t cause, uint8_t origin) {
 
 // ---- 0x2140 osc-drive ingress ---------------------------------------------------
 // SPEC 9.7: each sample is {amplitude f32, frequency f32}, each 0 .. 1, timed
-// as any samples-kind bundle (resolved and lead-capped as 0x2100's) and handed
-// to the motion task at once: the driven oscillator places it at its stamp,
-// no nearer than kOscDriveLeadUs ahead, the grant's schedule latency.
+// as any samples-kind bundle (resolved, and moved earlier whole past the lead
+// cap, as 0x2100's) and handed to the motion task at once: the driven
+// oscillator places it at its stamp, no nearer than kOscDriveLeadUs ahead, the
+// grant's schedule latency. A stamp already past plays at once.
 void ValenceDevice::takeOscDrive(const BundleView& bundle) {
     const int64_t now64 = int64_t(deviceNowUs());
     const uint32_t now32 = uint32_t(uint64_t(now64) & 0xFFFFFFFFull);
-    const int32_t leadCapUs = int32_t(limits::max_future_schedule_ms) * 1000;
+    bool moved = false;
+    const BundleView b = leadCapped(bundle, now32, limits::max_future_schedule_ms * 1000u, moved);
     auto unit = [](float v) { return !(v > 0.0f) ? 0.0f : std::fmin(v, 1.0f); };
-    for (uint8_t i = 0; i < bundle.sampleCount(); ++i) {
-        const int32_t delta = std::clamp<int32_t>(int32_t(bundle.sampleTimeUs(i) - now32), 0, leadCapUs);
-        const auto sample = bundle.sample(i);
+    for (uint8_t i = 0; i < b.sampleCount(); ++i) {
+        const int32_t delta = std::max<int32_t>(int32_t(b.sampleTimeUs(i) - now32), 0);
+        const auto sample = b.sample(i);
         if (sample.size() < 8) continue;
         motionOscDrive(unit(getF32(sample.subspan(0, 4))), unit(getF32(sample.subspan(4, 4))),
                        uint64_t(now64 + delta));
@@ -1622,11 +1650,13 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
     // only the WIRE stamp being resolved against it does.
     const int64_t now64 = int64_t(deviceNowUs());
     const uint32_t now32 = uint32_t(uint64_t(now64) & 0xFFFFFFFFull);
-    // RFC-084 lead cap, one per kind: a sample stamped further ahead than its
-    // cap is CLAMPED to it, never dropped. Segments ride the grant's horizon
-    // (RFC-087); samples the registry's max_future_schedule_ms.
-    const int32_t leadCapUs = int32_t(isSegment ? scheduleHorizonMs(channel_id)
-                                                : limits::max_future_schedule_ms) * 1000;
+    // RFC-084 lead cap, one per kind: a bundle stamped further ahead than its
+    // cap moves earlier whole (leadCapped()), never dropped. Segments ride the
+    // grant's horizon (RFC-087); samples the registry's max_future_schedule_ms.
+    const uint32_t leadCapUs = uint32_t(isSegment ? scheduleHorizonMs(channel_id)
+                                                  : limits::max_future_schedule_ms) * 1000u;
+    bool farMoved = false;
+    const BundleView b = leadCapped(bundle, now32, leadCapUs, farMoved);
     // A segment's expectation (MotionIntent::expect_us) is the hub's quiet
     // window for this stream, the same max the library releases it on.
     const uint32_t expectUs =
@@ -1637,7 +1667,6 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
     const Window w = clientWindow(motionCensus().rail_mm);
     const float span = w.hi - w.lo;
     uint32_t dropped = 0;
-    uint32_t farClamped = 0;
     // Samples of either kind whose time had passed at ingress, the count
     // Valence RFC-109 drafts as stream.late; worstUs is the bundle's arrival
     // lead when it is negative.
@@ -1651,8 +1680,7 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
         // Nearest-window resolve (§7.2): a wrap-aware signed subtract, safe
         // because the wire stamp is near now by construction (the bundle
         // span is capped far under the 32-bit wrap).
-        int32_t delta = int32_t(bundle.sampleTimeUs(i) - now32);
-        if (delta > leadCapUs) { delta = leadCapUs; ++farClamped; }
+        int32_t delta = int32_t(b.sampleTimeUs(i) - now32);
         if (delta < 0) {
             ++late;
             worstUs = std::min(worstUs, delta);
@@ -1661,7 +1689,7 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
 
         // The field mapping is StreamIntent.h's, shared with the offline
         // planner; a zero-duration segment decodes to nullopt and is dropped.
-        const auto sample = bundle.sample(i);
+        const auto sample = b.sample(i);
         const uint16_t pos = getU16(sample.subspan(0, 2));
         const uint64_t anchor = uint64_t(now64 + int64_t(delta));
         std::optional<MotionIntent> in =
@@ -1684,10 +1712,10 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
         GLOGI_EVERY_MS(1000, kTag, "motion stream: %u of %u sample(s) arrived past their time, by up to %.1f ms",
                        unsigned(late), unsigned(n), double(-worstUs) * 1e-3);
     }
-    if (farClamped) {
+    if (farMoved) {
         GLOGW_EVERY_MS(2000, kTag,
-                       "motion stream: %u sample(s) clamped from a far-future t_off "
-                       "(missed CLOCK resync on the client?)", unsigned(farClamped));
+                       "motion stream: a bundle of %u sample(s) stamped past the lead cap moved earlier whole "
+                       "(missed CLOCK resync on the client?)", unsigned(n));
     }
 }
 
@@ -1710,7 +1738,7 @@ void ValenceDevice::oscSessionEnded(uint32_t session_id, const char* how) {
     _osc.enabled = false;
     motionSetOscillator(_osc);
     _oscDirty = true;
-    _oscCleared = true;
+    _oscHubChange = true;
     GLOGI(kTag, "oscillator off: session %lu %s", static_cast<unsigned long>(session_id), how);
     (void)how;
 }

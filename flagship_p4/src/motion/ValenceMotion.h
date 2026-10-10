@@ -190,6 +190,7 @@ struct MotionCensus {
     // ---- the oscillator (RFC-103), as 0x1140 publishes it ----
     bool     osc_active     = false;  // rendering a nonzero amplitude at the plan's head
     float    osc_amplitude  = 0.0f;   // that amplitude, window share (osc.amplitude_effective)
+    bool     osc_stream_live = false; // an osc-drive stream is live: under stream_quiet_release_ms past its newest stamp
 };
 
 // What sets one driven oscillator parameter (SPEC 9.7): `drive` an osc_drives

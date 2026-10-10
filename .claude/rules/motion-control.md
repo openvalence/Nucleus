@@ -103,37 +103,43 @@ window is solved at the next sample, and the sampler evaluates it.
   test_motion_arbiter, the oscillator cases: the strip under 300 mm strokes at
   the input set keeps every ceiling and the window, sheds to under a step at
   full speed].
-  **Driven parameters (SPEC 9.7, bd val-o9r).** A bound drive puts the stage
-  in Kinetic's driven mode, a sine whose frequency and amplitude follow drive
-  points, the phase integrated (0x1140 then reports the sine). The osc-drive
-  stream's samples cross from the hub task at arrival through a
-  single-producer ring (`postOscDrive()`), and `feedOscillator()`, on the
+  **Driven parameters (SPEC 9.7, bd val-o9r; Valence RFC-110, ahead of the
+  pinned SPEC).** A parameter driven by a live input, a speed or position
+  drive or an `axis` drive while an osc-drive stream is live (under
+  `stream_quiet_release_ms` past its newest stamp, whichever session
+  published it), puts the stage in Kinetic's driven mode: a sine whose
+  frequency and amplitude follow drive points, the phase integrated. An
+  `axis` drive with no live stream is exactly `fixed`, so the factory card
+  (both drives `axis`) renders every shape and dwell by hand. While an `axis`
+  drive is bound a live stream also renders the stage whatever osc.enabled
+  holds (`streamOscillator()`, before the plan read). A stream's start and
+  end therefore switch the mode, which passes through rest: the kernel's
+  fade out, then in, up to 150 ms each; quiet with osc.enabled off, it rests.
+  The osc-drive stream's samples cross from the hub task at arrival through
+  a single-producer ring (`postOscDrive()`), and `feedOscillator()`, on the
   planner, makes each a point at its stamp; a speed or position drive adds a
   point every `kOscPlanDriveTicks` at `kOscDriveLeadUs` ahead from the plan
-  there. Each parameter is its field (`fixed`) or SPEC 8.11's linear_clamp of
+  there. In the driven mode each parameter is its field (`fixed`, or `axis`
+  with no live stream while osc.enabled holds) or SPEC 8.11's linear_clamp of
   the plan's speed (mm/s) or position (mm, client frame) or the newest sample
   (`axis`). No point lands nearer than `kOscDriveLeadUs` (156 ms, the
   osc-drive grant's schedule latency); with nothing asked for `kDriveQuietUs`
-  it fades to rest; a point the stage cannot hold is dropped and counted. The
-  factory drive is `axis`. Two rules run ahead of the pinned SPEC 9.7
-  (operator ruling 2026-10-09, amendment drafted on Valence rfc-ns5c):
-  with no live stream (none, or `stream_quiet_release_ms` past its newest
-  stamp) an `axis` parameter is its field, so osc.enabled under the factory
-  drives oscillates by hand, its points asked every `kOscPlanDriveTicks` as a
-  plan drive's are; and while an `axis` drive is bound a live stream renders
-  the stage whatever osc.enabled holds (`streamOscillator()`, before the plan
-  read). Quiet, the stream hands back through the kernel's fade: the first
-  hand point lands on the tick the stream's quiet window ends, the stage's
-  own window too (`kDriveQuietUs`, static_asserted), so the handover never
-  asks for rest; disabled, it fades to rest. PAUSE, ESTOP and the render
-  gates hold a stream as they hold the hand. The stage, its plan buffer and
+  (the stream's quiet window, static_asserted) it fades to rest; a point the
+  stage cannot hold is dropped and counted. PAUSE, ESTOP and the render
+  gates hold a stream as they hold the hand. The hub reports what plays:
+  driven, 0x1140 and the ECHO carry osc.shape sine and both dwells 0, the
+  written values kept, and the report changing with a stream's liveness is
+  a hub-side cfg_gen (`ValenceDevice::publishOscillator()`, from the census's
+  `osc_stream_live`). The stage, its plan buffer and
   the drives cost about 8.9 KB of the arbiter's internal RAM
   (`sizeof(MotionOscillator)` 7,288 B) [verified 2026-10-09 -- riscv32
   `sizeof` at Kinetic 725d448; test_motion_arbiter, a 50 Hz drive sweeping
   5 to 20 Hz keeps every ceiling and fades out on silence; the factory
-  drives oscillate by hand at the fields; a stream over the hand state hands
-  it back with its amplitude never under the hand's (2 mm of 2 mm); a live
-  stream renders nothing under PAUSE or ESTOP].
+  drives render the hand square (0.81 of ticks within a tenth of the peak,
+  a sine 0.30) and saw (0.87 of moving ticks rising); a stream over a hand
+  square passes through rest to the driven sine and, quiet, back through
+  rest to the square, every ceiling held; a live stream renders nothing
+  under PAUSE or ESTOP].
 - **Map:** header-only, hardware-free `kinetic2::Engine`: a knot timeline (64
   knots per axis here), a window solver that re-plans every pending knot
   together, and a brake. The library is the sibling Kinetic checkout,

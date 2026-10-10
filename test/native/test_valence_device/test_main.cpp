@@ -1884,12 +1884,25 @@ TEST_CASE("VD-OSC-DRIVE: drives default to axis, clamp and echo; osc-drive sampl
     CHECK(rig->del.nacks[0].detail == "drive in_min equals in_max");
     CHECK(g_osc.amplitude_drive.in_min == doctest::Approx(0.2f));
 
-    // While a drive is bound the twin names the sine that plays.
-    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(4, IntentValue::ofU64(1))).has_value());
+    // Driven by the plan, the twin and the echo name the sine that plays, no
+    // dwells; the written values are kept.
+    {
+        IntentValueMap s{};
+        s.count = 2;
+        s.fields[0] = IntentValueField{4, IntentValue::ofU64(1)};
+        s.fields[1] = IntentValueField{5, IntentValue::ofF32(0.3f)};
+        REQUIRE(rig->client->sendIntent(ch::osc_set, s).has_value());
+    }
     rig->step();
     CHECK(echoed(rig->del.lastEcho, 4)->u64_val == 0);
-    CHECK(rig->del.lastState.find(ch::oscillator)->second[9] == std::byte{0});
+    CHECK(echoed(rig->del.lastEcho, 5)->f32_val == 0.0f);
+    {
+        const std::span<const std::byte> tw(rig->del.lastState.find(ch::oscillator)->second);
+        CHECK(tw[9] == std::byte{0});
+        CHECK(getF32(tw.subspan(10, 4)) == 0.0f);
+    }
     CHECK(g_osc.shape == 1);
+    CHECK(g_osc.dwell_crest == doctest::Approx(0.3f));
     CHECK(rig->device.scheduleLatencyUs(ch::osc_drive) == kOscDriveLeadUs);
 
     // Two samples 10 ms and 30 ms ahead: each handed over at arrival with its
@@ -1986,9 +1999,120 @@ TEST_CASE("VD-HOME-OSC: home op 1 is refused INTERLOCK while the oscillator is o
     REQUIRE(rig->del.nacks.size() == 2);
     CHECK(rig->del.nacks[1].code == NackCode::INTERLOCK);
     CHECK(g_homeCalls == 0);
+    // Neither, but a live stream with the factory axis drives renders it.
     g_census.osc_active = false;
+    g_census.osc_stream_live = true;
     REQUIRE(rig->client->sendIntent(ch::home, homeOp1()).has_value());
     rig->step();
-    CHECK(rig->del.nacks.size() == 2);
+    REQUIRE(rig->del.nacks.size() == 3);
+    CHECK(rig->del.nacks[2].code == NackCode::INTERLOCK);
+    g_census.osc_stream_live = false;
+    REQUIRE(rig->client->sendIntent(ch::home, homeOp1()).has_value());
+    rig->step();
+    CHECK(rig->del.nacks.size() == 3);
     CHECK(g_homeCalls == 1);
+}
+
+// ---- shape and dwells as they play (Valence RFC-110 item 3) -----------------
+
+TEST_CASE("VD-OSC-SHOWN: the factory card reports its shape and dwells by hand, a live stream the sine with no dwells, each change a hub-side cfg_gen") {
+    auto rig = std::make_unique<Rig>();
+    IntentValueMap m{};
+    m.count = 3;
+    m.fields[0] = IntentValueField{4, IntentValue::ofU64(1)};        // square
+    m.fields[1] = IntentValueField{5, IntentValue::ofF32(0.25f)};
+    m.fields[2] = IntentValueField{6, IntentValue::ofF32(0.5f)};
+    REQUIRE(rig->client->sendIntent(ch::osc_set, m).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(echoed(rig->del.lastEcho, 4)->u64_val == 1);
+    CHECK(echoed(rig->del.lastEcho, 5)->f32_val == doctest::Approx(0.25f));
+    auto twin = [&] { return std::span<const std::byte>(rig->del.lastState[ch::oscillator]); };
+    CHECK(twin()[9] == std::byte{1});
+    CHECK(getF32(twin().subspan(10, 4)) == doctest::Approx(0.25f));
+    CHECK(getF32(twin().subspan(14, 4)) == doctest::Approx(0.5f));
+    // A stream goes live: the sine, no dwells, published with cfg_gen moved.
+    uint16_t gen = rig->hub->cfgGen();
+    g_census.osc_stream_live = true;
+    rig->step(60);
+    CHECK(twin()[9] == std::byte{0});
+    CHECK(getF32(twin().subspan(10, 4)) == 0.0f);
+    CHECK(getF32(twin().subspan(14, 4)) == 0.0f);
+    CHECK(rig->hub->cfgGen() != gen);
+    CHECK(g_osc.shape == 1);
+    // A write of shape while it is live keeps it and echoes the sine.
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(4, IntentValue::ofU64(2))).has_value());
+    rig->step();
+    CHECK(echoed(rig->del.lastEcho, 4)->u64_val == 0);
+    CHECK(g_osc.shape == 2);
+    // Quiet: the kept values again, a hub-side change.
+    gen = rig->hub->cfgGen();
+    g_census.osc_stream_live = false;
+    rig->step(60);
+    CHECK(twin()[9] == std::byte{2});
+    CHECK(getF32(twin().subspan(10, 4)) == doctest::Approx(0.25f));
+    CHECK(rig->hub->cfgGen() != gen);
+    // A kept sine with no dwells reports nothing new: no cfg_gen.
+    m.fields[0] = IntentValueField{4, IntentValue::ofU64(0)};
+    m.fields[1] = IntentValueField{5, IntentValue::ofF32(0.0f)};
+    m.fields[2] = IntentValueField{6, IntentValue::ofF32(0.0f)};
+    REQUIRE(rig->client->sendIntent(ch::osc_set, m).has_value());
+    rig->step();
+    gen = rig->hub->cfgGen();
+    g_census.osc_stream_live = true;
+    rig->step(60);
+    g_census.osc_stream_live = false;
+    rig->step(60);
+    CHECK(rig->hub->cfgGen() == gen);
+    // Both drives fixed: a live stream drives nothing, the square plays.
+    m.count = 3;
+    m.fields[0] = IntentValueField{4, IntentValue::ofU64(1)};
+    m.fields[1] = IntentValueField{7, IntentValue::ofU64(osc_drives::fixed)};
+    m.fields[2] = IntentValueField{12, IntentValue::ofU64(osc_drives::fixed)};
+    REQUIRE(rig->client->sendIntent(ch::osc_set, m).has_value());
+    rig->step();
+    g_census.osc_stream_live = true;
+    rig->step(60);
+    CHECK(twin()[9] == std::byte{1});
+}
+
+// ---- SPEC 5.4 (RFC-090): an over-cap bundle moves earlier whole -------------
+
+TEST_CASE("VD-LEADCAP: a bundle stamped past the lead cap moves earlier whole, its spacing kept, on osc-drive and motion-input") {
+    auto rig = std::make_unique<Rig>();
+    const uint64_t now = g_clock.nowUs();
+    const uint32_t now32 = uint32_t(now);
+    const uint64_t cap = uint64_t(limits::max_future_schedule_ms) * 1000u;
+    // osc-drive: two samples at now + 300 and now + 320 ms, past the 250 ms cap.
+    g_oscDrives.clear();
+    std::vector<std::byte> b(6 + 2 * 2 + 8 * 2, std::byte{0});
+    std::span<std::byte> out(b);
+    putU32(out.subspan(0, 4), now32 + 300'000);
+    out[4] = std::byte{2};
+    putU16(out.subspan(8, 2), 20'000);
+    putF32(out.subspan(10, 4), 0.5f);
+    putF32(out.subspan(14, 4), 0.25f);
+    putF32(out.subspan(18, 4), 0.75f);
+    putF32(out.subspan(22, 4), 0.5f);
+    const auto parsed = BundleView::parse(std::span<const std::byte>(b), 8);
+    REQUIRE(parsed.isOk());
+    rig->device.onStreamBundle(ch::osc_drive, 1, parsed.value());
+    REQUIRE(g_oscDrives.size() == 2);
+    CHECK(g_oscDrives[1].at_us == now + cap);
+    CHECK(g_oscDrives[0].at_us == now + cap - 20'000);
+    // motion-input: two points 5 ms apart at now + 400 ms.
+    g_intents.clear();
+    std::vector<std::byte> pts(6 + 2 * 2 + 4 * 2, std::byte{0});
+    std::span<std::byte> po(pts);
+    putU32(po.subspan(0, 4), now32 + 400'000);
+    po[4] = std::byte{2};
+    putU16(po.subspan(8, 2), 5000);
+    putU16(po.subspan(10, 2), 5000);
+    putU16(po.subspan(14, 2), 6000);
+    const auto pp = BundleView::parse(std::span<const std::byte>(pts), 4);
+    REQUIRE(pp);
+    rig->device.onStreamBundle(ch::motion_input, 1, pp.value());
+    REQUIRE(g_intents.size() == 2);
+    CHECK(g_intents[1].anchor_us == now + cap);
+    CHECK(g_intents[0].anchor_us == now + cap - 5000);
 }

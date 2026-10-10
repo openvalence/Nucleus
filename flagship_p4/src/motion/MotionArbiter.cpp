@@ -65,8 +65,8 @@ static_assert(uint8_t(kinetic2::OscShape::Sine) == osc_shapes::sine &&
               "kinetic2::OscShape is the registry's osc_shapes");
 
 // An osc-drive stream is live from a sample's arrival until this long past the
-// newest stamp. It is the stage's own quiet window too, so a handover to the
-// hand state asks for no gap (feedOscillator()).
+// newest stamp, whichever session published it. It is the stage's own quiet
+// window too: a stream is quiet once the stage asks nothing of it.
 constexpr uint64_t kOscQuietUs = uint64_t(limits::stream_quiet_release_ms) * 1000u;
 static_assert(kOscQuietUs == MotionOscillator::kDriveQuietUs,
               "the osc-drive stream's quiet window is the oscillator's");
@@ -741,21 +741,29 @@ void MotionArbiter::takeOscillator() {
     _osc_base = p;
     _osc_fdrive = fd;
     _osc_adrive = ad;
-    _oscd_plan_next_us = 0;   // a hand change asks its point at the next tick
+    _oscd_plan_next_us = 0;   // a change asks its plan point at the next tick
     setOscStage();
 }
 
 void MotionArbiter::setOscStage() {
     kinetic2::OscParams p = _osc_base;
     p.enabled = p.enabled || _osc_streaming;
-    // A bound drive is the driven mode: a sine, frequency and amplitude from
-    // the points alone (shape, dwells and the two fields unused).
-    p.driven = _osc_fdrive.drive != osc_drives::fixed || _osc_adrive.drive != osc_drives::fixed;
+    // Driven by a live input (a speed or position drive, or an axis drive
+    // with a live stream) is the driven mode: a sine, frequency and amplitude
+    // from the points alone (shape, dwells and the two fields unused). An
+    // axis drive with no live stream is exactly fixed. A change of mode
+    // passes through rest (the kernel's fade out, then in).
+    p.driven = oscPlanBound() || _osc_streaming;
     _osc.set(p);
 }
 
 bool MotionArbiter::oscAxisBound() const {
     return _osc_fdrive.drive == osc_drives::axis || _osc_adrive.drive == osc_drives::axis;
+}
+
+bool MotionArbiter::oscPlanBound() const {
+    auto plan = [](uint8_t d) { return d == osc_drives::speed || d == osc_drives::position; };
+    return plan(_osc_fdrive.drive) || plan(_osc_adrive.drive);
 }
 
 bool MotionArbiter::oscStreamLive(uint64_t t_us) const {
@@ -784,22 +792,9 @@ void MotionArbiter::feedOscillator(uint64_t t0_us, const float* plan, bool rende
         if (render && axis) drivePoint(_oscd_last.t_us, plan, t0_us);
     }
     if (!render) return;
-    const uint64_t at = t0_us + kOscDriveLeadUs;
-    const bool fromPlan = _osc_fdrive.drive == osc_drives::speed || _osc_fdrive.drive == osc_drives::position ||
-                          _osc_adrive.drive == osc_drives::speed || _osc_adrive.drive == osc_drives::position;
-    // The hand state (bd val-o9r): osc.enabled with an axis drive and no live
-    // stream at the lead. Its points are the fields, asked as a plan drive's
-    // are. The first lands on the lattice tick where the stream's quiet
-    // window ends, and the last stream point is asked through that window
-    // inclusive, so the handover asks no gap. Leaving it with no stream
-    // asks nothing from the lead on.
-    const bool hand = axis && _osc_base.enabled && !oscStreamLive(at);
-    if (hand && !_oscd_hand) _oscd_plan_next_us = 0;
-    if (!hand && _oscd_hand && !oscStreamLive(at) && !_osc.drive(at, 0.0f, 0.0f)) ++_oscd_dropped;
-    _oscd_hand = hand;
-    if ((fromPlan || hand) && t0_us >= _oscd_plan_next_us) {
+    if (oscPlanBound() && t0_us >= _oscd_plan_next_us) {
         _oscd_plan_next_us = t0_us + uint64_t(kOscPlanDriveTicks) * kMotionTickUs;
-        drivePoint(at, plan, t0_us);
+        drivePoint(t0_us + kOscDriveLeadUs, plan, t0_us);
     }
 }
 
@@ -1681,7 +1676,7 @@ MotionArbiter::PlanRead MotionArbiter::readPlan(const kinetic2::State& st, uint6
     return r;
 }
 
-MotionCensus MotionArbiter::snapshot(uint64_t) {
+MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     const PlanRead s = _plan_read;
     const float s_mm = span();
 
@@ -1760,6 +1755,7 @@ MotionCensus MotionArbiter::snapshot(uint64_t) {
     // RFC-103: the ceilings or the window cut the oscillation below its ask.
     if (_osc.shaped()) c.plan_flags |= plan_flags::clamped;
     c.osc_active     = _osc.active();
+    c.osc_stream_live = oscStreamLive(now_us);
     c.osc_amplitude  = _osc.amplitudeEffective();
     c.plans          = _k2_plans;
     c.failures       = _k2_failures;

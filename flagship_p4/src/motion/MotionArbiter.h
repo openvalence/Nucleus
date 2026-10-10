@@ -138,10 +138,9 @@ inline constexpr size_t kPlanExt = kOscEdge + kStripLen + kOscLook + kOscEdge;
 static_assert(kOscDriveLeadUs == MotionOscillator::driveLeadUs(kMotionTickUs),
               "the osc-drive grant's schedule latency is the oscillator's drive lead");
 static_assert(kOscDriveLeadUs / kMotionTickUs < kStripLen + kOscLook, "the plan read must reach the lead");
-// While a speed or position drive is bound, or an axis drive reads its field
-// (feedOscillator()), a drive point every this many ticks. The oscillator
-// holds its points from a fade behind its head to the lead ahead: these and a
-// 50 Hz axis over that span stay under kDriveMax.
+// While a speed or position drive is bound, a plan drive point every this
+// many ticks. The oscillator holds its points from a fade behind its head to
+// the lead ahead: these and a 50 Hz axis over that span stay under kDriveMax.
 inline constexpr uint32_t kOscPlanDriveTicks = 16;
 inline constexpr uint64_t kOscDriveHeldUs = kOscDriveLeadUs + MotionOscillator::kFadeMaxUs;
 static_assert(kOscDriveHeldUs / (kOscPlanDriveTicks * kMotionTickUs) + kOscDriveHeldUs / 20000 <
@@ -572,24 +571,27 @@ private:
     // posted, if new and whole.
     void takeOscillator();
     // Planner task: the stage's parameters from the post, enabled while
-    // osc.enabled is or a live stream renders it (streamOscillator()). Any
-    // drive bound (SPEC 9.7) is the driven mode: a sine whose frequency and
-    // amplitude follow the points feedOscillator() gives it.
+    // osc.enabled is or a live stream renders it (streamOscillator()). A
+    // parameter driven by a live input (speed, position, or axis with a live
+    // stream) is the driven mode: a sine whose frequency and amplitude follow
+    // the points feedOscillator() gives it. Otherwise the fixed mode, every
+    // shape and dwell.
     void setOscStage();
     bool oscAxisBound() const;
+    bool oscPlanBound() const;
     // An osc-drive sample has been drained and t_us is under
     // stream_quiet_release_ms past the newest stamp.
     bool oscStreamLive(uint64_t t_us) const;
     // Planner task, from fillStrip() every tick before the plan read: a
-    // stream live at now (a sample waiting in the ring counts) enables the
-    // stage while an axis drive is bound; quiet, the hand state again.
+    // stream live at now (a sample waiting in the ring counts) enables and
+    // drives the stage while an axis drive is bound; quiet, the hand state
+    // again, through rest.
     void streamOscillator(uint64_t now_us);
     // Planner task, from fillStrip() every tick with the plan from t0
     // (kOscEdge read before it). It drains the osc-drive ring; rendering,
-    // each sample becomes a drive point at its stamp, and every
-    // kOscPlanDriveTicks a point at t0 + kOscDriveLeadUs while a speed or
-    // position drive is bound or the hand state holds (osc.enabled, an axis
-    // drive, no live stream at the lead). Each parameter through its own
+    // each sample becomes a drive point at its stamp, and while a speed or
+    // position drive is bound a point at t0 + kOscDriveLeadUs every
+    // kOscPlanDriveTicks from the plan there. Each parameter through its own
     // drive: fixed its field, speed and position the plan, axis the newest
     // sample, or with no live stream its field while osc.enabled holds and 0
     // otherwise (bd val-o9r (a)).
@@ -800,10 +802,9 @@ private:
     OscDriveSample        _oscd_last{};
     uint64_t              _oscd_plan_next_us = 0;
     uint32_t              _oscd_dropped = 0;
-    // A live stream enables the stage (streamOscillator()); the hand state
-    // held at the last rendering tick (feedOscillator()). Planner task.
+    // A live stream enables and drives the stage while an axis drive is
+    // bound (streamOscillator()). Planner task.
     bool                  _osc_streaming = false;
-    bool                  _oscd_hand = false;
 
     float _jog_v = DEFAULT_JOG_MAX_SPEED_MM_S;
     float _jog_a = DEFAULT_JOG_ACCEL_MM_S2;

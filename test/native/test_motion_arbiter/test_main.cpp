@@ -3537,7 +3537,7 @@ TEST_CASE("oscillator drives: an osc-drive stream sweeping frequency moves it co
 }
 
 // bd val-o9r (a), ahead of the pinned SPEC 9.7: with no live stream an axis
-// drive is its field, so the factory drives oscillate by hand.
+// drive is exactly fixed, so the factory drives oscillate by hand.
 TEST_CASE("oscillator drives: the factory axis drives with no stream oscillate by hand at the fields, inside every ceiling") {
     auto r = restRig(250.0f);
     MotionOsc o;   // the factory drives, both axis
@@ -3574,45 +3574,103 @@ TEST_CASE("oscillator drives: the factory axis drives with no stream oscillate b
     CHECK(r->census().osc_amplitude == 0.0f);
 }
 
-// bd val-o9r (a) and (b): a stream takes the hand state over and, quiet,
-// hands it back through the kernel's fade, never through rest.
-TEST_CASE("oscillator drives: a stream over the hand oscillation takes it, and quiet hands it back with no gap") {
+// Shape statistics over the heads from `from`, about `mid`, at amplitude `amp`
+// mm: the share of ticks within a tenth of the peak, and the share of moving
+// ticks that rise.
+struct ShapeStats { double nearPeak = 0, rising = 0; };
+ShapeStats shapeStats(const std::vector<float>& p, size_t from, float mid, float amp) {
+    size_t atPeak = 0, up = 0, moving = 0;
+    for (size_t i = from; i < p.size(); ++i) {
+        if (std::fabs(p[i] - mid) > 0.9f * amp) ++atPeak;
+        if (i > from && std::fabs(p[i] - p[i - 1]) > 1e-4f) {
+            ++moving;
+            if (p[i] > p[i - 1]) ++up;
+        }
+    }
+    ShapeStats s;
+    s.nearPeak = double(atPeak) / double(p.size() - from);
+    s.rising = moving ? double(up) / double(moving) : 0.0;
+    return s;
+}
+
+// bd val-o9r, Valence RFC-110 item 3: an axis drive with no live stream is
+// exactly fixed, so the factory card renders every shape by hand.
+TEST_CASE("oscillator drives: the factory axis drives with no stream render the hand square and saw") {
+    for (const uint8_t shape : {uint8_t(1), uint8_t(2)}) {
+        auto r = restRig(250.0f);
+        MotionOsc o;   // the factory drives, both axis
+        o.enabled = true;
+        o.frequency_hz = 5.0f;
+        o.amplitude = 0.004f;   // 2 mm
+        o.shape = shape;
+        r->arb.setOscillator(o);
+        Heads h;
+        runHeads(*r, 1'500'000, h);
+        const MotionCensus c = r->census();
+        CHECK(c.osc_active);
+        CHECK_FALSE(c.osc_stream_live);
+        const float a = c.osc_amplitude * 500.0f;
+        CHECK(a == doctest::Approx(2.0f).epsilon(0.02));
+        const ShapeStats s = shapeStats(h.p, 700, 250.0f, a);
+        MESSAGE("shape ", int(shape), ": near the peak ", s.nearPeak, ", rising ", s.rising);
+        if (shape == 1) CHECK(s.nearPeak > 0.6);    // a sine spends 0.29 there
+        if (shape == 2) CHECK(s.rising > 0.75);     // a sine rises half the time
+        for (const size_t ticks : crossings(h.p, 250.0f, 700)) CHECK(ticks == doctest::Approx(200).epsilon(0.02));
+        const GridPeaks g = gridPeaks(h.p);
+        CHECK(g.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
+        CHECK(g.a <= DEFAULT_ACCEL_MM_S2 + kFdA);
+        CHECK(g.j <= DEFAULT_INPUT_MAX_JERK_MM_S3 + kFdJ);
+        CHECK(c.backstops == 0);
+    }
+}
+
+// bd val-o9r, RFC-110 items 1 and 3: a stream over the hand square switches
+// the stage to the driven sine through rest, and quiet, back to the square
+// through rest.
+TEST_CASE("oscillator drives: a stream over a hand square fades through rest to the driven sine, and quiet back to the square") {
     auto r = restRig(250.0f);
     MotionOsc o;
     o.enabled = true;
-    o.frequency_hz = 10.0f;
-    o.amplitude = 0.004f;   // 2 mm by hand
+    o.frequency_hz = 5.0f;
+    o.amplitude = 0.004f;   // a 2 mm square by hand
+    o.shape = 1;
     o.amplitude_drive.out_max = 0.02f;
     r->arb.setOscillator(o);
     Heads h;
-    runHeads(*r, 800'000, h);
+    runHeads(*r, 1'500'000, h);
     REQUIRE(r->census().osc_amplitude == doctest::Approx(0.004f).epsilon(0.02));
-    // A player at 50 Hz for a second: 5 mm at 20 Hz.
-    for (uint64_t t = 0; t < 1'000'000; t += 20'000) {
-        r->arb.postOscDrive(0.5f, 0.2f, g_now_us + valence::kOscDriveLeadUs);
+    CHECK(shapeStats(h.p, 700, 250.0f, 2.0f).nearPeak > 0.6);
+    // A player at 50 Hz for 1.5 s: 5 mm at 10 Hz.
+    std::vector<float> amp;
+    for (uint64_t t = 0; t < 1'500'000; t += 20'000) {
+        r->arb.postOscDrive(0.5f, 0.1f, g_now_us + valence::kOscDriveLeadUs);
         for (int k = 0; k < 20; ++k) {
             r->run(1000);
             h.take(r->arb);
+            amp.push_back(r->census().osc_amplitude);
         }
     }
+    CHECK(r->census().osc_stream_live);
+    // Through rest: the square fades out before the sine fades in.
+    CHECK(*std::min_element(amp.begin(), amp.begin() + 400) == 0.0f);
     CHECK(r->census().osc_amplitude == doctest::Approx(0.01f).epsilon(0.02));
-    const auto fast = crossings(h.p, 250.0f, h.p.size() - 500);
-    REQUIRE(fast.size() > 4);
-    for (const size_t ticks : fast) CHECK(ticks == doctest::Approx(50).epsilon(0.04));
-    // Quiet: the hand's amplitude again, never less on the way.
-    std::vector<float> amp;
-    const uint64_t back = uint64_t(valence::limits::stream_quiet_release_ms) * 1000u + valence::kOscDriveLeadUs + 600'000;
+    const ShapeStats sine = shapeStats(h.p, h.p.size() - 500, 250.0f, 5.0f);
+    MESSAGE("driven: near the peak ", sine.nearPeak);
+    CHECK(sine.nearPeak < 0.4);
+    for (const size_t ticks : crossings(h.p, 250.0f, h.p.size() - 500)) CHECK(ticks == doctest::Approx(100).epsilon(0.02));
+    // Quiet: rest, then the hand square again.
+    amp.clear();
+    const uint64_t back = uint64_t(valence::limits::stream_quiet_release_ms) * 1000u + valence::kOscDriveLeadUs + 1'200'000;
     for (uint64_t t = 0; t < back; t += 1000) {
         r->run(1000);
         h.take(r->arb);
         amp.push_back(r->census().osc_amplitude);
     }
-    MESSAGE("least amplitude through the handover: ", *std::min_element(amp.begin(), amp.end()) * 500.0f, " mm");
-    CHECK(*std::min_element(amp.begin(), amp.end()) >= 0.004f * 0.98f);
+    CHECK_FALSE(r->census().osc_stream_live);
+    CHECK(*std::min_element(amp.begin(), amp.end()) == 0.0f);
     CHECK(r->census().osc_amplitude == doctest::Approx(0.004f).epsilon(0.02));
-    const auto slow = crossings(h.p, 250.0f, h.p.size() - 500);
-    REQUIRE(slow.size() > 2);
-    for (const size_t ticks : slow) CHECK(ticks == doctest::Approx(100).epsilon(0.02));
+    CHECK(shapeStats(h.p, h.p.size() - 600, 250.0f, 2.0f).nearPeak > 0.6);
+    for (const size_t ticks : crossings(h.p, 250.0f, h.p.size() - 600)) CHECK(ticks == doctest::Approx(200).epsilon(0.02));
     const GridPeaks g = gridPeaks(h.p);
     CHECK(g.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
     CHECK(g.a <= DEFAULT_ACCEL_MM_S2 + kFdA);

@@ -362,21 +362,25 @@ private:
     // The oscillator as 0x3140 last set it: this copy IS the setting, pushed
     // to the motion task on every change, never persisted (enabled boots
     // false). _oscSession: the session that last wrote osc.enabled, 0 when
-    // none is known. _oscCleared: that session's end cleared enabled, a
-    // hub-side change whose cfg_gen bump follows its twin's publish.
+    // none is known. _oscDrivenShown: the twin last reported the driven sine.
+    // _oscHubChange: a hub-side change (a session's end cleared enabled, or a
+    // stream's liveness moved the reported shape or dwells) whose cfg_gen
+    // bump follows its twin's publish.
     MotionOsc _osc{};
     std::array<std::byte, 57> _sentOsc{};
     uint32_t _oscSession = 0;
     bool _oscDirty = false;
-    bool _oscCleared = false;
+    bool _oscDrivenShown = false;
+    bool _oscHubChange = false;
     // SPEC 9.7: the end of the session behind osc.enabled (any door, STALE
     // included) clears it; another session's end does not.
     void oscSessionEnded(uint32_t session_id, const char* how);
 
     // The osc-drive stream (SPEC 9.7): each sample to the motion task at once.
     void takeOscDrive(const BundleView& bundle);
-    // The osc_shapes number that renders: sine while a drive is bound.
-    uint8_t oscShapeRendered() const;
+    // A parameter is driven by a live input: the twin and the ECHO report a
+    // sine with no dwells.
+    bool oscDriven(bool streamLive) const;
 
     // Debounced persist, one timer per blob: armed by every applied change,
     // re-armed by the next, so a slider drag costs ONE write after the
