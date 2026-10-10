@@ -21,8 +21,10 @@
 //   polled on the hub thread like the board's hub task. --no-discovery keeps a
 //   test run off UDP; --discovery-port moves it off the registry port.
 // - The loop's 5 ms hub tick matches the P4's hub task; motion is evaluated
-//   every pass (~1 ms), matching the P4's 1 kHz motion tick as closely as a
-//   desktop scheduler allows.
+//   every pass, paced to kMotionTickUs against a deadline (TickPacer). On
+//   Windows the wait is a high-resolution waitable timer: a headless
+//   process's timeBeginPeriod(1) is not honored, and a 1 ms sleep there
+//   lands at ~15.6 ms.
 // - PERSISTENCE IS THE BOARD'S, WITH FILES FOR NVS KEYS: PREFIX.cfg and
 //   PREFIX.presets hold the exact blobs the P4 writes, on the same debounce,
 //   and PREFIX.iid holds the P4's hub_iid (WELCOME identity key 5, SPEC §6.3)
@@ -31,6 +33,7 @@
 //   defaults to valencesim-state beside the exe.
 // See: sim/valencesim/README.md
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -57,12 +60,68 @@
 #include "SimCore.h"
 #include "hub/ValenceDiscovery.h"
 #include "hub/ValenceEstopDatagram.h"
+#include "motion/ValenceMotion.h"
 #include "net/WsServerPort.h"
 
 namespace {
 
 std::atomic<bool> g_stop{false};
 void onSignal(int) { g_stop = true; }
+
+// One pass per period from a running deadline. A pass that overran restarts
+// the cadence from now: a late tick is a stall, never a burst of catch-up.
+class TickPacer {
+public:
+    explicit TickPacer(std::chrono::microseconds period) : _period(period) {
+#ifdef _WIN32
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+        _timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+#endif
+    }
+    ~TickPacer() {
+#ifdef _WIN32
+        if (_timer != nullptr) CloseHandle(_timer);
+#endif
+    }
+    TickPacer(const TickPacer&) = delete;
+    TickPacer& operator=(const TickPacer&) = delete;
+
+    // false: the high-resolution timer is unavailable (before Windows 10
+    // 1803) and the wait falls back to sleep_until at the default resolution.
+    bool precise() const {
+#ifdef _WIN32
+        return _timer != nullptr;
+#else
+        return true;
+#endif
+    }
+
+    void wait() {
+        const auto now = std::chrono::steady_clock::now();
+        _next = _next + _period < now ? now + _period : _next + _period;
+#ifdef _WIN32
+        if (_timer != nullptr) {
+            const auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(_next - now).count();
+            LARGE_INTEGER due;
+            due.QuadPart = -std::max<long long>(left / 100, 1);   // relative, 100 ns units
+            if (SetWaitableTimer(_timer, &due, 0, nullptr, nullptr, FALSE)) {
+                WaitForSingleObject(_timer, INFINITE);
+                return;
+            }
+        }
+#endif
+        std::this_thread::sleep_until(_next);
+    }
+
+private:
+    std::chrono::microseconds _period;
+    std::chrono::steady_clock::time_point _next = std::chrono::steady_clock::now();
+#ifdef _WIN32
+    HANDLE _timer = nullptr;
+#endif
+};
 
 // The one clock: the hub's u32 wire time, deviceNowUs() and the engine all read
 // it, which is what keeps stream anchors honest (ValenceDevice.h).
@@ -225,7 +284,8 @@ int main(int argc, char** argv) {
     std::signal(SIGPIPE, SIG_IGN);
 #endif
 #ifdef _WIN32
-    // Without this a 1 ms sleep lands at ~15.6 ms and the motion tick with it.
+    // The waits the motion tick does not own (IXWebSocket's polls), at 1 ms
+    // where Windows honors it; TickPacer paces the tick itself.
     timeBeginPeriod(1);
 #endif
 
@@ -270,6 +330,8 @@ int main(int argc, char** argv) {
         port.loop(nowMs);
         discovery.poll(hub, nowMs);
     };
+    TickPacer pacer(std::chrono::microseconds(valence::kMotionTickUs));
+    if (!pacer.precise()) log.logf('W', "valencesim: no high-resolution timer, the motion tick runs coarse");
     const auto start = std::chrono::steady_clock::now();
     while (!g_stop) {
         core->pass(g_clock.nowUs64(), pump);
@@ -277,7 +339,7 @@ int main(int argc, char** argv) {
             std::chrono::steady_clock::now() - start > std::chrono::seconds(opt.durationS)) {
             break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        pacer.wait();
     }
 
     geiger::drainToSinks();
