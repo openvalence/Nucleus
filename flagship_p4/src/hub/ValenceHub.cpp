@@ -70,6 +70,7 @@
 #include "ValenceUiToken.h"
 #include "ValenceWsPort.h"
 #include "system/ValenceHttp.h"
+#include "system/ValenceTcpTally.h"
 #include "system/SelfCheck.h"
 #include "system/ValenceOta.h"
 #include "valence_config.h"
@@ -519,6 +520,7 @@ bool hubBegin() {
     provisioningBegin();
     if (ISerialPipe* usb = usbSerialPipeBegin()) g_box->serial.begin(*g_box->hub, *usb, &*g_box->desk);
 
+    tcpTallyWatch(kWsPort);
     if (!g_box->port.begin(&*g_box->hub, kWsPort)) {
         GLOGE(kTag, "WS port failed to start on :%u", unsigned(kWsPort));
         geiger::drainToSinks();

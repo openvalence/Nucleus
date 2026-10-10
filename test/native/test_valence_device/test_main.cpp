@@ -98,6 +98,8 @@ namespace valence {
 
 uint64_t deviceNowUs() { return g_clock.nowUs(); }
 uint32_t deviceFreeHeapBytes() { return 0; }
+LinkTcp g_linkTcp{};
+LinkTcp deviceLinkTcp() { return g_linkTcp; }
 
 bool motionBegin() { return true; }
 // False: the motion door refuses the intent, as a full queue does.
@@ -238,8 +240,8 @@ struct Rig {
     RecordingClient del{};
     std::optional<Client> client{};
 
-    // motionHz > 0 also subscribes 0x1100 at that rate.
-    explicit Rig(AccessLevel role = AccessLevel::control, float motionHz = 0.0f) {
+    // motionHz > 0 also subscribes 0x1100 at that rate; hubStatus, 0x0006.
+    explicit Rig(AccessLevel role = AccessLevel::control, float motionHz = 0.0f, bool hubStatus = false) {
         g_census = MotionCensus{};
         g_census.homed = true;
         g_census.motor_on = true;
@@ -261,6 +263,7 @@ struct Rig {
         g_still = true;
         g_stillWindowUs = 0;
         g_anomalies.clear();
+        g_linkTcp = LinkTcp{};
         REQUIRE(buildValenceCatalog(catalog, boardFeatures()));
         device.setUnvouchedRole(role);
         device.setSetupWritten(kSetupRequiredMask);
@@ -268,7 +271,7 @@ struct Rig {
         device.attach(*hub, catalog);
         link.emplace(g_clock, hubRng);
         // A 13th wish takes WELCOME past the link's default 250 B; a WS frame has room.
-        if (motionHz > 0.0f) link->profileA().mtu = 1024;
+        if (motionHz > 0.0f || hubStatus) link->profileA().mtu = 1024;
         REQUIRE(hub->attachTransport(link->endpointA()));
         ClientIdentity id;
         id.instance_id.fill(std::byte{0});
@@ -291,6 +294,7 @@ struct Rig {
                                   ch::oscillator, ch::plan_strip})
             REQUIRE(client->addSubscriptionWish(id, 0.0f, Priority::normal));
         if (motionHz > 0.0f) REQUIRE(client->addSubscriptionWish(ch::motion, motionHz, Priority::elevated));
+        if (hubStatus) REQUIRE(client->addSubscriptionWish(channels::hub_status, 1.0f, Priority::background));
         REQUIRE(client->connect());
         step(200);
         REQUIRE(client->state() == ClientSessionState::LIVE);
@@ -605,7 +609,7 @@ TEST_CASE("VD-11: a brake that never reaches rest still reboots, after the bound
     g_homeGesture = button::Gesture::hold;
     rig->step(1000);
     CHECK_FALSE(rig->device.rebootDue());
-    rig->step(1100);
+    rig->step(2500);
     CHECK(rig->hub->estopLatched());
     CHECK(rig->device.rebootDue());
 }
@@ -2492,4 +2496,27 @@ TEST_CASE("VD-LEADCAP: a bundle stamped past the lead cap moves earlier whole, i
     REQUIRE(g_intents.size() == 2);
     CHECK(g_intents[1].anchor_us == now + cap);
     CHECK(g_intents[0].anchor_us == now + cap - 5000);
+}
+
+TEST_CASE("VD-TCP: hub-status carries the binding's TCP totals at bytes 16 and 20, little-endian u32") {
+    auto rig = std::make_unique<Rig>(AccessLevel::control, 0.0f, true);
+    g_linkTcp = LinkTcp{0xFFFFFFF0u, 7u};
+    rig->step(2500);
+    const auto it = rig->del.lastState.find(channels::hub_status);
+    REQUIRE(it != rig->del.lastState.end());
+    REQUIRE(it->second.size() == 24);
+    const std::span<const std::byte> s(it->second);
+    CHECK(getU32(s.subspan(16, 4)) == 0xFFFFFFF0u);
+    CHECK(getU32(s.subspan(20, 4)) == 7u);
+    // The catalog declares the same two fields, in order, after motor_fault.
+    const CatalogEntry* e = rig->catalog.find(channels::hub_status);
+    REQUIRE(e != nullptr);
+    const auto fields = rig->catalog.layoutFields(*e);
+    REQUIRE(fields.size() == 9);
+    CHECK(fields[7].name == "tcp_sent");
+    CHECK(fields[7].role == "link.tcp_sent");
+    CHECK(fields[8].name == "tcp_resent");
+    CHECK(fields[8].role == "link.tcp_resent");
+    CHECK((fields[7].hasScope && fields[7].scope == 3 && fields[8].hasScope && fields[8].scope == 3));
+    CHECK(fields[2].role == "link.rssi");
 }

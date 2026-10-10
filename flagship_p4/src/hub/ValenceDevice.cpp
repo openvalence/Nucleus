@@ -1903,10 +1903,11 @@ std::optional<HubDelegate::BlobView> ValenceDevice::readBlob(uint8_t ns, uint8_t
 // ---- retained STATE --------------------------------------------------------------
 
 void ValenceDevice::publishHubStatus() {
-    // 4+4+1+1+4+1+1 = 16 B, matching the 0x0006 layout in ValenceCatalog.h.
+    // 4+4+1+1+4+1+1+4+4 = 24 B, matching the 0x0006 layout in ValenceCatalog.h.
     const int8_t rssi = _linkRssi.load(std::memory_order_relaxed);
+    const LinkTcp tcp = deviceLinkTcp();
     _mswSent = motorSwitchStatus();
-    std::array<std::byte, 16> buf{};
+    std::array<std::byte, 24> buf{};
     std::span<std::byte> s(buf);
     putU32(s.subspan(0, 4), deviceFreeHeapBytes());
     putU32(s.subspan(4, 4), uint32_t(deviceNowUs() / 1000000));
@@ -1915,6 +1916,8 @@ void ValenceDevice::publishHubStatus() {
     putU32(s.subspan(10, 4), _hub->logDropped());
     putU8(s.subspan(14, 1), uint8_t(_mswSent.state));
     putU8(s.subspan(15, 1), uint8_t(_mswSent.last_fault));
+    putU32(s.subspan(16, 4), tcp.sent);
+    putU32(s.subspan(20, 4), tcp.resent);
     _hub->publishState(channels::hub_status, s);
 }
 

@@ -494,7 +494,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                             AccessLevel::control});// 10 retired (bypass_off)
 
     // ---- "hub-status" — STATE, background, 1 Hz -----------------------------
-    // Slow health telemetry.  [4+4+1+1+4+1+1 = 16 B]
+    // Slow health telemetry.  [4+4+1+1+4+1+1+4+4 = 24 B]
     c.addEntry({.id = valence::channels::hub_status, .name = "hub-status",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
@@ -502,7 +502,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "heap_free", .type = PackedFieldType::u32, .unit = "B",     .scale = 1.0f});
     c.addLayoutField({.name = "uptime_s",  .type = PackedFieldType::u32, .unit = "s",     .scale = 1.0f,
                       .role = roles::telemetry_uptime});
-    c.addLayoutField({.name = "rssi",      .type = PackedFieldType::i8,  .unit = "dBm",   .scale = 1.0f});
+    // TODO(RFC-109): `link.rssi` is a drafted role; the literal becomes the
+    // generated constant when the RFC lands, or goes if it is refused.
+    c.addLayoutField({.name = "rssi",      .type = PackedFieldType::i8,  .unit = "dBm",   .scale = 1.0f,
+                      .role = "link.rssi"});
     c.addLayoutField({.name = "sessions",  .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
     // `log_dropped` (field 5, appended 10 -> 14 B): SPEC §9.4's VISIBLE drop
     // counter for the log plane. A bounded log that silently eats lines under
@@ -524,6 +527,24 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectField({.name = "motor_fault", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .desc = "Reason the motor switch last latched off"},
                      {"none", "switch_fault", "en_node", "inrush", "precharge"});
+    // `tcp_sent` and `tcp_resent` (fields 8-9, appended 16 -> 24 B): the
+    // WebSocket binding's TCP segments since boot, every session together
+    // (deviceLinkTcp(); system/TcpTally.h says what counts). Read by
+    // difference: resent over sent across a window is the share of the hub's
+    // segments it had to send again.
+    // TODO(RFC-109): both roles and the `boot` scope (3) are drafted; the
+    // literals become generated constants when the RFC lands, or go if it is
+    // refused. RFC-109's link_drops and heap_block append after these.
+    c.addLayoutField({.name = "tcp_sent", .type = PackedFieldType::u32, .unit = "count", .scale = 1.0f,
+                      .desc = "TCP segments sent since boot", .role = "link.tcp_sent",
+                      .hasAspect = true, .aspect = valence::value_aspects::total,
+                      .hasScope = true, .scope = 3,
+                      .hasUnitId = true, .unitId = valence::unit_ids::count});
+    c.addLayoutField({.name = "tcp_resent", .type = PackedFieldType::u32, .unit = "count", .scale = 1.0f,
+                      .desc = "TCP segments retransmitted since boot", .role = "link.tcp_resent",
+                      .hasAspect = true, .aspect = valence::value_aspects::total,
+                      .hasScope = true, .scope = 3,
+                      .hasUnitId = true, .unitId = valence::unit_ids::count});
 
     // ---- "session-events" — EVENT, watch ------------------------------------
     // Payload keys match Hub::emitTakeoverEvent(): {1:"source", 2:"session"}.

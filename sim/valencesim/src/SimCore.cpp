@@ -21,6 +21,7 @@
 namespace valence {
 
 uint32_t deviceFreeHeapBytes() { return 0; }
+LinkTcp deviceLinkTcp() { return {}; }
 // The twin has no HOME button: its reboot has no meaning for a desktop
 // process. PAIR is the front's simPairPress(); the pairing_window option opens
 // the same window at boot.

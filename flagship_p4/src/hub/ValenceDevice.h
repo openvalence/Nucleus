@@ -87,9 +87,16 @@ CatalogHeadroom catalogHeadroom(const Catalog32& c, size_t encodedBytes);
 // deviceNowUs(): the 64-bit monotonic clock motion plans against. It MUST be
 // the clock the linked ValenceMotion implementation reads, or every stream
 // anchor lands at the wrong instant. deviceFreeHeapBytes(): the 0x0006 heap
-// figure; 0 where the host has no meaningful answer.
+// figure; 0 where the host has no meaningful answer. deviceLinkTcp(): the
+// 0x0006 TCP segment totals of the WebSocket binding since boot (u32, wrap);
+// zeros where the host has no TCP of its own to count.
+struct LinkTcp {
+    uint32_t sent = 0;     // segments occupying sequence space, resends included
+    uint32_t resent = 0;   // of those, retransmissions
+};
 uint64_t deviceNowUs();
 uint32_t deviceFreeHeapBytes();
+LinkTcp deviceLinkTcp();
 
 class ValenceDevice final : public HubDelegate {
 public:
