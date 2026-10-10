@@ -86,20 +86,44 @@ def post_image(ip, image, token, timeout):
         return e.code, e.read().decode("utf-8", "replace"), time.time() - t0, len(body)
 
 
+def latest_artifact():
+    """The highest artifacts/fw-X.Y.Z-p4hub-bench.bin; branch images (other suffixes) never match."""
+    import re
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "artifacts")
+    best = None
+    for f in os.listdir(d):
+        m = re.fullmatch(r"fw-(\d+)\.(\d+)\.(\d+)-p4hub-bench\.bin", f)
+        if m:
+            key = tuple(int(x) for x in m.groups())
+            if best is None or key > best[0]:
+                best = (key, f)
+    if best is None:
+        raise SystemExit("FAIL: no artifacts/fw-X.Y.Z-p4hub-bench.bin")
+    ver = "%d.%d.%d-p4hub-bench" % best[0]
+    return os.path.normpath(os.path.join(d, best[1])), ver
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ip", default="192.168.1.118")
-    ap.add_argument("--image", required=True,
+    ap.add_argument("--image", default=None,
                     help="flagship_p4/.pio/build/<env>/firmware.bin; no default (bd val-bep)")
+    ap.add_argument("--latest", action="store_true",
+                    help="flash the highest artifacts/fw-X.Y.Z-p4hub-bench.bin; --expect is its file name's version")
     ap.add_argument("--token", default=None, help="overrides the value read from secrets.h")
     ap.add_argument("--secrets", default=SECRETS)
     ap.add_argument("--timeout", type=float, default=300.0, help="seconds for the upload itself")
     ap.add_argument("--wait", type=float, default=150.0, help="seconds to wait for the new version")
-    ap.add_argument("--expect", required=True,
+    ap.add_argument("--expect", default=None,
                     help="the image must carry this FIRMWARE_VERSION, and the board must come back as it")
     ap.add_argument("--dry-run", action="store_true", help="check the image, send nothing")
     args = ap.parse_args()
+    if args.latest:
+        if args.image or args.expect:
+            ap.error("--latest picks --image and --expect itself; pass neither")
+        args.image, args.expect = latest_artifact()
+    elif not (args.image and args.expect):
+        ap.error("--image and --expect are both required (or --latest)")
 
     if not os.path.isfile(args.image):
         print("FAIL: no image at %s (build it first)" % args.image)
