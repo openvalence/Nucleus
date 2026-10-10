@@ -629,6 +629,7 @@ private:
     // never capped below its own ceiling at render time.
     float inputVmaxMm() const { return _ovr_v > 0.0f ? _ovr_v * winSpan() : _in_v; }
     float inputAmaxMm() const { return _ovr_a > 0.0f ? _ovr_a * winSpan() : _in_a; }
+    float inputJmaxMm() const { return _ovr_j > 0.0f ? _ovr_j * winSpan() : _in_j; }
     // Moves the engine's frame at rest: reseeds it at the carriage, so the
     // move is a relabeling, never motion.
     void setRailFrame(bool on, uint64_t now_us);

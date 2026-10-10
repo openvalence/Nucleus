@@ -53,14 +53,14 @@ uint32_t strokeUs(float seconds) { return uint32_t(clampf(seconds, kMinStrokeS, 
 constexpr float kRenderSlack = 1.2f;
 
 // The least time of a d mm half-stroke the planner renders whole under the
-// frame's input ceilings: Kinetic's fastest rest-to-rest move (Profile::point),
-// widened by kRenderSlack. Anything shorter keeps its deadline and is trimmed
-// toward its start. 0 while any ceiling is unset.
-float fitSeconds(float d, const PatternFrame& f) {
-    if (!(f.input_speed > 0.0f && f.input_accel > 0.0f && f.input_jerk > 0.0f)) return 0.0f;
+// input set it plans with, overrides applied: Kinetic's fastest rest-to-rest
+// move (Profile::point), widened by kRenderSlack. Anything shorter keeps its
+// deadline and is trimmed toward its start. 0 while any ceiling is unknown.
+float fitSeconds(float d, const PatternInputs& in) {
+    if (!(in.vmax_mm_s > 0.0f && in.amax_mm_s2 > 0.0f && in.jmax_mm_s3 > 0.0f)) return 0.0f;
     float t = 0.0f;
     (void)kinetic2::Profile::point(kinetic2::State{0.0f, 0.0f, 0.0f}, d, 0,
-                                   kinetic2::Limits{f.input_speed, f.input_accel, f.input_jerk}, 0.0f, &t);
+                                   kinetic2::Limits{in.vmax_mm_s, in.amax_mm_s2, in.jmax_mm_s3}, 0.0f, &t);
     return t * kRenderSlack;
 }
 
@@ -152,7 +152,7 @@ std::optional<MotionIntent> PatternEngine::tick(uint64_t now_us, const PatternIn
     // Both generators time a stroke by their own knobs; neither may ask for
     // one the input ceilings cannot render whole.
     const uint32_t duration_us =
-        st->moves ? std::max(st->duration_us, strokeUs(fitSeconds(std::fabs(st->target_mm - fromMm(in)), _s.frame)))
+        st->moves ? std::max(st->duration_us, strokeUs(fitSeconds(std::fabs(st->target_mm - fromMm(in)), in)))
                   : st->duration_us;
     _due_us = now_us + duration_us;
     _stroke_end_us = _due_us;

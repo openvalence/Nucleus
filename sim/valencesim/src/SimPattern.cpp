@@ -40,6 +40,9 @@ void simPatternTick(uint64_t now_us) {
     in.stream_active = c.stream;
     in.position_mm   = c.position_mm;
     in.velocity_mm_s = c.velocity_mm_s;
+    in.vmax_mm_s     = c.input_vmax_mm_s;
+    in.amax_mm_s2    = c.input_amax_mm_s2;
+    in.jmax_mm_s3    = c.input_jmax_mm_s3;
     // The board's order: classic, then advanced, on one task.
     if (const auto it = g_classic.tick(now_us, in)) motionSubmit(*it);
     if (const auto it = g_advanced.tick(now_us, in)) motionSubmit(*it);

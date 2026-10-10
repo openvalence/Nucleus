@@ -1726,6 +1726,7 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.rail_mm        = _rail;
     c.input_vmax_mm_s  = inputVmaxMm();
     c.input_amax_mm_s2 = inputAmaxMm();
+    c.input_jmax_mm_s3 = inputJmaxMm();
     c.intents        = _intents;
     c.rejected       = _rejected;
     c.stalls         = _stalls;

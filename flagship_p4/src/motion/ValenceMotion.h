@@ -99,9 +99,11 @@ struct MotionCensus {
                                      // max_rail, force_home's stroke, or what
                                      // the home cycle measured
     // The input set's ceilings as the engine plans them, overrides applied:
-    // what the PD source's budget judges (PdSource.h).
+    // what the PD source's budget judges (PdSource.h) and a generator's
+    // stroke is timed to (PatternEngine.cpp fitSeconds()).
     float    input_vmax_mm_s  = 0.0f;
     float    input_amax_mm_s2 = 0.0f;
+    float    input_jmax_mm_s3 = 0.0f;
 
     // ---- emitter ----
     uint32_t edges          = 0;

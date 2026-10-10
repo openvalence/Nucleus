@@ -96,6 +96,9 @@ void PatternTask::run() {
         in.stream_active = c.stream;
         in.position_mm   = c.position_mm;
         in.velocity_mm_s = c.velocity_mm_s;
+        in.vmax_mm_s     = c.input_vmax_mm_s;
+        in.amax_mm_s2    = c.input_amax_mm_s2;
+        in.jmax_mm_s3    = c.input_jmax_mm_s3;
         tickOne(_classic, now_us, in);
         tickOne(_advanced, now_us, in);
         _active.store(_classic.active() || _advanced.active(), std::memory_order_relaxed);

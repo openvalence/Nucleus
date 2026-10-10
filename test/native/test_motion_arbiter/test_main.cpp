@@ -575,6 +575,9 @@ bool generatorPass(Rig& r, PatternEngine& gen, MotionIntent* last) {
     in.stream_active = c.stream;
     in.position_mm = c.position_mm;
     in.velocity_mm_s = c.velocity_mm_s;
+    in.vmax_mm_s = c.input_vmax_mm_s;
+    in.amax_mm_s2 = c.input_amax_mm_s2;
+    in.jmax_mm_s3 = c.input_jmax_mm_s3;
     bool landed = false;
     if (const auto it = gen.tick(g_now_us, in)) {
         landed = r.arb.accept(*it, g_now_us);
@@ -3830,36 +3833,57 @@ TEST_CASE("oscillator: a window write while it rides the rest neither stops nor 
 
 // bd val-hnq: a half-stroke timed shorter than the input ceilings render kept
 // its deadline and was trimmed toward its start. In a 5 mm window that was
-// every other stroke, one per tick, with the carriage all but still.
-TEST_CASE("generators in a 5 mm window: every half-stroke renders whole at the stroke rate, nothing trimmed (val-hnq)") {
+// every other stroke, one per tick, with the carriage all but still; under a
+// ceiling override the generator must time to the override, not the config.
+TEST_CASE("generators in a narrow window: every half-stroke renders whole at the stroke rate, nothing trimmed (val-hnq)") {
+    struct Case {
+        const char* name;
+        bool adv;
+        float hi;            // the window is 100..hi mm
+        float vmax_ovr;      // normalized overrides, 0 = the mm set
+        float amax_ovr;
+        int min_plans;       // over 2 s
+        int max_plans;
+    };
+    const Case cases[] = {
+        {"classic, 5 mm", false, 105.0f, 0.0f, 0.0f, 50, 200},
+        {"advanced, 5 mm", true, 105.0f, 0.0f, 0.0f, 50, 200},
+        {"classic, 20 mm under a 40 mm/s, 1000 mm/s^2 override", false, 120.0f, 2.0f, 50.0f, 4, 60},
+    };
     auto classic = std::make_unique<ClassicGenerator>();
     auto advanced = std::make_unique<AdvancedGenerator>();
-    for (const bool adv : {false, true}) {
-        CAPTURE(adv);
+    for (const Case& k : cases) {
+        const std::string name = k.name;
+        CAPTURE(name);
         auto r = rig();
         r->arb.forceHome(500.0f);
-        r->arb.setWindow(100.0f, 105.0f, 500.0f);
+        r->arb.setWindow(100.0f, k.hi, 500.0f);
+        valence::MotionTuning tu = valence::motionDefaultTuning();
+        tu.vmax_ovr = k.vmax_ovr;
+        tu.amax_ovr = k.amax_ovr;
+        r->arb.applyTuning(tu);
         r->run(1000);
         PatternSettings s;
-        s.frame = {100.0f, 105.0f, DEFAULT_MAX_SPEED_MM_S, DEFAULT_ACCEL_MM_S2, DEFAULT_INPUT_MAX_JERK_MM_S3};
-        if (adv) {
+        s.frame = {100.0f, k.hi, DEFAULT_MAX_SPEED_MM_S, DEFAULT_ACCEL_MM_S2};
+        if (k.adv) {
             // 0.75 mm strokes at full master speed.
             s.adv_running = true;
             s.ap.master.set(100);
             s.ap.setBase(advpat::DEPTH_MAX, 15);
             s.ap.setBase(advpat::DEPTH_MIN, 0);
         } else {
-            // The soak's probe: Teasing Pounding, 0.75 mm strokes at 73 % speed.
+            // The soak's probe: Teasing Pounding to 15 % depth at 73 % speed.
             s.running = true;
             s.setPattern(1);
             s.speed = 73.0f;
             s.depth = 15.0f;
             s.stroke = 71.0f;
         }
-        PatternEngine& gen = adv ? static_cast<PatternEngine&>(*advanced) : *classic;
-        REQUIRE(r->arb.acquireRail(adv ? MotionSource::Advanced : MotionSource::Pattern));
+        const float stroke_mm = 0.15f * (k.hi - 100.0f);
+        PatternEngine& gen = k.adv ? static_cast<PatternEngine&>(*advanced) : *classic;
+        REQUIRE(r->arb.acquireRail(k.adv ? MotionSource::Advanced : MotionSource::Pattern));
         gen.apply(s);
-        for (int i = 0; i < 1000; ++i) generatorPass(*r, gen, nullptr);   // into the window
+        for (int i = 0; i < 2000; ++i) generatorPass(*r, gen, nullptr);   // into the window
         r->arb.drainAnomalies();
         const MotionCensus c0 = r->census();
         float lo = 1e9f, hi = -1e9f;
@@ -3872,11 +3896,12 @@ TEST_CASE("generators in a 5 mm window: every half-stroke renders whole at the s
         const MotionCensus c = r->census();
         CHECK(c.anomalies == c0.anomalies);
         // The stroke rate, never the tick's: 2 s at 200 plans a second was the bug.
-        CHECK(c.plans - c0.plans >= 50);
-        CHECK(c.plans - c0.plans <= 200);
-        // The whole 0.75 mm stroke, both ends.
+        CHECK(int(c.plans - c0.plans) >= k.min_plans);
+        CHECK(int(c.plans - c0.plans) <= k.max_plans);
+        // The whole stroke, both ends.
         CHECK(lo <= 100.05f);
-        CHECK(hi >= 100.70f);
+        CHECK(hi >= 100.0f + stroke_mm - 0.05f);
+        gen.apply(PatternSettings{});
     }
 }
 

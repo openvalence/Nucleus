@@ -57,6 +57,11 @@ struct PatternInputs {
     bool  stream_active = false;   // a Stream-source plan is live: yield to it
     float position_mm   = 0.0f;
     float velocity_mm_s = 0.0f;
+    // The input set the planner plans a stroke under, overrides applied
+    // (census input_*max); 0 bounds nothing.
+    float vmax_mm_s     = 0.0f;
+    float amax_mm_s2    = 0.0f;
+    float jmax_mm_s3    = 0.0f;
 };
 
 // ---- the scheduler ----------------------------------------------------------

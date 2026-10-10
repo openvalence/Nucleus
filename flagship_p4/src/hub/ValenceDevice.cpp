@@ -1085,7 +1085,7 @@ void ValenceDevice::pushPattern() {
     // The client frame: the generator reads the mirrored census, and the
     // arbiter mirrors its strokes back (RFC-088).
     const Window w = clientWindow(motionCensus().rail_mm);
-    s.frame = {w.lo, w.hi, _cfg.input_speed, _cfg.input_accel, _cfg.input_jerk};
+    s.frame = {w.lo, w.hi, _cfg.input_speed, _cfg.input_accel};
     patternSetSettings(s);
 }
 
