@@ -3315,8 +3315,8 @@ MotionOsc oscOn(float hz, float amp, uint8_t shape = 0, float crest = 0.0f, floa
     o.shape = shape;
     o.dwell_crest = crest;
     o.dwell_trough = trough;
-    // The fixed drives: the parameters are the fields (SPEC 9.7). The factory
-    // drive is axis, which reads 0 with no osc-drive stream.
+    // The fixed drives: the parameters are the fields and the shapes render
+    // (SPEC 9.7). The factory drive is axis, the driven mode's sine.
     o.frequency_drive.drive = valence::osc_drives::fixed;
     o.amplitude_drive.drive = valence::osc_drives::fixed;
     return o;
@@ -3487,9 +3487,10 @@ TEST_CASE("oscillator under planned strokes: the strip never exceeds a ceiling o
 }
 
 // SPEC 9.7 driven parameters on Kinetic's driven mode (bd val-o9r).
-TEST_CASE("oscillator drives: an osc-drive stream sweeping frequency moves it continuously inside every ceiling; silence fades it to rest") {
+TEST_CASE("oscillator drives: an osc-drive stream sweeping frequency moves it continuously inside every ceiling, osc.enabled off; silence fades it to rest") {
     auto r = restRig(250.0f);
     MotionOsc o = oscOn(1.0f, 0.001f, 1);   // a square asked: driven, it plays a sine
+    o.enabled = false;   // the stream renders it (bd val-o9r (b))
     o.frequency_drive = {.drive = valence::osc_drives::axis, .out_max = OSC_MAX_HZ};
     o.amplitude_drive = {.drive = valence::osc_drives::axis, .out_max = 0.02f};
     r->arb.setOscillator(o);
@@ -3522,10 +3523,134 @@ TEST_CASE("oscillator drives: an osc-drive stream sweeping frequency moves it co
     (void)t0;
 
     // Silence: nothing is asked past stream_quiet_release_ms, it fades to rest.
+    const size_t quiet = h.p.size();
     runHeads(*r, uint64_t(valence::limits::stream_quiet_release_ms) * 1000u + valence::kOscDriveLeadUs + 400'000, h);
     CHECK_FALSE(r->census().osc_active);
     CHECK(r->census().osc_amplitude == 0.0f);
     CHECK(r->census().backstops == 0);
+    const GridPeaks q = gridPeaks(std::vector<float>(h.p.begin() + long(quiet), h.p.end()));
+    CHECK(q.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
+    CHECK(q.a <= DEFAULT_ACCEL_MM_S2 + kFdA);
+    CHECK(q.j <= DEFAULT_INPUT_MAX_JERK_MM_S3 + kFdJ);
+    const auto s = r->arb.publishedStrip();
+    for (const float p : s.p_mm) CHECK(p == doctest::Approx(250.0f).epsilon(1e-6));
+}
+
+// bd val-o9r (a), ahead of the pinned SPEC 9.7: with no live stream an axis
+// drive is its field, so the factory drives oscillate by hand.
+TEST_CASE("oscillator drives: the factory axis drives with no stream oscillate by hand at the fields, inside every ceiling") {
+    auto r = restRig(250.0f);
+    MotionOsc o;   // the factory drives, both axis
+    o.enabled = true;
+    o.frequency_hz = 10.0f;
+    o.amplitude = 0.01f;   // 5 mm peak
+    r->arb.setOscillator(o);
+    Heads h;
+    runHeads(*r, 1'200'000, h);
+    const MotionCensus c = r->census();
+    CHECK(c.osc_active);
+    CHECK(c.osc_amplitude == doctest::Approx(0.01f).epsilon(0.02));
+    const auto d = crossings(h.p, 250.0f, 500);
+    REQUIRE(d.size() > 4);
+    for (const size_t ticks : d) CHECK(ticks == doctest::Approx(100).epsilon(0.02));
+    const GridPeaks g = gridPeaks(h.p);
+    CHECK(g.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
+    CHECK(g.a <= DEFAULT_ACCEL_MM_S2 + kFdA);
+    CHECK(g.j <= DEFAULT_INPUT_MAX_JERK_MM_S3 + kFdJ);
+    CHECK(g.lo >= 245.0 - 0.05);
+    CHECK(g.hi <= 255.0 + 0.05);
+    CHECK(r->arb.oscDriveDropped() == 0);
+    CHECK(c.backstops == 0);
+    // A hand change takes: 4 Hz.
+    o.frequency_hz = 4.0f;
+    r->arb.setOscillator(o);
+    runHeads(*r, 1'500'000, h);
+    for (const size_t ticks : crossings(h.p, 250.0f, h.p.size() - 700)) CHECK(ticks == doctest::Approx(250).epsilon(0.02));
+    // Disabled, it fades to rest.
+    o.enabled = false;
+    r->arb.setOscillator(o);
+    r->run(400'000);
+    CHECK_FALSE(r->census().osc_active);
+    CHECK(r->census().osc_amplitude == 0.0f);
+}
+
+// bd val-o9r (a) and (b): a stream takes the hand state over and, quiet,
+// hands it back through the kernel's fade, never through rest.
+TEST_CASE("oscillator drives: a stream over the hand oscillation takes it, and quiet hands it back with no gap") {
+    auto r = restRig(250.0f);
+    MotionOsc o;
+    o.enabled = true;
+    o.frequency_hz = 10.0f;
+    o.amplitude = 0.004f;   // 2 mm by hand
+    o.amplitude_drive.out_max = 0.02f;
+    r->arb.setOscillator(o);
+    Heads h;
+    runHeads(*r, 800'000, h);
+    REQUIRE(r->census().osc_amplitude == doctest::Approx(0.004f).epsilon(0.02));
+    // A player at 50 Hz for a second: 5 mm at 20 Hz.
+    for (uint64_t t = 0; t < 1'000'000; t += 20'000) {
+        r->arb.postOscDrive(0.5f, 0.2f, g_now_us + valence::kOscDriveLeadUs);
+        for (int k = 0; k < 20; ++k) {
+            r->run(1000);
+            h.take(r->arb);
+        }
+    }
+    CHECK(r->census().osc_amplitude == doctest::Approx(0.01f).epsilon(0.02));
+    const auto fast = crossings(h.p, 250.0f, h.p.size() - 500);
+    REQUIRE(fast.size() > 4);
+    for (const size_t ticks : fast) CHECK(ticks == doctest::Approx(50).epsilon(0.04));
+    // Quiet: the hand's amplitude again, never less on the way.
+    std::vector<float> amp;
+    const uint64_t back = uint64_t(valence::limits::stream_quiet_release_ms) * 1000u + valence::kOscDriveLeadUs + 600'000;
+    for (uint64_t t = 0; t < back; t += 1000) {
+        r->run(1000);
+        h.take(r->arb);
+        amp.push_back(r->census().osc_amplitude);
+    }
+    MESSAGE("least amplitude through the handover: ", *std::min_element(amp.begin(), amp.end()) * 500.0f, " mm");
+    CHECK(*std::min_element(amp.begin(), amp.end()) >= 0.004f * 0.98f);
+    CHECK(r->census().osc_amplitude == doctest::Approx(0.004f).epsilon(0.02));
+    const auto slow = crossings(h.p, 250.0f, h.p.size() - 500);
+    REQUIRE(slow.size() > 2);
+    for (const size_t ticks : slow) CHECK(ticks == doctest::Approx(100).epsilon(0.02));
+    const GridPeaks g = gridPeaks(h.p);
+    CHECK(g.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
+    CHECK(g.a <= DEFAULT_ACCEL_MM_S2 + kFdA);
+    CHECK(g.j <= DEFAULT_INPUT_MAX_JERK_MM_S3 + kFdJ);
+    CHECK(r->arb.oscDriveDropped() == 0);
+    CHECK(r->census().backstops == 0);
+}
+
+// bd val-o9r (b): the stream renders it as the hand would, under the same
+// latches.
+TEST_CASE("oscillator drives: a live stream never lifts PAUSE or ESTOP") {
+    auto r = restRig(250.0f);
+    MotionOsc o;   // off, the factory drives
+    o.amplitude_drive.out_max = 0.02f;
+    r->arb.setOscillator(o);
+    auto play = [&](uint64_t us) {
+        for (uint64_t t = 0; t < us; t += 20'000) {
+            r->arb.postOscDrive(0.5f, 0.1f, g_now_us + valence::kOscDriveLeadUs);
+            r->run(20'000);
+        }
+    };
+    play(800'000);
+    REQUIRE(r->census().osc_active);
+    r->arb.pause(true);
+    r->run(1000);
+    CHECK_FALSE(r->census().osc_active);
+    play(400'000);
+    CHECK_FALSE(r->census().osc_active);
+    CHECK(r->census().osc_amplitude == 0.0f);
+    r->arb.pause(false);
+    play(800'000);
+    CHECK(r->census().osc_active);
+    r->arb.estop(true);
+    r->run(1000);
+    CHECK_FALSE(r->census().osc_active);
+    play(400'000);
+    CHECK_FALSE(r->census().osc_active);
+    CHECK(r->census().osc_amplitude == 0.0f);
 }
 
 TEST_CASE("oscillator drives: speed drives the amplitude from the plan it rides; fixed takes the field again") {

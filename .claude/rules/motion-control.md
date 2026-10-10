@@ -112,14 +112,28 @@ window is solved at the next sample, and the sampler evaluates it.
   point every `kOscPlanDriveTicks` at `kOscDriveLeadUs` ahead from the plan
   there. Each parameter is its field (`fixed`) or SPEC 8.11's linear_clamp of
   the plan's speed (mm/s) or position (mm, client frame) or the newest sample
-  (`axis`, 0 once `stream_quiet_release_ms` quiet). No point lands nearer than
-  `kOscDriveLeadUs` (156 ms, the osc-drive grant's schedule latency); with
-  nothing asked for `kDriveQuietUs` it fades to rest; a point the stage cannot
-  hold is dropped and counted. The factory drive is `axis`. The stage, its
-  plan buffer and the drives cost about 8.9 KB of the arbiter's internal RAM
+  (`axis`). No point lands nearer than `kOscDriveLeadUs` (156 ms, the
+  osc-drive grant's schedule latency); with nothing asked for `kDriveQuietUs`
+  it fades to rest; a point the stage cannot hold is dropped and counted. The
+  factory drive is `axis`. Two rules run ahead of the pinned SPEC 9.7
+  (operator ruling 2026-10-09, amendment drafted on Valence rfc-ns5c):
+  with no live stream (none, or `stream_quiet_release_ms` past its newest
+  stamp) an `axis` parameter is its field, so osc.enabled under the factory
+  drives oscillates by hand, its points asked every `kOscPlanDriveTicks` as a
+  plan drive's are; and while an `axis` drive is bound a live stream renders
+  the stage whatever osc.enabled holds (`streamOscillator()`, before the plan
+  read). Quiet, the stream hands back through the kernel's fade: the first
+  hand point lands on the tick the stream's quiet window ends, the stage's
+  own window too (`kDriveQuietUs`, static_asserted), so the handover never
+  asks for rest; disabled, it fades to rest. PAUSE, ESTOP and the render
+  gates hold a stream as they hold the hand. The stage, its plan buffer and
+  the drives cost about 8.9 KB of the arbiter's internal RAM
   (`sizeof(MotionOscillator)` 7,288 B) [verified 2026-10-09 -- riscv32
   `sizeof` at Kinetic 725d448; test_motion_arbiter, a 50 Hz drive sweeping
-  5 to 20 Hz keeps every ceiling and fades out on silence].
+  5 to 20 Hz keeps every ceiling and fades out on silence; the factory
+  drives oscillate by hand at the fields; a stream over the hand state hands
+  it back with its amplitude never under the hand's (2 mm of 2 mm); a live
+  stream renders nothing under PAUSE or ESTOP].
 - **Map:** header-only, hardware-free `kinetic2::Engine`: a knot timeline (64
   knots per axis here), a window solver that re-plans every pending knot
   together, and a brake. The library is the sibling Kinetic checkout,

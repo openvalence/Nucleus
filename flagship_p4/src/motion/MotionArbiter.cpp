@@ -64,6 +64,13 @@ static_assert(uint8_t(kinetic2::OscShape::Sine) == osc_shapes::sine &&
                   uint8_t(kinetic2::OscShape::SawReverse) == osc_shapes::saw_reverse,
               "kinetic2::OscShape is the registry's osc_shapes");
 
+// An osc-drive stream is live from a sample's arrival until this long past the
+// newest stamp. It is the stage's own quiet window too, so a handover to the
+// hand state asks for no gap (feedOscillator()).
+constexpr uint64_t kOscQuietUs = uint64_t(limits::stream_quiet_release_ms) * 1000u;
+static_assert(kOscQuietUs == MotionOscillator::kDriveQuietUs,
+              "the osc-drive stream's quiet window is the oscillator's");
+
 static_assert(MotionTuning{}.smoothness == kinetic2::Config{}.smoothness &&
                   MotionTuning{}.handle_floor == kinetic2::Config{}.handle_floor &&
                   MotionTuning{}.trim_max == kinetic2::Config{}.trim_max &&
@@ -734,29 +741,65 @@ void MotionArbiter::takeOscillator() {
     _osc_base = p;
     _osc_fdrive = fd;
     _osc_adrive = ad;
+    _oscd_plan_next_us = 0;   // a hand change asks its point at the next tick
+    setOscStage();
+}
+
+void MotionArbiter::setOscStage() {
+    kinetic2::OscParams p = _osc_base;
+    p.enabled = p.enabled || _osc_streaming;
     // A bound drive is the driven mode: a sine, frequency and amplitude from
     // the points alone (shape, dwells and the two fields unused).
-    p.driven = fd.drive != osc_drives::fixed || ad.drive != osc_drives::fixed;
+    p.driven = _osc_fdrive.drive != osc_drives::fixed || _osc_adrive.drive != osc_drives::fixed;
     _osc.set(p);
+}
+
+bool MotionArbiter::oscAxisBound() const {
+    return _osc_fdrive.drive == osc_drives::axis || _osc_adrive.drive == osc_drives::axis;
+}
+
+bool MotionArbiter::oscStreamLive(uint64_t t_us) const {
+    return _oscd_have && (t_us < _oscd_last.t_us || t_us - _oscd_last.t_us < kOscQuietUs);
+}
+
+void MotionArbiter::streamOscillator(uint64_t now_us) {
+    // A sample still in the ring is live by its arrival: the stage is enabled
+    // before this tick's plan read, which reaches its look-ahead only then.
+    const bool waiting = _oscd_head.load(std::memory_order_acquire) != _oscd_tail.load(std::memory_order_relaxed);
+    const bool streaming = oscAxisBound() && (waiting || oscStreamLive(now_us));
+    if (streaming == _osc_streaming) return;
+    _osc_streaming = streaming;
+    setOscStage();
 }
 
 void MotionArbiter::feedOscillator(uint64_t t0_us, const float* plan, bool render) {
     // Drained every tick, rendering or not, so a sample never waits in the
     // ring for an oscillator that is off.
-    const bool axis = render && (_osc_fdrive.drive == osc_drives::axis || _osc_adrive.drive == osc_drives::axis);
+    const bool axis = oscAxisBound();
     for (uint32_t tail = _oscd_tail.load(std::memory_order_relaxed);
          tail != _oscd_head.load(std::memory_order_acquire); ++tail) {
         _oscd_last = _oscd_ring[tail % _oscd_ring.size()];
         _oscd_have = true;
         _oscd_tail.store(tail + 1, std::memory_order_release);
-        if (axis) drivePoint(_oscd_last.t_us, plan, t0_us);
+        if (render && axis) drivePoint(_oscd_last.t_us, plan, t0_us);
     }
     if (!render) return;
+    const uint64_t at = t0_us + kOscDriveLeadUs;
     const bool fromPlan = _osc_fdrive.drive == osc_drives::speed || _osc_fdrive.drive == osc_drives::position ||
                           _osc_adrive.drive == osc_drives::speed || _osc_adrive.drive == osc_drives::position;
-    if (fromPlan && t0_us >= _oscd_plan_next_us) {
+    // The hand state (bd val-o9r): osc.enabled with an axis drive and no live
+    // stream at the lead. Its points are the fields, asked as a plan drive's
+    // are. The first lands on the lattice tick where the stream's quiet
+    // window ends, and the last stream point is asked through that window
+    // inclusive, so the handover asks no gap. Leaving it with no stream
+    // asks nothing from the lead on.
+    const bool hand = axis && _osc_base.enabled && !oscStreamLive(at);
+    if (hand && !_oscd_hand) _oscd_plan_next_us = 0;
+    if (!hand && _oscd_hand && !oscStreamLive(at) && !_osc.drive(at, 0.0f, 0.0f)) ++_oscd_dropped;
+    _oscd_hand = hand;
+    if ((fromPlan || hand) && t0_us >= _oscd_plan_next_us) {
         _oscd_plan_next_us = t0_us + uint64_t(kOscPlanDriveTicks) * kMotionTickUs;
-        drivePoint(t0_us + kOscDriveLeadUs, plan, t0_us);
+        drivePoint(at, plan, t0_us);
     }
 }
 
@@ -767,13 +810,13 @@ void MotionArbiter::drivePoint(uint64_t t_us, const float* plan, uint64_t t0_us)
     const int64_t i = std::clamp<int64_t>((int64_t(t_us) - int64_t(t0_us)) / int64_t(kMotionTickUs), 0, kLast);
     const float pos = _flipped.load() ? _rail - toMm(plan[i]) : toMm(plan[i]);
     const float speed = std::fabs(plan[i + 1] - plan[i - 1]) * span() / (2e-6f * float(kMotionTickUs));
-    // SPEC 9.7: quiet for stream_quiet_release_ms, an axis-driven parameter
-    // reads 0.
-    const bool live = _oscd_have && (t_us < _oscd_last.t_us ||
-                                     t_us - _oscd_last.t_us < uint64_t(limits::stream_quiet_release_ms) * 1000u);
+    // bd val-o9r (a), ahead of the pinned SPEC 9.7: with no live stream an
+    // axis-driven parameter is its field, as fixed is, while osc.enabled
+    // holds; without it there is no hand to return to, and it reads 0.
+    const bool live = oscStreamLive(t_us);
     auto driven = [&](const MotionOscDrive& d, float own, float axis, float top) {
         if (d.drive == osc_drives::fixed) return std::fmin(own, top);
-        if (d.drive == osc_drives::axis && !live) return 0.0f;
+        if (d.drive == osc_drives::axis && !live) return _osc_base.enabled ? std::fmin(own, top) : 0.0f;
         const float in = d.drive == osc_drives::speed ? speed : d.drive == osc_drives::position ? pos : axis;
         if (!std::isfinite(in) || !(d.in_max != d.in_min)) return 0.0f;
         // SPEC 8.11 linear_clamp.
@@ -1035,6 +1078,7 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
     // ticks before t0. Read this far ahead only while the oscillator renders:
     // its look-ahead past the strip, and its edge.
     float* plan = _plan_ext.data() + kOscEdge;
+    streamOscillator(now_us);
     const size_t ahead = _osc.idle() ? kStripLen : kPlanExt - kOscEdge;
     if (!live) {
         s.n = 0;
