@@ -50,13 +50,15 @@ constexpr const char* kTag = "motion";
 
 // ---- task constants ---------------------------------------------------------
 
-// How often the cross-task snapshot is refreshed. 50 Hz feeds a 60 Hz 0x1100
-// and a 45 Hz 0x1110 with one census build and anomaly drain per refresh
-// instead of one per tick, which is the whole reason it is not simply done at
-// kMotionTickUs: an instrument billed at the tick rate is the class that
+// How often the cross-task snapshot is refreshed. 100 Hz feeds a 60 Hz 0x1100
+// and a 45 Hz 0x1110 a fresh census on every publish: the hub task publishes
+// on its 5 ms tick, so those land 15 or 20 ms apart, and a refresh slower
+// than the shorter gap repeats a value (bd val-7ur). One census build and anomaly drain per
+// refresh instead of one per tick is the whole reason it is not simply done
+// at kMotionTickUs: an instrument billed at the tick rate is the class that
 // manufactures the fault it observes (memory-budget.md T27). The snapshot
 // reads the plan planTick() sampled; it never samples the engine.
-constexpr uint32_t kPublishUs = 20000;
+constexpr uint32_t kPublishUs = 10000;
 
 // Anomalies the planner hands the hub task per refresh before it drops the
 // newest: the hub takes them every tick, so more than a refresh's worth only
