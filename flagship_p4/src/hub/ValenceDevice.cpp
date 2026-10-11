@@ -1184,19 +1184,18 @@ Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
     const auto* f1 = findField(requested, 1);  // enabled
     const auto* f2 = findField(requested, 2);  // frequency
     const auto* f3 = findField(requested, 3);  // amplitude
-    const auto* f4 = findField(requested, 4);  // shape
     const auto* f5 = findField(requested, 5);  // dwell_crest
     const auto* f6 = findField(requested, 6);  // dwell_trough
     // Keys 7..16: the two drives and their bounds (kOscDriveCards).
     std::array<const IntentValueField*, 10> fd{};
-    bool any = f1 || f2 || f3 || f4 || f5 || f6;
+    bool any = f1 || f2 || f3 || f5 || f6;
     for (uint8_t k = 0; k < fd.size(); ++k) {
         fd[k] = findField(requested, uint8_t(7 + k));
         any = any || fd[k] != nullptr;
     }
     if (!any) return Ret::err(NackCode::INVALID_VALUE);
     if (f1 && !boolOf(f1)) return refuseNotANumber(ch::osc_set, 1);
-    for (const auto* f : {f2, f3, f4, f5, f6})
+    for (const auto* f : {f2, f3, f5, f6})
         if (f && !numberOf(f)) return refuseNotANumber(ch::osc_set, f->key);
     for (const auto* f : fd)
         if (f && !numberOf(f)) return refuseNotANumber(ch::osc_set, f->key);
@@ -1210,14 +1209,15 @@ Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
         _oscSession = _hub != nullptr ? _hub->intentSession() : 0;
     }
     if (f2) o.frequency_hz = clampf(*numberOf(f2), 0.0f, ceiling::osc_max_hz);
-    if (f3) o.amplitude = clampf(*numberOf(f3), 0.0f, 1.0f);
-    if (f4) o.shape = uint8_t(wholeIn(*numberOf(f4), 0.0f, 3.0f));
+    // A length, clamped to the ceiling and nothing else: the window and the
+    // ceilings narrow it at render (Valence RFC-112 items 1 and 2).
+    if (f3) o.amplitude = clampf(*numberOf(f3), 0.0f, ceiling::osc_amp_mm);
     if (f5) o.dwell_crest = dwell(*numberOf(f5));
     if (f6) o.dwell_trough = dwell(*numberOf(f6));
     // A drive's select, its input bounds as given, its output bounds clamped
     // into the parameter's range; equal input bounds have no map (SPEC 8.11).
     MotionOscDrive* drives[2] = {&o.frequency_drive, &o.amplitude_drive};
-    const float tops[2] = {ceiling::osc_max_hz, 1.0f};
+    const float tops[2] = {ceiling::osc_max_hz, ceiling::osc_amp_mm};
     for (int d = 0; d < 2; ++d) {
         const auto** f = &fd[size_t(5 * d)];
         MotionOscDrive& m = *drives[d];
@@ -1244,7 +1244,6 @@ Ret ValenceDevice::applyOsc(const IntentValueMap& requested, bool& cfgChanged) {
     if (f1) applied.fields[n++] = {1, IntentValue::ofBool(o.enabled)};
     if (f2) applied.fields[n++] = {2, IntentValue::ofF32(o.frequency_hz)};
     if (f3) applied.fields[n++] = {3, IntentValue::ofF32(o.amplitude)};
-    if (f4) applied.fields[n++] = {4, IntentValue::ofU64(driven ? 0 : o.shape)};
     if (f5) applied.fields[n++] = {5, IntentValue::ofF32(driven ? 0.0f : o.dwell_crest)};
     if (f6) applied.fields[n++] = {6, IntentValue::ofF32(driven ? 0.0f : o.dwell_trough)};
     for (int d = 0; d < 2; ++d) {
@@ -1270,7 +1269,7 @@ bool ValenceDevice::oscDriven(bool streamLive) const {
     return live(_osc.frequency_drive.drive) || live(_osc.amplitude_drive.drive);
 }
 
-// The parameters as applied, shape and dwells as they play (the written ones
+// The parameters as applied, dwells as they play (the written ones
 // kept), then what renders: osc.active and osc.amplitude_effective from the
 // census.
 // Every anomaly is taken, so the handoff never fills behind the bucket; one
@@ -1305,18 +1304,17 @@ void ValenceDevice::publishAnomalies(uint32_t nowMs) {
 
 void ValenceDevice::publishOscillator(const MotionCensus& mo, bool force) {
     const bool driven = oscDriven(mo.osc_stream_live);
-    // SPEC 4.2: the reported shape or dwells moving with a stream's liveness
-    // is a hub-side change; a kept sine with no dwells reports no change.
+    // SPEC 4.2: the reported dwells moving with a stream's liveness is a
+    // hub-side change; no dwells report no change.
     if (driven != _oscDrivenShown) {
         _oscDrivenShown = driven;
-        if (_osc.shape != 0 || _osc.dwell_crest != 0.0f || _osc.dwell_trough != 0.0f) _oscHubChange = true;
+        if (_osc.dwell_crest != 0.0f || _osc.dwell_trough != 0.0f) _oscHubChange = true;
     }
-    std::array<std::byte, 57> buf{};
+    std::array<std::byte, 56> buf{};
     size_t n = 0;
     packU8(buf, n, _osc.enabled ? 1 : 0);
     packF32(buf, n, _osc.frequency_hz);
     packF32(buf, n, _osc.amplitude);
-    packU8(buf, n, driven ? 0 : _osc.shape);
     packF32(buf, n, driven ? 0.0f : _osc.dwell_crest);
     packF32(buf, n, driven ? 0.0f : _osc.dwell_trough);
     packU8(buf, n, mo.osc_active ? 1 : 0);

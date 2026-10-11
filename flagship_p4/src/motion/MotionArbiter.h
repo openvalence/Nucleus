@@ -578,8 +578,8 @@ private:
     // osc.enabled is or a live stream renders it (streamOscillator()). A
     // parameter driven by a live input (speed, position, or axis with a live
     // stream) is the driven mode: a sine whose frequency and amplitude follow
-    // the points feedOscillator() gives it. Otherwise the fixed mode, every
-    // shape and dwell.
+    // the points feedOscillator() gives it. Otherwise the fixed mode, the
+    // sine with its dwells.
     void setOscStage();
     bool oscAxisBound() const;
     bool oscPlanBound() const;
@@ -711,7 +711,7 @@ private:
     float     _eng_lo = 0.0f;
     float     _eng_span = DEFAULT_MAX_RAIL_MM;
     PlanStrip _strip_pub{};
-    // The plan the strip is cut from, engine frame, on the strip's grid from
+    // The plan the strip is cut from, mm, on the strip's grid from
     // kOscEdge ticks before t0 (fillStrip()), and the oscillator summed into
     // it: its offset at t0, and a PAUSE's cut for the next refill to carry.
     std::array<float, kPlanExt> _plan_ext{};
@@ -776,7 +776,6 @@ private:
     // The oscillator's parameters setOscillator() posted, the same seqlock.
     std::atomic<uint32_t> _osc_seq{0};
     std::atomic<bool>     _osc_req_on{false};
-    std::atomic<uint8_t>  _osc_req_shape{0};
     std::atomic<float>    _osc_req_hz{0.0f};
     std::atomic<float>    _osc_req_amp{0.0f};
     std::atomic<float>    _osc_req_crest{0.0f};
@@ -786,7 +785,8 @@ private:
     std::array<std::atomic<float>, 4> _osc_req_fmap{};   // in_min, in_max, out_min, out_max
     std::array<std::atomic<float>, 4> _osc_req_amap{};
     uint32_t              _osc_taken = 0;
-    // The parameters as posted, before the drives (planner task).
+    // The parameters as posted, before the drives, the amplitude in mm
+    // (planner task).
     kinetic2::OscParams   _osc_base{};
     MotionOscDrive        _osc_fdrive{.drive = 0};
     MotionOscDrive        _osc_adrive{.drive = 0};

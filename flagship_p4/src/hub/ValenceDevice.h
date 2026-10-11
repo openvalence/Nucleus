@@ -381,7 +381,7 @@ private:
     // stream's liveness moved the reported shape or dwells) whose cfg_gen
     // bump follows its twin's publish.
     MotionOsc _osc{};
-    std::array<std::byte, 57> _sentOsc{};
+    std::array<std::byte, 56> _sentOsc{};
     uint32_t _oscSession = 0;
     bool _oscDirty = false;
     bool _oscDrivenShown = false;

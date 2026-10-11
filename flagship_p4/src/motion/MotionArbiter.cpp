@@ -57,13 +57,6 @@ public:
 
 AbsentHomeSense g_absent_sense;
 
-// The oscillator's shapes are the registry's osc_shapes numbers on the wire.
-static_assert(uint8_t(kinetic2::OscShape::Sine) == osc_shapes::sine &&
-                  uint8_t(kinetic2::OscShape::Square) == osc_shapes::square &&
-                  uint8_t(kinetic2::OscShape::Saw) == osc_shapes::saw &&
-                  uint8_t(kinetic2::OscShape::SawReverse) == osc_shapes::saw_reverse,
-              "kinetic2::OscShape is the registry's osc_shapes");
-
 // An osc-drive stream is live from a sample's arrival until this long past the
 // newest stamp, whichever session published it. It is the stage's own quiet
 // window too: a stream is quiet once the stage asks nothing of it.
@@ -250,7 +243,6 @@ bool MotionArbiter::takeWindow() {
 void MotionArbiter::setOscillator(const MotionOsc& o) {
     _osc_seq.fetch_add(1);   // odd: being written
     _osc_req_on.store(o.enabled);
-    _osc_req_shape.store(o.shape);
     _osc_req_hz.store(o.frequency_hz);
     _osc_req_amp.store(o.amplitude);
     _osc_req_crest.store(o.dwell_crest);
@@ -547,11 +539,8 @@ void MotionArbiter::reseedEngine(uint64_t now_us) {
     _k2_brake_to_p   = restate(_k2_brake_to_p);
     _seg_read.from_p = restate(_seg_read.from_p);
     _seg_read.to_p   = restate(_seg_read.to_p);
-    // The plan the strip was cut from, and the oscillation in millimeters:
-    // its amplitude is a window share, so it moves to the new window's
-    // through its fade, never in a step.
-    for (float& p : _plan_ext) p = restate(p);
-    _osc.rescale(k);
+    // The plan the strip was cut from and the oscillator are millimeters,
+    // which a frame move leaves alone (Valence RFC-112): never restated.
     if (_engine.pending() == 0) {
         const kinetic2::Knot h = _engine.newest();
         _k2_newest_us = h.t_us;
@@ -716,13 +705,11 @@ void MotionArbiter::takeOscillator() {
     if ((seq & 1u) != 0 || seq == _osc_taken) return;
     kinetic2::OscParams p;
     p.enabled = _osc_req_on.load();
-    const uint8_t shape = _osc_req_shape.load();
-    p.shape = kinetic2::OscShape(shape <= uint8_t(kinetic2::OscShape::SawReverse) ? shape : 0);
+    // Never set p.shape: Kinetic's default sine is the only waveform (Valence RFC-112).
     // Written so a NaN reads 0: the delegate clamped, this is the backstop.
     const float hz = _osc_req_hz.load(), amp = _osc_req_amp.load();
     p.frequency = !(hz > 0.0f) ? 0.0f : std::fmin(hz, OSC_MAX_HZ);
-    // A window share is the engine's unit in the window frame.
-    p.amplitude = !(amp > 0.0f) ? 0.0f : std::fmin(amp, 1.0f);
+    p.amplitude = !(amp > 0.0f) ? 0.0f : std::fmin(amp, OSC_MAX_AMPLITUDE_MM);
     p.dwell_crest = _osc_req_crest.load();
     p.dwell_trough = _osc_req_trough.load();
     auto drive = [](uint8_t d, const std::array<std::atomic<float>, 4>& m) {
@@ -750,7 +737,7 @@ void MotionArbiter::setOscStage() {
     p.enabled = p.enabled || _osc_streaming;
     // Driven by a live input (a speed or position drive, or an axis drive
     // with a live stream) is the driven mode: a sine, frequency and amplitude
-    // from the points alone (shape, dwells and the two fields unused). An
+    // from the points alone (dwells and the two fields unused). An
     // axis drive with no live stream is exactly fixed. A change of mode
     // passes through rest (the kernel's fade out, then in).
     p.driven = oscPlanBound() || _osc_streaming;
@@ -803,8 +790,8 @@ void MotionArbiter::drivePoint(uint64_t t_us, const float* plan, uint64_t t0_us)
     // mm, client frame, and the speed in mm/s by the grid's central difference.
     constexpr int64_t kLast = int64_t(kStripLen + kOscLook) - 1;
     const int64_t i = std::clamp<int64_t>((int64_t(t_us) - int64_t(t0_us)) / int64_t(kMotionTickUs), 0, kLast);
-    const float pos = _flipped.load() ? _rail - toMm(plan[i]) : toMm(plan[i]);
-    const float speed = std::fabs(plan[i + 1] - plan[i - 1]) * span() / (2e-6f * float(kMotionTickUs));
+    const float pos = _flipped.load() ? _rail - plan[i] : plan[i];
+    const float speed = std::fabs(plan[i + 1] - plan[i - 1]) / (2e-6f * float(kMotionTickUs));
     // bd val-o9r (a), ahead of the pinned SPEC 9.7: with no live stream an
     // axis-driven parameter is its field, as fixed is, while osc.enabled
     // holds; without it there is no hand to return to, and it reads 0.
@@ -820,7 +807,7 @@ void MotionArbiter::drivePoint(uint64_t t_us, const float* plan, uint64_t t0_us)
         return !(out > 0.0f) ? 0.0f : std::fmin(out, top);
     };
     const float hz = driven(_osc_fdrive, _osc_base.frequency, _oscd_last.frequency, OSC_MAX_HZ);
-    const float amp = driven(_osc_adrive, _osc_base.amplitude, _oscd_last.amplitude, 1.0f);
+    const float amp = driven(_osc_adrive, _osc_base.amplitude, _oscd_last.amplitude, OSC_MAX_AMPLITUDE_MM);
     if (!_osc.drive(t_us, hz, amp)) {
         ++_oscd_dropped;
         GLOGW_EVERY_MS(1000, kTag, "OSC DRIVE: point dropped, the oscillator holds its most (%lu dropped)",
@@ -1069,9 +1056,9 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
     s.continuous = _strip_continuous;
     s.cut = false;
     constexpr uint64_t kSpanUs = uint64_t(kStripLen) * kMotionTickUs;
-    // The plan from t0 on, engine frame, in _plan_ext after the kOscEdge
-    // ticks before t0. Read this far ahead only while the oscillator renders:
-    // its look-ahead past the strip, and its edge.
+    // The plan from t0 on, mm, in _plan_ext after the kOscEdge ticks before
+    // t0. Read this far ahead only while the oscillator renders: its
+    // look-ahead past the strip, and its edge.
     float* plan = _plan_ext.data() + kOscEdge;
     streamOscillator(now_us);
     const size_t ahead = _osc.idle() ? kStripLen : kPlanExt - kOscEdge;
@@ -1100,32 +1087,40 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
         ++s.plan;
         _plan_ahead = ahead;
         _engine.peek(0, now_us, kMotionTickUs, ahead, plan);
+        for (size_t i = 0; i < ahead; ++i) plan[i] = toMm(plan[i]);
         for (size_t i = 0; i < kOscEdge; ++i) _plan_ext[i] = had ? before[i] : plan[0];
     } else if (const size_t k = size_t((now_us - s.t0_us) / kMotionTickUs); k > 0) {
         // The same plan, advanced by the ticks elapsed: only the new tail is
         // read from the engine.
         std::copy(_plan_ext.begin() + k, _plan_ext.end(), _plan_ext.begin());
         s.t0_us += uint64_t(k) * kMotionTickUs;
-        _engine.peek(0, s.t0_us + uint64_t(_plan_ahead - k) * kMotionTickUs, kMotionTickUs, k,
-                     plan + (_plan_ahead - k));
+        float* tail = plan + (_plan_ahead - k);
+        _engine.peek(0, s.t0_us + uint64_t(_plan_ahead - k) * kMotionTickUs, kMotionTickUs, k, tail);
+        for (size_t i = 0; i < k; ++i) tail[i] = toMm(tail[i]);
     }
     feedOscillator(s.t0_us, plan, s.n != 0 && !_osc.idle());
     if (s.n != 0) {
         // THE OSCILLATOR (RFC-103): summed into the plan before the backstop,
         // so the steer follows it like any plan. It yields first under the
         // input set, inside the window, and holds at nothing while the
-        // machine may not move on its own (SPEC 9.7, 11.1).
+        // machine may not move on its own (SPEC 9.7, 11.1). It runs in mm,
+        // rail frame: the plan, the ceilings, the window and its amplitude
+        // alike, so a window move changes none of them (Valence RFC-112).
         // ponytail: it re-renders the whole strip every tick (a few tens of
         // us on the P4); shifting its envelope with the strip is the upgrade
         // if the planner's tick ever shows it.
         std::array<float, kStripLen> osc{};
         if (!_osc.idle()) {
             const bool hold = _paused.load() || !_homed || !_commissioned.load();
-            _osc.render(s.t0_us, kMotionTickUs, _plan_ext.data(), kStripLen, limitsFor(false),
-                        toNorm(backstopLo()), toNorm(backstopHi()), hold, osc.data());
+            EngineLimits lim = limitsFor(false);
+            lim.vmax *= span();
+            lim.amax *= span();
+            lim.jmax *= span();
+            _osc.render(s.t0_us, kMotionTickUs, _plan_ext.data(), kStripLen, lim, backstopLo(), backstopHi(),
+                        hold, osc.data());
         }
         _osc_head = osc[0];
-        for (size_t i = 0; i < kStripLen; ++i) s.p_mm[i] = toMm(plan[i] + osc[i]);
+        for (size_t i = 0; i < kStripLen; ++i) s.p_mm[i] = plan[i] + osc[i];
     }
     // ponytail: the whole strip is copied under the lock every tick (~0.5 KB);
     // a ring with a published head is the upgrade if the copy ever shows.
@@ -1718,7 +1713,7 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.position_mm    = float(c.steps) * kMmPerStep;
     // The plan's position with the oscillation summed in: what the steer is
     // following, so the residual stays a tracking error.
-    c.plan_mm        = seeking ? c.position_mm : toMm(s.pos + _osc_head);
+    c.plan_mm        = seeking ? c.position_mm : toMm(s.pos) + _osc_head;
     c.target_mm      = seeking ? float(_leg_end - _origin) * kMmPerStep : toMm(s.target);
     c.velocity_mm_s  = vel_mm_s;
     c.residual_steps = static_cast<int32_t>(std::lround((c.plan_mm - c.position_mm) * kStepsPerMm));

@@ -2072,7 +2072,7 @@ TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publish
     {
         const auto it = rig->del.lastState.find(ch::oscillator);
         REQUIRE(it != rig->del.lastState.end());
-        REQUIRE(it->second.size() == 57);
+        REQUIRE(it->second.size() == 56);
         CHECK(it->second[0] == std::byte{0});
         CHECK(getF32(std::span<const std::byte>(it->second).subspan(1, 4)) == MotionOsc{}.frequency_hz);
     }
@@ -2091,8 +2091,8 @@ TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publish
     m.count = 6;
     m.fields[0] = IntentValueField{1, IntentValue::ofBool(true)};
     m.fields[1] = IntentValueField{2, IntentValue::ofF32(150.0f)};   // past osc_max_hz
-    m.fields[2] = IntentValueField{3, IntentValue::ofF32(0.05f)};
-    m.fields[3] = IntentValueField{4, IntentValue::ofU64(1)};        // square
+    m.fields[2] = IntentValueField{3, IntentValue::ofF32(5000.0f)};  // mm, past the ceiling
+    m.fields[3] = IntentValueField{4, IntentValue::ofU64(1)};        // key 4 is unused: ignored
     m.fields[4] = IntentValueField{5, IntentValue::ofF32(0.333f)};   // two decimals
     m.fields[5] = IntentValueField{6, IntentValue::ofF32(9.0f)};     // past the longest hold
     REQUIRE(rig->client->sendIntent(ch::osc_set, m).has_value());
@@ -2101,15 +2101,16 @@ TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publish
     REQUIRE(rig->del.echoes == 1);
     CHECK(echoed(rig->del.lastEcho, 1)->bool_val);
     CHECK(echoed(rig->del.lastEcho, 2)->f32_val == OSC_MAX_HZ);
+    CHECK(echoed(rig->del.lastEcho, 3)->f32_val == OSC_MAX_AMPLITUDE_MM);
+    CHECK(echoed(rig->del.lastEcho, 4) == nullptr);   // absent: not applied (SPEC 9.3)
     CHECK(echoed(rig->del.lastEcho, 5)->f32_val == doctest::Approx(0.33f));
     CHECK(echoed(rig->del.lastEcho, 6)->f32_val == doctest::Approx(4.0f));
     CHECK(g_osc.enabled);
     CHECK(g_osc.frequency_hz == OSC_MAX_HZ);
-    CHECK(g_osc.amplitude == doctest::Approx(0.05f));
-    CHECK(g_osc.shape == 1);
+    CHECK(g_osc.amplitude == OSC_MAX_AMPLITUDE_MM);
     // 0x1140: the applied parameters, then what renders, the census's.
     g_census.osc_active = true;
-    g_census.osc_amplitude = 0.04f;
+    g_census.osc_amplitude = 4.0f;
     rig->step(60);
     {
         const auto it = rig->del.lastState.find(ch::oscillator);
@@ -2117,12 +2118,33 @@ TEST_CASE("VD-OSC-1: osc-set clamps and echoes, reaches the motion door, publish
         const std::span<const std::byte> b(it->second);
         CHECK(b[0] == std::byte{1});
         CHECK(getF32(b.subspan(1, 4)) == OSC_MAX_HZ);
-        CHECK(getF32(b.subspan(5, 4)) == doctest::Approx(0.05f));
-        CHECK(b[9] == std::byte{1});
-        CHECK(getF32(b.subspan(10, 4)) == doctest::Approx(0.33f));
-        CHECK(getF32(b.subspan(14, 4)) == doctest::Approx(4.0f));
-        CHECK(b[18] == std::byte{1});
-        CHECK(getF32(b.subspan(19, 4)) == doctest::Approx(0.04f));
+        CHECK(getF32(b.subspan(5, 4)) == OSC_MAX_AMPLITUDE_MM);
+        CHECK(getF32(b.subspan(9, 4)) == doctest::Approx(0.33f));
+        CHECK(getF32(b.subspan(13, 4)) == doctest::Approx(4.0f));
+        CHECK(b[17] == std::byte{1});
+        CHECK(getF32(b.subspan(18, 4)) == doctest::Approx(4.0f));
+    }
+    // Valence RFC-112: the four amplitude fields are mm to the ceiling, on
+    // the intent and on the twin.
+    {
+        auto mm = [](std::string_view name, std::string_view unit, bool hasUnitId, uint8_t unitId, bool hasMax,
+                     float max) {
+            CAPTURE(name);
+            CHECK(unit == "mm");
+            CHECK(hasUnitId);
+            CHECK(unitId == valence::unit_ids::mm);
+            if (name != "amplitude_effective") CHECK((hasMax && max == OSC_MAX_AMPLITUDE_MM));
+        };
+        auto amplitude = [](std::string_view n) {
+            return n == "amplitude" || n == "amplitude_out_min" || n == "amplitude_out_max" ||
+                   n == "amplitude_effective";
+        };
+        size_t seen = 0;
+        for (const LayoutField& f : rig->catalog.layoutFields(*rig->catalog.find(ch::oscillator)))
+            if (amplitude(f.name)) mm(f.name, f.unit, f.hasUnitId, f.unitId, f.hasMax, f.max), ++seen;
+        for (const SchemaField& f : rig->catalog.schemaFields(*rig->catalog.find(ch::osc_set)))
+            if (amplitude(f.name)) mm(f.name, f.unit, f.hasUnitId, f.unitId, f.hasMax, f.max), ++seen;
+        CHECK(seen == 7);
     }
     // A NaN refuses the whole write: nothing moves.
     IntentValueMap bad{};
@@ -2273,13 +2295,14 @@ TEST_CASE("VD-OSC-DRIVE: drives default to axis, clamp and echo; osc-drive sampl
     CHECK(g_osc.frequency_drive.drive == osc_drives::axis);
     CHECK(g_osc.amplitude_drive.drive == osc_drives::axis);
     CHECK(g_osc.frequency_drive.out_max == OSC_MAX_HZ);
-    CHECK(g_osc.amplitude_drive.out_max == 1.0f);
+    CHECK(g_osc.amplitude_drive.out_max == 20.0f);   // mm: a full V8
+    CHECK(g_osc.amplitude == 5.0f);                  // mm by hand
     {
         const auto it = rig->del.lastState.find(ch::oscillator);
         REQUIRE(it != rig->del.lastState.end());
-        REQUIRE(it->second.size() == 57);
-        CHECK(it->second[23] == std::byte{osc_drives::axis});
-        CHECK(it->second[40] == std::byte{osc_drives::axis});
+        REQUIRE(it->second.size() == 56);
+        CHECK(it->second[22] == std::byte{osc_drives::axis});
+        CHECK(it->second[39] == std::byte{osc_drives::axis});
     }
     CHECK_FALSE(rig->device.sourceForChannel(ch::osc_drive).has_value());
 
@@ -2307,24 +2330,15 @@ TEST_CASE("VD-OSC-DRIVE: drives default to axis, clamp and echo; osc-drive sampl
     CHECK(rig->del.nacks[0].detail == "drive in_min equals in_max");
     CHECK(g_osc.amplitude_drive.in_min == doctest::Approx(0.2f));
 
-    // Driven by the plan, the twin and the echo name the sine that plays, no
+    // Driven by the plan, the twin and the echo report the sine that plays, no
     // dwells; the written values are kept.
-    {
-        IntentValueMap s{};
-        s.count = 2;
-        s.fields[0] = IntentValueField{4, IntentValue::ofU64(1)};
-        s.fields[1] = IntentValueField{5, IntentValue::ofF32(0.3f)};
-        REQUIRE(rig->client->sendIntent(ch::osc_set, s).has_value());
-    }
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(5, IntentValue::ofF32(0.3f))).has_value());
     rig->step();
-    CHECK(echoed(rig->del.lastEcho, 4)->u64_val == 0);
     CHECK(echoed(rig->del.lastEcho, 5)->f32_val == 0.0f);
     {
         const std::span<const std::byte> tw(rig->del.lastState.find(ch::oscillator)->second);
-        CHECK(tw[9] == std::byte{0});
-        CHECK(getF32(tw.subspan(10, 4)) == 0.0f);
+        CHECK(getF32(tw.subspan(9, 4)) == 0.0f);
     }
-    CHECK(g_osc.shape == 1);
     CHECK(g_osc.dwell_crest == doctest::Approx(0.3f));
     CHECK(rig->device.scheduleLatencyUs(ch::osc_drive) == kOscDriveLeadUs);
 
@@ -2436,49 +2450,43 @@ TEST_CASE("VD-HOME-OSC: home op 1 is refused INTERLOCK while the oscillator is o
     CHECK(g_homeCalls == 1);
 }
 
-// ---- shape and dwells as they play (Valence RFC-110 item 3) -----------------
+// ---- dwells as they play (Valence RFC-110 item 3) ---------------------------
 
-TEST_CASE("VD-OSC-SHOWN: the factory card reports its shape and dwells by hand, a live stream the sine with no dwells, each change a hub-side cfg_gen") {
+TEST_CASE("VD-OSC-SHOWN: the factory card reports its dwells by hand, a live stream none, each change a hub-side cfg_gen") {
     auto rig = std::make_unique<Rig>();
     IntentValueMap m{};
-    m.count = 3;
-    m.fields[0] = IntentValueField{4, IntentValue::ofU64(1)};        // square
-    m.fields[1] = IntentValueField{5, IntentValue::ofF32(0.25f)};
-    m.fields[2] = IntentValueField{6, IntentValue::ofF32(0.5f)};
+    m.count = 2;
+    m.fields[0] = IntentValueField{5, IntentValue::ofF32(0.25f)};
+    m.fields[1] = IntentValueField{6, IntentValue::ofF32(0.5f)};
     REQUIRE(rig->client->sendIntent(ch::osc_set, m).has_value());
     rig->step();
     REQUIRE(rig->del.nacks.empty());
-    CHECK(echoed(rig->del.lastEcho, 4)->u64_val == 1);
     CHECK(echoed(rig->del.lastEcho, 5)->f32_val == doctest::Approx(0.25f));
     auto twin = [&] { return std::span<const std::byte>(rig->del.lastState[ch::oscillator]); };
-    CHECK(twin()[9] == std::byte{1});
-    CHECK(getF32(twin().subspan(10, 4)) == doctest::Approx(0.25f));
-    CHECK(getF32(twin().subspan(14, 4)) == doctest::Approx(0.5f));
-    // A stream goes live: the sine, no dwells, published with cfg_gen moved.
+    CHECK(getF32(twin().subspan(9, 4)) == doctest::Approx(0.25f));
+    CHECK(getF32(twin().subspan(13, 4)) == doctest::Approx(0.5f));
+    // A stream goes live: no dwells, published with cfg_gen moved.
     uint16_t gen = rig->hub->cfgGen();
     g_census.osc_stream_live = true;
     rig->step(60);
-    CHECK(twin()[9] == std::byte{0});
-    CHECK(getF32(twin().subspan(10, 4)) == 0.0f);
-    CHECK(getF32(twin().subspan(14, 4)) == 0.0f);
+    CHECK(getF32(twin().subspan(9, 4)) == 0.0f);
+    CHECK(getF32(twin().subspan(13, 4)) == 0.0f);
     CHECK(rig->hub->cfgGen() != gen);
-    CHECK(g_osc.shape == 1);
-    // A write of shape while it is live keeps it and echoes the sine.
-    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(4, IntentValue::ofU64(2))).has_value());
+    // A dwell written while it is live is kept and echoed 0.
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(5, IntentValue::ofF32(0.4f))).has_value());
     rig->step();
-    CHECK(echoed(rig->del.lastEcho, 4)->u64_val == 0);
-    CHECK(g_osc.shape == 2);
+    CHECK(echoed(rig->del.lastEcho, 5)->f32_val == 0.0f);
+    CHECK(g_osc.dwell_crest == doctest::Approx(0.4f));
     // Quiet: the kept values again, a hub-side change.
     gen = rig->hub->cfgGen();
     g_census.osc_stream_live = false;
     rig->step(60);
-    CHECK(twin()[9] == std::byte{2});
-    CHECK(getF32(twin().subspan(10, 4)) == doctest::Approx(0.25f));
+    CHECK(getF32(twin().subspan(9, 4)) == doctest::Approx(0.4f));
+    CHECK(getF32(twin().subspan(13, 4)) == doctest::Approx(0.5f));
     CHECK(rig->hub->cfgGen() != gen);
-    // A kept sine with no dwells reports nothing new: no cfg_gen.
-    m.fields[0] = IntentValueField{4, IntentValue::ofU64(0)};
-    m.fields[1] = IntentValueField{5, IntentValue::ofF32(0.0f)};
-    m.fields[2] = IntentValueField{6, IntentValue::ofF32(0.0f)};
+    // No dwells report nothing new: no cfg_gen.
+    m.fields[0] = IntentValueField{5, IntentValue::ofF32(0.0f)};
+    m.fields[1] = IntentValueField{6, IntentValue::ofF32(0.0f)};
     REQUIRE(rig->client->sendIntent(ch::osc_set, m).has_value());
     rig->step();
     gen = rig->hub->cfgGen();
@@ -2487,16 +2495,16 @@ TEST_CASE("VD-OSC-SHOWN: the factory card reports its shape and dwells by hand, 
     g_census.osc_stream_live = false;
     rig->step(60);
     CHECK(rig->hub->cfgGen() == gen);
-    // Both drives fixed: a live stream drives nothing, the square plays.
+    // Both drives fixed: a live stream drives nothing, the dwells play.
     m.count = 3;
-    m.fields[0] = IntentValueField{4, IntentValue::ofU64(1)};
+    m.fields[0] = IntentValueField{5, IntentValue::ofF32(0.25f)};
     m.fields[1] = IntentValueField{7, IntentValue::ofU64(osc_drives::fixed)};
     m.fields[2] = IntentValueField{12, IntentValue::ofU64(osc_drives::fixed)};
     REQUIRE(rig->client->sendIntent(ch::osc_set, m).has_value());
     rig->step();
     g_census.osc_stream_live = true;
     rig->step(60);
-    CHECK(twin()[9] == std::byte{1});
+    CHECK(getF32(twin().subspan(9, 4)) == doctest::Approx(0.25f));
 }
 
 // ---- SPEC 5.4 (RFC-090): an over-cap bundle moves earlier whole -------------
