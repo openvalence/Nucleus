@@ -331,11 +331,17 @@ void MotionTask::planRun() {
         prev_us = now_us;
         _arb.planTick(now_us, dt_s);
         if (now_us >= next_pub_us) {
-            next_pub_us = now_us + kPublishUs;
+            // A schedule, not a restart from now: a restart walks the refresh
+            // against the hub's 5 ms tick, so the census a push reads ages 0
+            // to 10 ms in turn and the published steps go uneven (bd val-7f5).
+            // A refresh a whole period late restarts it: no catch-up burst.
+            next_pub_us += kPublishUs;
+            if (next_pub_us <= now_us) next_pub_us = now_us + kPublishUs;
             handOverAnomalies();
             // The steer's counters and _backstop_on are read as single
-            // words, at most one steer old.
-            refreshSnapshot(now_us);
+            // words, at most one steer old. Read now, not at the wake: the
+            // census's sample_us is the instant its count was taken.
+            refreshSnapshot(espNowUs());
         }
     }
 }

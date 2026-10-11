@@ -1722,6 +1722,42 @@ TEST_CASE("VD-RATE: on the 5 ms hub tick 0x1100 meets its 60 Hz grant and 0x1110
     CHECK(std::abs(rig->del.stateCount[ch::plan_strip] - 270) <= 2);
 }
 
+// A carriage at constant speed must publish constant steps: each 0x1100 push
+// carries the census of the tick that pushed it, stamped with its instant in
+// t_us. A second schedule in the delegate made every fifth step at 50 Hz span
+// two (bd val-7f5).
+TEST_CASE("VD-EVEN: at constant speed every 0x1100 push steps the same distance and t_us the same time") {
+    auto rig = std::make_unique<Rig>(AccessLevel::control, 50.0f);
+    rig->del.stateCount.clear();
+    std::vector<int> steps, gaps;
+    int seen = 0, lastPos = -1;
+    uint32_t lastT = 0;
+    for (int i = 0; i < 400; ++i) {   // 2 s at 0.5 mm per 5 ms tick
+        g_clock.advanceUs(5000);
+        g_census.position_mm = 0.5f * float(i);
+        g_census.sample_us = g_clock.nowUs();
+        rig->hub->update(g_clock.nowUs());
+        (void)rig->device.tick(g_clock.nowUs() / 1000);
+        rig->client->update(g_clock.nowUs());
+        if (rig->del.stateCount[ch::motion] == seen) continue;
+        seen = rig->del.stateCount[ch::motion];
+        const std::span<const std::byte> s(rig->del.lastState[ch::motion]);
+        REQUIRE(s.size() == 13);
+        const int pos = getU16(s.subspan(0, 2));
+        const uint32_t t = getU32(s.subspan(9, 4));
+        if (lastPos >= 0 && pos > 0) {
+            steps.push_back(pos - lastPos);
+            gaps.push_back(int(t - lastT));
+        }
+        lastPos = pos;
+        lastT = t;
+    }
+    // The first step spans the rig's own settling before the ramp.
+    REQUIRE(steps.size() > 90);
+    CHECK(std::all_of(steps.begin() + 1, steps.end(), [](int d) { return d == 200; }));   // 2 mm in 10 um
+    CHECK(std::all_of(gaps.begin() + 1, gaps.end(), [](int g) { return g == 20000; }));
+}
+
 TEST_CASE("VD-MODES-9: home_speed writes on modes-set key 9, clamped, published at 0x1030's tail, stored") {
     auto rig = std::make_unique<Rig>();
     persistBitsOver(*rig, 2500);

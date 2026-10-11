@@ -594,7 +594,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
 
     // ---- "motion" — STATE, elevated, 60 Hz ----------------------------------
     // The live carriage snapshot. scale 100 on positions = 10µm wire units;
-    // scale 10 on speed = 0.1 mm/s wire units.  [2+2+2+1+2 = 9 B]
+    // scale 10 on speed = 0.1 mm/s wire units.  [2+2+2+1+2+4 = 13 B]
     //
     // raw_10um (field 5) is the pre-planning demand — do not split it into
     // its own channel. raw/target/actual are ONE measurement of ONE quantity
@@ -652,6 +652,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasRank = true, .rank = valence::ui_ranks::diagnostic,
                       .hasProvenance = true, .provenance = valence::value_provenance::demand,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
+    // The hub time the census behind this frame was read, so a client places
+    // each sample at the instant it describes rather than at its arrival
+    // (RFC-113 draft, bd val-7f5). u32 hub-us, the STREAM wrap rule (SPEC 7.2).
+    c.addLayoutField({.name = "t_us", .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
+                      .desc = "Hub time this snapshot was sampled",
+                      .role = "telemetry.sample_time",
+                      .hasRank = true, .rank = valence::ui_ranks::diagnostic,
+                      .hasUnitId = true, .unitId = valence::unit_ids::us});
     };
 
     // ---- "machine-config" — STATE, normal, on-change ------------------------

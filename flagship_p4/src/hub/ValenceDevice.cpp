@@ -377,7 +377,7 @@ void publishPacked(Hub& hub, uint16_t id, std::span<const std::byte> buf, size_t
 // packed struct to static_assert against).
 
 void publishMotion(Hub& hub, const MotionCensus& m, bool genRunning) {
-    std::array<std::byte, 9> buf{};
+    std::array<std::byte, 13> buf{};
     size_t n = 0;
     packU16(buf, n, wireU16(m.position_mm, 100.0f));   // pos_10um
     // tgt_10um is the plan's AIM, m.target_mm, never m.plan_mm. plan_mm is
@@ -393,6 +393,7 @@ void publishMotion(Hub& hub, const MotionCensus& m, bool genRunning) {
                  (m.paused ? 0x08u : 0u) | (m.override_mode ? 0x10u : 0u) |
                  (m.estop ? 0x20u : 0u) | (m.stream ? 0x40u : 0u)));
     packU16(buf, n, wireU16(m.demand_mm, 100.0f));     // raw_10um: the asked position
+    packU32(buf, n, uint32_t(m.sample_us));            // t_us: hub-us the census was read
     // AT RATE, not on change. An on-change gate looks like an economy and is a
     // ground-truth hazard on a hero channel: a machine at rest stops pushing,
     // so a subscriber that joined late, or whose retained value never landed,
@@ -2117,8 +2118,6 @@ void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     _hub = &hub;
     _catalog = &catalog;
     _anomTokens = kAnomalyEventBurst;
-    if (const CatalogEntry* e = catalog.find(ch::motion)) _motionPace.granted_rate_hz = e->maxRateHz;
-    if (const CatalogEntry* e = catalog.find(ch::plan_strip)) _stripPace.granted_rate_hz = e->maxRateHz;
     // The declaration's one home is the composition's setEstopCutsPower().
     motionSetEstopCutsPower(hub.estopCutsPower());
     hub.publishControlOwnerStateIfPresent();
@@ -2266,7 +2265,12 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _hub->latchEstop(safety_causes::fault, uint8_t(AccessLevel::configure));
     }
     // The motion plane, from ONE census so no two channels disagree about the
-    // same instant. 0x1100 and 0x1110 publish at their catalog ceilings.
+    // same instant. 0x1100 and 0x1110 refresh their retained values on every
+    // tick and the hub's grant pacing is their only pacing (Valence
+    // subscription.hpp, a rate-0 grant held to the catalog ceiling). Do not
+    // pace them here: a second schedule beats against every grant at another
+    // rate, and a push then carries a value 5 to 20 ms old in a 100 ms cycle
+    // (bd val-7f5).
     const MotionCensus mo = motionCensus();
 
     // Every tick, not at the 1 Hz publish: a slot's counter dies with its
@@ -2317,14 +2321,8 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
               mo.home_fail_why != nullptr ? mo.home_fail_why : "no reason recorded",
               mo.homed ? "" : ", unhomed");
     }
-    if (_motionPace.dueForPush(nowMs, true)) {
-        _motionPace.markPushed(nowMs);
-        publishMotion(*_hub, mo, patternActive());
-    }
-    if (_stripPace.dueForPush(nowMs, true)) {
-        _stripPace.markPushed(nowMs);
-        publishPlanStrip(*_hub, mo);
-    }
+    publishMotion(*_hub, mo, patternActive());
+    publishPlanStrip(*_hub, mo);
     if (uint32_t(nowMs - _lastOscMs) >= 50u) {
         _lastOscMs = nowMs;
         publishOscillator(mo, false);   // what renders moves with the plan
