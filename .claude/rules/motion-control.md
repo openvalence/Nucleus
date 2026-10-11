@@ -111,7 +111,12 @@ window is solved at the next sample, and the sampler evaluates it.
   narrowed about the plan, never shifted [verified 2026-10-10 --
   test_motion_arbiter: 5 mm by hand and a 10 mm V8 hold through a window a
   fifth the size; a window edge 3 mm from the rest narrows it to 3 mm about
-  the rest, and the room given back plays 5 mm again].
+  the rest, and the room given back plays 5 mm again]. The caps (RFC-112
+  item 6) are `OSC_MAX_HZ` 30 and `OSC_MAX_AMPLITUDE_MM` 20, from the
+  factory set's sine curve (`valence_config.h`); the waveform is a sine
+  only, Kinetic's default, never set [verified 2026-10-11 --
+  test_motion_arbiter: a 5 mm ask at 30 Hz renders 1.85 mm inside every
+  ceiling, a period on the 1 ms grid].
   **Driven parameters (SPEC 9.7, bd val-o9r; Valence RFC-110, ahead of the
   pinned SPEC).** A parameter driven by a live input, a speed or position
   drive or an `axis` drive while an osc-drive stream is live (under
@@ -119,7 +124,7 @@ window is solved at the next sample, and the sampler evaluates it.
   published it), puts the stage in Kinetic's driven mode: a sine whose
   frequency and amplitude follow drive points, the phase integrated. An
   `axis` drive with no live stream is exactly `fixed`, so the factory card
-  (both drives `axis`) renders every shape and dwell by hand. While an `axis`
+  (both drives `axis`) renders the sine and its dwells by hand. While an `axis`
   drive is bound a live stream also renders the stage whatever osc.enabled
   holds (`streamOscillator()`, before the plan read). A stream's start and
   end therefore switch the mode, which passes through rest: the kernel's
@@ -136,19 +141,18 @@ window is solved at the next sample, and the sampler evaluates it.
   (the stream's quiet window, static_asserted) it fades to rest; a point the
   stage cannot hold is dropped and counted. PAUSE, ESTOP and the render
   gates hold a stream as they hold the hand. The hub reports what plays:
-  driven, 0x1140 and the ECHO carry osc.shape sine and both dwells 0, the
+  driven, 0x1140 and the ECHO carry both dwells 0, the
   written values kept, and the report changing with a stream's liveness is
   a hub-side cfg_gen (`ValenceDevice::publishOscillator()`, from the census's
   `osc_stream_live`). The stage, its plan buffer and
   the drives cost about 8.9 KB of the arbiter's internal RAM
   (`sizeof(MotionOscillator)` 7,288 B) [verified 2026-10-09 -- riscv32
   `sizeof` at Kinetic 725d448; test_motion_arbiter, a 50 Hz drive sweeping
-  5 to 20 Hz keeps every ceiling and fades out on silence; the factory
-  drives render the hand square (0.81 of ticks within a tenth of the peak,
-  a sine 0.30) and saw (0.87 of moving ticks rising); a stream over a hand
-  square passes through rest to the driven sine and, quiet, back through
-  rest to the square, every ceiling held; a live stream renders nothing
-  under PAUSE or ESTOP].
+  5 to 20 Hz keeps every ceiling and fades out on silence; a stream over a
+  hand sine held a cycle at each extreme (0.81 of ticks within a tenth of
+  the peak, the driven sine 0.30; 2026-10-11) passes through rest to the
+  driven sine and, quiet, back through rest to the dwells, every ceiling
+  held; a live stream renders nothing under PAUSE or ESTOP].
 - **Map:** header-only, hardware-free `kinetic2::Engine`: a knot timeline (64
   knots per axis here), a window solver that re-plans every pending knot
   together, and a brake. The library is the sibling Kinetic checkout,

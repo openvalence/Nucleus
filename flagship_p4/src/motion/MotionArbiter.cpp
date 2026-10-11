@@ -57,13 +57,6 @@ public:
 
 AbsentHomeSense g_absent_sense;
 
-// The oscillator's shapes are the registry's osc_shapes numbers on the wire.
-static_assert(uint8_t(kinetic2::OscShape::Sine) == osc_shapes::sine &&
-                  uint8_t(kinetic2::OscShape::Square) == osc_shapes::square &&
-                  uint8_t(kinetic2::OscShape::Saw) == osc_shapes::saw &&
-                  uint8_t(kinetic2::OscShape::SawReverse) == osc_shapes::saw_reverse,
-              "kinetic2::OscShape is the registry's osc_shapes");
-
 // An osc-drive stream is live from a sample's arrival until this long past the
 // newest stamp, whichever session published it. It is the stage's own quiet
 // window too: a stream is quiet once the stage asks nothing of it.
@@ -250,7 +243,6 @@ bool MotionArbiter::takeWindow() {
 void MotionArbiter::setOscillator(const MotionOsc& o) {
     _osc_seq.fetch_add(1);   // odd: being written
     _osc_req_on.store(o.enabled);
-    _osc_req_shape.store(o.shape);
     _osc_req_hz.store(o.frequency_hz);
     _osc_req_amp.store(o.amplitude);
     _osc_req_crest.store(o.dwell_crest);
@@ -713,8 +705,7 @@ void MotionArbiter::takeOscillator() {
     if ((seq & 1u) != 0 || seq == _osc_taken) return;
     kinetic2::OscParams p;
     p.enabled = _osc_req_on.load();
-    const uint8_t shape = _osc_req_shape.load();
-    p.shape = kinetic2::OscShape(shape <= uint8_t(kinetic2::OscShape::SawReverse) ? shape : 0);
+    // Never set p.shape: Kinetic's default sine is the only waveform (Valence RFC-112).
     // Written so a NaN reads 0: the delegate clamped, this is the backstop.
     const float hz = _osc_req_hz.load(), amp = _osc_req_amp.load();
     p.frequency = !(hz > 0.0f) ? 0.0f : std::fmin(hz, OSC_MAX_HZ);
@@ -746,7 +737,7 @@ void MotionArbiter::setOscStage() {
     p.enabled = p.enabled || _osc_streaming;
     // Driven by a live input (a speed or position drive, or an axis drive
     // with a live stream) is the driven mode: a sine, frequency and amplitude
-    // from the points alone (shape, dwells and the two fields unused). An
+    // from the points alone (dwells and the two fields unused). An
     // axis drive with no live stream is exactly fixed. A change of mode
     // passes through rest (the kernel's fade out, then in).
     p.driven = oscPlanBound() || _osc_streaming;

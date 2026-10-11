@@ -216,8 +216,8 @@ struct MotionOscDrive {
 
 // The oscillator's parameters (RFC-103, SPEC 9.7) as 0x3140 speaks them: the
 // frequency in Hz, the amplitude in mm (the peak, half the swing; static,
-// no window change rescales it, Valence RFC-112), the shape an osc_shapes
-// number, each dwell a share of the moving cycle, and what drives the
+// no window change rescales it, Valence RFC-112), a sine always (RFC-112
+// item 7), each dwell a share of the moving cycle, and what drives the
 // frequency and the amplitude. A `fixed` drive takes the parameter's own
 // field. The defaults are the catalog's: 5 mm by hand, and a full V8 asks
 // 20 mm, about the most the factory speed ceiling lets a 10 Hz sine keep.
@@ -225,7 +225,6 @@ struct MotionOsc {
     bool    enabled      = false;
     float   frequency_hz = 10.0f;
     float   amplitude    = 5.0f;
-    uint8_t shape        = 0;
     float   dwell_crest  = 0.0f;
     float   dwell_trough = 0.0f;
     MotionOscDrive frequency_drive{.out_max = OSC_MAX_HZ};

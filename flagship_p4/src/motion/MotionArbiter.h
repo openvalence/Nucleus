@@ -578,8 +578,8 @@ private:
     // osc.enabled is or a live stream renders it (streamOscillator()). A
     // parameter driven by a live input (speed, position, or axis with a live
     // stream) is the driven mode: a sine whose frequency and amplitude follow
-    // the points feedOscillator() gives it. Otherwise the fixed mode, every
-    // shape and dwell.
+    // the points feedOscillator() gives it. Otherwise the fixed mode, the
+    // sine with its dwells.
     void setOscStage();
     bool oscAxisBound() const;
     bool oscPlanBound() const;
@@ -776,7 +776,6 @@ private:
     // The oscillator's parameters setOscillator() posted, the same seqlock.
     std::atomic<uint32_t> _osc_seq{0};
     std::atomic<bool>     _osc_req_on{false};
-    std::atomic<uint8_t>  _osc_req_shape{0};
     std::atomic<float>    _osc_req_hz{0.0f};
     std::atomic<float>    _osc_req_amp{0.0f};
     std::atomic<float>    _osc_req_crest{0.0f};

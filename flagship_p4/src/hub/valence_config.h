@@ -34,9 +34,9 @@
 
 #define FIRMWARE_MAJOR_MINOR "0.1"
 #if NUCLEUS_BENCH_NO_MOTOR
-#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".43-p4hub-bench"
+#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".44-p4hub-bench"
 #else
-#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".43-p4hub"
+#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".44-p4hub"
 #endif
 
 // Identity strings for WELCOME key 37 (RFC-016a). Static storage, so the views
@@ -70,17 +70,16 @@
 #define DEFAULT_INPUT_MAX_JERK_MM_S3 20000000.0f
 #define MAX_JERK_MM_S3              50000000.0f
 
-// ---- The oscillator (RFC-103): the highest frequency it renders -------------
-// WELCOME limits osc_max_hz and the catalog's osc.frequency bound. Operator
-// ruling 2026-10-09 (bd val-dzf): 100 Hz, ten samples a period on the 1 ms
-// strip; the yield-first budget still holds the amplitude under every ceiling
-// (0.05 mm at 100 Hz under the factory set, test_motion_arbiter). NOT MEASURED
-// on the loaded drive (bd val-ael).
-#define OSC_MAX_HZ                  100.0f
-// The largest peak osc.amplitude takes, mm: half the longest rail configValid
-// accepts (ceiling::rail_mm), the most any window could hold (Valence RFC-112
-// item 1). The window and the ceilings narrow it at render, never the write.
-#define OSC_MAX_AMPLITUDE_MM        1000.0f
+// ---- The oscillator's caps (Valence RFC-112 item 6) ---------------------------
+// OSC_MAX_HZ is WELCOME limits osc_max_hz and the catalog's osc.frequency
+// bound; OSC_MAX_AMPLITUDE_MM the catalog max of osc.amplitude and its out
+// bounds, a peak. Both come from what the factory input set lets a sine
+// render, min(v/w, a/w^2, j/w^3) with w = 2 pi f: 30 Hz still renders about
+// 2 mm of peak, and 20 mm is the speed ceiling's peak at 10 Hz. Move them
+// with that set or a loaded measurement (bd val-ael), never with the travel.
+// The window and the ceilings narrow the amplitude at render, never the write.
+#define OSC_MAX_HZ                  30.0f
+#define OSC_MAX_AMPLITUDE_MM        20.0f
 
 #ifdef __cplusplus
 namespace valence {

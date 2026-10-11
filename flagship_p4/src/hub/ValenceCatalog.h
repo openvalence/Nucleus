@@ -332,8 +332,8 @@ inline constexpr float accel_max  = 100000.0f;    // MAX_ACCEL_MM_S2
 inline constexpr float jerk_min   = 1000.0f;
 inline constexpr float jerk_max   = 50000000.0f;  // MAX_JERK_MM_S3
 inline constexpr float home_speed_min = 5.0f;     // MIN_HOME_SPEED_MM_S; its max is speed_max
-inline constexpr float osc_max_hz = 100.0f;       // OSC_MAX_HZ, WELCOME limits osc_max_hz
-inline constexpr float osc_amp_mm = 1000.0f;      // OSC_MAX_AMPLITUDE_MM, half of rail_mm
+inline constexpr float osc_max_hz = 30.0f;        // OSC_MAX_HZ, WELCOME limits osc_max_hz
+inline constexpr float osc_amp_mm = 20.0f;        // OSC_MAX_AMPLITUDE_MM, a peak
 inline constexpr float osc_dwell_max = 4.0f;      // the longest hold, four moving cycles
 }  // namespace ceiling
 
@@ -1667,7 +1667,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // ending clears it (ValenceDevice.cpp onSessionLeft()). The two drives and
     // their bounds (SPEC 9.7) are appended, keys 7..16, frequency's then
     // amplitude's (kOscDriveCards).
-    //   [1 + 4 + 4 + 1 + 4 + 4 + 1 + 4 + 2 x (1 + 4 x 4) = 57 B]
+    //   [1 + 4 + 4 + 4 + 4 + 1 + 4 + 2 x (1 + 4 x 4) = 56 B]
     auto addOscillator = [&]() {
     c.addEntry({.id = ch::oscillator, .name = "oscillator",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1693,12 +1693,6 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .desc = "Peak displacement",
                       .step = 0.1f, .settingKey = 3, .hasSettingKey = true, .hasStep = true,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
-    c.addSelectField({.name = "shape", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 3.0f,
-                      .dflt = SettingDefault::ofInt(0), .group = "Oscillator",
-                      .desc = "Waveform",
-                      .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true},
-                     {"sine", "square", "saw", "saw_reverse"});
     c.addLayoutField({.name = "dwell_crest", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_dwell_max,
                       .dflt = SettingDefault::ofFloat(0.0f), .group = "Oscillator",
@@ -2314,10 +2308,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSchemaField({.key = 3, .name = "amplitude", .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_amp_mm,
                       .role = roles::osc_amplitude, .hasUnitId = true, .unitId = valence::unit_ids::mm});
-    c.addSelectSchemaField({.key = 4, .name = "shape", .type = CborFieldType::uint_t, .unit = "",
-                            .hasMin = true, .hasMax = true, .min = 0.0f, .max = 3.0f,
-                            .role = roles::osc_shape},
-                           {"sine", "square", "saw", "saw_reverse"});
+    // Key 4 stays unused: never reissue it (Valence RFC-112).
     c.addSchemaField({.key = 5, .name = "dwell_crest", .type = CborFieldType::f32_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_dwell_max,
                       .role = roles::osc_dwell_crest});

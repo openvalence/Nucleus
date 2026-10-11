@@ -3343,15 +3343,14 @@ namespace {
 
 using valence::MotionOsc;
 
-MotionOsc oscOn(float hz, float amp, uint8_t shape = 0, float crest = 0.0f, float trough = 0.0f) {
+MotionOsc oscOn(float hz, float amp, float crest = 0.0f, float trough = 0.0f) {
     MotionOsc o;
     o.enabled = true;
     o.frequency_hz = hz;
     o.amplitude = amp;
-    o.shape = shape;
     o.dwell_crest = crest;
     o.dwell_trough = trough;
-    // The fixed drives: the parameters are the fields and the shapes render
+    // The fixed drives: the parameters are the fields and the dwells render
     // (SPEC 9.7). The factory drive is axis, the driven mode's sine.
     o.frequency_drive.drive = valence::osc_drives::fixed;
     o.amplitude_drive.drive = valence::osc_drives::fixed;
@@ -3451,24 +3450,25 @@ TEST_CASE("oscillator: boots off; enabled at rest it swings the asked amplitude 
     CHECK(r->census().backstops == 0);
 }
 
-// Operator ruling 2026-10-09 (bd val-dzf): OSC_MAX_HZ is 100.
-TEST_CASE("oscillator at OSC_MAX_HZ: 100 Hz is taken, renders inside every ceiling, ten steer samples a period") {
+// Valence RFC-112 item 6: OSC_MAX_HZ is the cap the factory set still renders
+// about 2 mm of peak at.
+TEST_CASE("oscillator at OSC_MAX_HZ: the cap is taken, renders inside every ceiling, a period on the steer's grid") {
     auto r = restRig(250.0f);
     r->arb.setOscillator(oscOn(OSC_MAX_HZ, 5.0f));   // 5 mm asked: the ceilings shed it
     Heads h;
     runHeads(*r, 1'200'000, h);
     const MotionCensus c = r->census();
     CHECK(c.osc_active);
-    MESSAGE("amplitude at 100 Hz: ", c.osc_amplitude, " mm");
-    CHECK(c.osc_amplitude > 0.0f);
-    CHECK(c.osc_amplitude < 0.3f);
+    MESSAGE("amplitude at ", OSC_MAX_HZ, " Hz: ", c.osc_amplitude, " mm");
+    CHECK(c.osc_amplitude > 1.0f);
+    CHECK(c.osc_amplitude < 5.0f);
     const GridPeaks g = gridPeaks(h.p);
     CHECK(g.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
     CHECK(g.a <= DEFAULT_ACCEL_MM_S2 + kFdA);
     CHECK(g.j <= DEFAULT_INPUT_MAX_JERK_MM_S3 + kFdJ);
     const auto d = crossings(h.p, 250.0f, 600);
     REQUIRE(d.size() > 10);
-    for (const size_t ticks : d) CHECK(ticks == 10);
+    for (const size_t ticks : d) CHECK(double(ticks) == doctest::Approx(1000.0 / OSC_MAX_HZ).epsilon(0.04));
     CHECK(r->census().backstops == 0);
 }
 
@@ -3525,17 +3525,17 @@ TEST_CASE("oscillator under planned strokes: the strip never exceeds a ceiling o
 // SPEC 9.7 driven parameters on Kinetic's driven mode (bd val-o9r).
 TEST_CASE("oscillator drives: an osc-drive stream sweeping frequency moves it continuously inside every ceiling, osc.enabled off; silence fades it to rest") {
     auto r = restRig(250.0f);
-    MotionOsc o = oscOn(1.0f, 0.5f, 1);   // a square asked: driven, it plays a sine
+    MotionOsc o = oscOn(1.0f, 0.5f);
     o.enabled = false;   // the stream renders it (bd val-o9r (b))
     o.frequency_drive = {.drive = valence::osc_drives::axis, .out_max = OSC_MAX_HZ};
     o.amplitude_drive = {.drive = valence::osc_drives::axis, .out_max = 10.0f};
     r->arb.setOscillator(o);
     // A player at 50 Hz, leading by the grant's schedule latency: amplitude
-    // 0.5 of 10 mm, frequency 0.05 .. 0.2 of 100 Hz over two seconds.
+    // 0.5 of 10 mm, frequency 5 .. 20 Hz over two seconds.
     Heads h;
     const uint64_t t0 = g_now_us;
     for (uint64_t t = 0; t < 2'000'000; t += 20'000) {
-        const float f = 0.05f + 0.15f * float(t) / 2e6f;
+        const float f = (5.0f + 15.0f * float(t) / 2e6f) / OSC_MAX_HZ;
         r->arb.postOscDrive(0.5f, f, g_now_us + valence::kOscDriveLeadUs);
         for (int k = 0; k < 20; ++k) {
             r->run(1000);
@@ -3550,7 +3550,7 @@ TEST_CASE("oscillator drives: an osc-drive stream sweeping frequency moves it co
     const auto d = crossings(h.p, 250.0f, 400);
     REQUIRE(d.size() > 10);
     CHECK(d.front() > d.back());
-    CHECK(double(d.back()) == doctest::Approx(1000.0 / (100.0 * (0.05 + 0.15 * (2e6 - valence::kOscDriveLeadUs) / 2e6))).epsilon(0.1));
+    CHECK(double(d.back()) == doctest::Approx(1000.0 / (5.0 + 15.0 * (2e6 - valence::kOscDriveLeadUs) / 2e6)).epsilon(0.1));
     const GridPeaks g = gridPeaks(h.p);
     CHECK(g.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
     CHECK(g.a <= DEFAULT_ACCEL_MM_S2 + kFdA);
@@ -3629,57 +3629,30 @@ ShapeStats shapeStats(const std::vector<float>& p, size_t from, float mid, float
     return s;
 }
 
-// bd val-o9r, Valence RFC-110 item 3: an axis drive with no live stream is
-// exactly fixed, so the factory card renders every shape by hand.
-TEST_CASE("oscillator drives: the factory axis drives with no stream render the hand square and saw") {
-    for (const uint8_t shape : {uint8_t(1), uint8_t(2)}) {
-        auto r = restRig(250.0f);
-        MotionOsc o;   // the factory drives, both axis
-        o.enabled = true;
-        o.frequency_hz = 5.0f;
-        o.amplitude = 2.0f;   // mm
-        o.shape = shape;
-        r->arb.setOscillator(o);
-        Heads h;
-        runHeads(*r, 1'500'000, h);
-        const MotionCensus c = r->census();
-        CHECK(c.osc_active);
-        CHECK_FALSE(c.osc_stream_live);
-        const float a = c.osc_amplitude;
-        CHECK(a == doctest::Approx(2.0f).epsilon(0.02));
-        const ShapeStats s = shapeStats(h.p, 700, 250.0f, a);
-        MESSAGE("shape ", int(shape), ": near the peak ", s.nearPeak, ", rising ", s.rising);
-        if (shape == 1) CHECK(s.nearPeak > 0.6);    // a sine spends 0.29 there
-        if (shape == 2) CHECK(s.rising > 0.75);     // a sine rises half the time
-        for (const size_t ticks : crossings(h.p, 250.0f, 700)) CHECK(ticks == doctest::Approx(200).epsilon(0.02));
-        const GridPeaks g = gridPeaks(h.p);
-        CHECK(g.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
-        CHECK(g.a <= DEFAULT_ACCEL_MM_S2 + kFdA);
-        CHECK(g.j <= DEFAULT_INPUT_MAX_JERK_MM_S3 + kFdJ);
-        CHECK(c.backstops == 0);
-    }
-}
-
-// bd val-o9r, RFC-110 items 1 and 3: a stream over the hand square switches
-// the stage to the driven sine through rest, and quiet, back to the square
-// through rest.
-TEST_CASE("oscillator drives: a stream over a hand square fades through rest to the driven sine, and quiet back to the square") {
+// bd val-o9r, RFC-110 items 1 and 3: a stream over a hand dwelled sine
+// switches the stage to the driven sine, no dwells, through rest, and quiet,
+// back to the dwelled sine through rest.
+TEST_CASE("oscillator drives: a stream over a hand dwelled sine fades through rest to the driven sine, and quiet back to the dwells") {
     auto r = restRig(250.0f);
     MotionOsc o;
     o.enabled = true;
-    o.frequency_hz = 5.0f;
-    o.amplitude = 2.0f;   // a 2 mm square by hand
-    o.shape = 1;
+    o.frequency_hz = 10.0f;
+    o.amplitude = 2.0f;   // 2 mm by hand, a cycle held at each extreme
+    o.dwell_crest = 1.0f;
+    o.dwell_trough = 1.0f;
     o.amplitude_drive.out_max = 10.0f;
     r->arb.setOscillator(o);
     Heads h;
     runHeads(*r, 1'500'000, h);
     REQUIRE(r->census().osc_amplitude == doctest::Approx(2.0f).epsilon(0.02));
-    CHECK(shapeStats(h.p, 700, 250.0f, 2.0f).nearPeak > 0.6);
+    const ShapeStats held = shapeStats(h.p, 700, 250.0f, 2.0f);
+    MESSAGE("dwelled: near the peak ", held.nearPeak);
+    CHECK(held.nearPeak > 0.6);   // a sine spends 0.29 there
+    for (const size_t ticks : crossings(h.p, 250.0f, 700)) CHECK(ticks == doctest::Approx(300).epsilon(0.02));
     // A player at 50 Hz for 1.5 s: 5 mm at 10 Hz.
     std::vector<float> amp;
     for (uint64_t t = 0; t < 1'500'000; t += 20'000) {
-        r->arb.postOscDrive(0.5f, 0.1f, g_now_us + valence::kOscDriveLeadUs);
+        r->arb.postOscDrive(0.5f, 10.0f / OSC_MAX_HZ, g_now_us + valence::kOscDriveLeadUs);
         for (int k = 0; k < 20; ++k) {
             r->run(1000);
             h.take(r->arb);
@@ -3687,14 +3660,14 @@ TEST_CASE("oscillator drives: a stream over a hand square fades through rest to 
         }
     }
     CHECK(r->census().osc_stream_live);
-    // Through rest: the square fades out before the sine fades in.
+    // Through rest: the dwelled sine fades out before the driven one fades in.
     CHECK(*std::min_element(amp.begin(), amp.begin() + 400) == 0.0f);
     CHECK(r->census().osc_amplitude == doctest::Approx(5.0f).epsilon(0.02));
     const ShapeStats sine = shapeStats(h.p, h.p.size() - 500, 250.0f, 5.0f);
     MESSAGE("driven: near the peak ", sine.nearPeak);
     CHECK(sine.nearPeak < 0.4);
     for (const size_t ticks : crossings(h.p, 250.0f, h.p.size() - 500)) CHECK(ticks == doctest::Approx(100).epsilon(0.02));
-    // Quiet: rest, then the hand square again.
+    // Quiet: rest, then the hand dwells again.
     amp.clear();
     const uint64_t back = uint64_t(valence::limits::stream_quiet_release_ms) * 1000u + valence::kOscDriveLeadUs + 1'200'000;
     for (uint64_t t = 0; t < back; t += 1000) {
@@ -3706,7 +3679,7 @@ TEST_CASE("oscillator drives: a stream over a hand square fades through rest to 
     CHECK(*std::min_element(amp.begin(), amp.end()) == 0.0f);
     CHECK(r->census().osc_amplitude == doctest::Approx(2.0f).epsilon(0.02));
     CHECK(shapeStats(h.p, h.p.size() - 600, 250.0f, 2.0f).nearPeak > 0.6);
-    for (const size_t ticks : crossings(h.p, 250.0f, h.p.size() - 600)) CHECK(ticks == doctest::Approx(200).epsilon(0.02));
+    for (const size_t ticks : crossings(h.p, 250.0f, h.p.size() - 600)) CHECK(ticks == doctest::Approx(300).epsilon(0.02));
     const GridPeaks g = gridPeaks(h.p);
     CHECK(g.v <= DEFAULT_MAX_SPEED_MM_S + kFdV);
     CHECK(g.a <= DEFAULT_ACCEL_MM_S2 + kFdA);
@@ -3724,7 +3697,7 @@ TEST_CASE("oscillator drives: a live stream never lifts PAUSE or ESTOP") {
     r->arb.setOscillator(o);
     auto play = [&](uint64_t us) {
         for (uint64_t t = 0; t < us; t += 20'000) {
-            r->arb.postOscDrive(0.5f, 0.1f, g_now_us + valence::kOscDriveLeadUs);
+            r->arb.postOscDrive(0.5f, 10.0f / OSC_MAX_HZ, g_now_us + valence::kOscDriveLeadUs);
             r->run(20'000);
         }
     };
@@ -3766,17 +3739,17 @@ TEST_CASE("oscillator drives: speed drives the amplitude from the plan it rides;
     CHECK(r->census().osc_amplitude == doctest::Approx(2.0f).epsilon(0.02));
 }
 
-TEST_CASE("oscillator: dwells stretch its period; a square with a trough dwell is a pulse") {
+TEST_CASE("oscillator: dwells stretch its period; a trough dwell holds the sine low, a pulse") {
     {
         auto r = restRig(250.0f);
-        r->arb.setOscillator(oscOn(4.0f, 5.0f, 0, 0.3f, 0.0f));
+        r->arb.setOscillator(oscOn(4.0f, 5.0f, 0.3f, 0.0f));
         Heads h;
         runHeads(*r, 2'400'000, h);
         for (const size_t d : crossings(h.p, 250.0f, 600)) CHECK(d == doctest::Approx(325).epsilon(0.01));
     }
     {
         auto r = restRig(250.0f);
-        r->arb.setOscillator(oscOn(5.0f, 1.0f, 1, 0.0f, 1.0f));
+        r->arb.setOscillator(oscOn(5.0f, 1.0f, 0.0f, 1.0f));
         Heads h;
         runHeads(*r, 3'000'000, h);
         size_t up = 0;
@@ -3789,17 +3762,17 @@ TEST_CASE("oscillator: dwells stretch its period; a square with a trough dwell i
 // Valence RFC-112 item 2: a swing wider than the room narrows about the
 // planned position, never shifts to fit; amplitude_effective reports it.
 TEST_CASE("oscillator: the window edge narrows the swing about the rest, never moves its center, and the clamped flag says so") {
-    auto r = restRig(20.0f);
-    r->arb.setOscillator(oscOn(5.0f, 50.0f));   // 50 mm asked, 20 mm to the edge
+    auto r = restRig(10.0f);
+    r->arb.setOscillator(oscOn(5.0f, OSC_MAX_AMPLITUDE_MM));   // 20 mm asked, 10 mm to the edge
     Heads h;
     runHeads(*r, 1'500'000, h);
     const MotionCensus c = r->census();
-    CHECK(c.osc_amplitude <= 20.0f);
-    CHECK(c.osc_amplitude > 17.5f);
+    CHECK(c.osc_amplitude <= 10.0f);
+    CHECK(c.osc_amplitude > 8.75f);
     CHECK((c.plan_flags & valence::plan_flags::clamped) != 0);
     CHECK(gridPeaks(h.p).lo >= 0.0);
     const GridPeaks g = gridPeaks(std::vector<float>(h.p.end() - 400, h.p.end()));
-    CHECK((g.lo + g.hi) / 2.0 == doctest::Approx(20.0).epsilon(0.01));
+    CHECK((g.lo + g.hi) / 2.0 == doctest::Approx(10.0).epsilon(0.01));
     CHECK((g.hi - g.lo) / 2.0 == doctest::Approx(c.osc_amplitude).epsilon(0.01));
     CHECK(c.backstops == 0);
 }
@@ -3914,7 +3887,7 @@ TEST_CASE("oscillator: a window write while it rides the rest neither stops, ste
 // every window, through a window write while it streams.
 TEST_CASE("oscillator drives: V8 maps through the card's mm, the same swing before and after a window write") {
     auto r = restRig(250.0f);
-    MotionOsc o;   // the factory card: both drives axis, V8 onto 0 .. 20 mm, V9 onto 0 .. 100 Hz
+    MotionOsc o;   // the factory card: both drives axis, V8 onto 0 .. 20 mm, V9 onto 0 .. OSC_MAX_HZ
     REQUIRE(o.amplitude_drive.out_min == 0.0f);
     REQUIRE(o.amplitude_drive.out_max == 20.0f);
     r->arb.setOscillator(o);
@@ -3922,7 +3895,7 @@ TEST_CASE("oscillator drives: V8 maps through the card's mm, the same swing befo
     std::vector<float> amp;
     auto play = [&](uint64_t us) {
         for (uint64_t t = 0; t < us; t += 20'000) {
-            r->arb.postOscDrive(0.5f, 0.05f, g_now_us + valence::kOscDriveLeadUs);   // V8 50, V9 5 (5 Hz)
+            r->arb.postOscDrive(0.5f, 5.0f / OSC_MAX_HZ, g_now_us + valence::kOscDriveLeadUs);   // V8 50, 5 Hz
             for (int k = 0; k < 20; ++k) {
                 r->run(1000);
                 h.take(r->arb);
