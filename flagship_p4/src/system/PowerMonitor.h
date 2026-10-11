@@ -19,9 +19,16 @@
 // - The boot and read sequences take a register port, never the bus: the
 //   IDF glue passes its I2C device, test_power_monitor a fake register file
 //   that models each part's widths and its reserved bits.
-// See: Hardware flagship/SPEC.md (2026-09-24 U11 row), bd val-091.22
+// - U11 sits AFTER the motor switch (SPEC 2026-09-23 row): its VBUS is
+//   MOTOR_V+ and its current the motor's alone. The system voltage is the
+//   board monitor's +BUS; pickPower() is the one place that chooses.
+// - BusOwner and PowerHandoff are the bus's runtime ownership: one task reads
+//   the private bus, every other task reads the hand-off (ValencePower.h).
+// See: Hardware flagship/SPEC.md (2026-09-24 U11 row), bd val-091.22, val-9hr
 
 #include <array>
+#include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -242,4 +249,89 @@ std::optional<PowerReading> readPower(Port& port, const PowerScale& s) {
 }
 
 }  // namespace ina2xx
+
+// ---- the bus's runtime owner ------------------------------------------------------
+
+// Who may touch the private bus. Unclaimed during boot, when app_main is the
+// only caller (powerBegin(), the self-check); claim() then hands the bus to
+// one task for the rest of the boot, and mayUse() refuses every other.
+// Id is the task's handle; a default-constructed Id means unclaimed.
+template <class Id>
+class BusOwner {
+public:
+    // True when `self` now owns the bus: the first claim, or a repeat by the owner.
+    bool claim(Id self) {
+        Id none{};
+        return _owner.compare_exchange_strong(none, self) || none == self;
+    }
+    bool mayUse(Id self) const {
+        const Id o = _owner.load();
+        return o == Id{} || o == self;
+    }
+
+private:
+    std::atomic<Id> _owner{};
+};
+
+// ---- the power hand-off -------------------------------------------------------------
+
+// The system voltage and the draw at one instant; nullopt = no reading, never 0.
+struct PowerNow {
+    std::optional<float> bus_v;    // system (+BUS) voltage
+    std::optional<float> draw_w;   // what the motor path draws from it
+};
+
+// The bus owner's latest PowerNow, for any task, as ONE 32-bit word: bus
+// millivolts in the low half, draw in tenths of a watt in the high half,
+// 0xFFFF in a half for no reading. A word the CPU stores and loads whole is
+// why a reader never sees one half from an older reading. Readers never wait
+// and never touch the bus.
+class PowerHandoff {
+public:
+    static constexpr uint16_t kNone = 0xFFFF;
+
+    // The bus owner only.
+    void publish(const PowerNow& p) {
+        _word.store(uint32_t(half(p.bus_v, 1000.0f)) | (uint32_t(half(p.draw_w, 10.0f)) << 16),
+                    std::memory_order_relaxed);
+    }
+    // Any task. No reading until the owner's first publish.
+    PowerNow latest() const {
+        const uint32_t w = _word.load(std::memory_order_relaxed);
+        return {unhalf(uint16_t(w), 1000.0f), unhalf(uint16_t(w >> 16), 10.0f)};
+    }
+
+    // A value as one half: a negative or NaN reading is no reading; a high
+    // one saturates one count under kNone, so it can never read as none.
+    static uint16_t half(std::optional<float> v, float perUnit) {
+        if (!v || !(*v >= 0.0f)) return kNone;
+        const float x = *v * perUnit;
+        return x >= float(kNone - 1) ? uint16_t(kNone - 1) : uint16_t(x + 0.5f);
+    }
+    static std::optional<float> unhalf(uint16_t h, float perUnit) {
+        if (h == kNone) return std::nullopt;
+        return float(h) / perUnit;
+    }
+
+private:
+    std::atomic<uint32_t> _word{0xFFFFFFFFu};
+};
+
+// The owner's pick. Voltage: the board monitor's +BUS when it answered;
+// failing that, U11's MOTOR_V+ while the switch is on (it then follows +BUS
+// less the switch's drop); otherwise none. Draw: U11's V x I, which is the
+// motor path only (the logic rails are not on R2), with regen read as 0,
+// since a returning motor draws nothing from the supply.
+// ponytail: one sample a second of a stroking load, not its mean; the
+// INA228's ENERGY register or a faster owner poll gives the mean.
+inline PowerNow pickPower(std::optional<float> monitorBusV, const std::optional<PowerReading>& u11,
+                          bool switchOn) {
+    PowerNow p;
+    if (monitorBusV) p.bus_v = monitorBusV;
+    else if (u11 && switchOn) p.bus_v = u11->bus_v;
+    if (u11 && std::isfinite(u11->bus_v * u11->current_a))
+        p.draw_w = std::fmax(0.0f, u11->bus_v * u11->current_a);
+    return p;
+}
+
 }  // namespace valence

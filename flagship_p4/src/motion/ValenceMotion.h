@@ -81,6 +81,8 @@ struct MotionIntent {
 // publish 0x1100 / 0x1110 / 0x1111 / 0x1020 out of a single read.
 struct MotionCensus {
     // ---- position truth and the plan ----
+    uint64_t sample_us      = 0;     // deviceNowUs() when this census was read:
+                                     // the instant every field below describes
     int32_t  steps          = 0;     // LP signed edge count since the origin
     float    position_mm    = 0.0f;  // that count, in millimeters
     float    plan_mm        = 0.0f;  // where the plan says the carriage should be

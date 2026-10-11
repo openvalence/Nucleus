@@ -14,4 +14,10 @@ if(NUCLEUS_BENCH_NO_MOTOR)
     idf_build_set_property(COMPILE_DEFINITIONS "NUCLEUS_BENCH_NO_MOTOR=1" APPEND)
     message(WARNING "NUCLEUS_BENCH_NO_MOTOR: bench profile, the motor-power gate is advisory")
 endif()
+# PROJECT_VER (esp_app_desc.version) is the label git_label.py writes on every
+# pio run. IDF's fallback, git describe at configure time, goes stale under
+# pio (bd val-73g); it applies only to a build that bypasses pio.
+if(EXISTS "${CMAKE_BINARY_DIR}/git_label.txt")
+    file(READ "${CMAKE_BINARY_DIR}/git_label.txt" PROJECT_VER)
+endif()
 project(flagship_p4)

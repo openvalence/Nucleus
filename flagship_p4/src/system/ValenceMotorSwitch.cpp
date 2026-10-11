@@ -13,8 +13,13 @@
 //   adc_oneshot_read only try-locks its unit, so a read from a second task
 //   fails instead of waiting, and a failed EN-node read is NaN, which trips
 //   en_node and cuts motor power. Another ADC1 pin joins this task's poll,
-//   never a task of its own. It alone calls powerRead() and
-//   powerTakeAlerts() here.
+//   never a task of its own.
+// - The switch task is also the POWER BUS's one owner once the self-check's
+//   verdict lands (powerClaimBus(), ValencePower.h): the pre-charge window's
+//   MOTOR_V+ read, the ALERT re-arm, and once a second outside pre-charge the
+//   board monitor's +BUS and U11's V and I, handed to every other task as one
+//   word (PowerHandoff, motorSwitchPower()). A failed read hands over no
+//   reading, never a 0. A new device on that bus joins this task's poll.
 // - MOTOR_EN and PRECHARGE_EN are outputs driven low from
 //   selfCheckHoldMotorOff(); this file is the only one that drives them high.
 // - Task "MotorSw": core 0, priority 5, kMotorSwitchTaskStackBytes of
@@ -27,6 +32,7 @@
 
 #include "system/ValenceMotorSwitch.h"
 
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -44,6 +50,7 @@
 #include "geiger/geiger.h"
 #include "motion/ValenceMotion.h"
 #include "system/BoardPins.h"
+#include "system/Supervisor.h"
 #include "system/ValencePower.h"
 
 namespace valence {
@@ -108,6 +115,14 @@ uint32_t g_thermPolls = 0;
 // Written by the switch task, read anywhere. NaN = unreadable.
 std::atomic<float> g_thermV{kNaN};
 std::atomic<bool> g_thermSampled{false};
+
+// The 1 Hz power reading: written by the switch task, read anywhere.
+PowerHandoff g_power;
+// Set by motorSwitchSetSelfCheck(): app_main is done with the power bus.
+std::atomic<bool> g_verdict{false};
+// The switch task's alone.
+bool g_busClaimed = false;
+bool g_busOwned = false;
 
 // Under g_mux only. MOTOR_EN is written first both ways: closing, the main
 // FETs take the bus before the pre-charge path lets go; opening, the main
@@ -200,6 +215,19 @@ Readings readPins() {
     return r;
 }
 
+// The once-a-second power read, on the bus's owner only.
+void samplePower(bool switchOn) {
+    std::optional<float> busV;
+    std::array<uint8_t, SV_STATUS_LEN> b{};
+    SvStatus s{};
+    // A monitor still on its first scan, or with its own supply out of window,
+    // has no +BUS worth reporting.
+    if (boardMonitorRead(SV_REG_STATUS, b) == ESP_OK && sv_status_decode(b.data(), b.size(), &s) == SV_OK &&
+        (s.faults_live & (SV_F_BOOT | SV_F_VDD)) == 0)
+        busV = float(s.mv[SV_CH_BUS]) / 1000.0f;
+    g_power.publish(pickPower(busV, powerRead(), switchOn));
+}
+
 // ---- the task ------------------------------------------------------------------
 
 void logTransition(State is, Fault f, const Readings& r) {
@@ -267,6 +295,11 @@ void serviceEnable() {
 void taskMain(void*) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kPollMs));
+        if (!g_busClaimed && g_verdict.load(std::memory_order_acquire)) {
+            g_busClaimed = true;
+            g_busOwned = powerClaimBus();
+            if (!g_busOwned) GLOGE(kTag, "power bus owned by another task: no power reading");
+        }
         if (g_enableReq.exchange(false)) serviceEnable();
 
         Readings r = readPins();
@@ -292,6 +325,8 @@ void taskMain(void*) {
             g_thermPolls = 0;
             g_thermV.store(readVolts(g_chTherm, g_caliTherm, kThermSamples), std::memory_order_relaxed);
             g_thermSampled.store(true, std::memory_order_release);
+            // Never inside the pre-charge window: its one I2C read is the window's own.
+            if (g_busOwned && is != State::precharging) samplePower(is == State::on);
         }
         // Every entry into and exit from `on`, a cut from another task
         // included, reaches the arbiter from here and only from here.
@@ -331,6 +366,7 @@ void motorSwitchSetSelfCheck(bool passed) {
     portENTER_CRITICAL(&g_mux);
     g_allowed = passed;
     portEXIT_CRITICAL(&g_mux);
+    g_verdict.store(true, std::memory_order_release);
     if (passed) motorSwitchRequestEnable();
 }
 
@@ -374,6 +410,8 @@ MotorSwitchStatus motorSwitchStatus() {
 }
 
 bool motorSwitchFaultLine() { return gpio_get_level(pin(BOARD_GPIO_MSW_FLT_N)) == 0; }
+
+PowerNow motorSwitchPower() { return g_power.latest(); }
 
 std::optional<float> motorSwitchThermVolts() {
     if (!g_thermSampled.load(std::memory_order_acquire)) return std::nullopt;

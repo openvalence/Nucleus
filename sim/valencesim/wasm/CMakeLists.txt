@@ -65,6 +65,6 @@ target_link_options(integral PRIVATE
     -sALLOW_MEMORY_GROWTH=1
     -sSTACK_SIZE=1MB
     -sFILESYSTEM=0
-    -sEXPORTED_FUNCTIONS=_malloc,_free,_integral_create,_integral_tick,_integral_connect,_integral_disconnect,_integral_send,_integral_poll,_integral_http,_integral_state_get,_integral_destroy
+    -sEXPORTED_FUNCTIONS=_malloc,_free,_integral_create,_integral_tick,_integral_connect,_integral_disconnect,_integral_send,_integral_poll,_integral_http,_integral_state_get,_integral_destroy,_integral_pair_press,_integral_datagram
     -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32,stringToNewUTF8,UTF8ToString)
 set_target_properties(integral PROPERTIES SUFFIX ".js")

@@ -1717,6 +1717,7 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     if (std::fabs(vel_mm_s) > _peak_mm_s) _peak_mm_s = std::fabs(vel_mm_s);
 
     MotionCensus c{};
+    c.sample_us      = now_us;
     c.steps          = steps - _origin;
     c.position_mm    = float(c.steps) * kMmPerStep;
     // The plan's position with the oscillation summed in: what the steer is

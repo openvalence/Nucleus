@@ -12,7 +12,8 @@
 //   (MotorSwitch.h precheck()); the EN node is judged by the switch's own
 //   task after the INA ALERT re-arm, and a refusal there is logged, not
 //   returned.
-// - motorSwitchStatus(): any task, one consistent copy.
+// - motorSwitchStatus(), motorSwitchPower(): any task, one consistent copy,
+//   never blocking.
 // - The implementation pushes every entry into and exit from `on` to the
 //   arbiter (motionSetMotorPowered), so motion is gated on exactly the state
 //   this door reports.
@@ -22,6 +23,7 @@
 #include <optional>
 
 #include "system/MotorSwitch.h"
+#include "system/PowerMonitor.h"
 
 namespace valence {
 
@@ -64,6 +66,13 @@ bool motorSwitchFaultLine();
 // Board only: the switch task's stack high-water headroom, bytes; 0 before
 // motorSwitchBegin().
 uint32_t motorSwitchStackFree();
+
+// The system voltage and the motor path's draw, read once a second by the
+// switch task, which owns the power bus from the self-check's verdict on
+// (ValencePower.h). Each value is nullopt until that task's first read, after
+// a failed read, and where the hardware has nothing to say; never a 0
+// standing in for one. The twin reports its modeled supply.
+PowerNow motorSwitchPower();
 
 // Board only: THERM (G16) in volts, sampled once a second by the switch task
 // because that task is ADC1's one reader (ValenceMotorSwitch.cpp). Any task.

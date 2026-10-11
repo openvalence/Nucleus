@@ -37,6 +37,10 @@ constexpr const char* kTag = "msw";
 
 // A 36 V supply profile and the EN node's running level (MotorSwitch.h).
 constexpr float kBusV = 36.0f;
+// motorSwitchPower()'s model: the motor path's draw while powered, a drive
+// holding at rest. A modeled figure, not a measurement (the 0x1010 field
+// desc says so); motion does not move it.
+constexpr float kVirtualHoldW = 4.0f;
 constexpr float kEnNodeRunningV = 1.8f;
 
 bool g_model = false;
@@ -128,6 +132,10 @@ void motorSwitchCut() {
     if (!g_model) return;
     g_sw.cut();
     push();
+}
+
+PowerNow motorSwitchPower() {
+    return {kBusV, motorSwitchStatus().state == State::on ? kVirtualHoldW : 0.0f};
 }
 
 MotorSwitchStatus motorSwitchStatus() {

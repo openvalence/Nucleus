@@ -30,6 +30,7 @@ idf_component_register(SRCS "main.cpp"
                             "system/ValenceAccessoryIo.cpp"
                             "system/ValencePdSource.cpp"
                             "system/ValenceHomeSense.cpp"
+                            "system/ValenceTcpTally.cpp"
                        INCLUDE_DIRS "." "hub" "motion" "system"
                                     "../../lib/valence/include"
                                     "../../lib/geiger/include"
@@ -59,6 +60,13 @@ idf_component_register(SRCS "main.cpp"
 # emits fmadd.s, and the planner must match kinetic.wasm and the native suite,
 # both built -ffp-contract=off, bit for bit. Do not drop it for speed.
 target_compile_options(${COMPONENT_LIB} PRIVATE -ffp-contract=off)
+
+# lwIP's segment output hook (system/ValenceTcpHook.h): IDF includes the file
+# named by ESP_IDF_LWIP_HOOK_FILENAME from lwip_default_hooks.h, so only the
+# lwip component needs the define and the include path.
+idf_component_get_property(lwip_lib lwip COMPONENT_LIB)
+target_compile_definitions(${lwip_lib} PRIVATE "ESP_IDF_LWIP_HOOK_FILENAME=\"ValenceTcpHook.h\"")
+target_include_directories(${lwip_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/system")
 
 # ulp_embed_binary builds ulp/ with the LP core toolchain, embeds ulp_main.bin
 # into the app, and generates ulp_main.h (every LP global as ulp_<name>). The

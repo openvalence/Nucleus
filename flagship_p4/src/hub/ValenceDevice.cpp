@@ -377,7 +377,7 @@ void publishPacked(Hub& hub, uint16_t id, std::span<const std::byte> buf, size_t
 // packed struct to static_assert against).
 
 void publishMotion(Hub& hub, const MotionCensus& m, bool genRunning) {
-    std::array<std::byte, 9> buf{};
+    std::array<std::byte, 13> buf{};
     size_t n = 0;
     packU16(buf, n, wireU16(m.position_mm, 100.0f));   // pos_10um
     // tgt_10um is the plan's AIM, m.target_mm, never m.plan_mm. plan_mm is
@@ -393,6 +393,7 @@ void publishMotion(Hub& hub, const MotionCensus& m, bool genRunning) {
                  (m.paused ? 0x08u : 0u) | (m.override_mode ? 0x10u : 0u) |
                  (m.estop ? 0x20u : 0u) | (m.stream ? 0x40u : 0u)));
     packU16(buf, n, wireU16(m.demand_mm, 100.0f));     // raw_10um: the asked position
+    packU32(buf, n, uint32_t(m.sample_us));            // t_us: hub-us the census was read
     // AT RATE, not on change. An on-change gate looks like an economy and is a
     // ground-truth hazard on a hero channel: a machine at rest stops pushing,
     // so a subscriber that joined late, or whose retained value never landed,
@@ -461,6 +462,16 @@ void publishOdometer(Hub& hub, const MotionCensus& m) {
     packF32(buf, n, 0.0f);                             // energy_wh: no power monitor
     packU32(buf, n, uint32_t(deviceNowUs() / 1000));
     publishPacked(hub, ch::odometer, buf, n);
+}
+
+// Layout per ValenceCatalog.h's power entry: 4 B. A value the switch task has
+// no reading for goes out as 65535, never 0 (PowerHandoff's none, kept as is).
+void publishPower(Hub& hub, const PowerNow& p) {
+    std::array<std::byte, 4> buf{};
+    size_t n = 0;
+    packU16(buf, n, PowerHandoff::half(p.bus_v, 1000.0f));   // bus_mV
+    packU16(buf, n, PowerHandoff::half(p.draw_w, 10.0f));    // draw_w10
+    publishPacked(hub, ch::power, buf, n);
 }
 
 // Layout per ValenceCatalog.h's machine-modes entry: 13 B, plus home_style
@@ -1354,8 +1365,11 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     MotionIntent in;
     in.source    = MotionSource::Manual;
     in.target_mm = *numberOf(f1);
-    _jogMark = c.intents + c.rejected;
+    // The mark is the count before the submit, so a move the planner takes at
+    // once still reads as taken; it is stored only once the submit lands, so
+    // a refused move leaves the last submitted move's mark (sourceQuiet()).
     if (!motionSubmit(in)) return refuse(NackCode::INTERLOCK, "motion path refused the intent");
+    _jogMark = c.intents + c.rejected;
 
     // Ground truth: echo the post-clamp position, against the SAME bounds the
     // arbiter clamps a Manual intent to: the whole rail under override, the
@@ -1864,8 +1878,9 @@ uint8_t ValenceDevice::sourceKind(uint8_t source_id) {
 }
 
 // RFC-098: a generator is quiet once stopped and no longer driving (its stop's
-// brake done); the jog once the motion task took the move and the plan is at
-// rest. A refused jog submitted nothing, so its slot is quiet at rest.
+// brake done); the jog once the motion task took the last move submitted and
+// the plan is at rest. A refused jog submitted nothing and marks nothing, so
+// it never holds the slot (bd val-u8a).
 bool ValenceDevice::sourceQuiet(uint8_t source_id) {
     switch (MotionSource(source_id)) {
         case MotionSource::Manual: {
@@ -1901,10 +1916,12 @@ std::optional<HubDelegate::BlobView> ValenceDevice::readBlob(uint8_t ns, uint8_t
 // ---- retained STATE --------------------------------------------------------------
 
 void ValenceDevice::publishHubStatus() {
-    // 4+4+1+1+4+1+1 = 16 B, matching the 0x0006 layout in ValenceCatalog.h.
+    // 4+4+1+1+4+1+1+2 = 18 B, matching the 0x0006 layout in ValenceCatalog.h.
     const int8_t rssi = _linkRssi.load(std::memory_order_relaxed);
+    const LinkTcp tcp = deviceLinkTcp();
+    const uint16_t resent = _resentWindow.push(uint32_t(deviceNowUs() / 1000), tcp.sent, tcp.resent);
     _mswSent = motorSwitchStatus();
-    std::array<std::byte, 16> buf{};
+    std::array<std::byte, 18> buf{};
     std::span<std::byte> s(buf);
     putU32(s.subspan(0, 4), deviceFreeHeapBytes());
     putU32(s.subspan(4, 4), uint32_t(deviceNowUs() / 1000000));
@@ -1913,6 +1930,7 @@ void ValenceDevice::publishHubStatus() {
     putU32(s.subspan(10, 4), _hub->logDropped());
     putU8(s.subspan(14, 1), uint8_t(_mswSent.state));
     putU8(s.subspan(15, 1), uint8_t(_mswSent.last_fault));
+    putU16(s.subspan(16, 2), resent);
     _hub->publishState(channels::hub_status, s);
 }
 
@@ -2102,8 +2120,6 @@ void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     _hub = &hub;
     _catalog = &catalog;
     _anomTokens = kAnomalyEventBurst;
-    if (const CatalogEntry* e = catalog.find(ch::motion)) _motionPace.granted_rate_hz = e->maxRateHz;
-    if (const CatalogEntry* e = catalog.find(ch::plan_strip)) _stripPace.granted_rate_hz = e->maxRateHz;
     // The declaration's one home is the composition's setEstopCutsPower().
     motionSetEstopCutsPower(hub.estopCutsPower());
     hub.publishControlOwnerStateIfPresent();
@@ -2118,6 +2134,7 @@ void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
     publishPlanStrip(hub, mo);
     publishMotionDiag(hub, mo, _ingressDrops.total(), _segBundles);
     publishOdometer(hub, mo);
+    if (boardFeatures().has_current_sensor) publishPower(hub, motorSwitchPower());
     motionSetOscillator(_osc);
     publishOscillator(mo, true);
     if (boardFeatures().has_pattern) {
@@ -2250,7 +2267,12 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _hub->latchEstop(safety_causes::fault, uint8_t(AccessLevel::configure));
     }
     // The motion plane, from ONE census so no two channels disagree about the
-    // same instant. 0x1100 and 0x1110 publish at their catalog ceilings.
+    // same instant. 0x1100 and 0x1110 refresh their retained values on every
+    // tick and the hub's grant pacing is their only pacing (Valence
+    // subscription.hpp, a rate-0 grant held to the catalog ceiling). Do not
+    // pace them here: a second schedule beats against every grant at another
+    // rate, and a push then carries a value 5 to 20 ms old in a 100 ms cycle
+    // (bd val-7f5).
     const MotionCensus mo = motionCensus();
 
     // Every tick, not at the 1 Hz publish: a slot's counter dies with its
@@ -2301,14 +2323,8 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
               mo.home_fail_why != nullptr ? mo.home_fail_why : "no reason recorded",
               mo.homed ? "" : ", unhomed");
     }
-    if (_motionPace.dueForPush(nowMs, true)) {
-        _motionPace.markPushed(nowMs);
-        publishMotion(*_hub, mo, patternActive());
-    }
-    if (_stripPace.dueForPush(nowMs, true)) {
-        _stripPace.markPushed(nowMs);
-        publishPlanStrip(*_hub, mo);
-    }
+    publishMotion(*_hub, mo, patternActive());
+    publishPlanStrip(*_hub, mo);
     if (uint32_t(nowMs - _lastOscMs) >= 50u) {
         _lastOscMs = nowMs;
         publishOscillator(mo, false);   // what renders moves with the plan
@@ -2322,6 +2338,7 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _lastSlowMs = nowMs;
         publishMotionDiag(*_hub, mo, _ingressDrops.total(), _segBundles);
         publishOdometer(*_hub, mo);
+        if (boardFeatures().has_current_sensor) publishPower(*_hub, motorSwitchPower());
     }
 
     if (_tuneDirty != 0) {

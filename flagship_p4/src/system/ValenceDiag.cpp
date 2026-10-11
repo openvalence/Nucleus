@@ -13,6 +13,7 @@
 #include <new>
 #include <string_view>
 
+#include <esp_app_desc.h>
 #include <esp_attr.h>
 #include <esp_heap_caps.h>
 #include <esp_http_server.h>
@@ -194,8 +195,11 @@ esp_err_t handleGet(httpd_req_t* req) {
     // route of its own: "the new version answers" only proves the image
     // booted, and one that boots but never buys itself is a single reset from
     // being gone. The deploy tool reads this line.
-    out.emit("# %s %s slot=%s img=%s boot=%lu reset=%s up=%lus\n",
-             VALENCE_HUB_NAME, FIRMWARE_VERSION, otaRunningSlot(),
+    // git= is the commit the image was built from (flagship_p4/git_label.py);
+    // FIRMWARE_VERSION stays the second field, the one ota.py parses.
+    out.emit("# %s %s git=%s slot=%s img=%s boot=%lu reset=%s up=%lus\n",
+             VALENCE_HUB_NAME, FIRMWARE_VERSION, esp_app_get_description()->version,
+             otaRunningSlot(),
              otaPendingVerify() ? "pending" : "valid",
              static_cast<unsigned long>(g_ar->_bootSeq),
              resetName(esp_reset_reason()),

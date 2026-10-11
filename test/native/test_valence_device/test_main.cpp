@@ -98,9 +98,14 @@ namespace valence {
 
 uint64_t deviceNowUs() { return g_clock.nowUs(); }
 uint32_t deviceFreeHeapBytes() { return 0; }
+LinkTcp g_linkTcp{};
+LinkTcp deviceLinkTcp() { return g_linkTcp; }
 
 bool motionBegin() { return true; }
+// False: the motion door refuses the intent, as a full queue does.
+bool g_submitOk = true;
 bool motionSubmit(const MotionIntent& in) {
+    if (!g_submitOk) return false;
     ++g_submits;
     g_intents.push_back(in);
     return true;
@@ -172,6 +177,8 @@ MotorSwitchStatus motorSwitchStatus() { return g_switch; }
 bool motorSwitchFaultLine() { return false; }
 uint32_t motorSwitchStackFree() { return 0; }
 std::optional<float> motorSwitchThermVolts() { return std::nullopt; }
+PowerNow g_powerNow{};
+PowerNow motorSwitchPower() { return g_powerNow; }
 
 button::Gesture homeButtonTake() { return std::exchange(g_homeGesture, button::Gesture::none); }
 button::Gesture pairButtonTake() { return std::exchange(g_pairGesture, button::Gesture::none); }
@@ -235,8 +242,8 @@ struct Rig {
     RecordingClient del{};
     std::optional<Client> client{};
 
-    // motionHz > 0 also subscribes 0x1100 at that rate.
-    explicit Rig(AccessLevel role = AccessLevel::control, float motionHz = 0.0f) {
+    // motionHz > 0 also subscribes 0x1100 at that rate; hubStatus, 0x0006 and 0x1010.
+    explicit Rig(AccessLevel role = AccessLevel::control, float motionHz = 0.0f, bool hubStatus = false) {
         g_census = MotionCensus{};
         g_census.homed = true;
         g_census.motor_on = true;
@@ -248,6 +255,7 @@ struct Rig {
         g_homeCalls = 0;
         g_driveAlarm = false;
         g_submits = g_patPushes = 0;
+        g_submitOk = true;
         g_intents.clear();
         g_switch = MotorSwitchStatus{};
         g_switch.state = motorswitch::State::on;
@@ -257,6 +265,8 @@ struct Rig {
         g_still = true;
         g_stillWindowUs = 0;
         g_anomalies.clear();
+        g_linkTcp = LinkTcp{};
+        g_powerNow = PowerNow{};
         REQUIRE(buildValenceCatalog(catalog, boardFeatures()));
         device.setUnvouchedRole(role);
         device.setSetupWritten(kSetupRequiredMask);
@@ -264,7 +274,7 @@ struct Rig {
         device.attach(*hub, catalog);
         link.emplace(g_clock, hubRng);
         // A 13th wish takes WELCOME past the link's default 250 B; a WS frame has room.
-        if (motionHz > 0.0f) link->profileA().mtu = 1024;
+        if (motionHz > 0.0f || hubStatus) link->profileA().mtu = 1024;
         REQUIRE(hub->attachTransport(link->endpointA()));
         ClientIdentity id;
         id.instance_id.fill(std::byte{0});
@@ -287,6 +297,10 @@ struct Rig {
                                   ch::oscillator, ch::plan_strip})
             REQUIRE(client->addSubscriptionWish(id, 0.0f, Priority::normal));
         if (motionHz > 0.0f) REQUIRE(client->addSubscriptionWish(ch::motion, motionHz, Priority::elevated));
+        if (hubStatus) {
+            REQUIRE(client->addSubscriptionWish(channels::hub_status, 1.0f, Priority::background));
+            REQUIRE(client->addSubscriptionWish(ch::power, 1.0f, Priority::background));
+        }
         REQUIRE(client->connect());
         step(200);
         REQUIRE(client->state() == ClientSessionState::LIVE);
@@ -601,7 +615,7 @@ TEST_CASE("VD-11: a brake that never reaches rest still reboots, after the bound
     g_homeGesture = button::Gesture::hold;
     rig->step(1000);
     CHECK_FALSE(rig->device.rebootDue());
-    rig->step(1100);
+    rig->step(2500);
     CHECK(rig->hub->estopLatched());
     CHECK(rig->device.rebootDue());
 }
@@ -1036,6 +1050,116 @@ TEST_CASE("VD-23: a move with no position is refused, never read as position 0")
     REQUIRE(rig->del.nacks.size() == 1);
     CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
     CHECK(g_submits == 0);
+}
+
+// ---- SPEC 11.4: a refused move takes nothing (bd val-u8a) ------------------------
+
+namespace {
+
+// A second control session on its own link, subscribed to control-owner. The
+// rig's step() updates only its own client, so stepping goes through here.
+struct Peer {
+    XorShift32 rng;
+    std::optional<InProcessLink> link{};
+    RecordingClient del{};
+    std::optional<Client> client{};
+
+    Peer(Rig& rig, uint8_t instance) : rng(5000u + instance) {
+        link.emplace(g_clock, rng);
+        link->profileA().mtu = 1024;   // control-owner is 216 B
+        REQUIRE(rig.hub->attachTransport(link->endpointA()));
+        ClientIdentity id;
+        id.instance_id.fill(std::byte{0});
+        id.instance_id[0] = std::byte{instance};
+        id.hasToken = false;
+        id.client_kind = "sim";
+        id.client_name = "peer";
+        client.emplace(id, link->endpointB(), g_clock, rng, del);
+        const auto etag = rig.hub->catalogEtag();
+        client->setCachedEtag(std::span<const std::byte, limits::etag_bytes>(etag.data(), limits::etag_bytes));
+        REQUIRE(client->addSubscriptionWish(channels::control_owner, 0.0f, Priority::normal));
+        REQUIRE(client->connect());
+        step(rig, 200);
+        REQUIRE(client->state() == ClientSessionState::LIVE);
+    }
+
+    void step(Rig& rig, int rounds = 16) {
+        for (int i = 0; i < rounds; ++i) {
+            rig.step(1);
+            client->update(g_clock.nowUs());
+        }
+    }
+
+    // control-owner's owner of the jog source (slot 0, Manual), 0 = unowned.
+    uint32_t jogOwner() const {
+        const auto it = del.lastState.find(channels::control_owner);
+        REQUIRE(it != del.lastState.end());
+        REQUIRE(it->second.size() >= 5);
+        return getU32(std::span<const std::byte>(it->second).subspan(1, 4));
+    }
+};
+
+}  // namespace
+
+TEST_CASE("VD-OWN-1: a move refused after it took the jog source releases it; another session's move is accepted") {
+    auto rig = std::make_unique<Rig>();
+    Peer b(*rig, 9);
+    REQUIRE(rig->client->sessionId() != 0);
+    REQUIRE(b.jogOwner() == 0);
+
+    g_submitOk = false;
+    REQUIRE(rig->client->sendIntent(ch::move, moveTo(100.0f)).has_value());
+    b.step(*rig);
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INTERLOCK);
+    CHECK(b.jogOwner() == 0);
+
+    g_submitOk = true;
+    REQUIRE(b.client->sendIntent(ch::move, moveTo(200.0f)).has_value());
+    b.step(*rig);
+    CHECK(b.del.nacks.empty());
+    CHECK(b.del.echoes == 1);
+    CHECK(b.jogOwner() == b.client->sessionId());
+    REQUIRE(g_intents.size() == 1);
+    CHECK(g_intents[0].target_mm == 200.0f);
+}
+
+// The source a session already owns stays owned through its refused move (the
+// hub's rule), so the refusal must not pin it either: once the move it did
+// submit settles, the source goes quiet and another session's move lands.
+TEST_CASE("VD-OWN-2: a refused move by the jog's owner leaves the source to go quiet; another session's move is accepted") {
+    auto rig = std::make_unique<Rig>();
+    Peer b(*rig, 9);
+    const uint32_t a = rig->client->sessionId();
+
+    REQUIRE(rig->client->sendIntent(ch::move, moveTo(100.0f)).has_value());
+    b.step(*rig);
+    REQUIRE(rig->del.echoes == 1);
+    REQUIRE(b.jogOwner() == a);
+    // The planner takes the move and drives it.
+    g_census.intents = 1;
+    g_census.busy = true;
+    b.step(*rig);
+    REQUIRE(b.jogOwner() == a);
+
+    g_submitOk = false;
+    REQUIRE(rig->client->sendIntent(ch::move, moveTo(150.0f)).has_value());
+    b.step(*rig);
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INTERLOCK);
+    CHECK(b.jogOwner() == a);
+
+    // The submitted move settles: the jog has nothing left to execute.
+    g_census.busy = false;
+    b.step(*rig);
+    CHECK(b.jogOwner() == 0);
+
+    g_submitOk = true;
+    REQUIRE(b.client->sendIntent(ch::move, moveTo(200.0f)).has_value());
+    b.step(*rig);
+    CHECK(b.del.nacks.empty());
+    CHECK(b.del.echoes == 1);
+    CHECK(b.jogOwner() == b.client->sessionId());
 }
 
 // ---- DRV_ALM: the drive's own alarm reaches the hub as a fault latch (val-091.29) --
@@ -1596,6 +1720,42 @@ TEST_CASE("VD-RATE: on the 5 ms hub tick 0x1100 meets its 60 Hz grant and 0x1110
     }
     CHECK(std::abs(rig->del.stateCount[ch::motion] - 360) <= 2);
     CHECK(std::abs(rig->del.stateCount[ch::plan_strip] - 270) <= 2);
+}
+
+// A carriage at constant speed must publish constant steps: each 0x1100 push
+// carries the census of the tick that pushed it, stamped with its instant in
+// t_us. A second schedule in the delegate made every fifth step at 50 Hz span
+// two (bd val-7f5).
+TEST_CASE("VD-EVEN: at constant speed every 0x1100 push steps the same distance and t_us the same time") {
+    auto rig = std::make_unique<Rig>(AccessLevel::control, 50.0f);
+    rig->del.stateCount.clear();
+    std::vector<int> steps, gaps;
+    int seen = 0, lastPos = -1;
+    uint32_t lastT = 0;
+    for (int i = 0; i < 400; ++i) {   // 2 s at 0.5 mm per 5 ms tick
+        g_clock.advanceUs(5000);
+        g_census.position_mm = 0.5f * float(i);
+        g_census.sample_us = g_clock.nowUs();
+        rig->hub->update(g_clock.nowUs());
+        (void)rig->device.tick(g_clock.nowUs() / 1000);
+        rig->client->update(g_clock.nowUs());
+        if (rig->del.stateCount[ch::motion] == seen) continue;
+        seen = rig->del.stateCount[ch::motion];
+        const std::span<const std::byte> s(rig->del.lastState[ch::motion]);
+        REQUIRE(s.size() == 13);
+        const int pos = getU16(s.subspan(0, 2));
+        const uint32_t t = getU32(s.subspan(9, 4));
+        if (lastPos >= 0 && pos > 0) {
+            steps.push_back(pos - lastPos);
+            gaps.push_back(int(t - lastT));
+        }
+        lastPos = pos;
+        lastT = t;
+    }
+    // The first step spans the rig's own settling before the ramp.
+    REQUIRE(steps.size() > 90);
+    CHECK(std::all_of(steps.begin() + 1, steps.end(), [](int d) { return d == 200; }));   // 2 mm in 10 um
+    CHECK(std::all_of(gaps.begin() + 1, gaps.end(), [](int g) { return g == 20000; }));
 }
 
 TEST_CASE("VD-MODES-9: home_speed writes on modes-set key 9, clamped, published at 0x1030's tail, stored") {
@@ -2402,4 +2562,69 @@ TEST_CASE("VD-LEADCAP: a bundle stamped past the lead cap moves earlier whole, i
     REQUIRE(g_intents.size() == 2);
     CHECK(g_intents[1].anchor_us == now + cap);
     CHECK(g_intents[0].anchor_us == now + cap - 5000);
+}
+
+TEST_CASE("VD-TCP: hub-status carries the binding's resent share at bytes 16-17, hundredths of a percent") {
+    auto rig = std::make_unique<Rig>(AccessLevel::control, 0.0f, true);
+    g_linkTcp = LinkTcp{1000u, 10u};
+    rig->step(2500);
+    const auto it = rig->del.lastState.find(channels::hub_status);
+    REQUIRE(it != rig->del.lastState.end());
+    REQUIRE(it->second.size() == 18);
+    const std::span<const std::byte> s(it->second);
+    // 10 of 1000 since the attach-time snapshot of zeros: 1 %.
+    CHECK(getU16(s.subspan(16, 2)) == 100u);
+    const CatalogEntry* e = rig->catalog.find(channels::hub_status);
+    REQUIRE(e != nullptr);
+    const auto fields = rig->catalog.layoutFields(*e);
+    REQUIRE(fields.size() == 8);
+    CHECK(fields[7].name == "resent");
+    CHECK(fields[7].role == "link.resent");
+    CHECK(fields[7].scale == 100.0f);
+    CHECK(fields[2].role == "link.rssi");
+}
+
+TEST_CASE("VD-PWR: the power layout tags bus voltage and power draw as two roles, in volts and watts") {
+    auto cat = std::make_unique<Catalog32>();
+    DeviceFeatures feat = boardFeatures();
+    feat.has_current_sensor = true;
+    feat.has_power_monitor = true;
+    REQUIRE(buildValenceCatalog(*cat, feat));
+    const CatalogEntry* e = cat->find(ch::power);
+    REQUIRE(e != nullptr);
+    const auto f = cat->layoutFields(*e);
+    REQUIRE(f.size() == 3);
+    CHECK((f[0].role == "telemetry.power.bus" && f[0].unitId == unit_ids::v));
+    CHECK((f[1].name == "draw_w10" && f[1].role == "telemetry.power.draw" && f[1].unitId == unit_ids::w));
+    CHECK(layoutWireSize(f) == 6);
+    CHECK(e->maxRateHz == 1.0f);
+}
+
+TEST_CASE("VD-PWR-PACK: 0x1010 carries the switch task's reading in mV and tenths of a watt, 65535 for none") {
+    auto rig = std::make_unique<Rig>(AccessLevel::control, 0.0f, true);
+    const CatalogEntry* e = rig->catalog.find(ch::power);
+    REQUIRE(e != nullptr);   // the board advertises it (boardFeatures, val-9hr)
+    REQUIRE(layoutWireSize(rig->catalog.layoutFields(*e)) == 4);
+    auto packed = [&]() {
+        const auto it = rig->del.lastState.find(ch::power);
+        REQUIRE(it != rig->del.lastState.end());
+        REQUIRE(it->second.size() == 4);
+        const std::span<const std::byte> s(it->second);
+        return std::pair{getU16(s.subspan(0, 2)), getU16(s.subspan(2, 2))};
+    };
+
+    g_powerNow = {36.0f, 12.34f};
+    rig->step(2500);
+    CHECK(packed() == std::pair<uint16_t, uint16_t>{36000, 123});
+
+    // A failed read: both fields go no reading, never 0.
+    g_powerNow = {};
+    rig->step(2500);
+    CHECK(packed() == std::pair<uint16_t, uint16_t>{65535, 65535});
+
+    // Voltage without a draw, a real 0 W, and a reading past the field saturating under none.
+    g_powerNow = {70.0f, 0.0f};
+    rig->step(2500);
+    CHECK(packed() == std::pair<uint16_t, uint16_t>{65534, 0});
+    g_powerNow = {};
 }

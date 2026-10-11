@@ -9,9 +9,12 @@
 #include <span>
 
 #include <driver/i2c_master.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "geiger/geiger.h"
 #include "system/BoardPins.h"
+#include "system/Supervisor.h"
 
 namespace valence {
 
@@ -41,8 +44,18 @@ constexpr float kBusOverVolts = 50.0f;
 
 i2c_master_bus_handle_t g_bus = nullptr;
 i2c_master_dev_handle_t g_dev = nullptr;
+i2c_master_dev_handle_t g_monitorDev = nullptr;
 PowerChip  g_chip  = PowerChip::none;
 ina2xx::PowerScale g_scale = {};
+BusOwner<const void*> g_owner;
+
+// False, and logged, when the calling task does not own the bus.
+bool mayUseBus() {
+    if (g_owner.mayUse(xTaskGetCurrentTaskHandle())) return true;
+    GLOGE_EVERY_MS(5000, kTag, "I2C read refused: task %s does not own the power bus",
+                   pcTaskGetName(nullptr));
+    return false;
+}
 
 // The register port PowerMonitor.h's sequences take, on U11's device handle.
 struct I2cPort {
@@ -68,6 +81,14 @@ bool powerBegin() {
     if (i2c_new_master_bus(&bus, &g_bus) != ESP_OK) {
         GLOGE(kTag, "I2C bus init failed (SDA G%d, SCL G%d)", int(kPinSda), int(kPinScl));
         return false;
+    }
+    i2c_device_config_t mon{};
+    mon.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    mon.device_address = SV_I2C_ADDR;
+    mon.scl_speed_hz = kSclHz;
+    if (i2c_master_bus_add_device(g_bus, &mon, &g_monitorDev) != ESP_OK) {
+        g_monitorDev = nullptr;
+        GLOGE(kTag, "board monitor device add failed");
     }
     if (i2c_master_probe(g_bus, kAddress, kTimeoutMs) != ESP_OK) {
         GLOGW(kTag, "no power monitor at 0x%02x: current sensing absent", unsigned(kAddress));
@@ -110,18 +131,23 @@ bool powerBegin() {
 
 PowerChip powerChip() { return g_chip; }
 
-i2c_master_bus_handle_t powerI2cBus() { return g_bus; }
-
 std::optional<PowerReading> powerRead() {
-    if (g_chip == PowerChip::none) return std::nullopt;
+    if (g_chip == PowerChip::none || !mayUseBus()) return std::nullopt;
     I2cPort port;
     return ina2xx::readPower(port, g_scale);
 }
 
+esp_err_t boardMonitorRead(uint8_t reg, std::span<uint8_t> out) {
+    if (g_monitorDev == nullptr || !mayUseBus()) return ESP_ERR_INVALID_STATE;
+    return i2c_master_transmit_receive(g_monitorDev, &reg, 1, out.data(), out.size(), kTimeoutMs);
+}
+
 std::optional<uint16_t> powerTakeAlerts() {
-    if (g_chip == PowerChip::none) return std::nullopt;
+    if (g_chip == PowerChip::none || !mayUseBus()) return std::nullopt;
     I2cPort port;
     return ina2xx::read16(port, ina2xx::kRegDiagAlrt);
 }
+
+bool powerClaimBus() { return g_owner.claim(xTaskGetCurrentTaskHandle()); }
 
 }  // namespace valence

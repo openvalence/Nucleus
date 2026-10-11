@@ -34,6 +34,7 @@
 #include "motion/ValenceMotion.h"
 #include "patterns/PatternPresetStore.h"
 #include "patterns/PatternSettings.h"
+#include "system/TcpTally.h"
 #include "system/ValenceMotorSwitch.h"
 #include "valence/hub/hub.hpp"
 
@@ -55,12 +56,14 @@ public:
 // the host twin both build their catalog from it, so the twin can never serve
 // a different etag by drifting a flag.
 // Operator ruling 2026-09-21: the board acts like a normal machine with no
-// motor, no Modbus drive and no current sensor. The motion plane is REAL --
-// the arbiter, the engine and the LP emitter are all live -- so it is
-// advertised, and so is the pattern generator that drives it
-// (flagship_p4/src/patterns/); the two absent subsystems are what stays gated.
+// motor and no Modbus drive. The motion plane is REAL -- the arbiter, the
+// engine and the LP emitter are all live -- so it is advertised, and so is
+// the pattern generator that drives it (flagship_p4/src/patterns/). The
+// board has since gained its power monitor (U11, val-091.22): 0x1010 is
+// advertised, and the twin models its supply (SimMotorSwitch.cpp).
 inline DeviceFeatures boardFeatures() {
     DeviceFeatures feat{};
+    feat.has_current_sensor = true;
     feat.has_motion  = true;
     feat.has_drive   = false;  // no Modbus drive on this board (val-091)
     feat.has_pattern = true;
@@ -87,9 +90,16 @@ CatalogHeadroom catalogHeadroom(const Catalog32& c, size_t encodedBytes);
 // deviceNowUs(): the 64-bit monotonic clock motion plans against. It MUST be
 // the clock the linked ValenceMotion implementation reads, or every stream
 // anchor lands at the wrong instant. deviceFreeHeapBytes(): the 0x0006 heap
-// figure; 0 where the host has no meaningful answer.
+// figure; 0 where the host has no meaningful answer. deviceLinkTcp(): the
+// WebSocket binding's TCP segment totals since boot (u32, wrap), behind
+// 0x0006 `resent`; zeros where the host has no TCP of its own to count.
+struct LinkTcp {
+    uint32_t sent = 0;     // segments occupying sequence space, resends included
+    uint32_t resent = 0;   // of those, retransmissions
+};
 uint64_t deviceNowUs();
 uint32_t deviceFreeHeapBytes();
+LinkTcp deviceLinkTcp();
 
 class ValenceDevice final : public HubDelegate {
 public:
@@ -309,7 +319,8 @@ private:
     std::array<uint32_t, 4> _owner{};
     // RFC-098: the motion task's intent count (accepted plus rejected) when
     // the last jog was submitted. The jog's slot stays held until the count
-    // moves past it, so a jog admitted this tick is never quiet.
+    // moves past it, so a jog admitted this tick is never quiet. A jog the
+    // motion door refused never moves it (bd val-u8a).
     std::optional<uint32_t> _jogMark;
     // A `return` is running: set on its acceptance, cleared when the
     // arbiter's census.returns moves past _returnsAtRequest, or by ESTOP.
@@ -403,12 +414,6 @@ private:
     // targets this object, which lives in PSRAM (HubBox).
     std::atomic<uint32_t> _lateSamples{0};
 
-    // 0x1100 and 0x1110 publish at their catalog max_rate_hz on the schedule
-    // a grant is paced by (Valence subscription.hpp), so every grant up to
-    // that ceiling is met and none is pushed past it, a rate-0 grant included
-    // (bd val-7ur). attach() sets the rates.
-    SubscriptionEntry _motionPace{};
-    SubscriptionEntry _stripPace{};
     uint32_t _lastOscMs = 0;
     uint32_t _lastSlowMs = 0;
     uint32_t _lastStatusMs = 0;
@@ -420,6 +425,8 @@ private:
     // One byte, relaxed: a stale reading is a stale reading either way, and
     // nothing orders against it.
     std::atomic<int8_t> _linkRssi{0};
+    // 0x0006 `resent`: the trailing window over deviceLinkTcp(), hub task only.
+    tcptally::ResentWindow _resentWindow{};
 };
 
 }  // namespace valence

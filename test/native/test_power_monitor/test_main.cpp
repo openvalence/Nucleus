@@ -3,15 +3,21 @@
 // - Hardware-free: register bytes in, SI units out. Expected values come from
 //   the datasheets' own worked examples and LSB tables (INA228 SLYS021A,
 //   INA237 SBOSA20A), never from the code under test.
-// See: flagship_p4/src/system/PowerMonitor.h, bd val-091.22
+// - The bus-owner and hand-off cases run real threads: they are the proof
+//   that one task reads the bus and no reader sees a torn pair.
+// See: flagship_p4/src/system/PowerMonitor.h, bd val-091.22, val-9hr
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
 #include <array>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <span>
+#include <thread>
+#include <vector>
 
 #include "../../../flagship_p4/src/system/PowerMonitor.h"
 
@@ -238,4 +244,112 @@ TEST_CASE("fake: the ALERT flags read back through DIAG_ALRT on both parts") {
         CHECK((*flags & ina::kFlagShuntOver) != 0);
         CHECK((*flags & ina::kFlagBusOver) == 0);
     }
+}
+
+// ---- the bus owner and the hand-off (val-9hr) ---------------------------------------
+
+using valence::BusOwner;
+using valence::PowerHandoff;
+using valence::PowerNow;
+using valence::PowerReading;
+
+TEST_CASE("hand-off: no reading until the first publish, then each value as published") {
+    PowerHandoff h;
+    CHECK_FALSE(h.latest().bus_v.has_value());
+    CHECK_FALSE(h.latest().draw_w.has_value());
+    h.publish({36.012f, 123.4f});
+    REQUIRE(h.latest().bus_v.has_value());
+    REQUIRE(h.latest().draw_w.has_value());
+    CHECK(*h.latest().bus_v == doctest::Approx(36.012f));
+    CHECK(*h.latest().draw_w == doctest::Approx(123.4f));
+    CHECK(*h.latest().bus_v * 1000.0f == doctest::Approx(36012.0f));
+}
+
+TEST_CASE("hand-off: a failed or implausible read is no reading, never 0; 0 is a real 0") {
+    PowerHandoff h;
+    h.publish({36.0f, 50.0f});
+    h.publish({});   // the read failed
+    CHECK_FALSE(h.latest().bus_v.has_value());
+    CHECK_FALSE(h.latest().draw_w.has_value());
+    h.publish({std::nanf(""), -1.0f});
+    CHECK_FALSE(h.latest().bus_v.has_value());
+    CHECK_FALSE(h.latest().draw_w.has_value());
+    h.publish({0.0f, 0.0f});
+    CHECK(h.latest().bus_v == 0.0f);
+    CHECK(h.latest().draw_w == 0.0f);
+    // Past the field: saturated one count under none.
+    CHECK(PowerHandoff::half(70.0f, 1000.0f) == 65534);
+    CHECK(PowerHandoff::half(1e9f, 10.0f) == 65534);
+    CHECK(PowerHandoff::half(std::nullopt, 10.0f) == 65535);
+}
+
+TEST_CASE("pickPower: +BUS from the monitor, MOTOR_V+ only while the switch is on, draw from V x I") {
+    const PowerReading u11{35.9f, 2.0f, 71.8f, 30.0f};
+    PowerNow p = valence::pickPower(36.2f, u11, false);
+    CHECK(p.bus_v == 36.2f);
+    CHECK(*p.draw_w == doctest::Approx(71.8f));
+    p = valence::pickPower(std::nullopt, u11, true);
+    CHECK(p.bus_v == 35.9f);
+    // Switch off, no monitor: MOTOR_V+ is not the system voltage.
+    p = valence::pickPower(std::nullopt, PowerReading{0.2f, 0.0f, 0.0f, 30.0f}, false);
+    CHECK_FALSE(p.bus_v.has_value());
+    CHECK(p.draw_w == 0.0f);
+    // Regen: the motor draws nothing from the supply.
+    p = valence::pickPower(36.0f, PowerReading{40.0f, -3.0f, 120.0f, 30.0f}, true);
+    CHECK(p.draw_w == 0.0f);
+    // U11 failed: no draw, the monitor's voltage stands.
+    p = valence::pickPower(36.0f, std::nullopt, true);
+    CHECK(p.bus_v == 36.0f);
+    CHECK_FALSE(p.draw_w.has_value());
+}
+
+TEST_CASE("bus owner: anyone during boot, then the claimant alone; a second claim fails") {
+    BusOwner<const void*> owner;
+    int a = 0, b = 0;
+    CHECK(owner.mayUse(&a));
+    CHECK(owner.mayUse(&b));
+    CHECK(owner.claim(&a));
+    CHECK(owner.claim(&a));
+    CHECK_FALSE(owner.claim(&b));
+    CHECK(owner.mayUse(&a));
+    CHECK_FALSE(owner.mayUse(&b));
+}
+
+TEST_CASE("threads: one task reads the bus, readers take whole pairs from the hand-off") {
+    BusOwner<std::thread::id> owner;
+    PowerHandoff h;
+    std::atomic<bool> claimed{false}, done{false};
+    std::atomic<int> torn{0}, refused{0}, foreignReads{0};
+    std::thread::id ownerId;
+    auto busRead = [&](int i) {
+        if (std::this_thread::get_id() != ownerId) ++foreignReads;
+        return PowerNow{float(i) / 1000.0f, float(i) / 10.0f};   // a pair that must stay a pair
+    };
+    std::thread ownerTask([&] {
+        ownerId = std::this_thread::get_id();
+        if (!owner.claim(ownerId)) ++foreignReads;
+        claimed = true;
+        for (int i = 0; i < 200000; ++i)
+            if (owner.mayUse(std::this_thread::get_id())) h.publish(busRead(i % 65534));
+        done = true;
+    });
+    while (!claimed) std::this_thread::yield();
+    std::vector<std::thread> readers;
+    for (int r = 0; r < 3; ++r) {
+        readers.emplace_back([&] {
+            // A reader that tries the bus is refused before it touches it.
+            if (owner.mayUse(std::this_thread::get_id())) busRead(0);
+            else ++refused;
+            while (!done) {
+                const PowerNow p = h.latest();
+                if (p.bus_v.has_value() != p.draw_w.has_value()) ++torn;
+                else if (p.bus_v && std::lround(*p.bus_v * 1000.0f) != std::lround(*p.draw_w * 10.0f)) ++torn;
+            }
+        });
+    }
+    ownerTask.join();
+    for (auto& t : readers) t.join();
+    CHECK(refused == 3);
+    CHECK(torn == 0);
+    CHECK(foreignReads == 0);
 }

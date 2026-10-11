@@ -12,10 +12,14 @@
 // - Mirrors bench::ValenceBenchWsPort where a host can see it: the RX ring is
 //   bounded and drops, a TX backlog over kMuteBytes mutes the client until
 //   the host drains it, a close waits one hub tick for frames already received.
+// - The host's datagrams get the board's responder and ESTOP hook
+//   (ValenceDiscovery.h, ValenceEstopDatagram.h) between ticks, as the
+//   board's hub task polls its socket between hub updates.
 // See: sim/valencesim/README.md (the ABI and the host contract)
 
 #include <emscripten/emscripten.h>
 
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -25,6 +29,9 @@
 #include <vector>
 
 #include "SimCore.h"
+#include "hub/ValenceDiscovery.h"
+#include "hub/ValenceEstopDatagram.h"
+#include "hub/valence_config.h"
 
 namespace {
 
@@ -139,6 +146,8 @@ uint64_t g_lastPassUs = 0;
 bool g_firstTick = true;
 std::string g_httpBody;
 std::vector<uint8_t> g_stateOut;
+valence::DiscoveryResponder g_discovery;
+std::array<std::byte, valence::kDiscoverReplyBytes> g_reply{};
 
 MemTransport* slotOf(int id) {
     for (auto& s : g_slots)
@@ -221,6 +230,9 @@ EMSCRIPTEN_KEEPALIVE int integral_create(const char* json_opts, const uint8_t* s
     g_core = new valence::SimCore();
     g_core->log.setEcho(true);
     if (!g_core->begin(cfg, g_clock, g_store)) return 0;
+    valence::estopDatagramBind(&g_core->hub());
+    g_discovery.setDatagramHook(&valence::estopDatagramHook);
+    g_discovery.setReplyFlagsHook(&valence::estopDatagramReplyFlags);
     return 1;
 }
 
@@ -314,6 +326,26 @@ EMSCRIPTEN_KEEPALIVE int integral_http(const char* method, const char* path, con
     *out = reinterpret_cast<const uint8_t*>(g_httpBody.data());
     *out_len = g_httpBody.size();
     return code;
+}
+
+// The PAIR button, pressed once: the presence window opens at the next hub
+// tick, as the board's press opens it.
+EMSCRIPTEN_KEEPALIVE void integral_pair_press() { valence::simPairPress(); }
+
+// One UDP datagram the host received on its SPEC 13.8 port from `src_ipv4`
+// (host order), `ws_port` the WebSocket port it serves this machine on. The
+// reply's length with *out set, 0 for none: an ESTOP datagram (consumed, maybe
+// latched), not a probe, or the source answered within its window.
+EMSCRIPTEN_KEEPALIVE int integral_datagram(const uint8_t* data, size_t len, uint32_t src_ipv4, uint32_t ws_port,
+                                           const uint8_t** out) {
+    if (g_core == nullptr) return 0;
+    const valence::Hub& hub = g_core->hub();
+    g_discovery.setIdentity(valence::SimCore::kHubName, FIRMWARE_MAJOR_MINOR, uint16_t(ws_port));
+    g_discovery.setLive(hub.hubInstanceId(), hub.catalogEtag(), hub.pairingWindowOpen());
+    const size_t n = g_discovery.answer(std::span<const std::byte>(reinterpret_cast<const std::byte*>(data), len),
+                                        src_ipv4, uint32_t(g_clock.now / 1000), g_reply);
+    *out = reinterpret_cast<const uint8_t*>(g_reply.data());
+    return int(n);
 }
 
 // The persisted state as one blob, for the host to keep and hand back to
