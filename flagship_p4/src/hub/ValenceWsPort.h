@@ -25,25 +25,30 @@
 // httpd task closes that fd. A send in flight would then write into a
 // recycled descriptor. The _sending/_closing pair below is a two-flag
 // handshake (seq_cst, both directions checked) so close_fn WAITS for an
-// in-flight send instead of pulling the fd out from under it; the wait is
-// bounded by SO_SNDTIMEO. This transport holds no client object of any kind,
-// only the fd, and that is deliberate (T29).
+// in-flight send instead of pulling the fd out from under it; a send never
+// waits on the peer (below), so neither does close_fn. This transport holds no
+// client object of any kind, only the fd, and that is deliberate (T29).
+//
+// ---- A send never waits on the peer (ITransport::write MUST NOT block) -----
+// httpd_ws_send_frame_async is a BLOCKING write into lwIP's send buffer, and
+// SO_SNDTIMEO does not bound it: lwIP re-checks the timeout only when the peer
+// ACKs or its 1 s netconn poll fires (api_msg.c, NETCONN_TCP_POLL_INTERVAL 2 x
+// TCP_SLOW_INTERVAL 500 ms), so one full buffer parked the hub task for up to
+// a second per send and stalled every session (bd val-ni0). A timed-out write
+// can also be PARTIAL, which tears the WebSocket frame. So no frame is handed
+// to the socket unless it is writable NOW (sendRoom(): select, zero timeout).
+// lwIP reports writable only while more than TCP_SNDLOWAT (half of
+// TCP_SND_BUF, 2881 B here) is free, and a whole frame is at most
+// kFrameBufferCapacity plus a 4 B header, so a writable socket takes the frame
+// at once. SO_SNDTIMEO stays as the backstop, never the plan.
 //
 // ---- Congestion, from what esp_http_server actually exposes ----------------
-// There is NO egress queue and NO queue-depth API here: httpd_ws_send_frame_async
-// is a blocking socket write straight into the kernel send buffer. So the
-// watermark IS the syscall. Every send is timed; SO_SNDTIMEO bounds it at
-// kSendTimeoutMs. A send that returns promptly means the buffer took it; one
-// that takes longer than kSlowSendUs means the buffer was full and the kernel
-// parked us, which is exactly the "egress queue above the watermark" signal
-// CongestionSignal::QueueWatermark names; a send that fails means the peer is
-// not draining at all. pollCongestionLevel() bands those three with SPEC
-// §10.3's own hysteresis (sustained 1 s up, 5 s down) and feeds
-// Hub::setCongestionLevel.
-// The cost that buys it: ONE stalled send costs up to kSendTimeoutMs on the
-// hub task. It is paid once per stall onset, not per frame -- above level 0
-// the data classes shed WITHOUT attempting a send, so a wedged peer cannot
-// charge the tick repeatedly.
+// There is NO egress queue and NO queue-depth API here, so the watermark IS
+// the socket: no room means the peer is not draining. A data or control frame
+// that finds no room, or a send slower than kSlowSendUs, is the "egress queue
+// above the watermark" signal CongestionSignal::QueueWatermark names.
+// pollCongestionLevel() bands it with SPEC §10.3's own hysteresis (sustained
+// 1 s up, 5 s down) and feeds Hub::setCongestionLevel.
 //
 // ---- Three TX classes, same split the S3 runs -------------------------------
 //   STATE / STREAM  : data. Shed as soon as congestion is nonzero. Stale
@@ -52,8 +57,14 @@
 //   BLOB_CHUNK      : its own class, paced against the registry's OWN
 //                     advertised sender budget (limits::blob_chunks_in_flight)
 //                     per hub tick. HELD, never dropped -- the hub re-sends the
-//                     same index next tick -- and it never arms the stall timer
+//                     same index next tick. It never arms the stall timer and
+//                     never marks the link slow, and the buffer it fills does
+//                     not count against the data class while it is moving
 //                     (T16: a big honest transfer is not a wedged client).
+//                     Not gated on the congestion level either: the hub's own
+//                     §8.4 row-2 in-flight budget does that, and a second gate
+//                     here held every chunk until the hub's row-4 clock
+//                     answered BUSY, on every retry.
 //   everything else : control, EVENT included (a safety edge is the one thing
 //                     nobody may shed). Never shed on our own initiative; a
 //                     refusal starts the stall timer and only kCtrlStallMs of
@@ -136,10 +147,8 @@ public:
     // STALE -- this one is the half that releases the SOCKET.
     static constexpr uint32_t kIdleReapMs = 10 * valence::limits::ping_interval_idle_ms;
 
-    // Socket send bound. Mirrors the C5 bridge's value: ~6 frames at the
-    // observed relay rate -- long enough that a healthy client on a busy
-    // channel is never cut short, short enough that a dead one cannot own the
-    // hub tick.
+    // SO_SNDTIMEO, the backstop behind sendRoom(): lwIP honors it only at
+    // the next ACK or 1 s poll, so it bounds nothing finer than a second.
     static constexpr uint32_t kSendTimeoutMs = 50;
 
     // ---- httpd task ---------------------------------------------------------
@@ -166,6 +175,14 @@ public:
     bool stalledOut(uint32_t nowMs) const;
     // True once nothing at all has arrived for kIdleReapMs.
     bool idleOut(uint32_t nowMs) const;
+    // True when a close was already requested for this binding.
+    bool closeRequested() const { return _closeRequested; }
+    // The slowest send since the last call, in microseconds; resets it.
+    uint32_t takeWorstSendUs() {
+        const uint32_t w = _worstSendUs;
+        _worstSendUs = 0;
+        return w;
+    }
     // Frames in the RX ring the hub has not read yet.
     bool rxPending() const {
         return _rxHead.load(std::memory_order_relaxed) != _rxTail.load(std::memory_order_acquire);
@@ -207,7 +224,14 @@ private:
     uint32_t _aboveSinceMs = 0;
     uint32_t _belowSinceMs = 0;
     uint32_t _lastSlowMs = 0;   // ms of the last slow-or-failed send, 0 = never
+    uint32_t _lastBlobOkMs = 0; // ms of the last BLOB_CHUNK the socket took
+    uint32_t _worstSendUs = 0;
+    bool _closeRequested = false;
 };
+
+// True when `fd` can take a whole frame without blocking (select, zero
+// timeout). Either task; the httpd task's PONG and CLOSE echoes use it too.
+bool sendRoom(int fd);
 
 // The server plus its transport slots. Owns TWO httpd instances: the Valence
 // socket on 82 and the /uitoken surface on 80 (ValenceUiToken registers into
@@ -223,6 +247,9 @@ public:
     bool begin(valence::Hub* hub, uint16_t port);
     // Hub task: performs the deferred attach/detach and sweeps stalls.
     void loop(uint32_t nowMs);
+    // Hub task: the slowest send since the last call and its slot (0xFF =
+    // none); resets them.
+    uint32_t takeWorstSendUs(uint8_t& slot);
     // Hub task, last act before a planned restart: one GOODBYE `code` frame on
     // every attached socket, best-effort, written here because the library
     // has no hub-wide GOODBYE yet. The hub's session table is not touched:

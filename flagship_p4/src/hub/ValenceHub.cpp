@@ -297,6 +297,32 @@ uint64_t loadOrMintInstanceId() {
     esp_restart();
 }
 
+// ---- tick phase watchdog -----------------------------------------------------
+// Names what made a hub tick late: every session waits on this one task, so a
+// tick over kSlowTickUs is a stall for all of them (bd val-ni0).
+constexpr int64_t kSlowTickUs = 50000;
+
+struct PhaseClock {
+    int64_t start = 0;
+    int64_t last = 0;
+    int64_t worstUs = 0;
+    const char* worst = "none";
+
+    void begin() {
+        start = last = esp_timer_get_time();
+        worstUs = 0;
+        worst = "none";
+    }
+    void mark(const char* phase) {
+        const int64_t now = esp_timer_get_time();
+        if (now - last > worstUs) {
+            worstUs = now - last;
+            worst = phase;
+        }
+        last = now;
+    }
+};
+
 // ---- the hub task ------------------------------------------------------------
 // CORE 1. The LP core renders motion's edges, so HP core 1 carries no
 // emitter; core 0 runs app_main and the esp_hosted SDIO
@@ -314,19 +340,25 @@ void hubTask(void*) {
     if (esp_task_wdt_add(nullptr) != ESP_OK)
         GLOGW(kTag, "task watchdog subscribe failed: a hung hub will not self-reset");
     TickType_t last = xTaskGetTickCount();
+    PhaseClock phase;
     for (;;) {
         vTaskDelayUntil(&last, pdMS_TO_TICKS(5));
         esp_task_wdt_reset();
         ++g_ticks;
+        phase.begin();
         const uint32_t nowMs = uint32_t(esp_timer_get_time() / 1000);
 
         // Port first: it performs the deferred attach/detach and re-arms the
         // per-tick BLOB pacing budget that update() is about to spend.
         g_box->port.loop(nowMs);
+        phase.mark("ws.loop");
         g_box->serial.loop(nowMs);
+        phase.mark("serial.loop");
         g_box->hub->update(g_box->clock.nowUs());
+        phase.mark("hub.update");
         // After update(): a join that finished answers on this same tick.
         g_box->desk->tick();
+        phase.mark("desk.tick");
 
         // The device half: deferred latch clear, the motion plane's STATE, the
         // 0x1000 republish and the hub-status line. It says which debounced
@@ -337,11 +369,14 @@ void hubTask(void*) {
         // successful update reboots before the hold drains, so a change made
         // DURING an update does not survive it; one made before it does.
         g_persistDue |= g_box->device.tick(nowMs);
+        phase.mark("device.tick");
         if (g_box->device.rebootDue()) rebootNow(nowMs);
         const bool ota = otaInFlight();
         if (g_persistDue != 0 && !ota) persistDue();
+        phase.mark("persistDue");
         // nowMs is uptime, which is also the §12.3 gesture's clock.
         const uint8_t trust = g_box->trust.tick(g_box->hub->pairing(), g_nvs, nowMs, ota);
+        phase.mark("trust.tick");
         if (trust & kTrustLedgerFailed)
             GLOGW_EVERY_MS(30000, kTag, "trust ledger not persisted: retrying every %lu ms",
                            static_cast<unsigned long>(kLedgerWriteMinIntervalMs));
@@ -351,9 +386,19 @@ void hubTask(void*) {
             g_lastEndpointMs = nowMs;
             refreshEndpoint();
         }
+        phase.mark("refreshEndpoint");
         // Here and nowhere else: a reply reads the hub's etag and window (T5).
         g_box->discovery.poll(*g_box->hub, nowMs);
+        phase.mark("discovery.poll");
 
+        uint8_t sendSlot = 0xFF;
+        const uint32_t worstSendUs = g_box->port.takeWorstSendUs(sendSlot);
+        if (phase.last - phase.start > kSlowTickUs) {
+            GLOGW_EVERY_MS(1000, kTag, "slow tick %lu ms: worst phase %s %lu ms, slowest ws send %lu us (slot %u)",
+                           static_cast<unsigned long>((phase.last - phase.start) / 1000), phase.worst,
+                           static_cast<unsigned long>(phase.worstUs / 1000),
+                           static_cast<unsigned long>(worstSendUs), unsigned(sendSlot));
+        }
         geiger::drainToSinks();
     }
 }

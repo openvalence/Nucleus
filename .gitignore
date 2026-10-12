@@ -36,6 +36,9 @@ tools/*
 !tools/lp_stream_capture.py
 !tools/lag_probe.py
 !tools/encoder_log.py
+# the twin's dead-peer regression check (val-ni0): a wedged or vanished client
+# must cost the other sessions nothing
+!tools/sim_link_test.py
 # the deploy and forensics doors: an operator with a fresh clone has no other
 # way onto the board or into the archive (val-091.16/.17)
 !tools/ota.py

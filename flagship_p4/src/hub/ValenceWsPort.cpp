@@ -42,6 +42,9 @@ void ValenceWsTransport::bind(httpd_handle_t hd, int fd) {
     _congestionLevel = 0;
     _aboveSinceMs = _belowSinceMs = 0;
     _lastSlowMs = 0;
+    _lastBlobOkMs = 0;
+    _worstSendUs = 0;
+    _closeRequested = false;
     _lastRxMs.store(uint32_t(esp_timer_get_time() / 1000), std::memory_order_relaxed);
     _fd.store(fd, std::memory_order_seq_cst);
 }
@@ -68,16 +71,23 @@ void ValenceWsTransport::pushRx(const uint8_t* data, size_t len) {
 
 void ValenceWsTransport::beginClose() {
     _closing.store(true, std::memory_order_seq_cst);
-    // Bounded by SO_SNDTIMEO: an in-flight send owns the fd until it returns.
+    // An in-flight send owns the fd until it returns; sendRoom() keeps that short.
     while (_sending.load(std::memory_order_seq_cst)) vTaskDelay(1);
     _fd.store(-1, std::memory_order_seq_cst);
 }
 
 bool ValenceWsTransport::open() { return _fd.load(std::memory_order_seq_cst) >= 0; }
 
+// One trigger per binding. Each call queues a close on httpd's control socket
+// for that fd's session record; repeats flooded it once per 5 ms tick until
+// close_fn landed, and a queued close outliving its session can land on the
+// next connection to reuse the record.
 void ValenceWsTransport::close() {
+    if (_closeRequested) return;
     const int fd = _fd.load(std::memory_order_seq_cst);
-    if (fd >= 0 && _hd != nullptr) httpd_sess_trigger_close(_hd, fd);
+    if (fd < 0 || _hd == nullptr) return;
+    _closeRequested = true;
+    httpd_sess_trigger_close(_hd, fd);
 }
 
 bool ValenceWsTransport::isDroppable(std::span<const std::byte> frame) {
@@ -97,19 +107,32 @@ bool ValenceWsTransport::write(std::span<const std::byte> frame) {
     const bool blob = isBlobChunk(frame);
 
     // Class gates BEFORE the syscall, so a congested link is never charged
-    // another blocking send for a frame it is allowed to shed.
+    // a send for a frame it is allowed to shed.
     if (data && _congestionLevel != 0) {
         ++_txDataDrops;
         return false;
     }
-    if (blob) {
-        if (_blobThisTick >= valence::limits::blob_chunks_in_flight || _congestionLevel != 0) {
-            ++_txBlobHolds;   // held, not lost: the hub retries this index next tick
-            return false;
-        }
+    if (blob && _blobThisTick >= valence::limits::blob_chunks_in_flight) {
+        ++_txBlobHolds;   // held, not lost: the hub retries this index next tick
+        return false;
     }
 
-    if (_closing.load(std::memory_order_seq_cst)) return false;
+    if (_closeRequested || _closing.load(std::memory_order_seq_cst)) return false;
+    const uint32_t nowMs = uint32_t(esp_timer_get_time() / 1000);
+    if (!sendRoom(_fd.load(std::memory_order_seq_cst))) {
+        if (blob) {
+            ++_txBlobHolds;
+        } else if (data) {
+            ++_txDataDrops;
+            // A buffer this slot's own moving transfer filled is not congestion.
+            if (uint32_t(nowMs - _lastBlobOkMs) >= kSlowWindowMs) _lastSlowMs = nowMs;
+        } else {
+            ++_txCtrlFails;
+            _lastSlowMs = nowMs;
+            if (_ctrlStallSinceMs == 0) _ctrlStallSinceMs = nowMs;
+        }
+        return false;
+    }
     _sending.store(true, std::memory_order_seq_cst);
     if (_closing.load(std::memory_order_seq_cst)) {
         _sending.store(false, std::memory_order_seq_cst);
@@ -129,26 +152,39 @@ bool ValenceWsTransport::write(std::span<const std::byte> frame) {
         elapsedUs = esp_timer_get_time() - t0;
     }
     _sending.store(false, std::memory_order_seq_cst);
+    if (uint32_t(elapsedUs) > _worstSendUs) _worstSendUs = uint32_t(elapsedUs);
 
-    const uint32_t nowMs = uint32_t(esp_timer_get_time() / 1000);
     if (err == ESP_OK) {
         ++_framesTx;
-        if (elapsedUs > int64_t(kSlowSendUs)) _lastSlowMs = nowMs;
+        if (blob) {
+            ++_blobThisTick;
+            _lastBlobOkMs = nowMs;
+        } else if (elapsedUs > int64_t(kSlowSendUs)) {
+            _lastSlowMs = nowMs;
+        }
         if (!data && !blob) _ctrlStallSinceMs = 0;  // cleared ONLY by control going out
-        if (blob) ++_blobThisTick;
         return true;
     }
 
-    _lastSlowMs = nowMs;
+    if (!blob) _lastSlowMs = nowMs;
     if (data) {
         ++_txDataDrops;
     } else if (blob) {
         ++_txBlobHolds;   // never arms the stall timer (T16)
     } else {
         ++_txCtrlFails;
-        if (_ctrlStallSinceMs == 0) _ctrlStallSinceMs = uint32_t(esp_timer_get_time() / 1000);
+        if (_ctrlStallSinceMs == 0) _ctrlStallSinceMs = nowMs;
     }
     return false;
+}
+
+bool sendRoom(int fd) {
+    if (fd < 0) return false;
+    fd_set w;
+    FD_ZERO(&w);
+    FD_SET(fd, &w);
+    struct timeval zero{};
+    return select(fd + 1, nullptr, &w, nullptr, &zero) > 0 && FD_ISSET(fd, &w);
 }
 
 std::optional<valence::FrameBuffer> ValenceWsTransport::read() {
@@ -300,7 +336,7 @@ esp_err_t ValenceWsPort::wsHandler(httpd_req_t* req) {
             pong.type = HTTPD_WS_TYPE_PONG;
             pong.payload = buf;
             pong.len = f.len;
-            httpd_ws_send_frame(req, &pong);
+            if (sendRoom(fd)) httpd_ws_send_frame(req, &pong);   // a peer not draining gets none
             return ESP_OK;
         }
         case HTTPD_WS_TYPE_CLOSE: {
@@ -308,7 +344,7 @@ esp_err_t ValenceWsPort::wsHandler(httpd_req_t* req) {
             bye.final = true;
             bye.type = HTTPD_WS_TYPE_CLOSE;
             bye.len = 0;
-            httpd_ws_send_frame(req, &bye);
+            if (sendRoom(fd)) httpd_ws_send_frame(req, &bye);
             // ESP_FAIL IS THE TEARDOWN. ESP_OK here leaks the fd, the port slot
             // and the hub session: esp_http_server has already latched
             // sd->ws_close, and from the next select it returns early on this
@@ -413,11 +449,12 @@ void ValenceWsPort::loop(uint32_t nowMs) {
         // on its socket, so nothing else in this system will ever free it.
         // Closing here runs the ONE funnel -- close_fn detaches and the hub
         // parks the session (RFC-042), which is what a reconnect reattaches to.
+        // Once a close is requested, close_fn is the only way forward.
+        if (s.closeRequested()) continue;
+
         if (s.idleOut(nowMs)) {
             GLOGW(kTag, "slot %u silent >%lums -- reaping", unsigned(i),
                   static_cast<unsigned long>(ValenceWsTransport::kIdleReapMs));
-            s.noteRx();   // re-arm: close_fn lands a tick or two later, and a
-                          // trigger_close per 5 ms tick would flood the ctrl socket
             s.close();
             continue;
         }
@@ -430,6 +467,19 @@ void ValenceWsPort::loop(uint32_t nowMs) {
             s.close();
         }
     }
+}
+
+uint32_t ValenceWsPort::takeWorstSendUs(uint8_t& slot) {
+    uint32_t worst = 0;
+    slot = 0xFF;
+    for (uint8_t i = 0; i < kSlots; ++i) {
+        const uint32_t w = _slots[i].takeWorstSendUs();
+        if (w > worst) {
+            worst = w;
+            slot = i;
+        }
+    }
+    return worst;
 }
 
 void ValenceWsPort::goodbyeAll(valence::NackCode code) {
