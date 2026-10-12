@@ -39,6 +39,8 @@ tools/*
 # the twin's dead-peer regression check (val-ni0): a wedged or vanished client
 # must cost the other sessions nothing
 !tools/sim_link_test.py
+# a client whose ACKs lag keeps its STATE (val-kec): run under WSL netem
+!tools/ack_lag_test.py
 # the deploy and forensics doors: an operator with a fresh clone has no other
 # way onto the board or into the archive (val-091.16/.17)
 !tools/ota.py
