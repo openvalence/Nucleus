@@ -44,6 +44,7 @@
 // does not follow the relative include below.
 #include "geiger/geiger.h"
 #include "valence/client/client.hpp"
+#include "valence/conformance/catalog_check.hpp"
 #include "valence/core/clock.hpp"
 #include "valence/core/rng.hpp"
 #include "valence/hub/hub.hpp"
@@ -2255,6 +2256,20 @@ TEST_CASE("VD-GROUP-24: no group string in the catalog is over the spec's 24-byt
         for (const LayoutField& f : c.layoutFields(c.entries[i])) check(f.group);
         for (const SchemaField& f : c.schemaFields(c.entries[i])) check(f.group);
     }
+}
+
+// Valence rfc-tcmf: the library's own authoring check, every size cap the
+// decoder enforces and the per-entry byte cap, over the board's catalog.
+TEST_CASE("VD-CONFORM: the board catalog passes conformance::checkCatalog") {
+    auto rig = std::make_unique<Rig>();
+    static std::array<std::byte, limits::catalog_max_entry_bytes + 64> scratch{};
+    const auto r = conformance::checkCatalog(rig->catalog, scratch);
+    for (size_t i = 0; i < r.count; ++i) {
+        CAPTURE(unsigned(r.violations[i].kind));
+        CAPTURE(r.violations[i].channel_id);
+        CHECK(false);
+    }
+    CHECK(r.ok());
 }
 
 // ---- bd val-4rr: a persist waits for a still window -------------------------------
