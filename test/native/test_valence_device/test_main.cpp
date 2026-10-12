@@ -2238,6 +2238,21 @@ TEST_CASE("VD-GROUP: every group string in the catalog that has a section spells
     CHECK_FALSE(sectionedByRegistry("Tuning /Planner"));
 }
 
+// bd val-3xd: catalog.cddl caps a group at 24 bytes and a C++ client rejects the
+// whole catalog over one that is longer.
+TEST_CASE("VD-GROUP-24: no group string in the catalog is over the spec's 24-byte cap") {
+    auto rig = std::make_unique<Rig>();
+    const Catalog32& c = rig->catalog;
+    auto check = [&](std::string_view g) {
+        CAPTURE(std::string(g));
+        CHECK(g.size() <= 24);
+    };
+    for (uint16_t i = 0; i < c.count; ++i) {
+        for (const LayoutField& f : c.layoutFields(c.entries[i])) check(f.group);
+        for (const SchemaField& f : c.schemaFields(c.entries[i])) check(f.group);
+    }
+}
+
 // ---- bd val-4rr: a persist waits for a still window -------------------------------
 
 TEST_CASE("VD-PERSIST-1: a save requested mid-stroke lands in the next still window, once, never during motion") {

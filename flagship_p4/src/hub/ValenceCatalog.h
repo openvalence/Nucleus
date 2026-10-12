@@ -211,7 +211,7 @@ inline constexpr std::string_view sample_streams   = "Tuning / Sample streams";
 inline constexpr std::string_view curve            = "Tuning / Curve";
 inline constexpr std::string_view ceilings         = "Tuning / Ceilings";
 inline constexpr std::string_view replanning       = "Tuning / Re-planning";
-inline constexpr std::string_view pattern_presets  = "Library / Pattern presets";
+inline constexpr std::string_view pattern_presets  = "Pattern library";
 inline constexpr std::string_view safety           = "Tuning / Safety";
 }  // namespace card
 
