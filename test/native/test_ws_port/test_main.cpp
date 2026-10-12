@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <map>
 #include <span>
+#include <vector>
 
 // Named directly so the library finder adds lib/valence and lib/geiger; it
 // does not follow the relative include below.
@@ -39,6 +40,7 @@ struct FakeSock {
     uint32_t delivered = 0;
     uint32_t parked = 0;
     uint32_t closes = 0;
+    std::vector<uint8_t> types;   // the Valence frame type of each delivered frame, in order
 };
 
 int64_t g_nowUs = 1000000;
@@ -61,16 +63,25 @@ int test_select(int nfds, test_fd_set*, test_fd_set* w, test_fd_set*, test_timev
     return ready;
 }
 
-esp_err_t httpd_ws_send_frame_async(httpd_handle_t, int fd, httpd_ws_frame_t*) {
+int httpd_socket_send(httpd_handle_t, int fd, const char* buf, size_t len, int) {
     FakeSock& s = g_socks[fd];
     if (!s.room) {
         ++s.parked;
         g_nowUs += kParkUs;
-        return ESP_FAIL;
+        return -3;   // HTTPD_SOCK_ERR_TIMEOUT
     }
+    // An unmasked server frame, header and payload in ONE send: FIN+BINARY,
+    // then a 7-bit or 16-bit length.
+    const auto* b = reinterpret_cast<const uint8_t*>(buf);
+    REQUIRE(len >= 2);
+    REQUIRE(b[0] == 0x82);
+    const size_t h = (b[1] == 126) ? 4 : 2;
+    const size_t n = (h == 4) ? (size_t(b[2]) << 8 | b[3]) : b[1];
+    REQUIRE(len == h + n);
     ++s.delivered;
+    s.types.push_back(b[h]);
     g_nowUs += kSendUs;
-    return ESP_OK;
+    return int(len);
 }
 
 esp_err_t httpd_ws_send_frame(httpd_req_t*, httpd_ws_frame_t*) { return ESP_OK; }
@@ -204,4 +215,84 @@ TEST_CASE("WP-04: the buffer a moving transfer fills is not congestion") {
     }
     CHECK(t.pollCongestionLevel(nowMs()) == 0);
     CHECK(g_socks[1005].delivered == 1600);
+}
+
+// ---- a peer whose ACKs come late (val-kec) -----------------------------------------
+// lwIP reports a socket writable only under TCP_SNDQUEUELOWAT pbufs and over
+// TCP_SNDLOWAT bytes free, so a WiFi client that ACKs 30-100 ms late leaves
+// the socket unwritable for part of every round trip. Measured on 0.1.48: a
+// watch client with 30 ms of added ACK delay got 5.2 s STATE blackouts every
+// 6 s; a lost PONG or ECHO armed the 2 s control-stall teardown.
+
+TEST_CASE("WP-05: a refused control frame waits and keeps its order; a brief refusal is not a stall") {
+    reset();
+    static ValenceWsTransport t;
+    t.bind(kHd, 1006);
+    g_socks[1006].room = false;
+    send(t, FrameType::ECHO);
+    send(t, FrameType::EVENT);
+    for (int i = 0; i < 60; ++i) {                 // 300 ms without room
+        t.newTick();
+        t.pollCongestionLevel(nowMs());
+        send(t, FrameType::STATE);
+        g_nowUs += 5000;
+    }
+    CHECK(t.pollCongestionLevel(nowMs()) < 2);     // one round trip of waiting is flow control
+
+    g_socks[1006].room = true;
+    for (int i = 0; i < 400; ++i) {                // two seconds with room
+        t.newTick();
+        t.pollCongestionLevel(nowMs());
+        send(t, FrameType::STATE);
+        g_nowUs += 5000;
+    }
+    const auto& ty = g_socks[1006].types;
+    REQUIRE(ty.size() >= 2);
+    CHECK(ty[0] == uint8_t(FrameType::ECHO));
+    CHECK(ty[1] == uint8_t(FrameType::EVENT));
+    CHECK_FALSE(t.stalledOut(nowMs()));
+    CHECK(t.pollCongestionLevel(nowMs()) < 2);
+}
+
+TEST_CASE("WP-06: a peer whose ACKs lag keeps its STATE flowing and loses no control frame") {
+    reset();
+    static ValenceWsTransport t;
+    t.bind(kHd, 1007);
+    FakeSock& s = g_socks[1007];
+    // Room for 2 ticks of every 5: an ACK every 25 ms. Five seconds of a STATE
+    // push per tick and an ECHO every 100 ms.
+    int64_t lastStateUs = g_nowUs;
+    int64_t worstGapUs = 0;
+    uint32_t echoes = 0;
+    uint8_t worstLevel = 0;
+    for (int i = 0; i < 1000; ++i) {
+        s.room = (i % 5) < 2;
+        t.newTick();
+        const uint8_t level = t.pollCongestionLevel(nowMs());
+        if (level > worstLevel) worstLevel = level;
+        if (i % 20 == 3) {                         // a tick without room
+            send(t, FrameType::ECHO);
+            ++echoes;
+        }
+        const size_t before = s.types.size();
+        send(t, FrameType::STATE);
+        if (s.types.size() > before && s.types.back() == uint8_t(FrameType::STATE)) {
+            if (g_nowUs - lastStateUs > worstGapUs) worstGapUs = g_nowUs - lastStateUs;
+            lastStateUs = g_nowUs;
+        }
+        g_nowUs += 5000;
+    }
+    if (g_nowUs - lastStateUs > worstGapUs) worstGapUs = g_nowUs - lastStateUs;   // a silence that never ended
+    s.room = true;
+    t.newTick();
+    send(t, FrameType::STATE);                      // the last queued ECHO goes ahead of it
+
+    uint32_t echoesOut = 0;
+    for (uint8_t ty : s.types) echoesOut += (ty == uint8_t(FrameType::ECHO));
+    CAPTURE(worstGapUs);
+    CHECK(worstGapUs < 100000);                     // never a blackout, only a lower rate
+    CHECK(echoesOut == echoes);                     // never-shed means never lost
+    CHECK(worstLevel < 2);
+    CHECK_FALSE(t.stalledOut(nowMs()));
+    CHECK(s.closes == 0);
 }

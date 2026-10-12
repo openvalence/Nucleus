@@ -38,6 +38,8 @@ void ValenceWsTransport::bind(httpd_handle_t hd, int fd) {
     _framesRx.store(0, std::memory_order_relaxed);
     _framesTx = _txDataDrops = _txBlobHolds = _txCtrlFails = 0;
     _ctrlStallSinceMs = 0;
+    _ctrlHead = _ctrlLen = 0;
+    _lastSendUs = 0;
     _blobThisTick = 0;
     _congestionLevel = 0;
     _aboveSinceMs = _belowSinceMs = 0;
@@ -101,81 +103,119 @@ bool ValenceWsTransport::isBlobChunk(std::span<const std::byte> frame) {
 }
 
 bool ValenceWsTransport::write(std::span<const std::byte> frame) {
-    if (frame.empty()) return false;
+    if (frame.empty() || frame.size() > valence::kFrameBufferCapacity) return false;
+    if (_closeRequested || _closing.load(std::memory_order_seq_cst)) return false;
 
     const bool data = isDroppable(frame);
     const bool blob = isBlobChunk(frame);
+    const uint32_t nowMs = uint32_t(esp_timer_get_time() / 1000);
 
-    // Class gates BEFORE the syscall, so a congested link is never charged
-    // a send for a frame it is allowed to shed.
-    if (data && _congestionLevel != 0) {
-        ++_txDataDrops;
-        return false;
-    }
     if (blob && _blobThisTick >= valence::limits::blob_chunks_in_flight) {
         ++_txBlobHolds;   // held, not lost: the hub retries this index next tick
         return false;
     }
 
-    if (_closeRequested || _closing.load(std::memory_order_seq_cst)) return false;
-    const uint32_t nowMs = uint32_t(esp_timer_get_time() / 1000);
-    if (!sendRoom(_fd.load(std::memory_order_seq_cst))) {
-        if (blob) {
-            ++_txBlobHolds;
-        } else if (data) {
-            ++_txDataDrops;
-            // A buffer this slot's own moving transfer filled is not congestion.
-            if (uint32_t(nowMs - _lastBlobOkMs) >= kSlowWindowMs) _lastSlowMs = nowMs;
-        } else {
-            ++_txCtrlFails;
-            _lastSlowMs = nowMs;
-            if (_ctrlStallSinceMs == 0) _ctrlStallSinceMs = nowMs;
+    // Nothing overtakes a waiting control frame.
+    flushCtrl(nowMs);
+    if (!data && !blob) {
+        if (_ctrlLen == 0) {
+            const TxResult r = sendNow(frame);
+            if (r == TxResult::Ok) {
+                if (_lastSendUs > kSlowSendUs) _lastSlowMs = nowMs;
+                return true;
+            }
+            if (_closeRequested) return false;   // a torn frame closed the link
         }
+        return queueCtrl(frame, nowMs);
+    }
+    if (_ctrlLen != 0) {
+        if (blob) ++_txBlobHolds;
+        else ++_txDataDrops;
         return false;
     }
-    _sending.store(true, std::memory_order_seq_cst);
-    if (_closing.load(std::memory_order_seq_cst)) {
-        _sending.store(false, std::memory_order_seq_cst);
-        return false;
-    }
-    const int fd = _fd.load(std::memory_order_seq_cst);
-    esp_err_t err = ESP_FAIL;
-    int64_t elapsedUs = 0;
-    if (fd >= 0 && _hd != nullptr) {
-        httpd_ws_frame_t f{};
-        f.final = true;
-        f.type = HTTPD_WS_TYPE_BINARY;
-        f.payload = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(frame.data()));
-        f.len = frame.size();
-        const int64_t t0 = esp_timer_get_time();
-        err = httpd_ws_send_frame_async(_hd, fd, &f);
-        elapsedUs = esp_timer_get_time() - t0;
-    }
-    _sending.store(false, std::memory_order_seq_cst);
-    if (uint32_t(elapsedUs) > _worstSendUs) _worstSendUs = uint32_t(elapsedUs);
 
-    if (err == ESP_OK) {
-        ++_framesTx;
+    const TxResult r = sendNow(frame);
+    if (r == TxResult::Ok) {
         if (blob) {
             ++_blobThisTick;
             _lastBlobOkMs = nowMs;
-        } else if (elapsedUs > int64_t(kSlowSendUs)) {
+        } else if (_lastSendUs > kSlowSendUs) {
             _lastSlowMs = nowMs;
         }
-        if (!data && !blob) _ctrlStallSinceMs = 0;  // cleared ONLY by control going out
         return true;
     }
-
-    if (!blob) _lastSlowMs = nowMs;
-    if (data) {
-        ++_txDataDrops;
-    } else if (blob) {
-        ++_txBlobHolds;   // never arms the stall timer (T16)
-    } else {
-        ++_txCtrlFails;
-        if (_ctrlStallSinceMs == 0) _ctrlStallSinceMs = nowMs;
+    if (blob) {
+        ++_txBlobHolds;   // never marks the link slow (T16)
+        return false;
     }
+    ++_txDataDrops;
+    // A buffer this slot's own moving transfer filled is not congestion.
+    if (r == TxResult::Failed || uint32_t(nowMs - _lastBlobOkMs) >= kSlowWindowMs) _lastSlowMs = nowMs;
     return false;
+}
+
+ValenceWsTransport::TxResult ValenceWsTransport::sendNow(std::span<const std::byte> frame) {
+    if (!sendRoom(_fd.load(std::memory_order_seq_cst))) return TxResult::NoRoom;
+    _sending.store(true, std::memory_order_seq_cst);
+    if (_closing.load(std::memory_order_seq_cst)) {
+        _sending.store(false, std::memory_order_seq_cst);
+        return TxResult::Failed;
+    }
+    // RFC 6455 §5.2, server to client: FIN + BINARY, unmasked, 7- or 16-bit length.
+    const size_t n = frame.size();
+    size_t h = 0;
+    _txWire[h++] = 0x82;
+    if (n < 126) {
+        _txWire[h++] = uint8_t(n);
+    } else {
+        _txWire[h++] = 126;
+        _txWire[h++] = uint8_t(n >> 8);
+        _txWire[h++] = uint8_t(n);
+    }
+    std::memcpy(_txWire.data() + h, frame.data(), n);
+
+    const int fd = _fd.load(std::memory_order_seq_cst);
+    int sent = -1;
+    int64_t elapsedUs = 0;
+    if (fd >= 0 && _hd != nullptr) {
+        const int64_t t0 = esp_timer_get_time();
+        sent = httpd_socket_send(_hd, fd, reinterpret_cast<const char*>(_txWire.data()), h + n, 0);
+        elapsedUs = esp_timer_get_time() - t0;
+    }
+    _sending.store(false, std::memory_order_seq_cst);
+    _lastSendUs = uint32_t(elapsedUs);
+    if (_lastSendUs > _worstSendUs) _worstSendUs = _lastSendUs;
+
+    if (sent == int(h + n)) {
+        ++_framesTx;
+        return TxResult::Ok;
+    }
+    if (sent > 0) close();   // a partial write tore the frame: the stream cannot be resynced
+    return TxResult::Failed;
+}
+
+bool ValenceWsTransport::queueCtrl(std::span<const std::byte> frame, uint32_t nowMs) {
+    _lastSlowMs = nowMs;
+    if (_ctrlLen == kCtrlQueueDepth) {
+        ++_txCtrlFails;   // the stall timer is already running on the oldest
+        return false;
+    }
+    const uint8_t i = uint8_t((_ctrlHead + _ctrlLen) % kCtrlQueueDepth);
+    _ctrlQ[i] = valence::FrameBuffer::from(frame);
+    _ctrlAtMs[i] = nowMs;
+    ++_ctrlLen;
+    _ctrlStallSinceMs = _ctrlAtMs[_ctrlHead];
+    return true;
+}
+
+void ValenceWsTransport::flushCtrl(uint32_t nowMs) {
+    while (_ctrlLen != 0 && !_closeRequested) {
+        if (sendNow(_ctrlQ[_ctrlHead].bytes()) != TxResult::Ok) break;
+        if (_lastSendUs > kSlowSendUs) _lastSlowMs = nowMs;
+        _ctrlHead = uint8_t((_ctrlHead + 1) % kCtrlQueueDepth);
+        --_ctrlLen;
+    }
+    _ctrlStallSinceMs = _ctrlLen != 0 ? _ctrlAtMs[_ctrlHead] : 0;
 }
 
 bool sendRoom(int fd) {
@@ -214,8 +254,9 @@ bool ValenceWsTransport::idleOut(uint32_t nowMs) const {
 }
 
 uint8_t ValenceWsTransport::pollCongestionLevel(uint32_t nowMs) {
-    // severe: a never-shed frame is stalled right now. §10.4's own definition.
-    if (_ctrlStallSinceMs != 0) {
+    // severe: a never-shed frame has waited §10.3's sustain window. §10.4's
+    // own definition. A shorter wait is a round trip, counted as slow below.
+    if (_ctrlStallSinceMs != 0 && uint32_t(nowMs - _ctrlStallSinceMs) >= kCongestedSustainMs) {
         _congestionLevel = 2;
         _aboveSinceMs = _belowSinceMs = 0;
         return _congestionLevel;
@@ -231,10 +272,9 @@ uint8_t ValenceWsTransport::pollCongestionLevel(uint32_t nowMs) {
     } else {
         _aboveSinceMs = 0;
         if (_belowSinceMs == 0) _belowSinceMs = nowMs;
-        // Recovery re-probes by construction: at level 1 the data classes shed
-        // without touching the socket, so nothing refreshes _lastSlowMs and the
-        // level falls back to 0 after the §10.3 window. Control frames keep
-        // probing the socket throughout, so a genuinely wedged peer re-arms it.
+        // Every frame the library still sends at level 1 probes the socket, so
+        // a peer that still lags keeps the level up and one that caught up
+        // drops it after the §10.3 window.
         if (uint32_t(nowMs - _belowSinceMs) >= kRecoveredSustainMs) _congestionLevel = 0;
     }
     return _congestionLevel;
@@ -443,6 +483,7 @@ void ValenceWsPort::loop(uint32_t nowMs) {
         if (!_attached[i]) continue;
 
         s.newTick();
+        s.flushCtrl(nowMs);
         _hub->setCongestionLevel(s, s.pollCongestionLevel(nowMs));
 
         // T19 addendum: a peer that went dark without a FIN never wakes httpd
@@ -459,8 +500,8 @@ void ValenceWsPort::loop(uint32_t nowMs) {
             continue;
         }
 
-        // Continuous control failure for kCtrlStallMs is the one case where a
-        // client really is stranded waiting on a reply that will never come.
+        // A control frame waiting kCtrlStallMs is the one case where a client
+        // really is stranded waiting on a reply that will never come.
         if (s.stalledOut(nowMs)) {
             GLOGW(kTag, "slot %u control stalled >%lums -- disconnecting", unsigned(i),
                   static_cast<unsigned long>(ValenceWsTransport::kCtrlStallMs));

@@ -21,7 +21,7 @@
 // and the reader parses a half-written buffer.
 //
 // ---- The send hazard esp_http_server hands you ------------------------------
-// httpd_ws_send_frame_async(hd, fd, ...) takes a RAW fd, and close_fn on the
+// httpd_socket_send(hd, fd, ...) takes a RAW fd, and close_fn on the
 // httpd task closes that fd. A send in flight would then write into a
 // recycled descriptor. The _sending/_closing pair below is a two-flag
 // handshake (seq_cst, both directions checked) so close_fn WAITS for an
@@ -30,7 +30,7 @@
 // client object of any kind, only the fd, and that is deliberate (T29).
 //
 // ---- A send never waits on the peer (ITransport::write MUST NOT block) -----
-// httpd_ws_send_frame_async is a BLOCKING write into lwIP's send buffer, and
+// httpd_socket_send is a BLOCKING write into lwIP's send buffer, and
 // SO_SNDTIMEO does not bound it: lwIP re-checks the timeout only when the peer
 // ACKs or its 1 s netconn poll fires (api_msg.c, NETCONN_TCP_POLL_INTERVAL 2 x
 // TCP_SLOW_INTERVAL 500 ms), so one full buffer parked the hub task for up to
@@ -38,9 +38,15 @@
 // can also be PARTIAL, which tears the WebSocket frame. So no frame is handed
 // to the socket unless it is writable NOW (sendRoom(): select, zero timeout).
 // lwIP reports writable only while more than TCP_SNDLOWAT (half of
-// TCP_SND_BUF, 2881 B here) is free, and a whole frame is at most
-// kFrameBufferCapacity plus a 4 B header, so a writable socket takes the frame
-// at once. SO_SNDTIMEO stays as the backstop, never the plan.
+// TCP_SND_BUF, 2881 B here) is free and fewer than TCP_SNDQUEUELOWAT (8)
+// pbufs are queued, and a whole frame is at most kFrameBufferCapacity plus a
+// 4 B header, so a writable socket takes the frame at once. SO_SNDTIMEO stays
+// as the backstop, never the plan.
+// Each frame goes out as ONE send() of header and payload: one pbuf. Do not
+// use httpd_ws_send_frame_async: it sends the header and the payload apart,
+// two pbufs per frame, which let a peer hold only three frames unacked, and a
+// WiFi client ACKing 30 ms late then found the socket unwritable every round
+// trip (bd val-kec).
 //
 // ---- Congestion, from what esp_http_server actually exposes ----------------
 // There is NO egress queue and NO queue-depth API here, so the watermark IS
@@ -50,10 +56,14 @@
 // pollCongestionLevel() bands it with SPEC §10.3's own hysteresis (sustained
 // 1 s up, 5 s down) and feeds Hub::setCongestionLevel.
 //
-// ---- Three TX classes, same split the S3 runs -------------------------------
-//   STATE / STREAM  : data. Shed as soon as congestion is nonzero. Stale
-//                     telemetry is worthless and conflation is already the
-//                     doctrine.
+// ---- Three TX classes ---------------------------------------------------------
+//   STATE / STREAM  : data. Dropped when the socket has no room or a control
+//                     frame is waiting; the hub re-sends retained STATE on a
+//                     later tick, so a drop lowers the rate and loses nothing.
+//                     The per-level shedding is the library's (shedding.hpp,
+//                     SPEC §10.4): do not add a level gate here. A blanket one
+//                     shed critical and elevated STATE too, for the whole 5 s
+//                     recovery window, on every lagging client (bd val-kec).
 //   BLOB_CHUNK      : its own class, paced against the registry's OWN
 //                     advertised sender budget (limits::blob_chunks_in_flight)
 //                     per hub tick. HELD, never dropped -- the hub re-sends the
@@ -66,11 +76,12 @@
 //                     here held every chunk until the hub's row-4 clock
 //                     answered BUSY, on every retry.
 //   everything else : control, EVENT included (a safety edge is the one thing
-//                     nobody may shed). Never shed on our own initiative; a
-//                     refusal starts the stall timer and only kCtrlStallMs of
-//                     CONTINUOUS failure tears the session down. The timer is
-//                     cleared ONLY by a control frame actually going out, never
-//                     by inbound traffic.
+//                     nobody may shed). Never shed: a frame that finds no room
+//                     waits in a kCtrlQueueDepth FIFO and goes out first, in
+//                     order, as soon as there is room; nothing overtakes it.
+//                     The stall timer is the age of the oldest waiting frame,
+//                     never a past refusal: kCtrlStallMs of waiting tears the
+//                     session down, and inbound traffic never clears it.
 //
 // ---- Every way a client leaves runs ONE funnel (T3) -------------------------
 // close_fn is the funnel: it waits out an in-flight send, records the detach
@@ -98,6 +109,7 @@
 // socket is closed explicitly.
 // See: Valence SPEC.md §6.3, §9, §10.3, §13.1, §13.2
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <optional>
@@ -119,10 +131,15 @@ public:
     // PSRAM with the hub, so it costs the internal heap nothing.
     static constexpr uint8_t kRxRingDepth = 32;
 
-    // How long a CONTROL frame may stay unsendable before the session is torn
-    // down. A single refusal is ordinary flow control; two seconds of
-    // continuous refusal is a client waiting on a reply that will never come.
+    // How long a CONTROL frame may wait before the session is torn down. A
+    // wait of one round trip is ordinary flow control; two seconds is a client
+    // waiting on a reply that will never come.
     static constexpr uint32_t kCtrlStallMs = 2000;
+
+    // Control frames waiting for room. A healthy peer drains them within a
+    // round trip; a peer that lets eight pile up is stalled, and further
+    // control frames are refused while the stall timer runs out.
+    static constexpr uint8_t kCtrlQueueDepth = 8;
 
     // SPEC §10.3's own hysteresis windows, not local tuning.
     static constexpr uint32_t kCongestedSustainMs = 1000;
@@ -171,7 +188,10 @@ public:
     uint8_t pollCongestionLevel(uint32_t nowMs);
     // Called once per hub tick: re-arms the BLOB_CHUNK pacing budget.
     void newTick() { _blobThisTick = 0; }
-    // True once the control-stall timer has run past kCtrlStallMs.
+    // Sends waiting control frames while the socket has room. write() runs it
+    // first too; the port runs it every tick so a quiet hub still drains.
+    void flushCtrl(uint32_t nowMs);
+    // True once the oldest waiting control frame has waited past kCtrlStallMs.
     bool stalledOut(uint32_t nowMs) const;
     // True once nothing at all has arrived for kIdleReapMs.
     bool idleOut(uint32_t nowMs) const;
@@ -198,8 +218,12 @@ public:
     uint32_t txCtrlFails() const { return _txCtrlFails; }
 
 private:
+    enum class TxResult : uint8_t { Ok, NoRoom, Failed };
+
     static bool isDroppable(std::span<const std::byte> frame);
     static bool isBlobChunk(std::span<const std::byte> frame);
+    TxResult sendNow(std::span<const std::byte> frame);
+    bool queueCtrl(std::span<const std::byte> frame, uint32_t nowMs);
 
     httpd_handle_t _hd = nullptr;
     std::atomic<int> _fd{-1};
@@ -218,7 +242,14 @@ private:
     uint32_t _txDataDrops = 0;
     uint32_t _txBlobHolds = 0;
     uint32_t _txCtrlFails = 0;
-    uint32_t _ctrlStallSinceMs = 0;
+    uint32_t _ctrlStallSinceMs = 0;   // when the oldest waiting control frame arrived, 0 = none waits
+    valence::FrameBuffer _ctrlQ[kCtrlQueueDepth]{};
+    uint32_t _ctrlAtMs[kCtrlQueueDepth]{};
+    uint8_t _ctrlHead = 0;
+    uint8_t _ctrlLen = 0;
+    // One wire frame: a 2 or 4 B WebSocket header, then the Valence frame.
+    std::array<uint8_t, valence::kFrameBufferCapacity + 4> _txWire{};
+    uint32_t _lastSendUs = 0;
     uint8_t _blobThisTick = 0;
     uint8_t _congestionLevel = 0;
     uint32_t _aboveSinceMs = 0;

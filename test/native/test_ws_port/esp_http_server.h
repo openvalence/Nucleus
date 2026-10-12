@@ -58,7 +58,7 @@ struct httpd_config_t {
 };
 #define HTTPD_DEFAULT_CONFIG() httpd_config_t{}
 
-esp_err_t httpd_ws_send_frame_async(httpd_handle_t hd, int fd, httpd_ws_frame_t* frame);
+int httpd_socket_send(httpd_handle_t hd, int sockfd, const char* buf, size_t buf_len, int flags);
 esp_err_t httpd_ws_send_frame(httpd_req_t* req, httpd_ws_frame_t* frame);
 esp_err_t httpd_ws_recv_frame(httpd_req_t* req, httpd_ws_frame_t* frame, size_t max_len);
 int httpd_req_to_sockfd(httpd_req_t* req);
