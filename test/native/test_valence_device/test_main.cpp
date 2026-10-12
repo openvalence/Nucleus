@@ -2790,3 +2790,31 @@ TEST_CASE("VD-PAIR-8: a single press demotes nothing") {
     CHECK(rig->client->state() == ClientSessionState::LIVE);
     CHECK(rig->hub->pairing().hasConfigureToken());
 }
+
+TEST_CASE("VD-PAIR-9: after a demote the hub stays claimed: a press grants control, and nothing is vouched above watch") {
+    auto rig = std::make_unique<Rig>();
+    seedConfigureOwner(*rig);
+    pair(*rig, button::PairGesture::hold);
+    pair(*rig, button::PairGesture::press);
+    REQUIRE(rig->client->connect());
+    rig->step(200);
+    REQUIRE(rig->client->sendPairKnock());
+    rig->step();
+    REQUIRE(rig->del.granted.has_value());
+    CHECK(*rig->del.granted == AccessLevel::control);
+}
+
+TEST_CASE("VD-PAIR-10: a ledger with entries but no configure owner (as after a reboot) vouches nobody above watch") {
+    auto rig = std::make_unique<Rig>();   // this rig vouches control for anyone unpaired
+    std::array<std::byte, limits::instance_id_bytes> inst{};
+    inst[0] = std::byte{0x56};
+    XorShift32 rng(98);
+    std::array<std::byte, limits::token_bytes> tok{};
+    REQUIRE(rig->hub->pairing().grant(inst, AccessLevel::watch, pairing_modes::push_to_pair, rng, tok) != nullptr);
+    REQUIRE(rig->client->connect());
+    rig->step(200);
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(1, IntentValue::ofBool(true))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::NOT_CONTROLLER);
+}

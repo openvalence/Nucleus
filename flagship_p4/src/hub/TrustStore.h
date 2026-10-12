@@ -15,8 +15,8 @@
 //   the bytes last stored, at most once per kLedgerWriteMinIntervalMs, and
 //   never while holdWrites is true (an OTA transfer in flight). A change made
 //   inside the interval is held, never dropped.
-// - CLAIMABLE AT BOOT means zero configure tokens AND no stored ledger that
-//   failed to load. A stored ledger that is unreadable or rejected leaves the
+// - CLAIMABLE AT BOOT means an empty ledger (Valence RFC-114 draft: a demote
+//   keeps the hub claimed) AND no stored ledger that failed to load. A stored ledger that is unreadable or rejected leaves the
 //   hub unclaimable with an empty ledger; the gesture is the way back in.
 // - THE GESTURE COUNTS POWER-ON BOOTS ONLY. A panic, watchdog or software
 //   reset breaks the sequence: a crash loop is not physical presence, and a
@@ -70,7 +70,7 @@ inline constexpr size_t kLedgerBlobBytes = size_t(limits::trust_ledger_max_bytes
 struct TrustBoot {
     bool ledgerLoaded = false;     // a stored ledger was adopted
     bool ledgerRejected = false;   // a stored ledger exists and did not load
-    bool claimable = false;        // §12.3(c) factory-fresh: zero configure tokens
+    bool claimable = false;        // §12.3(c) factory-fresh: an empty ledger (RFC-114 draft)
     bool gesture = false;          // the power-cycle gesture armed this boot
     bool counterSaved = false;     // the boot's counter write landed
     uint8_t shortBoots = 0;        // consecutive short power-on boots before this one
@@ -103,7 +103,7 @@ public:
         // Adoption is not a change: decodeLedger() marks the ledger dirty.
         p.clearDirty();
         b.paired = p.entryCount();
-        b.claimable = !b.ledgerRejected && !p.hasConfigureToken();
+        b.claimable = !b.ledgerRejected && !p.claimed();
 
         uint8_t count = 0;
         std::array<std::byte, 1> raw{};

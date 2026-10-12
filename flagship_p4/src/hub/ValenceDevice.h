@@ -167,8 +167,8 @@ public:
     // motion, then latches ESTOP (cause user: the power cut), then reports
     // rebootDue(); PAIR press opens the presence window (SPEC 12.3); PAIR
     // double press approves the one pending configure ask and PAIR hold (5 s)
-    // demotes every client to watch (Valence RFC-114 draft). After a demote
-    // /uitoken vouches for nobody until a configure owner exists again: a
+    // demotes every client to watch (Valence RFC-114 draft). While the ledger
+    // holds entries but no configure owner, /uitoken vouches for nobody: a
     // demoted browser must not mint its control back. The reboot is the composition's:
     // takePendingPersist(), the GOODBYEs, the restart. Never clears.
     bool rebootDue() const { return _reboot == Reboot::due; }
@@ -367,11 +367,9 @@ private:
     enum class Reboot : uint8_t { none, braking, due };
     Reboot _reboot = Reboot::none;
     uint32_t _rebootBrakeUntilMs = 0;
-    // PAIR: a refused or demoting gesture's look and when it ends; whether a
-    // demote stands (cleared by the next configure owner).
+    // PAIR: a refused or demoting gesture's look and when it ends.
     PairLook _pairFlash = PairLook::quiet;
     uint32_t _pairFlashUntilMs = 0;
-    bool _demoted = false;
     std::atomic<uint8_t> _pairLook{uint8_t(PairLook::quiet)};
     void servicePair(button::PairGesture g, uint32_t nowMs);
 

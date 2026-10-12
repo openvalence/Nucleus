@@ -322,7 +322,7 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
         return true;
     }
     // SPEC §13.9: an association window open now, or a factory-fresh hub.
-    if (!_hub.pairingWindowOpen() && _hub.pairing().hasConfigureToken()) {
+    if (!_hub.pairingWindowOpen() && _hub.pairing().claimed()) {
         nack(link, NackCode::ACCESS_DENIED, in.intent_id, h->seq, "pairing window closed");
         return true;
     }

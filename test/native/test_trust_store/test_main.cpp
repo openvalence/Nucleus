@@ -120,16 +120,18 @@ TEST_CASE("TS-02: the ledger survives a reboot, tokens included, and ends claima
     CHECK(nvs.ledgerSaves() == 1);
 }
 
-TEST_CASE("TS-03: a ledger with only control entries is still factory-fresh (§12.3: zero configure tokens)") {
+TEST_CASE("TS-03: a ledger with no configure entry is still claimed (Valence RFC-114 draft: a demote keeps it)") {
     FakeNvs nvs;
     {
         Boot b(nvs);
         REQUIRE(b.pm.importEntry(entry(2, AccessLevel::control, "remote")));
+        REQUIRE(b.pm.importEntry(entry(3, AccessLevel::watch, "demoted")));
         b.store.tick(b.pm, nvs, 100, false);
     }
     Boot b(nvs);
     CHECK(b.result.ledgerLoaded);
-    CHECK(b.result.claimable);
+    CHECK_FALSE(b.result.claimable);
+    CHECK(b.pm.presenceGrantRole() == AccessLevel::control);
 }
 
 TEST_CASE("TS-04: written only on change, at most once per interval, held never dropped") {

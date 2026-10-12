@@ -605,9 +605,12 @@ BundleView leadCapped(const BundleView& bundle, uint32_t now32, uint32_t capUs, 
 AccessLevel ValenceDevice::validateToken(std::span<const std::byte> instance_id,
                                          std::span<const std::byte> token, bool hasToken) {
     (void)instance_id;
-    if (_demoted && _hub->pairing().hasConfigureToken()) _demoted = false;
-    if (!_demoted && hasToken && _tokenGate != nullptr && _tokenGate->consume(token)) return AccessLevel::control;
-    return _demoted ? AccessLevel::watch : _unvouchedRole;
+    // Claimed with no configure owner (a demote, or every owner revoked): the
+    // ledger says so across reboots, and nothing is vouched above watch.
+    const PairingManager& p = _hub->pairing();
+    if (p.claimed() && !p.hasConfigureToken()) return AccessLevel::watch;
+    if (hasToken && _tokenGate != nullptr && _tokenGate->consume(token)) return AccessLevel::control;
+    return _unvouchedRole;
 }
 
 Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& requested,
@@ -2198,7 +2201,6 @@ void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
         }
         case button::PairGesture::hold: {
             const Hub::DemoteCount d = _hub->demoteAllToWatch();
-            _demoted = true;
             _pairFlash = PairLook::demoted;
             _pairFlashUntilMs = nowMs + kPairFlashMs;
             GLOGW(kTag, "PAIR hold %lu s: DEMOTED every client to watch: %u stored tokens, %u live sessions; "
