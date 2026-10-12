@@ -24,6 +24,7 @@
 // See: Valence SPEC.md §13.9; ValenceProvisioning.h
 
 #include "ValenceProvisioning.h"
+#include "StationScan.h"
 
 #include <atomic>
 #include <cstring>
@@ -178,6 +179,7 @@ JoinOutcome BoardStation::join() {
     wifi_config_t next{};
     std::memcpy(next.sta.ssid, _reqSsid.data(), sizeof next.sta.ssid);
     std::memcpy(next.sta.password, _reqPass.data(), sizeof next.sta.password);
+    stationScanPolicy(next);
 
     xEventGroupClearBits(_events, kGotIp | kConnected);
     _reason.store(0, std::memory_order_relaxed);
@@ -236,6 +238,7 @@ JoinOutcome BoardStation::join() {
     // No stranding: back onto what boot would use.
     wifi_config_t prior{};
     stationCredentials(prior.sta.ssid, prior.sta.password);
+    stationScanPolicy(prior);
     apply(prior);
     wipeBytes(&prior, sizeof prior);
     return out;

@@ -31,6 +31,7 @@
 #include "geiger/geiger.h"
 #include "hub/ValenceHub.h"
 #include "hub/ValenceProvisioning.h"
+#include "hub/StationScan.h"
 #include "motion/MotionArbiter.h"
 #include "motion/ValenceMotion.h"
 #include "patterns/ValencePattern.h"
@@ -112,6 +113,10 @@ static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
         } else {
             GLOGI("wifi", "joined, ip %s", g_ip);
         }
+        // Which AP sort_method picked: BSSID tail only, never the SSID.
+        wifi_ap_record_t ap{};
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
+            GLOGI("wifi", "AP ..%02x:%02x ch %u rssi %d dBm", ap.bssid[4], ap.bssid[5], unsigned(ap.primary), int(ap.rssi));
     }
 }
 
@@ -156,6 +161,7 @@ static bool wifi_up() {
         printf("STA credentials: provisioned (NVS)\n");
     else
         printf("STA credentials: secrets.h, \"%s\"\n", SECRET_WIFI_SSID);
+    valence::stationScanPolicy(w);
     if ((err = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK)        { printf("set_mode: %s\n", esp_err_to_name(err)); return false; }
     if ((err = esp_wifi_set_config(WIFI_IF_STA, &w)) != ESP_OK)    { printf("set_config: %s\n", esp_err_to_name(err)); return false; }
     if ((err = esp_wifi_start()) != ESP_OK)                        { printf("wifi_start: %s\n", esp_err_to_name(err)); return false; }
