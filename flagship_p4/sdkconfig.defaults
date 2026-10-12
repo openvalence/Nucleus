@@ -139,6 +139,15 @@ CONFIG_LWIP_MAX_SOCKETS=17
 # clean-build ceremony (platformio.ini trap 1).
 CONFIG_HTTPD_WS_SUPPORT=y
 
+# lwIP counts the retransmission timeout in ticks of 2 x this interval, and on
+# a LAN the estimator settles at 3 ticks: 1.5 s at the IDF's 250 ms. A segment
+# lost where the client cannot dupack it (a tail loss, a blackout) waits that
+# long, then 3 s more, past the WS port's 2 s control-stall eviction (measured
+# 2026-10-12, bd val-jyu). 50 ms makes it 300 ms. It also bounds delayed ACKs
+# and zero-window probes; every other lwIP timeout is stated in ms and scales.
+# The generated sdkconfig keeps its old value: delete it to apply this.
+CONFIG_LWIP_TCP_TMR_INTERVAL=50
+
 
 # ---- OTA: rollback, and the watchdog that makes it fire (val-091.16) --------
 # The bootloader marks a freshly written slot PENDING_VERIFY and reverts to its

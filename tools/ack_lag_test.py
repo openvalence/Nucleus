@@ -13,6 +13,16 @@ Needs websocket-client (valence_soak.py's wire layer, Valence/tools).
 
 Pass: motion near 50 Hz, worst gap under 100 ms, pongs == pings. 0.1.48 at
 +30 ms: 13.7 Hz with 5.2 s gaps; at +100 +-50 ms: 0.8 Hz, 10.5 s gaps.
+
+Loss on the hub's own sends (the direction lwIP retransmits) needs ingress
+shaping through an ifb device, filtered to the hub's address:
+    ip link add ifb0 type ifb; ip link set ifb0 up
+    tc qdisc add dev eth0 handle ffff: ingress
+    tc filter add dev eth0 parent ffff: protocol ip u32 match ip src 192.168.1.118/32         action mirred egress redirect dev ifb0
+    tc qdisc add dev ifb0 root netem loss 1%
+0.1.49 at 1% for 90 s: worst motion gap 1087 ms and PONG round trip 992 ms
+(one lwIP retransmission timeout); a 0.3 s blackout cost a 1.27 s gap, and
+0.6 s or more parked the session on the 2 s control stall.
 """
 import json
 import os
@@ -36,6 +46,7 @@ ONE_HZ = {0x0006, 0x1111, 0x1010, 0x1020}
 ctx = types.SimpleNamespace(args=types.SimpleNamespace(ip=ip, port=82, timeout=6.0, sub_rate=50.0))
 c = vs.SoakClient(ctx, "acklag", sub_rate=50.0, subs=SUBS)
 pings = [0]
+ping_at, rtts = [], []
 arrivals = []
 send0, recv0 = c.send, c.recv
 
@@ -43,6 +54,7 @@ send0, recv0 = c.send, c.recv
 def send(ft, ch, p, seq=0):
     if ft == vs.sp.FRAME["PING"]:
         pings[0] += 1
+        ping_at.append(time.time())
     return send0(ft, ch, p, seq)
 
 
@@ -50,6 +62,8 @@ def recv(deadline):
     got = recv0(deadline)
     if got and got != "timeout":
         arrivals.append((time.time(), got[0]["type"], got[0]["channel"]))
+        if got[0]["type"] == vs.sp.FRAME["PONG"] and ping_at:
+            rtts.append((time.time() - ping_at.pop(0)) * 1000)
     return got
 
 
@@ -60,6 +74,7 @@ if not c.handshake(timeout=6.0):
     sys.exit(1)
 pongs0 = c.m["by_frame_type"].get("PONG", 0)
 pings[0] = 0
+ping_at.clear()
 c.start_loop()
 t0 = time.time()
 arrivals.clear()
@@ -72,11 +87,14 @@ except Exception:  # noqa: BLE001
     pass
 
 m = snap["state"].get("0x1100", {})
+rtts.sort()
 print(json.dumps({
     "secs": secs, "pings": pings[0], "pongs": snap["by_frame_type"].get("PONG", 0) - pongs0,
     "unexpected_disconnects": snap["unexpected_disconnects"],
     "motion_hz": m.get("measured_hz"), "motion_gap_max_ms": m.get("gap_max_ms"),
     "frames_rx_per_s": round(snap["frames_rx"] / secs),
+    "pong_rtt_p50_ms": round(rtts[len(rtts) // 2], 1) if rtts else None,
+    "pong_rtt_max_ms": round(rtts[-1], 1) if rtts else None,
 }))
 last = {}
 for t, ty, ch in arrivals:

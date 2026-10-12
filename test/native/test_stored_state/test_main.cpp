@@ -389,18 +389,19 @@ TEST_CASE("config blob: a pre-rename v2 blob decodes into the jog fields") {
     CHECK(c.max_rail == 300.0f);
 }
 
-TEST_CASE("config blob: the schedule horizon round trips; a v2 blob migrates to the 250 ms default") {
+TEST_CASE("config blob: the schedule horizon round trips; a v2 blob migrates to the 1000 ms default") {
     std::array<std::byte, stored::kConfigBlobBytes> b{};
     valence::StoredModes m;
-    m.horizon = 2;
+    CHECK(m.horizon == 2);
+    m.horizon = 0;
     REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), m, 9) == b.size());
     StoredConfig c;
     MotionTuning t;
     valence::StoredModes got;
     uint16_t gen = 0;
     REQUIRE(stored::decodeConfig(b, kFactory, c, t, got, gen));
-    CHECK(got.horizon == 2);
-    CHECK(valence::kHorizonMs[got.horizon] == 1000);
+    CHECK(got.horizon == 0);
+    CHECK(valence::kHorizonMs[got.horizon] == 250);
 
     // The same bytes cut back to the v2 layout and relabeled v2: the tail the
     // old firmware never wrote takes the factory value.
@@ -409,8 +410,8 @@ TEST_CASE("config blob: the schedule horizon round trips; a v2 blob migrates to 
     v2[4] = std::byte{2};
     got.horizon = 1;
     REQUIRE(stored::decodeConfig(v2, kFactory, c, t, got, gen));
-    CHECK(got.horizon == 0);
-    CHECK(valence::kHorizonMs[got.horizon] == 250);
+    CHECK(got.horizon == 2);
+    CHECK(valence::kHorizonMs[got.horizon] == 1000);
 
     // An ordinal past the select's options is rejected whole.
     b[stored::kConfigV3Bytes - 1] = std::byte{3};

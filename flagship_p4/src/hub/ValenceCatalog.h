@@ -1433,7 +1433,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // grant's horizon is a commitment for its life (SPEC 5.4); enabled_mask grays
     // it while a grant is live.
     c.addSelectField({.name = "schedule_horizon", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(0),
+                      .dflt = SettingDefault::ofInt(2),
                       .group = card::streaming,
                       .desc = "How far ahead segment players may schedule",
                       .settingKey = 7, .flags = valence::setting_flags::advanced,

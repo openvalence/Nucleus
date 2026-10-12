@@ -75,7 +75,10 @@ inline constexpr uint8_t kSetupRequiredMask = 0xFF;
 
 // The stored 0x1030 modes that are not engine tuning, and the first-run record.
 struct StoredModes {
-    uint8_t horizon = 0;   // schedule_horizon ordinal: kHorizonMs (ValenceCatalog.h)
+    // schedule_horizon ordinal: kHorizonMs (ValenceCatalog.h). Factory 1000 ms:
+    // a lookahead player's lead rides it, and a lead longer than a WiFi stall
+    // hides the stall from motion.
+    uint8_t horizon = 2;
     bool    flipped = false;   // axis.flipped (RFC-088): how the rail is mounted
     // 0x3000 keys accepted at least once, same bits as kSetupRequiredMask.
     // Only ever gains bits; a factory-fresh or migrated hub starts at 0.
