@@ -76,6 +76,10 @@ struct HubCensus {
 };
 HubCensus hubCensus();
 
+// The PAIR control's look (ValenceDevice.h PairLook), any task; 0 before the
+// hub is up.
+uint8_t hubPairLook();
+
 // Link RSSI for the 0x0006 hub-status snapshot, in dBm; 0 means "no reading".
 // IT IS PUSHED IN, NOT PULLED, AND THAT IS THE WHOLE POINT: the radio is on
 // the C6, so esp_wifi_sta_get_ap_info() is an esp_hosted RPC, MEASURED at

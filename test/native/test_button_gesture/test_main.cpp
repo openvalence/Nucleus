@@ -143,3 +143,133 @@ TEST_CASE("the millisecond clock wraps without a phantom gesture") {
     }
     CHECK(g == Gesture::press);
 }
+
+// ---- PAIR: press, double press, demote hold (Valence RFC-114 draft) ----------
+
+namespace {
+
+using btn::PairGesture;
+
+struct PairRig {
+    btn::PairButton b;
+    uint32_t t = 1000;
+    std::vector<PairGesture> seen;
+    std::vector<uint32_t> at;
+    bool downAtHold = false;
+
+    void hold(bool level, uint32_t ms) {
+        for (uint32_t end = t + ms; t < end; t += kPollMs) {
+            const PairGesture g = b.sample(level, t);
+            if (g == PairGesture::none) continue;
+            if (g == PairGesture::hold) downAtHold = b.down();
+            seen.push_back(g);
+            at.push_back(t);
+        }
+    }
+    void tap(uint32_t downMs = 100) { hold(true, downMs); }
+};
+
+PairRig armed() {
+    PairRig r;
+    r.hold(false, 200);
+    return r;
+}
+
+}  // namespace
+
+TEST_CASE("PAIR: one press is press, after the double-press window and not before") {
+    auto r = armed();
+    r.tap();
+    r.hold(false, btn::kDoublePressMs - 100);
+    CHECK(r.seen.empty());
+    r.hold(false, 200);
+    REQUIRE(r.seen.size() == 1);
+    CHECK(r.seen[0] == PairGesture::press);
+}
+
+TEST_CASE("PAIR: two presses inside the window are one double press, never a press") {
+    auto r = armed();
+    r.tap();
+    r.hold(false, 300);
+    r.tap();
+    r.hold(false, btn::kDoublePressMs + 100);
+    REQUIRE(r.seen.size() == 1);
+    CHECK(r.seen[0] == PairGesture::double_press);
+}
+
+TEST_CASE("PAIR: a third press makes it no gesture, and upgrades nothing") {
+    auto r = armed();
+    for (int i = 0; i < 3; ++i) {
+        r.tap();
+        r.hold(false, 300);
+    }
+    r.hold(false, btn::kDoublePressMs);
+    REQUIRE(r.seen.size() == 1);
+    CHECK(r.seen[0] == PairGesture::extra);
+}
+
+TEST_CASE("PAIR: a second press just outside the window is two single presses") {
+    auto r = armed();
+    r.tap();
+    r.hold(false, btn::kDoublePressMs + 50);
+    r.tap();
+    r.hold(false, btn::kDoublePressMs + 100);
+    REQUIRE(r.seen.size() == 2);
+    CHECK(r.seen[0] == PairGesture::press);
+    CHECK(r.seen[1] == PairGesture::press);
+}
+
+TEST_CASE("PAIR: a 5 s hold fires while held, and its release fires nothing") {
+    auto r = armed();
+    r.hold(true, btn::kDemoteHoldMs + 100);
+    REQUIRE(r.seen.size() == 1);
+    CHECK(r.seen[0] == PairGesture::hold);
+    CHECK(r.downAtHold);
+    r.hold(false, btn::kDoublePressMs + 100);
+    CHECK(r.seen.size() == 1);
+}
+
+TEST_CASE("PAIR: a 4.9 s press is only a single press") {
+    auto r = armed();
+    r.hold(true, btn::kDemoteHoldMs - 100);
+    r.hold(false, btn::kDoublePressMs + 100);
+    REQUIRE(r.seen.size() == 1);
+    CHECK(r.seen[0] == PairGesture::press);
+}
+
+TEST_CASE("PAIR: a press then a hold is only the hold") {
+    auto r = armed();
+    r.tap();
+    r.hold(false, 300);
+    r.hold(true, btn::kDemoteHoldMs + 100);
+    r.hold(false, btn::kDoublePressMs + 100);
+    REQUIRE(r.seen.size() == 1);
+    CHECK(r.seen[0] == PairGesture::hold);
+}
+
+TEST_CASE("PAIR: a hold then a quick press is the hold, then a press of its own") {
+    auto r = armed();
+    r.hold(true, btn::kDemoteHoldMs + 100);
+    r.hold(false, 200);
+    r.tap();
+    r.hold(false, btn::kDoublePressMs + 100);
+    REQUIRE(r.seen.size() == 2);
+    CHECK(r.seen[0] == PairGesture::hold);
+    CHECK(r.seen[1] == PairGesture::press);
+}
+
+TEST_CASE("PAIR: held through power-on fires no hold") {
+    PairRig r;
+    r.hold(true, btn::kDemoteHoldMs + 1000);
+    r.hold(false, btn::kDoublePressMs + 100);
+    CHECK(r.seen.empty());
+}
+
+TEST_CASE("PAIR: a jammed button fires its hold once, then stuck on release") {
+    auto r = armed();
+    r.hold(true, btn::kStuckMs + 100);
+    r.hold(false, 100);
+    REQUIRE(r.seen.size() == 2);
+    CHECK(r.seen[0] == PairGesture::hold);
+    CHECK(r.seen[1] == PairGesture::stuck);
+}

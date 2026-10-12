@@ -2,7 +2,7 @@
 
 // ButtonGesture -- one debounced push button as press / hold gestures, acted
 // on RELEASE: a press shorter than the hold time is `press`, one at least as
-// long is `hold`
+// long is `hold`; and PAIR's sequence on top of it (PairButton below)
 // Constraints:
 // - Hardware-free and allocation-free. The host samples the pad, hands in
 //   "pressed now" and its millisecond clock, and acts on what sample()
@@ -34,6 +34,14 @@ inline constexpr uint32_t kHoldMs = 3000;
 inline constexpr uint32_t kStuckMs = 30000;
 
 static_assert(kDebounceMs < kHoldMs && kHoldMs < kStuckMs, "gesture windows out of order");
+
+// PAIR (Valence RFC-114 draft; both move to the registry's limits at landing).
+// A next press beginning within this long of a release continues the sequence.
+inline constexpr uint32_t kDoublePressMs = 600;
+// A press this long demotes every client, fired while still held.
+inline constexpr uint32_t kDemoteHoldMs = 5000;
+
+static_assert(kDebounceMs < kDoublePressMs && kDemoteHoldMs < kStuckMs, "PAIR windows out of order");
 
 enum class Gesture : uint8_t { none, press, hold, stuck };
 
@@ -84,9 +92,9 @@ public:
     // Debounced state, for feedback while held.
     bool down() const { return _down; }
     // True once a debounced press has lasted kHoldMs: releasing now is a hold.
-    bool holdReached(uint32_t nowMs) const {
-        return _down && _armed && nowMs - _downAtMs >= kHoldMs;
-    }
+    bool holdReached(uint32_t nowMs) const { return heldMs(nowMs) >= kHoldMs; }
+    // How long a counted press has been down, from its raw edge; 0 when up.
+    uint32_t heldMs(uint32_t nowMs) const { return _down && _armed ? nowMs - _downAtMs : 0; }
 
 private:
     bool _seeded = false;
@@ -95,6 +103,64 @@ private:
     bool _down = false;
     uint32_t _rawSinceMs = 0;
     uint32_t _downAtMs = 0;
+};
+
+// ---- PAIR: press, double press, demote hold ----------------------------------
+// Constraints:
+// - A sequence of presses, each beginning within kDoublePressMs of the last
+//   release (measured between debounced edges), resolves kDoublePressMs after
+//   its last release: one press is `press`, two `double_press`, three or more
+//   `extra`, which binds nothing. A single press waits that long to know.
+// - `hold` fires WHILE HELD, at kDemoteHoldMs, and cancels the sequence it
+//   ends: no press of it, before or after, also counts. Its release fires
+//   nothing (`stuck` past kStuckMs, for the log). Shorter is a press.
+// - Inherits Button's arming: held through power-on fires nothing.
+
+enum class PairGesture : uint8_t { none, press, double_press, hold, extra, stuck };
+
+constexpr const char* pairGestureName(PairGesture g) {
+    switch (g) {
+        case PairGesture::press:        return "press";
+        case PairGesture::double_press: return "double press";
+        case PairGesture::hold:         return "hold";
+        case PairGesture::extra:        return "3+ presses";
+        case PairGesture::stuck:        return "stuck";
+        default:                        return "none";
+    }
+}
+
+class PairButton {
+public:
+    PairGesture sample(bool rawPressed, uint32_t nowMs) {
+        const Gesture g = _core.sample(rawPressed, nowMs);
+        if (_core.down()) {
+            if (_held || _core.heldMs(nowMs) < kDemoteHoldMs) return PairGesture::none;
+            _held = true;
+            _presses = 0;
+            return PairGesture::hold;
+        }
+        if (g != Gesture::none) {   // a counted release
+            if (_held) {
+                _held = false;
+                return g == Gesture::stuck ? PairGesture::stuck : PairGesture::none;
+            }
+            if (_presses < 3) ++_presses;
+            _upAtMs = nowMs;
+            return PairGesture::none;
+        }
+        if (_presses == 0 || nowMs - _upAtMs < kDoublePressMs) return PairGesture::none;
+        const uint8_t n = _presses;
+        _presses = 0;
+        return n == 1 ? PairGesture::press : n == 2 ? PairGesture::double_press : PairGesture::extra;
+    }
+
+    bool down() const { return _core.down(); }
+
+private:
+    Button _core;
+    uint32_t _upAtMs = 0;
+    uint8_t _presses = 0;
+    bool _held = false;
 };
 
 }  // namespace valence::button

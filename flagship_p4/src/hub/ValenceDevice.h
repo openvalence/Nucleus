@@ -34,6 +34,7 @@
 #include "motion/ValenceMotion.h"
 #include "patterns/PatternPresetStore.h"
 #include "patterns/PatternSettings.h"
+#include "system/ButtonGesture.h"
 #include "system/TcpTally.h"
 #include "system/ValenceMotorSwitch.h"
 #include "valence/hub/hub.hpp"
@@ -43,6 +44,13 @@ namespace valence {
 // tick()'s persist-due bits: which blob's debounced write is due.
 inline constexpr uint8_t kPersistConfig  = 0x01;  // StoredState.h: 0x1000 + tuning + cfg_gen
 inline constexpr uint8_t kPersistPresets = 0x02;  // PatternPresetStore: the 0x5220 slots
+
+// What the PAIR control has to say on the status pixel, first match wins:
+// a refused or demoting gesture for kPairFlashMs, the one configure ask a
+// double press would approve, an open presence window, else nothing.
+// ValenceGlow.cpp maps each to its Flux (Session, Status) pair.
+enum class PairLook : uint8_t { quiet, window, request, refused, demoted };
+inline constexpr uint32_t kPairFlashMs = 3000;
 
 // The consume side of /uitoken as validateToken sees it. A true return
 // CONSUMES the token: single-use is not advisory.
@@ -157,10 +165,15 @@ public:
     // tick() takes the gestures ValenceButtons.h parks and binds them: HOME
     // press is home op 1 through applyHome(), as the wire's; HOME hold brakes
     // motion, then latches ESTOP (cause user: the power cut), then reports
-    // rebootDue(); PAIR press opens the presence window (SPEC 12.3); PAIR hold
-    // is reserved and only logged. The reboot itself is the composition's:
+    // rebootDue(); PAIR press opens the presence window (SPEC 12.3); PAIR
+    // double press approves the one pending configure ask and PAIR hold (5 s)
+    // demotes every client to watch (Valence RFC-114 draft). After a demote
+    // /uitoken vouches for nobody until a configure owner exists again: a
+    // demoted browser must not mint its control back. The reboot is the composition's:
     // takePendingPersist(), the GOODBYEs, the restart. Never clears.
     bool rebootDue() const { return _reboot == Reboot::due; }
+    // Any task: the PAIR control's look, refreshed every tick().
+    PairLook pairLook() const { return PairLook(_pairLook.load(std::memory_order_relaxed)); }
     // The kPersist* bits armed and not yet due, disarmed: a planned reboot
     // writes them now instead of after the debounce.
     uint8_t takePendingPersist();
@@ -354,6 +367,13 @@ private:
     enum class Reboot : uint8_t { none, braking, due };
     Reboot _reboot = Reboot::none;
     uint32_t _rebootBrakeUntilMs = 0;
+    // PAIR: a refused or demoting gesture's look and when it ends; whether a
+    // demote stands (cleared by the next configure owner).
+    PairLook _pairFlash = PairLook::quiet;
+    uint32_t _pairFlashUntilMs = 0;
+    bool _demoted = false;
+    std::atomic<uint8_t> _pairLook{uint8_t(PairLook::quiet)};
+    void servicePair(button::PairGesture g, uint32_t nowMs);
 
     // The live pattern generator settings. This copy IS the setting (the
     // delegate is its one writer); the generator's task runs on whatever

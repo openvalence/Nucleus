@@ -68,7 +68,7 @@ MotorSwitchStatus g_switch{};
 ReturnStart g_returnAnswer = ReturnStart::queued;
 // The fake gesture source: what the BoardIo task would have parked.
 button::Gesture g_homeGesture = button::Gesture::none;
-button::Gesture g_pairGesture = button::Gesture::none;
+button::PairGesture g_pairGesture = button::PairGesture::none;
 int g_forceHomes = 0;
 // What the fake arbiter answers home op 1 with, and how often it was asked.
 HomeStart g_homeAnswer = HomeStart::started;
@@ -181,7 +181,7 @@ PowerNow g_powerNow{};
 PowerNow motorSwitchPower() { return g_powerNow; }
 
 button::Gesture homeButtonTake() { return std::exchange(g_homeGesture, button::Gesture::none); }
-button::Gesture pairButtonTake() { return std::exchange(g_pairGesture, button::Gesture::none); }
+button::PairGesture pairButtonTake() { return std::exchange(g_pairGesture, button::PairGesture::none); }
 bool driveAlarmTake() { return std::exchange(g_driveAlarm, false); }
 
 estop::Reading estopInputRead() { return g_estop; }
@@ -223,6 +223,8 @@ public:
         nacks.push_back({n.code, n.has_detail ? std::string(n.detail) : std::string()});
     }
     void onPendingDropped(uint16_t) override {}
+    std::optional<AccessLevel> granted;   // the last PAIR_GRANT's tier
+    void onPairGrant(std::span<const std::byte>, AccessLevel roles) override { granted = roles; }
     void onEvent(uint16_t channel_id, std::span<const std::byte> payload) override {
         if (channel_id != ch::motion_anomaly) return;
         const auto ev = decodeEvent(payload);
@@ -249,7 +251,8 @@ struct Rig {
         g_census.motor_on = true;
         g_census.power_gate = true;
         g_returnAnswer = ReturnStart::queued;
-        g_homeGesture = g_pairGesture = button::Gesture::none;
+        g_homeGesture = button::Gesture::none;
+        g_pairGesture = button::PairGesture::none;
         g_forceHomes = 0;
         g_homeAnswer = HomeStart::started;
         g_homeCalls = 0;
@@ -604,7 +607,7 @@ TEST_CASE("VD-10: HOME hold brakes first, then latches ESTOP and reports the reb
     CHECK(rig->hub->estopLatched());
     CHECK(rig->device.rebootDue());
     // Gestures during the reboot are ignored.
-    g_pairGesture = button::Gesture::press;
+    g_pairGesture = button::PairGesture::press;
     rig->step(2);
     CHECK_FALSE(rig->hub->presenceWindowOpen());
 }
@@ -620,14 +623,15 @@ TEST_CASE("VD-11: a brake that never reaches rest still reboots, after the bound
     CHECK(rig->device.rebootDue());
 }
 
-TEST_CASE("VD-12: PAIR press opens the presence window; PAIR hold does nothing") {
+TEST_CASE("VD-12: PAIR press opens the presence window; 3+ presses do nothing") {
     auto rig = std::make_unique<Rig>();
-    g_pairGesture = button::Gesture::hold;
+    g_pairGesture = button::PairGesture::extra;
     rig->step();
     CHECK_FALSE(rig->hub->presenceWindowOpen());
-    g_pairGesture = button::Gesture::press;
+    g_pairGesture = button::PairGesture::press;
     rig->step();
     CHECK(rig->hub->presenceWindowOpen());
+    CHECK(rig->device.pairLook() == PairLook::window);
     CHECK_FALSE(rig->device.rebootDue());
 }
 
@@ -2626,4 +2630,148 @@ TEST_CASE("VD-PWR-PACK: 0x1010 carries the switch task's reading in mV and tenth
     rig->step(2500);
     CHECK(packed() == std::pair<uint16_t, uint16_t>{65534, 0});
     g_powerNow = {};
+}
+
+// ---- PAIR gestures (Valence RFC-114 draft) -----------------------------------
+
+namespace {
+
+// A configure owner in the ledger, as an earlier ceremony would have left one.
+void seedConfigureOwner(Rig& rig) {
+    std::array<std::byte, limits::instance_id_bytes> inst{};
+    inst[0] = std::byte{0x55};
+    XorShift32 rng(99);
+    std::array<std::byte, limits::token_bytes> tok{};
+    REQUIRE(rig.hub->pairing().grant(inst, AccessLevel::configure, pairing_modes::push_to_pair, rng, tok) != nullptr);
+    REQUIRE(rig.hub->pairing().hasConfigureToken());
+}
+
+void pair(Rig& rig, button::PairGesture g) {
+    g_pairGesture = g;
+    rig.step();
+}
+
+}  // namespace
+
+TEST_CASE("VD-PAIR-1: with configure owners, a single press grants a knock control, not configure") {
+    auto rig = std::make_unique<Rig>();
+    seedConfigureOwner(*rig);
+    pair(*rig, button::PairGesture::press);
+    REQUIRE(rig->client->sendPairKnock());
+    rig->step();
+    REQUIRE(rig->del.granted.has_value());
+    CHECK(*rig->del.granted == AccessLevel::control);
+}
+
+TEST_CASE("VD-PAIR-2: a double press approves the one configure request, on the session that asked") {
+    auto rig = std::make_unique<Rig>();
+    seedConfigureOwner(*rig);
+    Peer other(*rig, 9);
+    REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
+    REQUIRE(other.client->sendPairKnock());   // a bare knock beside it
+    other.step(*rig);
+    CHECK(rig->device.pairLook() == PairLook::request);
+    pair(*rig, button::PairGesture::double_press);
+    other.step(*rig);
+    REQUIRE(rig->del.granted.has_value());
+    CHECK(*rig->del.granted == AccessLevel::configure);
+    CHECK_FALSE(other.del.granted.has_value());
+    CHECK(rig->device.pairLook() == PairLook::quiet);
+}
+
+TEST_CASE("VD-PAIR-3: a double press with no configure request approves nothing and says so") {
+    auto rig = std::make_unique<Rig>();
+    seedConfigureOwner(*rig);
+    pair(*rig, button::PairGesture::double_press);
+    CHECK(rig->device.pairLook() == PairLook::refused);
+    CHECK_FALSE(rig->hub->presenceWindowOpen());   // not a window either
+    rig->step(int(kPairFlashMs));
+    CHECK(rig->device.pairLook() == PairLook::quiet);
+}
+
+TEST_CASE("VD-PAIR-4: two configure requests: a double press approves neither") {
+    auto rig = std::make_unique<Rig>();
+    seedConfigureOwner(*rig);
+    Peer rival(*rig, 9);
+    REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
+    REQUIRE(rival.client->sendPairKnock(AccessLevel::configure));
+    rival.step(*rig);
+    CHECK(rig->device.pairLook() == PairLook::quiet);   // nothing a double press could approve
+    pair(*rig, button::PairGesture::double_press);
+    rival.step(*rig);
+    CHECK_FALSE(rig->del.granted.has_value());
+    CHECK_FALSE(rival.del.granted.has_value());
+    CHECK(rig->device.pairLook() == PairLook::refused);
+}
+
+TEST_CASE("VD-PAIR-5: a configure request older than the window approves nothing") {
+    auto rig = std::make_unique<Rig>();
+    seedConfigureOwner(*rig);
+    REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
+    rig->step();
+    REQUIRE(rig->device.pairLook() == PairLook::request);
+    for (int i = 0; i < 1220; ++i) rig->step(100);   // 122 s, the client pinging throughout
+    REQUIRE(rig->client->state() == ClientSessionState::LIVE);
+    pair(*rig, button::PairGesture::double_press);
+    rig->step();
+    CHECK_FALSE(rig->del.granted.has_value());
+    CHECK(rig->device.pairLook() == PairLook::refused);
+}
+
+TEST_CASE("VD-PAIR-6: a 5 s hold demotes every client, stops its motion, and Halt still works after") {
+    auto rig = std::make_unique<Rig>();
+    seedConfigureOwner(*rig);
+    // The control session drives: the oscillator is its motion.
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(1, IntentValue::ofBool(true))).has_value());
+    rig->step();
+    REQUIRE(g_osc.enabled);
+
+    pair(*rig, button::PairGesture::hold);
+    CHECK(rig->client->state() == ClientSessionState::CLOSED);   // evicted
+    CHECK_FALSE(g_osc.enabled);                                   // its session's end stopped it
+    CHECK_FALSE(rig->hub->pairing().hasConfigureToken());
+    CHECK(rig->hub->pairing().entryCount() == 1);                 // kept, at watch
+    CHECK(rig->device.pairLook() == PairLook::demoted);
+
+    // Back at watch, though this rig vouches control for anyone unpaired.
+    REQUIRE(rig->client->connect());
+    rig->step(200);
+    REQUIRE(rig->client->state() == ClientSessionState::LIVE);
+    REQUIRE(rig->client->sendIntent(ch::osc_set, oneKey(1, IntentValue::ofBool(true))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::NOT_CONTROLLER);
+    // Pause and e-stop are role-exempt: a demoted client can still stop the machine.
+    rig->del.nacks.clear();
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::pause)).has_value());
+    rig->step();
+    CHECK(rig->del.nacks.empty());
+    CHECK(rig->hub->pauseLatched());
+    REQUIRE(rig->client->sendIntent(channels::safety_intents, safetyOp(safety_ops::estop)).has_value());
+    rig->step();
+    CHECK(rig->del.nacks.empty());
+    CHECK(rig->hub->estopLatched());
+}
+
+TEST_CASE("VD-PAIR-7: after a demote, a configure request and a double press restore configure") {
+    auto rig = std::make_unique<Rig>();
+    seedConfigureOwner(*rig);
+    pair(*rig, button::PairGesture::hold);
+    REQUIRE(rig->client->connect());
+    rig->step(200);
+    REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
+    rig->step();
+    pair(*rig, button::PairGesture::double_press);
+    rig->step();
+    REQUIRE(rig->del.granted.has_value());
+    CHECK(*rig->del.granted == AccessLevel::configure);
+    CHECK(rig->hub->pairing().hasConfigureToken());
+}
+
+TEST_CASE("VD-PAIR-8: a single press demotes nothing") {
+    auto rig = std::make_unique<Rig>();
+    seedConfigureOwner(*rig);
+    pair(*rig, button::PairGesture::press);
+    CHECK(rig->client->state() == ClientSessionState::LIVE);
+    CHECK(rig->hub->pairing().hasConfigureToken());
 }

@@ -2,7 +2,7 @@
 
 // ValenceButtons -- the HOME and PAIR buttons (SW1 on BTN_HOME, SW2 on
 // BTN_PAIR, both active low, J13 in parallel) sampled into ButtonGesture.h's
-// press / hold core
+// press / hold core, and PAIR through its sequence core (PairButton)
 // Constraints:
 // - Owner: the BoardIo task (ValenceBoardIo.cpp) calls buttonsBegin() once
 //   and buttonsService() at least every 10 ms; the gesture cores are that
@@ -40,6 +40,6 @@ void buttonsService(uint32_t nowMs);
 
 // The newest completed gesture not yet taken, then none.
 button::Gesture homeButtonTake();
-button::Gesture pairButtonTake();
+button::PairGesture pairButtonTake();
 
 }  // namespace valence

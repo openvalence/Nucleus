@@ -395,6 +395,8 @@ HubCensus hubCensus() {
     return c;
 }
 
+uint8_t hubPairLook() { return g_box ? uint8_t(g_box->device.pairLook()) : 0; }
+
 bool hubBegin() {
     geiger::logBegin();
 

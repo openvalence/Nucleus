@@ -30,7 +30,9 @@ struct Pad {
 };
 
 Pad g_home{"HOME", BOARD_GPIO_BTN_HOME};
-Pad g_pair{"PAIR", BOARD_GPIO_BTN_PAIR};
+
+button::PairButton g_pairCore;
+std::atomic<uint8_t> g_pairParked{uint8_t(button::PairGesture::none)};
 
 // When a HOME hold was parked, while it is still parked. BoardIo task only.
 bool g_holdParked = false;
@@ -47,6 +49,19 @@ button::Gesture sample(Pad& p, uint32_t nowMs) {
         GLOGW(kTag, "%s %s at the board", p.name, button::gestureName(g));
     p.parked.store(uint8_t(g), std::memory_order_release);
     return g;
+}
+
+void samplePair(uint32_t nowMs) {
+    const bool pressed = gpio_get_level(static_cast<gpio_num_t>(BOARD_GPIO_BTN_PAIR)) == 0;
+    const button::PairGesture g = g_pairCore.sample(pressed, nowMs);
+    if (g == button::PairGesture::none) return;
+    if (g == button::PairGesture::stuck)
+        GLOGW(kTag, "PAIR held past %lu s: stuck (shorted J13 or a jammed switch?)",
+              static_cast<unsigned long>(button::kStuckMs / 1000));
+    else
+        GLOGW(kTag, "PAIR %s at the board", button::pairGestureName(g));
+    // A stuck release binds nothing: its hold was parked at kDemoteHoldMs.
+    if (g != button::PairGesture::stuck) g_pairParked.store(uint8_t(g), std::memory_order_release);
 }
 
 button::Gesture take(Pad& p) {
@@ -70,7 +85,7 @@ void buttonsService(uint32_t nowMs) {
         g_holdParked = true;
         g_holdParkedAtMs = nowMs;
     }
-    sample(g_pair, nowMs);
+    samplePair(nowMs);
 
     if (!g_holdParked) return;
     if (g_home.parked.load(std::memory_order_acquire) != uint8_t(button::Gesture::hold)) {
@@ -86,6 +101,8 @@ void buttonsService(uint32_t nowMs) {
 }
 
 button::Gesture homeButtonTake() { return take(g_home); }
-button::Gesture pairButtonTake() { return take(g_pair); }
+button::PairGesture pairButtonTake() {
+    return button::PairGesture(g_pairParked.exchange(uint8_t(button::PairGesture::none), std::memory_order_acquire));
+}
 
 }  // namespace valence

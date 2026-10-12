@@ -22,6 +22,7 @@
 
 #include "flux/flux_core.hpp"
 #include "geiger/geiger.h"
+#include "hub/ValenceDevice.h"
 #include "hub/ValenceHub.h"
 #include "motion/ValenceMotion.h"
 #include "system/BoardPins.h"
@@ -145,6 +146,18 @@ look::Facts gatherFacts() {
     return f;
 }
 
+// Session belongs to the hub: the PAIR control's look (ValenceDevice.h) as
+// one magenta effect each. The arbiter ranks it against the machine state.
+flux::Status sessionStatusFor(PairLook l) {
+    switch (l) {
+        case PairLook::window:  return flux::Status::Ceremony;   // blink: gone if missed
+        case PairLook::request: return flux::Status::Latched;    // solid: double-press to approve
+        case PairLook::refused: return flux::Status::Degraded;   // slow blink: nothing approved
+        case PairLook::demoted: return flux::Status::Urgent;     // fast blink: everyone knocked to watch
+        default:                return flux::Status::Nominal;
+    }
+}
+
 // The glue owns Motion, Safety and Flash: all three back to Nominal, then the
 // row's pair. The engine's arbiter does the rest.
 void show(look::MachineState s) {
@@ -197,6 +210,7 @@ void glowService(uint32_t nowMs) {
     }
     if (nowMs - g_lastFactsMs >= kFactsMs) {
         g_lastFactsMs = nowMs;
+        g_engine.set(flux::System::Session, sessionStatusFor(PairLook(hubPairLook())));
         const look::MachineState s = look::stateFor(gatherFacts());
         if (s != g_state) {
             GLOGD(kTag, "%s -> %s", stateName(g_state), stateName(s));

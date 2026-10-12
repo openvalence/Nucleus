@@ -26,11 +26,11 @@ LinkTcp deviceLinkTcp() { return {}; }
 // process. PAIR is the front's simPairPress(); the pairing_window option opens
 // the same window at boot.
 namespace {
-button::Gesture g_pairPress = button::Gesture::none;
+button::PairGesture g_pairPress = button::PairGesture::none;
 }  // namespace
 button::Gesture homeButtonTake() { return button::Gesture::none; }
-button::Gesture pairButtonTake() { return std::exchange(g_pairPress, button::Gesture::none); }
-void simPairPress() { g_pairPress = button::Gesture::press; }
+button::PairGesture pairButtonTake() { return std::exchange(g_pairPress, button::PairGesture::none); }
+void simPairPress() { g_pairPress = button::PairGesture::press; }
 // The twin has no drive: DRV_ALM never asserts.
 bool driveAlarmTake() { return false; }
 // The twin has no e-stop wired: it reads present and released, always.

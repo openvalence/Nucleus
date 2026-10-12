@@ -605,8 +605,9 @@ BundleView leadCapped(const BundleView& bundle, uint32_t now32, uint32_t capUs, 
 AccessLevel ValenceDevice::validateToken(std::span<const std::byte> instance_id,
                                          std::span<const std::byte> token, bool hasToken) {
     (void)instance_id;
-    if (hasToken && _tokenGate != nullptr && _tokenGate->consume(token)) return AccessLevel::control;
-    return _unvouchedRole;
+    if (_demoted && _hub->pairing().hasConfigureToken()) _demoted = false;
+    if (!_demoted && hasToken && _tokenGate != nullptr && _tokenGate->consume(token)) return AccessLevel::control;
+    return _demoted ? AccessLevel::watch : _unvouchedRole;
 }
 
 Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& requested,
@@ -2141,22 +2142,22 @@ void ValenceDevice::attach(Hub& hub, const Catalog32& catalog) {
 
 // ---- the board buttons -----------------------------------------------------------
 // Hub task, from tick(): outside the hub's intent dispatch, so the hub calls
-// below (openPresenceWindow, latchEstop) may publish and broadcast.
+// below (openPresenceWindow, latchEstop, the demote's evictions) may publish
+// and broadcast.
 
 void ValenceDevice::serviceButtons(uint32_t nowMs) {
     const button::Gesture home = homeButtonTake();
-    const button::Gesture pair = pairButtonTake();
+    const button::PairGesture pair = pairButtonTake();
     if (_reboot == Reboot::none) {
         if (home == button::Gesture::press) homeFromButton();
         else if (home == button::Gesture::hold) beginReboot(nowMs);
-        if (pair == button::Gesture::press) {
-            _hub->openPresenceWindow();
-            GLOGW(kTag, "PAIR press: presence window open for %lu s (SPEC 12.3)",
-                  static_cast<unsigned long>(limits::pairing_window_default_s));
-        } else if (pair == button::Gesture::hold) {
-            GLOGW(kTag, "PAIR hold: no binding");
-        }
+        servicePair(pair, nowMs);
     }
+    PairLook look = PairLook::quiet;
+    if (int32_t(nowMs - _pairFlashUntilMs) < 0) look = _pairFlash;
+    else if (_hub->configureRequestsPending() == 1) look = PairLook::request;
+    else if (_hub->presenceWindowOpen()) look = PairLook::window;
+    _pairLook.store(uint8_t(look), std::memory_order_relaxed);
     if (_reboot != Reboot::braking) return;
     const MotionCensus mo = motionCensus();
     const bool atRest = !mo.busy && mo.step_q8 == 0;
@@ -2166,6 +2167,52 @@ void ValenceDevice::serviceButtons(uint32_t nowMs) {
     if (!_hub->estopLatched()) _hub->latchEstop(safety_causes::user, uint8_t(AccessLevel::configure));
     _reboot = Reboot::due;
     GLOGW(kTag, "HOME hold: %s, motor power cut, rebooting", atRest ? "at rest" : "brake timed out");
+}
+
+// Valence RFC-114 draft. Each gesture is a W line, so /diag says what the
+// machine did and why.
+void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
+    switch (g) {
+        case button::PairGesture::press:
+            _hub->openPresenceWindow();
+            GLOGW(kTag, "PAIR press: presence window open for %lu s, grants %s (SPEC 12.3)",
+                  static_cast<unsigned long>(limits::pairing_window_default_s),
+                  _hub->pairing().presenceGrantRole() == AccessLevel::configure ? "configure" : "control");
+            return;
+        case button::PairGesture::double_press: {
+            using A = Hub::PresenceApproval;
+            const A r = _hub->approvePendingConfigure();
+            if (r == A::approved) {
+                _pairFlashUntilMs = nowMs;
+                GLOGW(kTag, "PAIR double press: the pending configure request approved at configure");
+                return;
+            }
+            _pairFlash = PairLook::refused;
+            _pairFlashUntilMs = nowMs + kPairFlashMs;
+            GLOGW(kTag, "PAIR double press: nothing approved: %s",
+                  r == A::none_pending      ? "no configure request pending"
+                  : r == A::several_pending ? "more than one configure request pending"
+                  : r == A::knocker_gone    ? "the requesting client left"
+                                            : "trust ledger full");
+            return;
+        }
+        case button::PairGesture::hold: {
+            const Hub::DemoteCount d = _hub->demoteAllToWatch();
+            _demoted = true;
+            _pairFlash = PairLook::demoted;
+            _pairFlashUntilMs = nowMs + kPairFlashMs;
+            GLOGW(kTag, "PAIR hold %lu s: DEMOTED every client to watch: %u stored tokens, %u live sessions; "
+                        "/uitoken vouches for nobody until a configure owner is approved",
+                  static_cast<unsigned long>(button::kDemoteHoldMs / 1000), unsigned(d.tokens),
+                  unsigned(d.sessions));
+            return;
+        }
+        case button::PairGesture::extra:
+            GLOGW(kTag, "PAIR: 3 or more presses: no gesture");
+            return;
+        default:
+            return;
+    }
 }
 
 // The same door as the wire's home op 1, refusal included. force_home (op 2)
