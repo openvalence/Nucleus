@@ -102,11 +102,14 @@ public:
     void begin(IBleNotifier& notifier) { _notifier = &notifier; }
 
     // ---- BLE host task ---------------------------------------------------------
-    void onConnect() {
+    // The MTU is NOT reset here: the host can report the exchange before the
+    // connection (measured on the P4, esp_hosted VHCI); it resets on the
+    // disconnect instead.
+    void onConnect() { _epoch.store(++_lastEpoch, std::memory_order_release); }
+    void onDisconnect() {
+        _epoch.store(0, std::memory_order_release);
         _mtu.store(kAttMtuDefault, std::memory_order_relaxed);
-        _epoch.store(++_lastEpoch, std::memory_order_release);
     }
-    void onDisconnect() { _epoch.store(0, std::memory_order_release); }
     void onMtu(uint16_t attMtu) { _mtu.store(attMtu, std::memory_order_relaxed); }
     // One characteristic write = one frame (or one §5.6 fragment).
     bool onWrite(std::span<const std::byte> value) {

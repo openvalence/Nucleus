@@ -92,20 +92,41 @@ public:
         const uint16_t conn = g_conn.load(std::memory_order_acquire);
         if (conn == kNoConn) return false;
         os_mbuf* om = ble_hs_mbuf_from_flat(value.data(), uint16_t(value.size()));
-        if (om == nullptr) return false;
-        return ble_gatts_notify_custom(conn, g_notifyHandle, om) == 0;   // consumes om
+        if (om == nullptr) {
+            GLOGW_EVERY_MS(1000, kTag, "notify of %u B: no host buffer", unsigned(value.size()));
+            return false;
+        }
+        const int rc = ble_gatts_notify_custom(conn, g_notifyHandle, om);   // consumes om
+        if (rc != 0) GLOGW_EVERY_MS(1000, kTag, "notify of %u B refused: rc=%d", unsigned(value.size()), rc);
+        return rc == 0;
     }
 };
 Notifier g_notifier;
 
-int onAccess(uint16_t, uint16_t, ble_gatt_access_ctxt* ctxt, void*) {
+// Host task only: writes on this link, so its first one is logged.
+uint32_t g_linkWrites = 0;
+
+// The link begins at whichever the host reports first: the connection, the
+// MTU exchange or a write (the order is not the spec's over VHCI, measured).
+void linkUp(uint16_t conn) {
+    if (g_conn.load(std::memory_order_acquire) == conn) return;
+    g_pipe.onConnect();
+    g_conn.store(conn, std::memory_order_release);
+    g_linkWrites = 0;
+    GLOGI(kTag, "central connected");
+}
+
+int onAccess(uint16_t conn, uint16_t, ble_gatt_access_ctxt* ctxt, void*) {
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    linkUp(conn);
     const uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
     if (len == 0 || len > g_writeBuf.size()) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     uint16_t got = 0;
     if (ble_hs_mbuf_to_flat(ctxt->om, g_writeBuf.data(), len, &got) != 0) return BLE_ATT_ERR_UNLIKELY;
     const bool taken = g_pipe.onWrite(std::span<const std::byte>(g_writeBuf.data(), got));
     std::memset(g_writeBuf.data(), 0, got);   // a wifi_join's passphrase does not linger
+    if (++g_linkWrites == 1) GLOGI(kTag, "first write on this link: %u B", unsigned(got));
+    if (!taken) GLOGW_EVERY_MS(1000, kTag, "write of %u B refused: ring full or no link", unsigned(got));
     return taken ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
@@ -175,9 +196,7 @@ int onGap(ble_gap_event* e, void*) {
     switch (e->type) {
         case BLE_GAP_EVENT_CONNECT:
             if (e->connect.status == 0) {
-                g_pipe.onConnect();
-                g_conn.store(e->connect.conn_handle, std::memory_order_release);
-                GLOGI(kTag, "central connected");
+                linkUp(e->connect.conn_handle);
             } else {
                 apply(nullptr);
             }
@@ -189,6 +208,7 @@ int onGap(ble_gap_event* e, void*) {
             apply(nullptr);
             return 0;
         case BLE_GAP_EVENT_MTU:
+            linkUp(e->mtu.conn_handle);
             g_pipe.onMtu(e->mtu.value);
             GLOGI(kTag, "ATT MTU %u", unsigned(e->mtu.value));
             return 0;
