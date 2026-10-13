@@ -11,7 +11,7 @@
 //   (SPEC §8.8 Secrets). The desk's one copy is the attempt's, wiped once the
 //   station has joined and the store has persisted it, or once it failed.
 // - THE BINDING HALF OF THE GATE IS BY CONSTRUCTION: only a binding that may
-//   carry credentials (USB serial now, BLE GATT later) calls offer(). A 0x000F
+//   carry credentials (USB serial, BLE GATT) calls offer(). A 0x000F
 //   INTENT on any other binding reaches the hub, whose delegate refuses it.
 // - A FEATURE EXISTS IFF ITS CHANNEL DOES (SPEC §6.3): with no INTENT entry
 //   0x000F in the catalog, offer() declines and the hub answers
@@ -114,6 +114,14 @@ public:
 
     bool busy() const { return _running || _persistDue; }
 
+    // Valence RFC-117 draft item 3: the session a presence gesture approved
+    // may start ONE wifi_join within pairing_window_default_s; no other
+    // session may. Hub task, from the gesture's binding.
+    void presenceApproved(uint32_t sessionId, uint32_t nowMs) {
+        _presenceSession = sessionId;
+        _presenceAtMs = nowMs;
+    }
+
 private:
     struct Attempt {
         ITransport* link = nullptr;
@@ -156,6 +164,8 @@ private:
     Attempt _attempt{};
     bool _running = false;
     bool _persistDue = false;
+    uint32_t _presenceSession = 0;
+    uint32_t _presenceAtMs = 0;
 
     // The last success, for a duplicate intent_id (SPEC §9.3).
     uint32_t _echoSession = 0;
@@ -321,8 +331,11 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
         nack(link, NackCode::CONFLICT, in.intent_id, h->seq);
         return true;
     }
-    // SPEC §13.9: an association window open now, or a factory-fresh hub.
-    if (!_hub.pairingWindowOpen() && _hub.pairing().claimed()) {
+    // SPEC §13.9: an association window open now, an unused presence approval
+    // of this very session (RFC-117 draft), or a factory-fresh hub.
+    const bool presence = _presenceSession != 0 && _presenceSession == sessionId &&
+                          nowMs - _presenceAtMs < limits::pairing_window_default_s * 1000u;
+    if (!_hub.pairingWindowOpen() && !presence && _hub.pairing().claimed()) {
         nack(link, NackCode::ACCESS_DENIED, in.intent_id, h->seq, "pairing window closed");
         return true;
     }
@@ -351,6 +364,7 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
         GLOGW(detail::kProvisioningTag, "wifi_join refused: the station cannot start a join");
         return true;
     }
+    if (presence) _presenceSession = 0;   // single use, a failed join included
     _attempt.link = &link;
     _attempt.sessionId = sessionId;
     _attempt.intentId = in.intent_id;

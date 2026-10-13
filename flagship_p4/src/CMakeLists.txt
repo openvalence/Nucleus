@@ -53,7 +53,7 @@ idf_component_register(SRCS "main.cpp"
                                      esp_event esp_netif
                                      esp_wifi lwip nvs_flash spi_flash
                                      esp_driver_usb_serial_jtag
-                                     espressif__esp_hosted
+                                     valence_ble espressif__esp_hosted
                                      espressif__esp_wifi_remote)
 
 # Float multiply-adds stay unfused (val-63b): GCC's default -ffp-contract=fast

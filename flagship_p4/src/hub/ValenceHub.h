@@ -42,8 +42,22 @@ inline constexpr uint32_t kHubTaskStackBytes = 16384;
 
 // Brings up logging, the catalog, the hub and the hub task. Returns false if
 // any of that failed; the caller reports and carries on (the bench emitters
-// are independent of the hub).
-bool hubBegin();
+// are independent of the hub). `configMode`: PAIR was held at boot (SPEC
+// §13.4.1): no WS listener, no discovery, BLE for the whole mode, the window
+// granting `configure`. `haveCredentials`: any network to try; none starts
+// BLE at once (LinkMode.h).
+bool hubBegin(bool configMode, bool haveCredentials);
+
+// SPEC §13.4.1 config mode, as hubBegin() was told; any task.
+bool hubConfigMode();
+
+// The station holds an address (true) or lost it (false). main.cpp's WiFi
+// event handler, on the event loop task; the hub task reads it (LinkMode.h).
+void hubSetStationUp(bool up);
+
+// The status pixel's network look, any task: 0 none, 1 offline with BLE up
+// (RFC-117 draft), 2 config mode.
+uint8_t hubNetLook();
 
 // The composed hub, or nullptr before hubBegin() succeeds. For the boot report
 // and the census line only -- never a door for another task to call into.

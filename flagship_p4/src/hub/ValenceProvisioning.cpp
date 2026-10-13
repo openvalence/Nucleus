@@ -19,12 +19,13 @@
 //   they joined (persist(), hub task, held while an OTA transfer runs).
 // - Credentials are never logged. The Provision task wipes its copies; the
 //   hub task wipes the request once the outcome is in.
-// - Requires a started station (main.cpp wifi_up). Config mode, which starts
-//   none, brings its own up first (bd val-9u0.14).
+// - Requires a started station (main.cpp wifi_up). In config mode the station
+//   is started but associated nowhere until a join asks.
 // See: Valence SPEC.md §13.9; ValenceProvisioning.h
 
 #include "ValenceProvisioning.h"
 #include "StationScan.h"
+#include "ValenceHub.h"
 
 #include <atomic>
 #include <cstring>
@@ -169,8 +170,9 @@ void BoardStation::apply(wifi_config_t& cfg) {
     esp_wifi_set_config(WIFI_IF_STA, &cfg);
     esp_wifi_disconnect();
     // main.cpp's handler reconnects on the drop too; a second connect while
-    // one is under way is refused harmlessly.
-    esp_wifi_connect();
+    // one is under way is refused harmlessly. Config mode restores the prior
+    // configuration but associates nowhere (SPEC 13.4.1).
+    if (!hubConfigMode()) esp_wifi_connect();
 }
 
 JoinOutcome BoardStation::join() {

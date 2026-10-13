@@ -31,6 +31,7 @@
 #include <optional>
 #include <string_view>
 
+#include "LinkMode.h"
 #include "ValenceEstopDatagram.h"
 #include "geiger/geiger.h"
 #include "motion/StreamIntent.h"
@@ -2176,29 +2177,31 @@ void ValenceDevice::serviceButtons(uint32_t nowMs) {
 // machine did and why.
 void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
     switch (g) {
-        case button::PairGesture::press:
+        case button::PairGesture::press: {
+            using linkmode::PressAct;
+            const PressAct act = linkmode::singlePress(_offline, _configMode, _hub->pairing().claimed(),
+                                                       _hub->configureRequestsPending(), _lanSessions);
+            if (act == PressAct::approve) {
+                approveAsk("PAIR press (offline, RFC-117)", nowMs);
+                return;
+            }
+            if (act != PressAct::open_window) {
+                _pairFlash = PairLook::refused;
+                _pairFlashUntilMs = nowMs + kPairFlashMs;
+                GLOGW(kTag, "PAIR press (offline): nothing approved: %s",
+                      act == PressAct::refuse_lan ? "a network session is still held"
+                                                  : "no configure request pending");
+                return;
+            }
             _hub->openPresenceWindow();
             GLOGW(kTag, "PAIR press: presence window open for %lu s, grants %s (SPEC 12.3)",
                   static_cast<unsigned long>(limits::pairing_window_default_s),
                   _hub->pairing().presenceGrantRole() == AccessLevel::configure ? "configure" : "control");
             return;
-        case button::PairGesture::double_press: {
-            using A = Hub::PresenceApproval;
-            const A r = _hub->approvePendingConfigure();
-            if (r == A::approved) {
-                _pairFlashUntilMs = nowMs;
-                GLOGW(kTag, "PAIR double press: the pending configure request approved at configure");
-                return;
-            }
-            _pairFlash = PairLook::refused;
-            _pairFlashUntilMs = nowMs + kPairFlashMs;
-            GLOGW(kTag, "PAIR double press: nothing approved: %s",
-                  r == A::none_pending      ? "no configure request pending"
-                  : r == A::several_pending ? "more than one configure request pending"
-                  : r == A::knocker_gone    ? "the requesting client left"
-                                            : "trust ledger full");
-            return;
         }
+        case button::PairGesture::double_press:
+            approveAsk("PAIR double press", nowMs);
+            return;
         case button::PairGesture::hold: {
             const Hub::DemoteCount d = _hub->demoteAllToWatch();
             _pairFlash = PairLook::demoted;
@@ -2215,6 +2218,34 @@ void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
         default:
             return;
     }
+}
+
+// RFC-114's double press, and RFC-117's single press offline: the one fresh
+// configure ask approved over its own session. The session is read before the
+// hub consumes the knock; the provisioning desk's gate term binds to it.
+void ValenceDevice::approveAsk(const char* gesture, uint32_t nowMs) {
+    uint32_t asker = 0;
+    const auto& pending = _hub->pairing().pending();
+    for (size_t i = 0; i < pending.kCapacity; ++i) {
+        const PendingKnock* k = pending.at(i);
+        if (k != nullptr && k->used && k->asked == AccessLevel::configure && !timeReached(nowMs, k->expiresAtMs))
+            asker = k->session_id;
+    }
+    using A = Hub::PresenceApproval;
+    const A r = _hub->approvePendingConfigure();
+    if (r == A::approved) {
+        _pairFlashUntilMs = nowMs;
+        _presenceSession = asker;
+        GLOGW(kTag, "%s: the pending configure request approved at configure", gesture);
+        return;
+    }
+    _pairFlash = PairLook::refused;
+    _pairFlashUntilMs = nowMs + kPairFlashMs;
+    GLOGW(kTag, "%s: nothing approved: %s", gesture,
+          r == A::none_pending      ? "no configure request pending"
+          : r == A::several_pending ? "more than one configure request pending"
+          : r == A::knocker_gone    ? "the requesting client left"
+                                    : "trust ledger full");
 }
 
 // The same door as the wire's home op 1, refusal included. force_home (op 2)

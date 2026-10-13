@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <driver/gpio.h>
 #include <esp_chip_info.h>
 #include <esp_event.h>
 #include <esp_flash.h>
@@ -63,6 +64,10 @@ extern const uint8_t ulp_main_bin_end[]   asm("_binary_ulp_main_bin_end");
 // ---- network -------------------------------------------------------------------
 
 static volatile bool g_got_ip = false;
+// SPEC 13.4.1: PAIR held at boot. Written once in app_main before wifi_up().
+static bool g_config_mode = false;
+// Any network to try at boot: provisioned or compiled in (LinkMode.h).
+static bool g_have_credentials = false;
 static bool g_hosted_ok = false;   // the C6 answered over SDIO; app_main only
 static char g_ip[16] = "-";
 // Event-loop task only, except g_wifi_drops, which the liveness line reads.
@@ -87,7 +92,8 @@ static const char* wifi_reason_name(uint8_t r) {
 
 static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        // Config mode associates nowhere until a wifi_join asks (SPEC 13.4.1).
+        if (!g_config_mode) esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         const auto* d = static_cast<const wifi_event_sta_disconnected_t*>(data);
         if (g_got_ip) {
@@ -100,11 +106,13 @@ static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
             GLOGW_EVERY_MS(5000, "wifi", "join failed: %s (%u)", wifi_reason_name(d->reason), unsigned(d->reason));
         }
         g_got_ip = false; strcpy(g_ip, "-");
-        esp_wifi_connect();   // dumb retry is fine for a bench image
+        valence::hubSetStationUp(false);
+        if (!g_config_mode) esp_wifi_connect();   // dumb retry is fine for a bench image
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         auto* e = static_cast<ip_event_got_ip_t*>(data);
         snprintf(g_ip, sizeof g_ip, IPSTR, IP2STR(&e->ip_info.ip));
         g_got_ip = true;
+        valence::hubSetStationUp(true);
         if (g_wifi_down_us != 0) {
             GLOGW("wifi", "back after %lu ms (drop #%lu), ip %s",
                   static_cast<unsigned long>((esp_timer_get_time() - g_wifi_down_us) / 1000),
@@ -161,6 +169,7 @@ static bool wifi_up() {
         printf("STA credentials: provisioned (NVS)\n");
     else
         printf("STA credentials: secrets.h, \"%s\"\n", SECRET_WIFI_SSID);
+    g_have_credentials = w.sta.ssid[0] != 0;
     valence::stationScanPolicy(w);
     if ((err = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK)        { printf("set_mode: %s\n", esp_err_to_name(err)); return false; }
     if ((err = esp_wifi_set_config(WIFI_IF_STA, &w)) != ESP_OK)    { printf("set_config: %s\n", esp_err_to_name(err)); return false; }
@@ -180,6 +189,20 @@ static bool wifi_up() {
         printf("wifi_set_ps(NONE): %s -- inbound frames will wait for DTIM\n", esp_err_to_name(err));
     else
         printf("wifi power save: OFF (WIFI_PS_NONE)\n");
+    return true;
+}
+
+// PAIR (active low, BoardPins.h) read low on every one of 5 samples over 40 ms.
+static bool pairHeldAtBoot() {
+    gpio_config_t io{};
+    io.pin_bit_mask = 1ULL << BOARD_GPIO_BTN_PAIR;
+    io.mode = GPIO_MODE_INPUT;
+    io.pull_up_en = GPIO_PULLUP_ENABLE;
+    if (gpio_config(&io) != ESP_OK) return false;
+    for (int i = 0; i < 5; ++i) {
+        if (i) vTaskDelay(pdMS_TO_TICKS(10));
+        if (gpio_get_level(gpio_num_t(BOARD_GPIO_BTN_PAIR)) != 0) return false;
+    }
     return true;
 }
 
@@ -317,6 +340,12 @@ extern "C" void app_main() {
     if (lp_ok) report_lp();
     else       printf("\n--- LP core FAILED to start ---\n");
 
+    // SPEC 13.4.1: PAIR held at boot (held through the second above) enters
+    // config mode for this boot. Sampled before BoardIo's button task reads
+    // the pad, which arms only on a release, so the hold fires no gesture.
+    g_config_mode = pairHeldAtBoot();
+    if (g_config_mode) printf("\n*** CONFIG MODE: PAIR held at boot ***\n");
+
     printf("\n--- network: esp_hosted over SDIO to the C6 ---\n");
     const bool wifi_ok = wifi_up();
     if (!wifi_ok) printf("--- network FAILED to start ---\n");
@@ -340,7 +369,7 @@ extern "C" void app_main() {
     // failure must never take the bench firmware down with it. It is now the
     // ONLY source of motion intents on this board.
     printf("\n--- Valence hub ---\n");
-    const bool hub_ok = valence::hubBegin();
+    const bool hub_ok = valence::hubBegin(g_config_mode, g_have_credentials);
     if (!hub_ok) printf("--- Valence hub FAILED to start ---\n");
 
     // The operator surface rides the :80 instance the hub's /uitoken already

@@ -187,6 +187,22 @@ public:
     // owns the radio; never read on the hub task (see ValenceHub.h).
     void setLinkRssi(int8_t rssi) { _linkRssi.store(rssi, std::memory_order_relaxed); }
 
+    // What PAIR's single press means (LinkMode.h, Valence RFC-117 draft):
+    // offline it approves the one configure ask. `lanSessions` counts occupied
+    // sessions on a network binding, parked ones included. Hub task, each tick.
+    void setLinkMode(bool offline, bool configMode, size_t lanSessions) {
+        _offline = offline;
+        _configMode = configMode;
+        _lanSessions = lanSessions;
+    }
+    // The session a presence gesture approved since the last take, 0 = none.
+    // Hub task: the provisioning desk's gate term (RFC-117 item 3).
+    uint32_t takePresenceApproval() {
+        const uint32_t s = _presenceSession;
+        _presenceSession = 0;
+        return s;
+    }
+
     // Stream samples, either kind, that reached onStreamBundle after their
     // time, since boot. Any task reads it; the hub task is its one writer.
     uint32_t lateSamples() const { return _lateSamples.load(std::memory_order_relaxed); }
@@ -372,6 +388,11 @@ private:
     uint32_t _pairFlashUntilMs = 0;
     std::atomic<uint8_t> _pairLook{uint8_t(PairLook::quiet)};
     void servicePair(button::PairGesture g, uint32_t nowMs);
+    void approveAsk(const char* gesture, uint32_t nowMs);
+    bool _offline = false;
+    bool _configMode = false;
+    size_t _lanSessions = 0;
+    uint32_t _presenceSession = 0;
 
     // The live pattern generator settings. This copy IS the setting (the
     // delegate is its one writer); the generator's task runs on whatever

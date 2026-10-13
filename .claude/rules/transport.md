@@ -58,8 +58,10 @@ wire-visible is ever respelled FROM this repo (`governance.md` §6).
   high-throughput path, expected on this class of silicon; clients auto-upgrade
   BLE to WS. ESP-NOW is the peer binding: supported and deliberately trivial
   to enable, NOT actively developed or tested. UI-serving is a hub capability,
-  never a requirement. On this board BLE later means a NimBLE host on the P4
-  with the controller on the C6 (`governance.md` §6).
+  never a requirement. On this board BLE is a NimBLE host on the P4 with the
+  controller on the C6 over esp_hosted VHCI (`governance.md` §6); the stock
+  slave image reports "HCI over SDIO, BLE only" [verified 2026-10-13 -- P4
+  boot log, capabilities 0xd, slave 2.12.1], so the C6 needs no reflash.
 - **Intake doctrine (operator ruling 2026-07-27).** On THIS machine the only
   way in and out is Valence. Other firmwares are never forced: Valence
   competes via the CLIENT ONRAMP (RFC-044). TCode passthrough is the easy rung
