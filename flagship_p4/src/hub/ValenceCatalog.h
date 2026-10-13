@@ -593,7 +593,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // wifi_join from BLE, serial or in-process only (ValenceProvisioning.h);
     // save, remove and move from any binding at configure (NetworkDesk.h).
     // Keys 4 and 5 are wifi_join's ECHO results. Category setup: RFC-079 names
-    // this channel as the commissioning surface's.
+    // this channel as the commissioning surface's. ssid is not secret: 0x0018
+    // shows it at configure (RFC-116 item 7). remove is destructive: a
+    // passphrase no client can read back is lost.
     // TODO(RFC-116): ops 2-4 and keys 6-8 are draft numbers.
     c.addEntry({.id = valence::channels::provisioning, .name = "provisioning",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
@@ -601,10 +603,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .defaultPriority = Priority::critical,
                 .hasCategory = true, .category = valence::ui_categories::setup});
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
-                            .role = "action.provision"},
+                            .role = "action.provision",
+                            .destructiveOptions = 1u << valence::net::draft::op_net_remove},
                            {"reserved", "wifi_join", "save", "remove", "move"});
     c.addSchemaField({.key = 2, .name = "ssid", .type = CborFieldType::tstr_t, .unit = "",
-                      .desc = "Network name", .flags = valence::setting_flags::secret});
+                      .desc = "Network name"});
     c.addSchemaField({.key = 3, .name = "passphrase", .type = CborFieldType::tstr_t, .unit = "",
                       .desc = "Password; empty for an open network", .flags = valence::setting_flags::secret});
     c.addSchemaField({.key = 4, .name = "ipv4", .type = CborFieldType::uint_t, .unit = ""});
@@ -641,22 +644,23 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "count", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
                       .desc = "Saved networks"});
     c.addLayoutField({.name = "live", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .desc = "Slot the hub is joined through"});
-    c.addLayoutField({.name = "rssi0", .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f});
-    c.addLayoutField({.name = "rssi1", .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f});
-    c.addLayoutField({.name = "rssi2", .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f});
-    c.addLayoutField({.name = "rssi3", .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f});
+                      .desc = "Slot the hub is joined through; 255 none"});
+    for (const char* name : {"rssi0", "rssi1", "rssi2", "rssi3"})
+        c.addLayoutField({.name = name, .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f,
+                          .desc = "-128 not heard"});
 
     // ---- "network-names" -- STATE, configure (RFC-116) ----------------------
     // The saved SSIDs in list order, for configure sessions only: the entry's
-    // access gates SUBSCRIBE (SPEC 12.2). open bit i = entry i has no
-    // passphrase. NetworkDesk::packNames().  [1+4x32 = 129 B]
+    // access gates SUBSCRIBE (SPEC 8.1, 8.6). generation pairs it with the
+    // networks sample of the same generation; open bit i = entry i has no
+    // passphrase. NetworkDesk::packNames().  [2+1+4x32 = 131 B]
     // TODO(RFC-116): 0x0018 is a draft number.
     c.addEntry({.id = valence::net::draft::ch_network_names, .name = "network-names",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::configure, .maxRateHz = 1.0f,
                 .defaultPriority = Priority::background,
                 .hasCategory = true, .category = valence::ui_categories::network});
+    c.addLayoutField({.name = "generation", .type = PackedFieldType::u16, .unit = "", .scale = 1.0f});
     c.addLayoutField({.name = "open", .type = PackedFieldType::bitfield8, .unit = "", .scale = 1.0f});
     c.addLayoutField({.name = "ssid0", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
     c.addLayoutField({.name = "ssid1", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});

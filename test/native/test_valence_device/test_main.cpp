@@ -2884,7 +2884,7 @@ IntentValueMap netSave(std::string_view ssid, std::string_view pass) {
 
 std::string ssidAt(const RecordingClient& d, size_t i) {
     const auto& b = d.lastState.at(net::draft::ch_network_names);
-    const char* p = reinterpret_cast<const char*>(b.data()) + 1 + i * 32;
+    const char* p = reinterpret_cast<const char*>(b.data()) + 3 + i * 32;
     return std::string(p, strnlen(p, 32));
 }
 
@@ -2899,7 +2899,7 @@ TEST_CASE("VD-NET-1: below configure the list is occupancy only: no SSID, no pas
         REQUIRE(s.size() == NetworkDesk::kNetworksBytes);
         CHECK(uint8_t(s[2]) == 4);     // capacity
         CHECK(uint8_t(s[3]) == 1);     // count
-        CHECK(uint8_t(s[4]) == 0);     // live: slot 1
+        CHECK(uint8_t(s[4]) == 0);     // live: slot 0
         CHECK(int8_t(s[5]) == -51);
         CHECK(rig->del.lastState.count(net::draft::ch_network_names) == 0);
         CHECK_FALSE(anyStateContains(rig->del, kHomeSsid));
@@ -2925,15 +2925,20 @@ TEST_CASE("VD-NET-2: at configure the names show, passphrases never; save, move,
     rig->step(1200);
     REQUIRE(rig->del.nacks.empty());
     REQUIRE(echoed(rig->del.lastEcho, 2) != nullptr);
-    CHECK(echoed(rig->del.lastEcho, 2)->kind == IntentValue::Kind::Bool);
+    CHECK(echoed(rig->del.lastEcho, 2)->kind == IntentValue::Kind::Tstr);   // RFC-116 item 7: not secret
     CHECK(echoed(rig->del.lastEcho, 3)->kind == IntentValue::Kind::Bool);
     CHECK(echoed(rig->del.lastEcho, 6)->u64_val == 1);
     const uint64_t gen = echoed(rig->del.lastEcho, 8)->u64_val;
     CHECK(uint8_t(rig->del.lastState.at(net::draft::ch_networks)[3]) == 2);
     CHECK(ssidAt(rig->del, 1) == "Cafe");
+    // Names and occupancy carry the same generation (RFC-116 S9).
+    const auto& names = rig->del.lastState.at(net::draft::ch_network_names);
+    const auto& occ = rig->del.lastState.at(net::draft::ch_networks);
+    CHECK(names[0] == occ[0]);
+    CHECK(names[1] == occ[1]);
     CHECK(rig->netStation.persists == 1);
 
-    // Move Cafe first: the live entry follows its id to slot 2.
+    // Move Cafe first: the live entry follows its id to slot 1.
     REQUIRE(rig->client->sendIntent(channels::provisioning,
                                     plus(plus(netOp(net::draft::op_net_move), 6, IntentValue::ofU64(1)), 7,
                                          IntentValue::ofU64(0))).has_value());

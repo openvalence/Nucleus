@@ -7,10 +7,12 @@
 // Constraints:
 // - HUB TASK ONLY: offer(), tick() and forget(). The station joins on its own
 //   task (ValenceProvisioning.cpp) and is polled here, never waited on.
-// - CREDENTIALS NEVER LEAVE: no log line, ECHO value, NACK detail or STATE
-//   carries the SSID or the passphrase. The ECHO answers `true` for both keys
-//   (SPEC §8.8 Secrets). The desk's one copy is the attempt's, wiped once the
-//   joined network is in the saved list, or once the join failed.
+// - THE PASSPHRASE NEVER LEAVES: no log line, ECHO value, NACK detail or
+//   STATE carries it; the ECHO answers `true` for it (SPEC §8.8 Secrets). The
+//   SSID leaves only in the ECHO to the sender, a configure session, and on
+//   0x0018 (RFC-116 item 7). The desk's one copy is the attempt's, wiped once
+//   the joined network is in the saved list and answered, or once the join
+//   failed.
 // - Only a binding that may carry credentials (USB serial now, BLE GATT
 //   later) calls offer(); a 0x000F INTENT on any other binding reaches the
 //   hub, whose delegate hands it to the same NetworkDesk as Binding::network.
@@ -117,8 +119,8 @@ private:
         std::optional<size_t> slot{};
     };
 
-    // ECHO payloads are small: {cfg_gen, intent_id, applied{<= 6}}.
-    static constexpr size_t kEchoBytes = 64;
+    // {cfg_gen, intent_id, applied{<= 6}}, the SSID's 32 bytes included.
+    static constexpr size_t kEchoBytes = 96;
 
     const HubSession* sessionById(uint32_t id) const;
     std::string_view ssid() const { return {_attempt.ssid.data(), _attempt.ssidLen}; }
@@ -152,7 +154,7 @@ private:
 
 // The board station: it owns every join, boot and reconnect included.
 // stationBegin() loads the saved list (migrating a single stored network
-// into slot 1 on first boot), registers its event hooks and starts its task;
+// into slot 0 on first boot), registers its event hooks and starts its task;
 // main.cpp wifi_up() calls it before esp_wifi_start(). false = no task, so no
 // joins.
 IStation& provisioningStation();
@@ -303,7 +305,7 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
         return true;
     }
     if (op != provisioning_ops::wifi_join) {
-        const NetworkDesk::Applied r = _nets.apply(map, Binding::credential);
+        const NetworkDesk::Applied r = _nets.apply(map, Binding::credential, windowOrFresh);
         if (!r) nack(link, r.error().code, in.intent_id, h->seq, r.error().detail);
         else echo(&link, sessionId, in.intent_id, r.value());
         return true;
@@ -366,23 +368,23 @@ inline void Provisioning::tick() {
         return;
     }
 
-    // The slot was checked before the join; the list can only have changed
-    // through this desk or the hub delegate since, and a full list still
-    // refuses here rather than drop a network that joined.
-    const std::optional<size_t> slot = _nets.storeJoined(_attempt.slot, ssid(), pass());
-    wipe();
+    // A joined network is always stored (RFC-116 item 3): on a full list it
+    // replaces an entry, and the ECHO's slot says which.
+    const size_t slot = _nets.storeJoined(_attempt.slot, ssid(), pass());
     IntentValueMap applied;
     applied.fields[0] = {net::kKeyOp, IntentValue::ofU64(provisioning_ops::wifi_join)};
-    applied.fields[1] = {net::kKeySsid, IntentValue::ofBool(true)};
+    applied.fields[1] = {net::kKeySsid, IntentValue::ofTstr(ssid())};
     applied.fields[2] = {net::kKeyPassphrase, IntentValue::ofBool(true)};
     applied.fields[3] = {net::kKeyIpv4, IntentValue::ofU64(out->ipv4)};
     applied.fields[4] = {net::kKeyWsPort, IntentValue::ofU64(_wsPort)};
-    applied.count = 5;
-    if (slot) applied.fields[applied.count++] = {net::draft::key_slot, IntentValue::ofU64(*slot)};
+    applied.fields[5] = {net::draft::key_slot, IntentValue::ofU64(slot)};
+    applied.count = 6;
+    // Encoded before the wipe: the ECHO carries the SSID.
     echo(link, _attempt.sessionId, _attempt.intentId, applied);
-    GLOGI(detail::kProvisioningTag, "wifi_join joined: %u.%u.%u.%u, ws port %u, slot %d",
+    wipe();
+    GLOGI(detail::kProvisioningTag, "wifi_join joined: %u.%u.%u.%u, ws port %u, slot %u",
           unsigned(out->ipv4 >> 24), unsigned((out->ipv4 >> 16) & 0xFF), unsigned((out->ipv4 >> 8) & 0xFF),
-          unsigned(out->ipv4 & 0xFF), unsigned(_wsPort), slot ? int(*slot + 1) : 0);
+          unsigned(out->ipv4 & 0xFF), unsigned(_wsPort), unsigned(slot));
 }
 
 }  // namespace valence

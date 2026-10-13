@@ -644,7 +644,7 @@ Ret ValenceDevice::applyNetworks(const IntentValueMap& requested) {
     if (const auto refusal = NetworkDesk::gate(op, Binding::network, false))
         r = NetworkDesk::Applied::err(*refusal);
     else
-        r = _nets->apply(requested, Binding::network);
+        r = _nets->apply(requested, Binding::network, false);
     if (r) return Ret::ok(r.value());
     std::snprintf(_nackDetail.data(), _nackDetail.size(), "%s", r.error().detail);
     return Ret::err(r.error().code);
