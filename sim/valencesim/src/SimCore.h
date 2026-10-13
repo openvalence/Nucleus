@@ -116,12 +116,15 @@ private:
             return i ? int8_t(-42 - 7 * int(*i)) : net::kRssiUnseen;
         }
         bool persist(std::span<const uint8_t>) override { return true; }
+        bool linked() const override { return _live != 0; }
         bool beginScan() override {
             if (_scanning) return false;
             _scanning = true;
             _scanFrom = _nowMs;
             return true;
         }
+        bool scanRunning() const override { return _scanning; }
+        void stopScan() override { _scanning = false; }
         bool takeScan(net::VisibleNetworks& out) override {
             if (!_scanning || _nowMs - _scanFrom < kScanMs) return false;
             _scanning = false;

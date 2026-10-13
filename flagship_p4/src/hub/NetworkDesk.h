@@ -18,15 +18,20 @@
 //   channels (configure) and the ECHO to the configure session that sent them. Passphrases leave through nothing: ECHO
 //   answers `true` for that key (SPEC §8.8 Secrets), and no log line here
 //   names either.
-// - SCANS (RFC-118), two policies by hub state, never while motion runs (a
-//   scan accepted before motion started waits for it to stop):
-//   joined (a live link): on demand only, at most one per
+// - SCANS (RFC-118), two policies by INetStation::linked(), never while
+//   motion runs: an ask during motion is refused INTERLOCK, one accepted
+//   earlier waits for motion to stop, and a scan running when motion starts
+//   is stopped on that tick and asked again once motion stops;
+//   joined (associated or associating): on demand only, at most one start per
 //   scan_min_interval_ms, asks inside the interval coalescing into one, and
 //   the station keeps the link within scan_offchannel_max_ms of its home
 //   channel at a time;
-//   not joined (config mode, the offline BLE fallback): no link to protect,
-//   so a scan asked runs at once, and while a configure session is present
-//   the desk rescans every scan_offline_period_ms by itself.
+//   not joined (config mode, the offline BLE fallback between attempts): no
+//   link to protect, so a scan asked runs at once, and while a configure
+//   session is present the desk rescans every scan_offline_period_ms.
+// - A CONFIGURE SESSION IS PRESENT when one is ready at configure on any
+//   binding, serial and in-process included; a parked (STALE) one is not. An
+//   ask pending when the last one leaves is dropped.
 // - Hardware-free: valencesim runs it with its own station.
 // - TODO(RFC-116, RFC-118): valence::net::draft numbers become registry
 //   constants when the RFCs land.
@@ -72,9 +77,15 @@ public:
     // Makes the list durable. false = not now (an OTA transfer holds NVS
     // writes); asked again next tick.
     virtual bool persist(std::span<const uint8_t> blob) = 0;
+    // Associated (IP or not) or a connect under way: the joined policy.
+    virtual bool linked() const = 0;
     // Starts one scan of every channel and returns at once; false = none can
     // start now (a join runs, the radio is off), asked again next tick.
     virtual bool beginScan() = 0;
+    // A scan begun is still under way, started or queued behind a join.
+    virtual bool scanRunning() const = 0;
+    // Stops the scan under way before its next channel; it publishes nothing.
+    virtual void stopScan() = 0;
     // A scan finished since the last call: its networks go to `out` (which
     // advances out.scan()) and true. Every finished scan counts, the join
     // rule's own included.
@@ -243,9 +254,10 @@ public:
             push(out, net::draft::key_slot, IntentValue::ofU64(*s));
             push(out, net::draft::key_to, IntentValue::ofU64(**to));
         } else if (op == net::draft::op_net_scan) {
-            // BUSY with no retry_after_ms (SPEC 16.1): the client asks again
-            // once motion stops. The results come on 0x0019/0x001A, not here.
-            if (_motion) return refuse(NackCode::BUSY, "motion running");
+            // A state refusal, as for axis.flipped and homing in motion: the
+            // client asks again once motion stops. The results come on
+            // 0x0019/0x001A, not here.
+            if (_motion) return refuse(NackCode::INTERLOCK, "motion running");
             _scanWanted = true;
         } else {
             return refuse(NackCode::UNSUPPORTED_OP, "op");
@@ -262,18 +274,33 @@ public:
     // runs now.
     void tick(uint32_t nowMs, bool motion) {
         _motion = motion;
-        const bool joined = _station.liveId() != 0;
+        const bool present = configurePresent();
+        if (!present) _scanWanted = false;
+        const bool joined = _station.linked();
         const uint32_t since = nowMs - _scanAtMs;
-        if (!joined && !_scanWanted && (!_scanned || since >= net::draft::scan_offline_period_ms) &&
-            configurePresent())
+        if (!joined && present && !_scanRunning && (!_scanned || since >= net::draft::scan_offline_period_ms))
             _scanWanted = true;
         const uint32_t gap = joined ? net::draft::scan_min_interval_ms : 0;
-        if (_scanWanted && !motion && (!_scanned || since >= gap) && _station.beginScan()) {
+        if (_scanWanted && !_scanRunning && !motion && (!_scanned || since >= gap) && _station.beginScan()) {
             _scanWanted = false;
             _scanned = true;
+            _scanRunning = true;
+            _stopAsked = false;
             _scanAtMs = nowMs;
         }
-        if (_station.takeScan(_visible)) _visibleDue = true;
+        const bool heard = _station.takeScan(_visible);
+        if (heard) _visibleDue = true;
+        if (_scanRunning) {
+            if (heard) {
+                _scanRunning = false;
+            } else if (!_station.scanRunning()) {
+                _scanRunning = false;
+                _scanWanted = _scanWanted || _stopAsked;   // motion cut it: again once motion stops
+            } else if (motion && !_stopAsked) {
+                _station.stopScan();
+                _stopAsked = true;
+            }
+        }
         if (_persistDue) {
             std::array<uint8_t, net::SavedNetworks::kBlobBytes> blob{};
             _list.encode(blob);
@@ -350,13 +377,16 @@ private:
             return std::optional<size_t>{};
         return std::optional<size_t>{size_t(v->u64_val)};
     }
-    // A ready configure session on any binding (the picker's audience).
+    // A ready configure session on any binding (the picker's audience). A
+    // parked one has nobody looking; it gets the retained rows on resume.
     bool configurePresent() const {
         if (_hub == nullptr) return false;
         for (size_t i = 0;; ++i) {
             const HubSession* s = _hub->sessionBySlot(i);
             if (s == nullptr) return false;
-            if (s->occupied() && s->ready && uint8_t(s->role) >= uint8_t(AccessLevel::configure)) return true;
+            if (s->occupied() && s->state != HubSessionState::STALE && s->ready &&
+                uint8_t(s->role) >= uint8_t(AccessLevel::configure))
+                return true;
         }
     }
     static void push(IntentValueMap& m, uint8_t key, IntentValue v) {
@@ -385,6 +415,8 @@ private:
     bool _visibleDue = false;
     bool _scanWanted = false;
     bool _scanned = false;
+    bool _scanRunning = false;
+    bool _stopAsked = false;
     bool _motion = false;
     uint32_t _scanAtMs = 0;
 };

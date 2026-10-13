@@ -235,13 +235,17 @@ public:
 };
 
 // The saved list's station half (RFC-116): live entry chosen by the test. A
-// scan (RFC-118) finishes on the tick after it starts and hears `air`.
+// scan (RFC-118) finishes on the tick it starts and hears `air`, unless
+// `hold` keeps it running until stopScan().
 class FakeNetStation final : public INetStation {
 public:
     uint8_t live = 0;
+    bool associating = false;
     int persists = 0;
     int scans = 0;
+    int stops = 0;
     bool scanning = false;
+    bool hold = false;
     std::vector<net::Sighting> air{{"HomeNet", -51}, {"Office", -70}, {"Cafe", -60, false}, {"HomeNet", -80}};
     bool offerList(const net::SavedNetworks&) override { return true; }
     uint8_t liveId() const override { return live; }
@@ -250,14 +254,20 @@ public:
         ++persists;
         return true;
     }
+    bool linked() const override { return live != 0 || associating; }
     bool beginScan() override {
         if (scanning) return false;
         scanning = true;
         ++scans;
         return true;
     }
+    bool scanRunning() const override { return scanning; }
+    void stopScan() override {
+        ++stops;
+        scanning = false;
+    }
     bool takeScan(net::VisibleNetworks& out) override {
-        if (!scanning) return false;
+        if (!scanning || hold) return false;
         scanning = false;
         out.take(air);
         return true;
@@ -3152,7 +3162,7 @@ TEST_CASE("VD-NET-5: joined, scans coalesce inside 10 s and never run during mot
     REQUIRE(rig->client->sendIntent(channels::provisioning, netOp(net::draft::op_net_scan)).has_value());
     rig->step();
     REQUIRE(rig->del.nacks.size() == 1);
-    CHECK(rig->del.nacks[0].code == NackCode::BUSY);
+    CHECK(rig->del.nacks[0].code == NackCode::INTERLOCK);
     CHECK(rig->del.nacks[0].detail == "motion running");
     CHECK(rig->netStation.scans == 2);
     g_census.busy = false;
@@ -3192,6 +3202,63 @@ TEST_CASE("VD-NET-6: not joined (config mode, offline): a scan runs at once, and
     watch->netStation.live = 0;
     watch->step(int(net::draft::scan_offline_period_ms) * 2);
     CHECK(watch->netStation.scans == 0);   // no configure session: no self-driven scans
+}
+
+TEST_CASE("VD-NET-7: a scan running when motion starts stops within one channel dwell and runs again after") {
+    auto rig = std::make_unique<Rig>(AccessLevel::configure, 0.0f, false, true);
+    rig->step(200);
+    rig->netStation.hold = true;
+    REQUIRE(rig->client->sendIntent(channels::provisioning, netOp(net::draft::op_net_scan)).has_value());
+    rig->step(20);
+    REQUIRE(rig->netStation.scans == 1);
+    REQUIRE(rig->netStation.scanning);
+    g_census.busy = true;
+    // One hub tick (1 ms here, 5 ms on the board) is far inside a 60 ms dwell.
+    rig->step(1);
+    CHECK(rig->netStation.stops == 1);
+    CHECK_FALSE(rig->netStation.scanning);
+    rig->netStation.hold = false;
+    rig->step(int(net::draft::scan_min_interval_ms) + 100);
+    CHECK(rig->netStation.scans == 1);   // not resumed while motion runs
+    CHECK(rig->netStation.stops == 1);
+    g_census.busy = false;
+    rig->step(20);
+    CHECK(rig->netStation.scans == 2);   // the ask stands: it runs once motion stops
+    rig->step(1100);
+    CHECK(uint8_t(rig->del.lastState.at(net::draft::ch_visible_networks)[0]) == 1);
+}
+
+TEST_CASE("VD-NET-8: associating counts as joined; a parked configure session is not present and drops the ask") {
+    auto rig = std::make_unique<Rig>(AccessLevel::configure, 0.0f, false, true);
+    rig->netStation.live = 0;
+    rig->netStation.associating = true;
+    rig->step(int(net::draft::scan_offline_period_ms) * 2);
+    CHECK(rig->netStation.scans == 0);   // joined policy: no self-driven scans
+    rig->netStation.associating = false;
+    rig->step(20);
+    CHECK(rig->netStation.scans == 1);   // not joined: at once
+
+    // Joined: an ask waits out motion; the session parks before it runs.
+    rig->netStation.live = 1;
+    REQUIRE(rig->client->sendIntent(channels::provisioning, netOp(net::draft::op_net_scan)).has_value());
+    rig->step(20);
+    REQUIRE(rig->nets->scanPending());
+    bool parked = false;
+    for (int i = 0; i < 60000 && !parked; ++i) {   // the client falls silent
+        g_clock.advanceUs(10'000);
+        rig->hub->update(g_clock.nowUs());
+        rig->nets->tick(uint32_t(g_clock.nowUs() / 1000), true);   // motion holds the ask
+        const HubSession* s = rig->hub->sessionBySlot(0);
+        parked = s != nullptr && s->state == HubSessionState::STALE;
+    }
+    REQUIRE(parked);
+    CHECK_FALSE(rig->nets->scanPending());   // nobody waits for it: dropped
+    rig->netStation.live = 0;
+    for (int i = 0; i < 1000; ++i) {
+        g_clock.advanceUs(10'000);
+        rig->nets->tick(uint32_t(g_clock.nowUs() / 1000), false);
+    }
+    CHECK(rig->netStation.scans == 1);   // offline, but no session present: no self-driven scans
 }
 
 TEST_CASE("VD-NET-3: the join rule and first-boot migration") {

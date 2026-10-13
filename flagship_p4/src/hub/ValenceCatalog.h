@@ -674,6 +674,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // strongest first: rows 0-6 here, 7-13 on the second channel (one does
     // not fit SPEC 9.1's 242 B). Configure only: the set of networks a hub
     // hears locates it. A client joins the two when their scan values match.
+    // Category setup, beside 0x000F: config mode's generic wizard (RFC-079)
+    // opens on setup, and the list is that wizard's first screen.
     // NetworkDesk tick(), VisibleNetworks::pack().  [4+7+7x32 = 235 B each]
     // TODO(RFC-118): 0x0019 and 0x001A are draft numbers.
     for (const auto& [id, name] : {std::pair{valence::net::draft::ch_visible_networks, "visible-networks"},
@@ -682,11 +684,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
                     .access = AccessLevel::configure, .maxRateHz = 1.0f,
                     .defaultPriority = Priority::background,
-                    .hasCategory = true, .category = valence::ui_categories::network});
+                    .hasCategory = true, .category = valence::ui_categories::setup});
         c.addLayoutField({.name = "scan", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .desc = "Finished scans since boot; 0 none yet"});
         c.addLayoutField({.name = "count", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
-                          .desc = "Networks on this channel"});
+                          .desc = "Rows on this channel; later rows empty"});
         c.addLayoutField({.name = "secured", .type = PackedFieldType::bitfield8, .unit = "", .scale = 1.0f,
                           .desc = "Bit i: row i needs a password"});
         c.addLayoutField({.name = "saved", .type = PackedFieldType::bitfield8, .unit = "", .scale = 1.0f,

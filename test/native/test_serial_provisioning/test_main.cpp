@@ -196,7 +196,10 @@ public:
         ++persists;
         return true;
     }
+    bool linked() const override { return live != 0; }
     bool beginScan() override { return false; }
+    bool scanRunning() const override { return false; }
+    void stopScan() override {}
     bool takeScan(net::VisibleNetworks&) override { return false; }
 };
 

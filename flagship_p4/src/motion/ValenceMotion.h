@@ -396,7 +396,8 @@ float motionForceHome(float stroke_mm);
 
 MotionCensus motionCensus();
 // Motion runs: a plan or a seek, a stream source, homing, a return, or the
-// emitter still stepping. A WiFi scan waits for none of these (RFC-118).
+// emitter still stepping. A WiFi scan neither starts nor keeps running while
+// any of these runs (RFC-118).
 inline bool motionRuns(const MotionCensus& c) {
     return c.busy || c.homing || c.returning || c.step_q8 != 0;
 }
