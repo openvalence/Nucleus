@@ -234,6 +234,23 @@ public:
     }
 };
 
+// The saved list's station half (RFC-116): live entry chosen by the test.
+class FakeNetStation final : public INetStation {
+public:
+    uint8_t live = 0;
+    int persists = 0;
+    bool offerList(const net::SavedNetworks&) override { return true; }
+    uint8_t liveId() const override { return live; }
+    int8_t rssiOf(uint8_t id) const override { return id == live ? int8_t(-51) : int8_t(-67); }
+    bool persist(std::span<const uint8_t>) override {
+        ++persists;
+        return true;
+    }
+};
+
+constexpr std::string_view kHomeSsid = "HomeNet";
+constexpr std::string_view kHomePass = "home passphrase 1";
+
 // Heap, not stack: the catalog and the hub are tens of KB each.
 struct Rig {
     Catalog32 catalog{};
@@ -244,9 +261,13 @@ struct Rig {
     XorShift32 clientRng{4243};
     RecordingClient del{};
     std::optional<Client> client{};
+    FakeNetStation netStation{};
+    std::optional<NetworkDesk> nets{};
 
-    // motionHz > 0 also subscribes 0x1100 at that rate; hubStatus, 0x0006 and 0x1010.
-    explicit Rig(AccessLevel role = AccessLevel::control, float motionHz = 0.0f, bool hubStatus = false) {
+    // motionHz > 0 also subscribes 0x1100 at that rate; hubStatus, 0x0006 and
+    // 0x1010; networks, 0x0017 and 0x0018 (RFC-116).
+    explicit Rig(AccessLevel role = AccessLevel::control, float motionHz = 0.0f, bool hubStatus = false,
+                 bool networks = false) {
         g_census = MotionCensus{};
         g_census.homed = true;
         g_census.motor_on = true;
@@ -276,9 +297,18 @@ struct Rig {
         device.setSetupWritten(kSetupRequiredMask);
         hub.emplace(catalog, g_clock, hubRng, device);
         device.attach(*hub, catalog);
+        nets.emplace(netStation);
+        {
+            net::SavedNetworks boot;
+            boot.save(std::nullopt, kHomeSsid, kHomePass);
+            nets->adopt(boot);
+            netStation.live = nets->list().id(0);
+        }
+        nets->attach(*hub);
+        device.bindNetworks(&*nets);
         link.emplace(g_clock, hubRng);
         // A 13th wish takes WELCOME past the link's default 250 B; a WS frame has room.
-        if (motionHz > 0.0f || hubStatus) link->profileA().mtu = 1024;
+        if (motionHz > 0.0f || hubStatus || networks) link->profileA().mtu = 1024;
         REQUIRE(hub->attachTransport(link->endpointA()));
         ClientIdentity id;
         id.instance_id.fill(std::byte{0});
@@ -305,6 +335,10 @@ struct Rig {
             REQUIRE(client->addSubscriptionWish(channels::hub_status, 1.0f, Priority::background));
             REQUIRE(client->addSubscriptionWish(ch::power, 1.0f, Priority::background));
         }
+        if (networks) {
+            REQUIRE(client->addSubscriptionWish(net::draft::ch_networks, 0.0f, Priority::background));
+            REQUIRE(client->addSubscriptionWish(net::draft::ch_network_names, 0.0f, Priority::background));
+        }
         REQUIRE(client->connect());
         step(200);
         REQUIRE(client->state() == ClientSessionState::LIVE);
@@ -314,6 +348,7 @@ struct Rig {
         for (int i = 0; i < rounds; ++i) {
             g_clock.advanceUs(1000);
             hub->update(g_clock.nowUs());
+            nets->tick();
             const uint8_t due = device.tick(g_clock.nowUs() / 1000);
             persisted |= due;
             if (due != 0) ++persistWrites;
@@ -2817,4 +2852,159 @@ TEST_CASE("VD-PAIR-10: a ledger with entries but no configure owner (as after a 
     rig->step();
     REQUIRE(rig->del.nacks.size() == 1);
     CHECK(rig->del.nacks[0].code == NackCode::NOT_CONTROLLER);
+}
+
+// ---- RFC-116: the saved-network list over a network binding --------------------
+
+namespace {
+
+bool bytesContain(const std::vector<std::byte>& hay, std::string_view needle) {
+    if (needle.empty() || hay.size() < needle.size()) return false;
+    for (size_t i = 0; i + needle.size() <= hay.size(); ++i)
+        if (std::memcmp(hay.data() + i, needle.data(), needle.size()) == 0) return true;
+    return false;
+}
+
+bool anyStateContains(const RecordingClient& d, std::string_view needle) {
+    for (const auto& [ch, bytes] : d.lastState)
+        if (bytesContain(bytes, needle)) return true;
+    return false;
+}
+
+IntentValueMap netOp(uint8_t op) {
+    IntentValueMap m{};
+    m.count = 1;
+    m.fields[0] = IntentValueField{1, IntentValue::ofU64(op)};
+    return m;
+}
+
+IntentValueMap netSave(std::string_view ssid, std::string_view pass) {
+    return plus(plus(netOp(net::draft::op_net_save), 2, IntentValue::ofTstr(ssid)), 3, IntentValue::ofTstr(pass));
+}
+
+std::string ssidAt(const RecordingClient& d, size_t i) {
+    const auto& b = d.lastState.at(net::draft::ch_network_names);
+    const char* p = reinterpret_cast<const char*>(b.data()) + 1 + i * 32;
+    return std::string(p, strnlen(p, 32));
+}
+
+}  // namespace
+
+TEST_CASE("VD-NET-1: below configure the list is occupancy only: no SSID, no passphrase, names refused") {
+    for (const AccessLevel role : {AccessLevel::watch, AccessLevel::control}) {
+        auto rig = std::make_unique<Rig>(role, 0.0f, false, true);
+        rig->step(1200);
+        REQUIRE(rig->del.lastState.count(net::draft::ch_networks) == 1);
+        const auto& s = rig->del.lastState.at(net::draft::ch_networks);
+        REQUIRE(s.size() == NetworkDesk::kNetworksBytes);
+        CHECK(uint8_t(s[2]) == 4);     // capacity
+        CHECK(uint8_t(s[3]) == 1);     // count
+        CHECK(uint8_t(s[4]) == 0);     // live: slot 1
+        CHECK(int8_t(s[5]) == -51);
+        CHECK(rig->del.lastState.count(net::draft::ch_network_names) == 0);
+        CHECK_FALSE(anyStateContains(rig->del, kHomeSsid));
+        CHECK_FALSE(anyStateContains(rig->del, kHomePass));
+
+        rig->del.nacks.clear();
+        REQUIRE(rig->client->sendIntent(channels::provisioning, netSave("Cafe", "cafe passphrase")).has_value());
+        rig->step();
+        REQUIRE(rig->del.nacks.size() == 1);
+        CHECK(rig->del.nacks[0].code == NackCode::ACCESS_DENIED);
+        CHECK(rig->nets->list().count() == 1);
+    }
+}
+
+TEST_CASE("VD-NET-2: at configure the names show, passphrases never; save, move, and the live refusal") {
+    auto rig = std::make_unique<Rig>(AccessLevel::configure, 0.0f, false, true);
+    rig->step(1200);
+    REQUIRE(rig->del.lastState.count(net::draft::ch_network_names) == 1);
+    CHECK(rig->del.lastState.at(net::draft::ch_network_names).size() == NetworkDesk::kNamesBytes);
+    CHECK(ssidAt(rig->del, 0) == kHomeSsid);
+
+    REQUIRE(rig->client->sendIntent(channels::provisioning, netSave("Cafe", "cafe passphrase")).has_value());
+    rig->step(1200);
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(echoed(rig->del.lastEcho, 2) != nullptr);
+    CHECK(echoed(rig->del.lastEcho, 2)->kind == IntentValue::Kind::Bool);
+    CHECK(echoed(rig->del.lastEcho, 3)->kind == IntentValue::Kind::Bool);
+    CHECK(echoed(rig->del.lastEcho, 6)->u64_val == 1);
+    const uint64_t gen = echoed(rig->del.lastEcho, 8)->u64_val;
+    CHECK(uint8_t(rig->del.lastState.at(net::draft::ch_networks)[3]) == 2);
+    CHECK(ssidAt(rig->del, 1) == "Cafe");
+    CHECK(rig->netStation.persists == 1);
+
+    // Move Cafe first: the live entry follows its id to slot 2.
+    REQUIRE(rig->client->sendIntent(channels::provisioning,
+                                    plus(plus(netOp(net::draft::op_net_move), 6, IntentValue::ofU64(1)), 7,
+                                         IntentValue::ofU64(0))).has_value());
+    rig->step(1200);
+    REQUIRE(rig->del.nacks.empty());
+    CHECK(ssidAt(rig->del, 0) == "Cafe");
+    CHECK(uint8_t(rig->del.lastState.at(net::draft::ch_networks)[4]) == 1);
+
+    // The network the hub rides cannot go, nor be overwritten, over WS.
+    REQUIRE(rig->client->sendIntent(channels::provisioning,
+                                    plus(netOp(net::draft::op_net_remove), 6, IntentValue::ofU64(1))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(uint16_t(rig->del.nacks[0].code) == net::draft::nack_live_network);
+    CHECK(rig->del.nacks[0].detail == "in use: the hub is joined through it");
+    REQUIRE(rig->client->sendIntent(channels::provisioning, netSave(kHomeSsid, "a new passphrase")).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 2);
+    CHECK(uint16_t(rig->del.nacks[1].code) == net::draft::nack_live_network);
+    CHECK(rig->nets->list().passphrase(1) == kHomePass);
+
+    // wifi_join never rides the network it would change.
+    REQUIRE(rig->client->sendIntent(channels::provisioning,
+                                    plus(plus(netOp(provisioning_ops::wifi_join), 2, IntentValue::ofTstr("X")), 3,
+                                         IntentValue::ofTstr("passphrase x"))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 3);
+    CHECK(rig->del.nacks[2].code == NackCode::ACCESS_DENIED);
+
+    // A stale generation is a conflict; the current one removes Cafe.
+    REQUIRE(rig->client->sendIntent(channels::provisioning,
+                                    plus(plus(netOp(net::draft::op_net_remove), 6, IntentValue::ofU64(0)), 8,
+                                         IntentValue::ofU64(gen))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 4);
+    CHECK(rig->del.nacks[3].code == NackCode::CONFLICT);
+    REQUIRE(rig->client->sendIntent(channels::provisioning,
+                                    plus(plus(netOp(net::draft::op_net_remove), 6, IntentValue::ofU64(0)), 8,
+                                         IntentValue::ofU64(rig->nets->generation()))).has_value());
+    rig->step(1200);
+    CHECK(rig->del.nacks.size() == 4);
+    CHECK(rig->nets->list().count() == 1);
+    CHECK(ssidAt(rig->del, 0) == kHomeSsid);
+    CHECK(ssidAt(rig->del, 1).empty());
+
+    CHECK_FALSE(anyStateContains(rig->del, kHomePass));
+    CHECK_FALSE(anyStateContains(rig->del, "cafe passphrase"));
+}
+
+TEST_CASE("VD-NET-3: the join rule and first-boot migration") {
+    std::array<uint8_t, 4> order{};
+    std::array<int8_t, 4> rssi{};
+    net::SavedNetworks l;
+    for (const char* s : {"one", "two", "hidden"}) l.save(std::nullopt, s, "passphrase");
+    const std::vector<net::Sighting> heard{{"one", -62}, {"two", -60}, {"other", -30}};
+    REQUIRE(net::joinOrder(l, heard, order, rssi) == 3);
+    CHECK(order[0] == 0);   // within 3 dB of two: the earlier entry
+    CHECK(order[1] == 1);
+    CHECK(order[2] == 2);   // not heard: after the visible ones
+    const std::vector<net::Sighting> clear{{"one", -70}, {"two", -60}};
+    net::joinOrder(l, clear, order, rssi);
+    CHECK(order[0] == 1);
+
+    const net::SavedNetworks fromNvs =
+        firstBootList(std::pair{std::string_view("prov"), std::string_view("prov passphrase")}, "compiled",
+                      "compiled passphrase");
+    REQUIRE(fromNvs.count() == 1);
+    CHECK(fromNvs.ssid(0) == "prov");
+    const net::SavedNetworks fromSecrets = firstBootList(std::nullopt, "compiled", "compiled passphrase");
+    REQUIRE(fromSecrets.count() == 1);
+    CHECK(fromSecrets.ssid(0) == "compiled");
+    CHECK(fromSecrets.passphrase(0) == "compiled passphrase");
+    CHECK(firstBootList(std::nullopt, "your-ssid", "short").count() == 0);
 }
