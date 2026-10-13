@@ -98,9 +98,10 @@ CONFIG_BT_NIMBLE_NVS_PERSIST=n
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
 CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
 CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
-# Twice the host's default mbuf pools (PSRAM, above): a 512 B notification
-# holds two to three blocks while it waits for the C6's buffers.
-CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24
+# The host's mbuf pools, PSRAM (above): four and two times the defaults. Each
+# queued notification holds one small block for its ATT header
+# (ValenceBle.cpp kTxBlocks); the rest serve the host's own traffic.
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=48
 CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=48
 
 CONFIG_FREERTOS_HZ=1000

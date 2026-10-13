@@ -263,8 +263,8 @@ constexpr uint32_t kEspLinesPerSec = 10;
 
 // Tag prefixes of the esp_hosted host side and esp_wifi_remote
 // (managed_components). A tag outside them stays console-only.
-constexpr std::array<std::string_view, 10> kEspBridged = {
-    "H_", "rpc_", "RPC_", "sdio", "transport", "host_init", "os_wrapper", "serial", "esp_hosted", "wifi"};
+constexpr std::array<std::string_view, 12> kEspBridged = {
+    "H_", "rpc_", "RPC_", "sdio", "transport", "host_init", "os_wrapper", "serial", "esp_hosted", "wifi", "vhci", "NimBLE"};
 
 // ESP_LOG's line head after the level letter (esp_log_format.h LOG_FORMAT,
 // CONFIG_LOG_COLORS off): the timestamp, then the tag, are its first arguments.

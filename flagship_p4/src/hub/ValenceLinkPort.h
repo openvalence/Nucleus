@@ -76,6 +76,8 @@ public:
     // and ten missed idle pings is a client that is gone.
     static constexpr uint32_t kCtrlStallMs = 2000;
     static constexpr uint32_t kIdleReapMs = 10 * limits::ping_interval_idle_ms;
+    // How long one refused data frame keeps the link at congestion level 1.
+    static constexpr uint32_t kShedHoldMs = 1000;
 
     // `desk` may be nullptr: then wifi_join reaches the hub like any intent.
     // `tag` is a string literal naming the binding in the log.
@@ -149,6 +151,8 @@ private:
     uint32_t _rxDrops = 0;
     uint32_t _txDataDrops = 0;
     uint32_t _txCtrlFails = 0;
+    uint32_t _dropsSeen = 0;
+    uint32_t _shedAtMs = 0;
 };
 
 // ---- port implementation -----------------------------------------------------------
@@ -206,9 +210,14 @@ inline void ValenceLinkPort::loop(uint32_t nowMs) {
         detach();
         return;
     }
-    // §10.4: severe while never-shed frames cannot leave. Level 1 is never
-    // reported: data the pipe refuses is shed at write().
-    _hub->setCongestionLevel(*this, _txCount > 0 ? 2 : 0);
+    // §10.4: severe while never-shed frames cannot leave; moderate while the
+    // pipe has refused data within kShedHoldMs, so the hub sheds at the
+    // source instead of every frame meeting a full pipe.
+    const bool shedding = _txDataDrops != _dropsSeen;
+    _dropsSeen = _txDataDrops;
+    if (shedding) _shedAtMs = nowMs;
+    const bool recent = _shedAtMs != 0 && uint32_t(nowMs - _shedAtMs) < kShedHoldMs;
+    _hub->setCongestionLevel(*this, _txCount > 0 ? 2 : recent ? 1 : 0);
 }
 
 inline void ValenceLinkPort::detach() {

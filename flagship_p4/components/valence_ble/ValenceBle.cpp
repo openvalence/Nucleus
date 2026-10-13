@@ -20,6 +20,7 @@
 
 #include "ValenceBle.h"
 
+#include <esp_heap_caps.h>
 #include <esp_hosted.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -44,12 +45,31 @@ constexpr const char* kTag = "ble";
 // Bring-up only: two RPCs and the host's init, no frame buffers.
 constexpr uint32_t kUpTaskStackBytes = 4096;
 constexpr uint16_t kNoConn = 0xFFFF;
-// msys blocks a notify must leave free. A notification waits in the host for
-// controller buffers holding its mbufs; spending the last of them starves the
-// ATT write response, the client's write times out (measured: bleak's 5 s on
-// a catalog transfer) and the link dies. The notify is refused instead, and
-// the port holds or sheds the frame.
-constexpr int kMsysReserve = 12;
+// NOTIFICATIONS COME FROM A POOL OF THEIR OWN. A notification waits in the
+// host for the C6's buffers, holding its mbufs; from the shared msys pool
+// (ble_hs_mbuf_from_flat takes its smallest) they starved the ATT write
+// response, the client's write timed out and the link died (measured: bleak's
+// 5 s, mid-catalog and under subscribe-everything). When this pool is empty
+// the notify is refused and the port holds or sheds the frame. PSRAM. The
+// host still takes one msys block per queued notification for its ATT
+// header (ble_att_cmd_get), so this count also bounds that: it stays well
+// under CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT.
+constexpr uint16_t kTxBlocks = 12;
+constexpr uint16_t kTxBlockData = 320;
+// Room for the ACL, L2CAP and ATT headers the host prepends in place.
+constexpr uint16_t kTxLeading = 32;
+os_mempool g_txMempool;
+os_mbuf_pool g_txPool;
+bool g_txPoolOk = false;
+
+bool txPoolInit() {
+    const uint32_t blockBytes = kTxBlockData + sizeof(os_mbuf) + sizeof(os_mbuf_pkthdr);
+    void* mem = heap_caps_malloc(OS_MEMPOOL_BYTES(kTxBlocks, blockBytes), MALLOC_CAP_SPIRAM);
+    if (mem == nullptr) return false;
+    if (os_mempool_init(&g_txMempool, kTxBlocks, blockBytes, static_cast<os_membuf_t*>(mem), "vlnc_tx") != 0)
+        return false;
+    return os_mbuf_pool_init(&g_txPool, &g_txMempool, uint16_t(blockBytes), kTxBlocks) == 0;
+}
 // 31 B legacy advertisement: flags 3 + 128-bit UUID 18 + name header 2.
 constexpr size_t kAdvNameMax = 31 - 3 - 18 - 2;
 
@@ -97,10 +117,12 @@ public:
     bool notify(std::span<const std::byte> value) override {
         const uint16_t conn = g_conn.load(std::memory_order_acquire);
         if (conn == kNoConn) return false;
-        if (os_msys_num_free() < kMsysReserve) return false;
-        os_mbuf* om = ble_hs_mbuf_from_flat(value.data(), uint16_t(value.size()));
-        if (om == nullptr) {
-            GLOGW_EVERY_MS(1000, kTag, "notify of %u B: no host buffer", unsigned(value.size()));
+        if (!g_txPoolOk) return false;
+        os_mbuf* om = os_mbuf_get_pkthdr(&g_txPool, 0);
+        if (om == nullptr) return false;   // the pool is the notify queue: full means wait
+        om->om_data += kTxLeading;
+        if (os_mbuf_copyinto(om, 0, value.data(), uint16_t(value.size())) != 0) {
+            os_mbuf_free_chain(om);
             return false;
         }
         const int rc = ble_gatts_notify_custom(conn, g_notifyHandle, om);   // consumes om
@@ -272,6 +294,8 @@ void upTask(void*) {
         vTaskDelete(nullptr);
         return;
     }
+    g_txPoolOk = txPoolInit();
+    if (!g_txPoolOk) GLOGE(kTag, "notify pool not allocated: the hub cannot send over BLE");
     ble_npl_event_init(&g_applyEvent, apply, nullptr);
     nimble_port_freertos_init(hostTask);
     vTaskDelete(nullptr);
