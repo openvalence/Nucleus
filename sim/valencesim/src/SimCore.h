@@ -96,17 +96,19 @@ private:
     };
 
     // The station twin behind the saved-network list (RFC-116): joined
-    // through slot 1 whenever the list has one, so the live-network refusal
-    // is reachable; RSSI made up per slot. The list lives in RAM only.
+    // through slot 0 at boot, and the live entry follows its id through
+    // moves; when it goes, slot 0 is live. RSSI made up per slot. The list
+    // lives in RAM only.
     // ponytail: no persistence across sim restarts; add an ISimStore blob if a
     // suite needs it.
     class SimNetStation final : public INetStation {
     public:
         bool offerList(const net::SavedNetworks& list) override {
             _list = list;
+            if (!_list.findId(_live)) _live = _list.id(0);
             return true;
         }
-        uint8_t liveId() const override { return _list.id(0); }
+        uint8_t liveId() const override { return _live; }
         int8_t rssiOf(uint8_t id) const override {
             const auto i = _list.findId(id);
             return i ? int8_t(-42 - 7 * int(*i)) : net::kRssiUnseen;
@@ -115,6 +117,7 @@ private:
 
     private:
         net::SavedNetworks _list{};
+        uint8_t _live = 0;
     };
 
     uint64_t loadOrMintInstanceId();

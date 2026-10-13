@@ -82,7 +82,7 @@ constexpr uint16_t kScanRecords = 20;
 
 // NVS namespace "valence": "nets" is the list (SavedNetworks::encode). "sta"
 // is the single network an older image stored; it is read once, migrated
-// into slot 1 and erased.
+// into slot 0 and erased.
 constexpr const char* kNvsNamespace = "valence";
 constexpr const char* kNvsNets = "nets";
 constexpr const char* kNvsLegacy = "sta";
@@ -215,7 +215,7 @@ void BoardStation::load() {
         if (_mine.count() == 1) {
             _mine.encode(blob);
             const bool saved = saveBlob(kNvsNets, blob, haveLegacy);
-            GLOGI(kTag, "saved networks: migrated %s into slot 1%s", from, saved ? "" : " (not yet written)");
+            GLOGI(kTag, "saved networks: migrated %s into slot 0%s", from, saved ? "" : " (not yet written)");
         } else {
             GLOGW(kTag, "saved networks: none, and %s is not a valid network", from);
         }
@@ -444,10 +444,10 @@ bool BoardStation::joinSaved() {
         if (r.joined) {
             _joined.assign(_mine.ssid(i), _mine.passphrase(i));
             reportLive(_mine.id(i));
-            GLOGI(kTag, "joined slot %u of %u", unsigned(i + 1), unsigned(n));
+            GLOGI(kTag, "joined slot %u, %u saved", unsigned(i), unsigned(n));
             return true;
         }
-        GLOGW(kTag, "slot %u of %u did not join: %s", unsigned(i + 1), unsigned(n),
+        GLOGW(kTag, "slot %u did not join, %u saved: %s", unsigned(i), unsigned(n),
               r.why == JoinFailure::auth ? "authentication failed"
               : r.why == JoinFailure::not_found ? "not found" : "timed out");
     }

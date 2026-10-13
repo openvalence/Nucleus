@@ -7,15 +7,15 @@
 // Constraints:
 // - HUB TASK ONLY. The station joins on its own task; the two meet through
 //   INetStation, never through shared memory.
-// - THE BINDING RULES LIVE IN gate() AND ONLY THERE: wifi_join only on a
-//   credential binding (BLE GATT, serial, in-process) with a pairing window
-//   open or the hub factory-fresh; the list ops on any binding at configure.
-//   The live-network refusal in apply() is the one other binding-dependent
-//   rule: on a network binding the entry the station is joined through may
-//   not be removed or overwritten.
-// - SSIDs leave only through network-names, whose catalog access is
-//   configure. Passphrases leave through nothing: ECHO answers `true` for
-//   both keys (SPEC §8.8 Secrets), and no log line here names either.
+// - THE BINDING RULES LIVE HERE AND ONLY HERE: gate() admits wifi_join only
+//   on a credential binding (BLE GATT, serial, in-process) with a pairing
+//   window open or the hub factory-fresh, and the list ops on any binding at
+//   configure; mayEditLive() lets an edit remove or overwrite the entry the
+//   station is joined through only under wifi_join's own terms.
+// - SSIDs leave only through network-names (configure) and the ECHO to the
+//   configure session that sent them. Passphrases leave through nothing: ECHO
+//   answers `true` for that key (SPEC §8.8 Secrets), and no log line here
+//   names either.
 // - Hardware-free: valencesim runs it with its own station.
 // - TODO(RFC-116): valence::net::draft numbers become registry constants
 //   when the RFC lands.
@@ -64,7 +64,7 @@ public:
 };
 
 // First boot of a list image: the one network the board already joined
-// becomes slot 1, a provisioned pair (an older image's NVS "sta") before the
+// becomes slot 0, a provisioned pair (an older image's NVS "sta") before the
 // compiled-in one. An invalid pair yields an empty list.
 inline net::SavedNetworks firstBootList(std::optional<std::pair<std::string_view, std::string_view>> provisioned,
                                         std::string_view compiledSsid, std::string_view compiledPass) {
@@ -83,7 +83,7 @@ public:
     using Applied = Result<IntentValueMap, Refusal>;
 
     static constexpr size_t kNetworksBytes = 9;    // generation u16, capacity, count, live, rssi x4
-    static constexpr size_t kNamesBytes = 1 + net::SavedNetworks::kCapacity * 32;   // open + ssid x4 str32
+    static constexpr size_t kNamesBytes = 2 + 1 + net::SavedNetworks::kCapacity * 32;   // generation, open, ssid x4 str32
     static constexpr uint8_t kNoLive = 0xFF;
 
     explicit NetworkDesk(INetStation& station) : _station(station) {}
@@ -126,8 +126,15 @@ public:
         }
     }
 
-    // wifi_join, before the join starts: refused when the joined network
-    // would have nowhere to be stored. A `slot` names the entry to replace.
+    // RFC-116 item 5: an edit that removes or overwrites the entry the
+    // station is joined through needs wifi_join's own terms, because it can
+    // strand the hub at its next reconnect.
+    static bool mayEditLive(Binding binding, bool windowOrFresh) {
+        return binding == Binding::credential && windowOrFresh;
+    }
+
+    // wifi_join, before the join starts: the credentials and the slot. A full
+    // list is no refusal: storeJoined() replaces an entry.
     std::optional<Refusal> checkJoinTarget(const IntentValueMap& in) const {
         const IntentValue* ssid = field(in, net::kKeySsid);
         const IntentValue* pass = field(in, net::kKeyPassphrase);
@@ -140,27 +147,34 @@ public:
         if (slot.has_value() && !slot->has_value()) return Refusal{NackCode::INVALID_VALUE, "slot"};
         const std::optional<size_t> s = slot ? *slot : std::nullopt;
         if (s && *s >= _list.count()) return Refusal{NackCode::INVALID_VALUE, "slot"};
-        if (!_list.saveTarget(s, ssid->tstr_val) && _list.count() == _list.capacity())
-            return Refusal{NackCode::INVALID_VALUE, "list full"};
+        if (const auto same = _list.find(ssid->tstr_val); s && same && *same != *s)
+            return Refusal{NackCode::INVALID_VALUE, "duplicate ssid"};
         return std::nullopt;
     }
 
-    // wifi_join joined: the credentials take their entry. Returns the slot.
-    std::optional<size_t> storeJoined(std::optional<size_t> slot, std::string_view ssid, std::string_view pass) {
-        const auto r = _list.save(slot, ssid, pass);
-        if (!r.ok) return std::nullopt;
+    // wifi_join joined: the credentials take SavedNetworks::joinTarget()'s
+    // entry. A list edited during the join (the slot gone, the SSID saved
+    // elsewhere) falls back to the target without a slot, which always
+    // stores. Returns the slot.
+    size_t storeJoined(std::optional<size_t> slot, std::string_view ssid, std::string_view pass) {
+        const std::optional<size_t> live = _list.findId(_station.liveId());
+        auto r = _list.save(_list.joinTarget(slot, ssid, live), ssid, pass);
+        if (!r.ok) r = _list.save(_list.joinTarget(std::nullopt, ssid, live), ssid, pass);
         changed();
+        GLOGI(kTag, "slot %u %s by wifi_join", unsigned(r.saved.slot), r.saved.replaced ? "replaced" : "added");
         return r.saved.slot;
     }
 
-    // net_save, net_remove, net_move. The caller passed gate() first.
-    Applied apply(const IntentValueMap& in, Binding binding) {
+    // net_save, net_remove, net_move. The caller passed gate() first, with the
+    // same `binding` and `windowOrFresh`.
+    Applied apply(const IntentValueMap& in, Binding binding, bool windowOrFresh) {
         const std::optional<uint8_t> op = opOf(in);
         if (const IntentValue* g = field(in, net::draft::key_generation)) {
             if (g->kind != IntentValue::Kind::U64) return refuse(NackCode::INVALID_VALUE, "generation");
             if (g->u64_val != _generation) return refuse(NackCode::CONFLICT, "list changed");
         }
-        const std::optional<size_t> live = _list.findId(_station.liveId());
+        const std::optional<size_t> live =
+            mayEditLive(binding, windowOrFresh) ? std::nullopt : _list.findId(_station.liveId());
         const auto slot = slotOf(in, net::draft::key_slot);
         if (slot.has_value() && !slot->has_value()) return refuse(NackCode::INVALID_VALUE, "slot");
         const std::optional<size_t> s = slot ? *slot : std::nullopt;
@@ -179,23 +193,26 @@ public:
                 return refuse(NackCode::INVALID_VALUE, bad->data());
             if (s && *s >= _list.count()) return refuse(NackCode::INVALID_VALUE, "slot");
             const std::optional<size_t> target = _list.saveTarget(s, ssid->tstr_val);
-            if (binding == Binding::network && target && target == live)
+            if (target && target == live)
                 return refuse(NackCode(net::draft::nack_live_network), "in use: the hub is joined through it");
             const auto r = _list.save(s, ssid->tstr_val, pass->tstr_val);
-            if (!r.ok) return refuse(NackCode::INVALID_VALUE, "list full");
+            if (!r.ok)
+                return refuse(NackCode::INVALID_VALUE,
+                              r.error == net::SavedNetworks::Error::duplicate ? "duplicate ssid" : "list full");
             changed();
             push(out, net::draft::key_slot, IntentValue::ofU64(r.saved.slot));
-            push(out, net::kKeySsid, IntentValue::ofBool(true));
+            // Not secret (RFC-116 item 7): the sender reads it on 0x0018 anyway.
+            push(out, net::kKeySsid, IntentValue::ofTstr(ssid->tstr_val));
             push(out, net::kKeyPassphrase, IntentValue::ofBool(true));
-            GLOGI(kTag, "slot %u %s", unsigned(r.saved.slot + 1), r.saved.replaced ? "replaced" : "added");
+            GLOGI(kTag, "slot %u %s", unsigned(r.saved.slot), r.saved.replaced ? "replaced" : "added");
         } else if (op == net::draft::op_net_remove) {
             if (!s || *s >= _list.count()) return refuse(NackCode::INVALID_VALUE, "slot");
-            if (binding == Binding::network && s == live)
+            if (s == live)
                 return refuse(NackCode(net::draft::nack_live_network), "in use: the hub is joined through it");
             _list.remove(*s);
             changed();
             push(out, net::draft::key_slot, IntentValue::ofU64(*s));
-            GLOGI(kTag, "slot %u removed", unsigned(*s + 1));
+            GLOGI(kTag, "slot %u removed", unsigned(*s));
         } else if (op == net::draft::op_net_move) {
             const auto to = slotOf(in, net::draft::key_to);
             if (!s || *s >= _list.count()) return refuse(NackCode::INVALID_VALUE, "slot");
@@ -252,14 +269,17 @@ public:
             putU8(s.subspan(5 + i, 1), uint8_t(i < _list.count() ? _station.rssiOf(_list.id(i)) : net::kRssiUnseen));
     }
 
+    // generation first, so a client pairs these names with the networks
+    // sample of the same generation.
     void packNames(std::span<std::byte, kNamesBytes> n) const {
+        putU16(n.subspan(0, 2), _generation);
         uint8_t open = 0;
         for (size_t i = 0; i < _list.count(); ++i) {
             if (_list.open(i)) open = uint8_t(open | (1u << i));
             const std::string_view ssid = _list.ssid(i);
-            std::memcpy(n.data() + 1 + i * 32, ssid.data(), ssid.size());
+            std::memcpy(n.data() + 3 + i * 32, ssid.data(), ssid.size());
         }
-        n[0] = std::byte(open);
+        n[2] = std::byte(open);
     }
 
 private:

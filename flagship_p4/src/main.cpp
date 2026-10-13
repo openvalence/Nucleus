@@ -10,7 +10,7 @@
 // - WiFi is esp_wifi_remote over esp_hosted: the esp_wifi_* calls below run on
 //   the C6. Pins and bus live in sdkconfig.defaults. The saved networks and
 //   every join, reconnects included, are the Station task's
-//   (hub/ValenceProvisioning.cpp); secrets.h only seeds slot 1 on first boot.
+//   (hub/ValenceProvisioning.cpp); secrets.h only seeds slot 0 on first boot.
 // See: docs/flagship-board.md section 8, bd val-091
 
 #include <atomic>

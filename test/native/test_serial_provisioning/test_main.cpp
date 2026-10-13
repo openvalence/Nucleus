@@ -247,8 +247,7 @@ bool buildTestCatalog(Catalog32& c, bool declareProvisioning) {
         c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                                 .role = "action.provision"},
                                {"reserved", "wifi_join", "save", "remove", "move"});
-        c.addSchemaField({.key = 2, .name = "ssid", .type = CborFieldType::tstr_t, .unit = "",
-                          .flags = setting_flags::secret});
+        c.addSchemaField({.key = 2, .name = "ssid", .type = CborFieldType::tstr_t, .unit = ""});
         c.addSchemaField({.key = 3, .name = "passphrase", .type = CborFieldType::tstr_t, .unit = "",
                           .flags = setting_flags::secret});
         c.addSchemaField({.key = 4, .name = "ipv4", .type = CborFieldType::uint_t, .unit = ""});
@@ -640,7 +639,7 @@ TEST_CASE("desk: a bad SSID or passphrase is refused INVALID_VALUE and starts no
     CHECK(rig->station.joins == 0);
 }
 
-TEST_CASE("desk: a join that worked echoes true for both secrets, the address and the port; nothing discloses them") {
+TEST_CASE("desk: a join that worked echoes the SSID to its sender, true for the passphrase, the address and the port") {
     g_logs.lines.clear();
     auto rig = std::make_unique<Rig>();
     rig->live();
@@ -659,11 +658,11 @@ TEST_CASE("desk: a join that worked echoes true for both secrets, the address an
     REQUIRE(a.count == 6);
     CHECK(a.fields[0].key == 1);
     CHECK(a.fields[0].value.u64_val == provisioning_ops::wifi_join);
-    for (const size_t i : {size_t(1), size_t(2)}) {
-        CHECK(a.fields[i].key == i + 1);
-        CHECK(a.fields[i].value.kind == IntentValue::Kind::Bool);
-        CHECK(a.fields[i].value.bool_val);
-    }
+    CHECK(a.fields[1].key == 2);
+    CHECK(a.fields[1].value.kind == IntentValue::Kind::Tstr);   // RFC-116 item 7: not secret
+    CHECK(a.fields[2].key == 3);
+    CHECK(a.fields[2].value.kind == IntentValue::Kind::Bool);
+    CHECK(a.fields[2].value.bool_val);
     CHECK(a.fields[3].key == 4);
     CHECK(a.fields[3].value.u64_val == kIp);
     CHECK(a.fields[4].key == 5);
@@ -677,7 +676,7 @@ TEST_CASE("desk: a join that worked echoes true for both secrets, the address an
     CHECK(rig->netDesk->list().passphrase(0) == kPass);
     CHECK_FALSE(rig->desk->busy());
 
-    CHECK_FALSE(contains(rig->at().wire.sentByHub, kSsid));
+    CHECK(contains(rig->at().wire.sentByHub, kSsid));   // the ECHO, to the sender only
     CHECK_FALSE(contains(rig->at().wire.sentByHub, kPass));
     CHECK(logged("joined: 192.168.1.50"));
     CHECK_FALSE(logged(kSsid));
@@ -749,7 +748,7 @@ TEST_CASE("desk: a store that cannot write yet holds the list in RAM and persist
     CHECK(rig->nets.persists == 1);
 }
 
-TEST_CASE("desk: on a credential binding the list ops answer at once, and the live entry may go") {
+TEST_CASE("desk: on a credential binding the list ops answer at once; the live entry goes only with a window open") {
     auto rig = std::make_unique<Rig>();
     rig->live();
     rig->configure();
@@ -764,11 +763,64 @@ TEST_CASE("desk: on a credential binding the list ops answer at once, and the li
     remove.count = 2;
     remove.fields[0] = {1, IntentValue::ofU64(net::draft::op_net_remove)};
     remove.fields[1] = {6, IntentValue::ofU64(0)};
+    // RFC-116 item 5: no window, no presence, so the live entry stays.
     REQUIRE(rig->client().sendIntent(channels::provisioning, remove));
     rig->step();
-    CHECK(rig->at().ears.nacks.empty());
+    REQUIRE(rig->at().ears.nacks.size() == 1);
+    CHECK(uint16_t(rig->at().ears.nacks[0].code) == net::draft::nack_live_network);
+    CHECK(rig->netDesk->list().count() == 1);
+    rig->hub->openPresenceWindow();
+    REQUIRE(rig->client().sendIntent(channels::provisioning, remove));
+    rig->step();
+    CHECK(rig->at().ears.nacks.size() == 1);
     CHECK(rig->netDesk->list().count() == 0);
     CHECK_FALSE(contains(rig->at().wire.sentByHub, "second passphrase"));
+}
+
+TEST_CASE("desk: wifi_join on a full list joins and replaces the last entry that is not live (RFC-116 B1)") {
+    auto rig = std::make_unique<Rig>();
+    rig->live();
+    rig->configure();
+    rig->hub->openPresenceWindow();
+    net::SavedNetworks four;
+    for (const char* s : {"a", "b", "c", "d"}) REQUIRE(four.save(std::nullopt, s, "password1").ok);
+    rig->netDesk->adopt(four);
+    rig->nets.live = rig->netDesk->list().id(3);
+    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    CHECK(rig->at().ears.nacks.empty());   // never refused for room
+    REQUIRE(rig->station.joins == 1);
+    rig->finish({true, kIp, JoinFailure::timeout});
+    REQUIRE(rig->at().ears.echoes.size() == 1);
+    const IntentValueMap& a = rig->at().ears.echoes[0].second;
+    REQUIRE(a.count == 6);
+    CHECK(a.fields[5].key == 6);
+    CHECK(a.fields[5].value.u64_val == 2);
+    REQUIRE(rig->netDesk->list().count() == 4);
+    CHECK(rig->netDesk->list().ssid(2) == kSsid);
+    CHECK(rig->netDesk->list().ssid(3) == "d");
+}
+
+TEST_CASE("desk: a slot that would repeat another entry's SSID is refused (RFC-116 S8)") {
+    auto rig = std::make_unique<Rig>();
+    rig->live();
+    rig->configure();
+    rig->hub->openPresenceWindow();
+    net::SavedNetworks two;
+    for (const char* s : {"a", "b"}) REQUIRE(two.save(std::nullopt, s, "password1").ok);
+    rig->netDesk->adopt(two);
+    for (const uint64_t op : {uint64_t(provisioning_ops::wifi_join), uint64_t(net::draft::op_net_save)}) {
+        rig->at().ears.nacks.clear();
+        IntentValueMap m = wifiJoin("b", "password2", op);
+        m.fields[m.count++] = {6, IntentValue::ofU64(0)};
+        REQUIRE(rig->client().sendIntent(channels::provisioning, m));
+        rig->step();
+        REQUIRE(rig->at().ears.nacks.size() == 1);
+        CHECK(rig->at().ears.nacks[0].code == NackCode::INVALID_VALUE);
+        CHECK(rig->at().ears.nacks[0].detail == "duplicate ssid");
+    }
+    CHECK(rig->station.joins == 0);
+    CHECK(rig->netDesk->list().ssid(0) == "a");
 }
 
 TEST_CASE("desk: a station that cannot start a join answers station down") {
