@@ -44,6 +44,12 @@ constexpr const char* kTag = "ble";
 // Bring-up only: two RPCs and the host's init, no frame buffers.
 constexpr uint32_t kUpTaskStackBytes = 4096;
 constexpr uint16_t kNoConn = 0xFFFF;
+// msys blocks a notify must leave free. A notification waits in the host for
+// controller buffers holding its mbufs; spending the last of them starves the
+// ATT write response, the client's write times out (measured: bleak's 5 s on
+// a catalog transfer) and the link dies. The notify is refused instead, and
+// the port holds or sheds the frame.
+constexpr int kMsysReserve = 12;
 // 31 B legacy advertisement: flags 3 + 128-bit UUID 18 + name header 2.
 constexpr size_t kAdvNameMax = 31 - 3 - 18 - 2;
 
@@ -91,6 +97,7 @@ public:
     bool notify(std::span<const std::byte> value) override {
         const uint16_t conn = g_conn.load(std::memory_order_acquire);
         if (conn == kNoConn) return false;
+        if (os_msys_num_free() < kMsysReserve) return false;
         os_mbuf* om = ble_hs_mbuf_from_flat(value.data(), uint16_t(value.size()));
         if (om == nullptr) {
             GLOGW_EVERY_MS(1000, kTag, "notify of %u B: no host buffer", unsigned(value.size()));
