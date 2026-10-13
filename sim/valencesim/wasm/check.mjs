@@ -16,7 +16,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const flag = (f, d) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : d; };
 const modPath = resolve(args.find((a) => a.endsWith('.js')) || here + '/build/integral.js');
-const ETAG = flag('--etag', 'cb65f7ff2d5062b2');
+const ETAG = flag('--etag', '61b8219d79ad6abc');
 
 let fails = 0;
 const ok = (name, cond, extra) => {
