@@ -5,16 +5,14 @@
 # FLAGS, never a #define in a source file: two translation units seeing two
 # values would be two Catalog32 types (ODR), and nothing would say so.
 #
-# Sizing (val-9u0.5, recomputed 2026-10-09 for the oscillator's drives and
-# osc-drive stream, val-o9r): the machine budget is 48 / 240 / 160 / 192 and
-# 29,696 B encoded. Layout rose from 216 and bytes from 27,648 because the
-# oscillator (val-dzf), datagram_estop (val-7t8) and the drives had already
-# cost an accessory: the twin's headroom line read 5. Machine use is 47
-# entries, 235 layout and 28,329 B encoded [verified 2026-10-09 -- valencesim
-# headroom line: 6 accessories]. Each
+# Sizing (val-9u0.5, recomputed 2026-10-13 for the saved-network channels
+# 0x000F, 0x0017 and 0x0018, RFC-116): the machine budget is 52 / 256 / 176 /
+# 200 and 29,696 B encoded. Machine use is 51 entries, 251 layout, 141 schema
+# and 29,286 B encoded [verified 2026-10-13 -- valencesim headroom line: 6
+# accessories]. Each
 # accessory gets the per-accessory budget below. The accessory count is
 # the most that keeps the total entries at or under catalog_max_entries (256),
-# the floor every client is built to handle: (256 - 48) / 31 = 6.
+# the floor every client is built to handle: (256 - 52) / 31 = 6.
 # The encode scratch keeps the 80% headroom floor over the machine's 29,696 B
 # plus 6 x 5,120 B, rounded up to 76 KiB: (29,696 + 30,720) / 0.8 = 75,520.
 
@@ -34,10 +32,10 @@ math(EXPR NUCLEUS_ACCESSORY_SAFE_FIELDS
 # accessory_declaration_max_bytes (4096) plus 25% for hub-authored text.
 set(NUCLEUS_ACCESSORY_CATALOG_BYTES 5120)
 
-math(EXPR _entries "48 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_ENTRIES}")
-math(EXPR _layout  "240 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LAYOUT_FIELDS}")
-math(EXPR _schema  "160 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_SCHEMA_FIELDS}")
-math(EXPR _labels  "192 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LABELS}")
+math(EXPR _entries "52 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_ENTRIES}")
+math(EXPR _layout  "256 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LAYOUT_FIELDS}")
+math(EXPR _schema  "176 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_SCHEMA_FIELDS}")
+math(EXPR _labels  "200 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LABELS}")
 math(EXPR _safe    "${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_SAFE_FIELDS}")
 
 set(VALENCE_CAPACITY_DEFINITIONS

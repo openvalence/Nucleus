@@ -155,6 +155,14 @@ bool SimCore::begin(const SimConfig& opt, IClock& clock, ISimStore& store) {
     log.logf('I', "valencesim: hub_instance_id %016llx", static_cast<unsigned long long>(hub.hubInstanceId()));
     _device.attach(hub, _catalog);
     _logChannel.hub = &hub;
+    {
+        // One saved network, as a migrated board boots with.
+        net::SavedNetworks boot;
+        boot.save(std::nullopt, "virtual", "virtual-passphrase");
+        _nets.adopt(boot);
+        _nets.attach(hub);
+        _device.bindNetworks(&_nets);
+    }
 
     const auto etag = hub.catalogEtag();
     std::array<char, 2 * 32 + 1> etagHex{};
@@ -201,6 +209,7 @@ void SimCore::pass(uint64_t nowUs, const std::function<void(uint32_t)>& pump) {
     pump(nowMs);
     hub.update(uint32_t(nowUs));
     const uint8_t due = _device.tick(nowMs);
+    _nets.tick();
     geiger::drainToSinks();
     std::span<std::byte> scratch(_scratch);
     if (due & kPersistConfig) {

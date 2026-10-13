@@ -8,7 +8,9 @@
 // - The LP core clock is MEASURED, never assumed. kLpCyclesPerEdge is exact,
 //   so scope edges/s times kLpCyclesPerEdge IS the LP clock.
 // - WiFi is esp_wifi_remote over esp_hosted: the esp_wifi_* calls below run on
-//   the C6. Pins and bus live in sdkconfig.defaults, credentials in secrets.h.
+//   the C6. Pins and bus live in sdkconfig.defaults. The saved networks and
+//   every join, reconnects included, are the Station task's
+//   (hub/ValenceProvisioning.cpp); secrets.h only seeds slot 1 on first boot.
 // See: docs/flagship-board.md section 8, bd val-091
 
 #include <atomic>
@@ -32,7 +34,6 @@
 #include "geiger/geiger.h"
 #include "hub/ValenceHub.h"
 #include "hub/ValenceProvisioning.h"
-#include "hub/StationScan.h"
 #include "motion/MotionArbiter.h"
 #include "motion/ValenceMotion.h"
 #include "patterns/ValencePattern.h"
@@ -48,7 +49,6 @@
 #include "system/ValenceMotorSwitch.h"
 #include "system/ValencePower.h"
 #include "system/ValenceSelfCheck.h"
-#include "secrets.h"
 #include "ulp_main.h"
 
 // ---- LP core emitter steering ---------------------------------------------------
@@ -90,11 +90,9 @@ static const char* wifi_reason_name(uint8_t r) {
     }
 }
 
+// Logs only: the Station task reconnects (hub/ValenceProvisioning.cpp).
 static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
-    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        // Config mode associates nowhere until a wifi_join asks (SPEC 13.4.1).
-        if (!g_config_mode) esp_wifi_connect();
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         const auto* d = static_cast<const wifi_event_sta_disconnected_t*>(data);
         if (g_got_ip) {
             g_wifi_down_us = esp_timer_get_time();
@@ -107,7 +105,6 @@ static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
         }
         g_got_ip = false; strcpy(g_ip, "-");
         valence::hubSetStationUp(false);
-        if (!g_config_mode) esp_wifi_connect();   // dumb retry is fine for a bench image
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         auto* e = static_cast<ip_event_got_ip_t*>(data);
         snprintf(g_ip, sizeof g_ip, IPSTR, IP2STR(&e->ip_info.ip));
@@ -121,10 +118,6 @@ static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
         } else {
             GLOGI("wifi", "joined, ip %s", g_ip);
         }
-        // Which AP sort_method picked: BSSID tail only, never the SSID.
-        wifi_ap_record_t ap{};
-        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
-            GLOGI("wifi", "AP ..%02x:%02x ch %u rssi %d dBm", ap.bssid[4], ap.bssid[5], unsigned(ap.primary), int(ap.rssi));
     }
 }
 
@@ -162,17 +155,12 @@ static bool wifi_up() {
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event, nullptr);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event, nullptr);
 
-    // A provisioned network (SPEC 13.9, written only after it joined) wins
-    // over the compiled-in one, and a provisioned SSID is never printed.
-    wifi_config_t w = {};
-    if (valence::stationCredentials(w.sta.ssid, w.sta.password))
-        printf("STA credentials: provisioned (NVS)\n");
-    else
-        printf("STA credentials: secrets.h, \"%s\"\n", SECRET_WIFI_SSID);
-    g_have_credentials = w.sta.ssid[0] != 0;
-    valence::stationScanPolicy(w);
+    // The saved list (RFC-116) and the task that joins from it, before the
+    // start whose STA_START event wakes that task. No SSID is ever printed.
+    if (!valence::stationBegin()) return false;
+    printf("saved networks: %u\n", unsigned(valence::stationBootList().count()));
+    g_have_credentials = valence::stationBootList().count() > 0;
     if ((err = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK)        { printf("set_mode: %s\n", esp_err_to_name(err)); return false; }
-    if ((err = esp_wifi_set_config(WIFI_IF_STA, &w)) != ESP_OK)    { printf("set_config: %s\n", esp_err_to_name(err)); return false; }
     if ((err = esp_wifi_start()) != ESP_OK)                        { printf("wifi_start: %s\n", esp_err_to_name(err)); return false; }
 
     // POWER SAVE OFF, and this is a LATENCY constraint, not a preference. The
@@ -430,6 +418,7 @@ extern "C" void app_main() {
             if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
                 rssi = ap.rssi;
                 valence::hubSetLinkRssi(ap.rssi);
+                valence::stationSetLinkRssi(ap.rssi);
             }
         }
         const unsigned int_free = unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));

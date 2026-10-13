@@ -630,8 +630,25 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     if (channel_id == ch::pattern_advanced_cmd) return applyPatternAdvanced(requested);
     if (channel_id == ch::pattern_presets_cmd) return applyPresets(requested);
     if (channel_id == channels::safety_intents) return applySafety(requested);
+    if (channel_id == channels::provisioning) return applyNetworks(requested);
     if (channel_id != ch::config_set) return Ret::err(NackCode::UNSUPPORTED_OP);
     return durable(applyConfig(requested, cfgChanged));
+}
+
+// 0x000F reaches the delegate only from a network binding: the credential
+// bindings hand it to their own desk (ValenceProvisioning.h). The hub has
+// already checked configure; NetworkDesk::gate() refuses wifi_join here.
+Ret ValenceDevice::applyNetworks(const IntentValueMap& requested) {
+    if (_nets == nullptr) return Ret::err(NackCode::UNSUPPORTED_OP);
+    const std::optional<uint8_t> op = NetworkDesk::opOf(requested);
+    NetworkDesk::Applied r = NetworkDesk::Applied::err({});
+    if (const auto refusal = NetworkDesk::gate(op, Binding::network, false))
+        r = NetworkDesk::Applied::err(*refusal);
+    else
+        r = _nets->apply(requested, Binding::network);
+    if (r) return Ret::ok(r.value());
+    std::snprintf(_nackDetail.data(), _nackDetail.size(), "%s", r.error().detail);
+    return Ret::err(r.error().code);
 }
 
 Ret ValenceDevice::durable(Ret r) {
