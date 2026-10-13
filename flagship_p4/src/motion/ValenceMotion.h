@@ -395,6 +395,11 @@ void motionNoteStream(uint32_t bundles, uint32_t samples, uint32_t dropped);
 float motionForceHome(float stroke_mm);
 
 MotionCensus motionCensus();
+// Motion runs: a plan or a seek, a stream source, homing, a return, or the
+// emitter still stepping. A WiFi scan waits for none of these (RFC-118).
+inline bool motionRuns(const MotionCensus& c) {
+    return c.busy || c.homing || c.returning || c.step_q8 != 0;
+}
 // Hub task, never blocks. The oldest planner anomaly not yet taken, false when
 // none. The planner hands each over once it is counted on 0x1111; a full
 // handoff drops the newest, which the counters keep and the seq gap shows.

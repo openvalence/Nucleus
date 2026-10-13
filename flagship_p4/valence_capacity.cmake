@@ -5,16 +5,16 @@
 # FLAGS, never a #define in a source file: two translation units seeing two
 # values would be two Catalog32 types (ODR), and nothing would say so.
 #
-# Sizing (val-9u0.5, recomputed 2026-10-13 for the saved-network channels
-# 0x000F, 0x0017 and 0x0018, RFC-116): the machine budget is 52 / 256 / 176 /
-# 200 and 29,696 B encoded. Machine use is 51 entries, 251 layout, 141 schema
-# and 29,286 B encoded [verified 2026-10-13 -- valencesim headroom line: 6
+# Sizing (val-9u0.5, recomputed 2026-10-13 for the visible-networks channels
+# 0x0019 and 0x001A, RFC-118): the machine budget is 54 / 292 / 176 / 200 and
+# 31,104 B encoded. Machine use is 53 entries, 288 layout, 141 schema and
+# 30,768 B encoded [verified 2026-10-13 -- valencesim 0.1.54 headroom line: 6
 # accessories]. Each
 # accessory gets the per-accessory budget below. The accessory count is
 # the most that keeps the total entries at or under catalog_max_entries (256),
-# the floor every client is built to handle: (256 - 52) / 31 = 6.
-# The encode scratch keeps the 80% headroom floor over the machine's 29,696 B
-# plus 6 x 5,120 B, rounded up to 76 KiB: (29,696 + 30,720) / 0.8 = 75,520.
+# the floor every client is built to handle: (256 - 54) / 31 = 6.
+# The encode scratch keeps the 80% headroom floor over the machine's 31,104 B
+# plus 6 x 5,120 B, within 76 KiB: (31,104 + 30,720) / 0.8 = 77,280.
 
 set(NUCLEUS_ACCESSORIES 6)
 # Per accessory: 30 channels (r 0x02-0x1F) + the accessory-status entry (r 0x01).
@@ -32,8 +32,8 @@ math(EXPR NUCLEUS_ACCESSORY_SAFE_FIELDS
 # accessory_declaration_max_bytes (4096) plus 25% for hub-authored text.
 set(NUCLEUS_ACCESSORY_CATALOG_BYTES 5120)
 
-math(EXPR _entries "52 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_ENTRIES}")
-math(EXPR _layout  "256 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LAYOUT_FIELDS}")
+math(EXPR _entries "54 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_ENTRIES}")
+math(EXPR _layout  "292 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LAYOUT_FIELDS}")
 math(EXPR _schema  "176 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_SCHEMA_FIELDS}")
 math(EXPR _labels  "200 + ${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_LABELS}")
 math(EXPR _safe    "${NUCLEUS_ACCESSORIES} * ${NUCLEUS_ACCESSORY_SAFE_FIELDS}")

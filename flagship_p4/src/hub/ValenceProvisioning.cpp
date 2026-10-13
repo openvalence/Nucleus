@@ -28,6 +28,11 @@
 // NetworkDesk.h
 // - CONFIG MODE (SPEC 13.4.1) joins nothing from the saved list: the station
 //   is started but associates only when a wifi_join asks.
+// - A SCAN ON A LIVE LINK (RFC-118 item 3) keeps every off-channel visit
+//   under scan_offchannel_max_ms: kScanChannelMs per channel, then
+//   kScanHomeMs back on the home channel. With no link (config mode, the
+//   offline fallback) it takes the driver's full dwell. Never while a join
+//   runs; the hub asks only when no motion runs.
 
 #include "ValenceProvisioning.h"
 #include "StationScan.h"
@@ -74,11 +79,18 @@ constexpr int kAttemptTries = 2;
 // provision_join_timeout_ms.
 constexpr int kProvisionTries = 6;
 constexpr uint32_t kScanMs = 8000;
+// A picker's scan (RFC-118): active, at most this long on each channel, then
+// this long back home between channels while joined. 13 channels take ~2 s.
+constexpr uint32_t kScanChannelMs = 60;
+constexpr uint8_t kScanHomeMs = 100;
+static_assert(kScanChannelMs + 40 <= net::draft::scan_offchannel_max_ms,
+              "the channel switches both ways fit the off-channel budget");
 // Between failed passes over the list.
 constexpr uint32_t kRetryMinMs = 1000;
 constexpr uint32_t kRetryMaxMs = 4000;
-// Scan records kept; extra BSSIDs are dropped by the driver.
-constexpr uint16_t kScanRecords = 20;
+// Scan records kept; extra BSSIDs are dropped by the driver. Sized for the
+// picker's 14 rows after one SSID's several BSSIDs fold into one.
+constexpr uint16_t kScanRecords = 32;
 
 // NVS namespace "valence": "nets" is the list (SavedNetworks::encode). "sta"
 // is the single network an older image stored; it is read once, migrated
@@ -138,6 +150,8 @@ public:
     uint8_t liveId() const override { return _liveId.load(std::memory_order_acquire); }
     int8_t rssiOf(uint8_t id) const override;
     bool persist(std::span<const uint8_t> blob) override;
+    bool beginScan() override;
+    bool takeScan(net::VisibleNetworks& out) override;
 
 private:
     static void taskEntry(void* self) { static_cast<BoardStation*>(self)->run(); }
@@ -147,6 +161,12 @@ private:
     void takeList();
     bool joinSaved();
     size_t scanOrder(std::span<uint8_t, net::SavedNetworks::kCapacity> order);
+    void pickerScan();
+    // The first n of _records, as sightings: what a passphrase cannot join
+    // (802.1X, WAPI, DPP) is left out. Returns how many.
+    size_t sightings(uint16_t n, std::span<net::Sighting, kScanRecords> out) const;
+    // Hands a finished scan to the hub when it took the last one.
+    void offerHeard(std::span<const net::Sighting> heard);
     // One credential pair, up to `tries` connects inside `budgetMs`.
     JoinOutcome attempt(std::string_view ssid, std::string_view pass, uint32_t budgetMs, int tries);
     bool requestPending() const { return _reqSeq.load(std::memory_order_acquire) != _handled; }
@@ -169,6 +189,16 @@ private:
     std::atomic<uint64_t> _heard{0};
     // Liveness loop -> hub task.
     std::atomic<int8_t> _linkRssi{net::kRssiUnseen};
+    // hub task -> Station task: a picker scan is asked while _scanReq moves
+    // past _scanAck; one at a time.
+    std::atomic<uint32_t> _scanReq{0};
+    std::atomic<uint32_t> _scanAck{0};
+    // Station task -> hub task: the last finished scan, published by
+    // _heardDone; the Station writes _heardList only while _heardTaken ==
+    // _heardDone.
+    net::VisibleNetworks _heardList{};
+    std::atomic<uint32_t> _heardDone{0};
+    std::atomic<uint32_t> _heardTaken{0};
     // Hub task only.
     uint32_t _polledSeq = 0;
     // Event loop task -> Station task.
@@ -304,6 +334,25 @@ int8_t BoardStation::rssiOf(uint8_t id) const {
     return net::kRssiUnseen;
 }
 
+bool BoardStation::beginScan() {
+    if (_task == nullptr || !_started.load(std::memory_order_acquire)) return false;
+    // A join owns the radio until it answers.
+    if (_doneSeq.load(std::memory_order_acquire) != _reqSeq.load(std::memory_order_relaxed)) return false;
+    const uint32_t seq = _scanReq.load(std::memory_order_relaxed);
+    if (_scanAck.load(std::memory_order_acquire) != seq) return false;
+    _scanReq.store(seq + 1, std::memory_order_release);
+    xTaskNotifyGive(_task);
+    return true;
+}
+
+bool BoardStation::takeScan(net::VisibleNetworks& out) {
+    const uint32_t done = _heardDone.load(std::memory_order_acquire);
+    if (done == _heardTaken.load(std::memory_order_relaxed)) return false;
+    out = _heardList;
+    _heardTaken.store(done, std::memory_order_release);
+    return true;
+}
+
 bool BoardStation::persist(std::span<const uint8_t> blob) {
     // NVS writes wait out an OTA transfer (ValenceHub.cpp, the persist rule).
     if (otaInFlight()) return false;
@@ -343,12 +392,9 @@ size_t BoardStation::scanOrder(std::span<uint8_t, net::SavedNetworks::kCapacity>
         esp_wifi_scan_stop();
         GLOGW(kTag, "scan did not finish; trying the list in order");
     }
-    for (uint16_t i = 0; i < n; ++i) {
-        const char* s = reinterpret_cast<const char*>(_records[i].ssid);
-        heard[i] = {std::string_view(s, strnlen(s, sizeof _records[i].ssid)), _records[i].rssi};
-    }
-    const size_t k = net::joinOrder(_mine, std::span<const net::Sighting>(heard.data(), n), order, rssi,
-                                    kStationRssiFloorDbm);
+    const std::span<const net::Sighting> seen(heard.data(), sightings(n, heard));
+    offerHeard(seen);
+    const size_t k = net::joinOrder(_mine, seen, order, rssi, kStationRssiFloorDbm);
     uint64_t packed = 0;
     for (size_t i = 0; i < _mine.count(); ++i)
         packed |= (uint64_t(_mine.id(i)) | uint64_t(uint8_t(rssi[i])) << 8) << (16 * i);
@@ -356,6 +402,68 @@ size_t BoardStation::scanOrder(std::span<uint8_t, net::SavedNetworks::kCapacity>
     GLOGI(kTag, "scan: %u BSSIDs; saved slots seen %d %d %d %d dBm", unsigned(n), int(rssi[0]), int(rssi[1]),
           int(rssi[2]), int(rssi[3]));
     return k;
+}
+
+size_t BoardStation::sightings(uint16_t n, std::span<net::Sighting, kScanRecords> out) const {
+    size_t k = 0;
+    for (uint16_t i = 0; i < n && i < kScanRecords; ++i) {
+        const wifi_auth_mode_t mode = _records[i].authmode;
+        switch (mode) {
+            case WIFI_AUTH_OPEN:
+            case WIFI_AUTH_OWE:
+            case WIFI_AUTH_WEP:
+            case WIFI_AUTH_WPA_PSK:
+            case WIFI_AUTH_WPA2_PSK:
+            case WIFI_AUTH_WPA_WPA2_PSK:
+            case WIFI_AUTH_WPA3_PSK:
+            case WIFI_AUTH_WPA2_WPA3_PSK:
+            case WIFI_AUTH_WPA3_EXT_PSK:
+            case WIFI_AUTH_WPA3_EXT_PSK_MIXED_MODE:
+                break;
+            default:
+                continue;
+        }
+        const char* s = reinterpret_cast<const char*>(_records[i].ssid);
+        out[k++] = {std::string_view(s, strnlen(s, sizeof _records[i].ssid)), _records[i].rssi,
+                    mode != WIFI_AUTH_OPEN && mode != WIFI_AUTH_OWE};
+    }
+    return k;
+}
+
+void BoardStation::offerHeard(std::span<const net::Sighting> heard) {
+    const uint32_t done = _heardDone.load(std::memory_order_relaxed);
+    if (_heardTaken.load(std::memory_order_acquire) != done) return;   // the hub has not taken the last
+    _heardList.take(heard);
+    _heardDone.store(done + 1, std::memory_order_release);
+}
+
+// RFC-118: one scan of every channel for the picker. Nothing is joined or
+// left; a link, when there is one, sees at most kScanChannelMs away at a time.
+void BoardStation::pickerScan() {
+    std::array<net::Sighting, kScanRecords> heard{};
+    wifi_scan_config_t sc{};
+    sc.show_hidden = false;
+    sc.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    // Zero scan_time is the driver's own dwell, for a radio with no link.
+    if (_linkUp.load(std::memory_order_acquire)) {
+        sc.scan_time.active.min = kScanChannelMs / 2;
+        sc.scan_time.active.max = kScanChannelMs;
+        sc.home_chan_dwell_time = kScanHomeMs;
+    }
+    uint16_t n = 0;
+    xEventGroupClearBits(_events, kScanDone);
+    if (esp_wifi_scan_start(&sc, false) == ESP_OK &&
+        (xEventGroupWaitBits(_events, kScanDone, pdTRUE, pdFALSE, pdMS_TO_TICKS(kScanMs)) & kScanDone)) {
+        n = kScanRecords;
+        if (esp_wifi_scan_get_ap_records(&n, _records) != ESP_OK) n = 0;
+    } else {
+        esp_wifi_scan_stop();
+        GLOGW(kTag, "picker scan did not finish");
+        return;
+    }
+    const size_t k = sightings(n, heard);
+    offerHeard(std::span<const net::Sighting>(heard.data(), k));
+    GLOGD(kTag, "picker scan: %u BSSIDs, %u listed", unsigned(n), unsigned(k));
 }
 
 JoinOutcome BoardStation::attempt(std::string_view ssid, std::string_view pass, uint32_t budgetMs, int tries) {
@@ -474,6 +582,11 @@ void BoardStation::run() {
             // Joined: the hub stores it and offers the list back, and
             // takeList() finds the entry. Failed: straight back to the list.
             if (_out.joined) continue;
+        }
+        const uint32_t scan = _scanReq.load(std::memory_order_acquire);
+        if (scan != _scanAck.load(std::memory_order_relaxed)) {
+            pickerScan();
+            _scanAck.store(scan, std::memory_order_release);
         }
         if (!_started.load(std::memory_order_acquire) || _linkUp.load(std::memory_order_acquire) ||
             hubConfigMode())

@@ -209,7 +209,8 @@ void SimCore::pass(uint64_t nowUs, const std::function<void(uint32_t)>& pump) {
     pump(nowMs);
     hub.update(uint32_t(nowUs));
     const uint8_t due = _device.tick(nowMs);
-    _nets.tick();
+    _netStation.setNow(nowMs);
+    _nets.tick(nowMs, motionRuns(motionCensus()));
     geiger::drainToSinks();
     std::span<std::byte> scratch(_scratch);
     if (due & kPersistConfig) {

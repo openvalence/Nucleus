@@ -98,7 +98,9 @@ private:
     // The station twin behind the saved-network list (RFC-116): joined
     // through slot 0 at boot, and the live entry follows its id through
     // moves; when it goes, slot 0 is live. RSSI made up per slot. The list
-    // lives in RAM only.
+    // lives in RAM only. A scan (RFC-118) hears the made-up neighborhood
+    // below, fixed RSSI, kScanMs after it starts; sim/valencesim/README.md
+    // lists it for client suites.
     // ponytail: no persistence across sim restarts; add an ISimStore blob if a
     // suite needs it.
     class SimNetStation final : public INetStation {
@@ -114,10 +116,36 @@ private:
             return i ? int8_t(-42 - 7 * int(*i)) : net::kRssiUnseen;
         }
         bool persist(std::span<const uint8_t>) override { return true; }
+        bool beginScan() override {
+            if (_scanning) return false;
+            _scanning = true;
+            _scanFrom = _nowMs;
+            return true;
+        }
+        bool takeScan(net::VisibleNetworks& out) override {
+            if (!_scanning || _nowMs - _scanFrom < kScanMs) return false;
+            _scanning = false;
+            out.take(kNeighborhood);
+            return true;
+        }
+        // Hub thread, before NetworkDesk::tick().
+        void setNow(uint32_t nowMs) { _nowMs = nowMs; }
 
     private:
+        static constexpr uint32_t kScanMs = 1200;
+        // A second "Workshop" BSSID folds into the first; the hidden one is
+        // left out.
+        static constexpr std::array<net::Sighting, 12> kNeighborhood{{
+            {"virtual", -42, true}, {"Workshop", -48, true}, {"Workshop-Lab", -55, true},
+            {"Guest", -61, false}, {"Neighbor", -67, true}, {"Workshop", -70, true},
+            {"Printer-Direct", -72, true}, {"Cafe", -75, false}, {"Upstairs", -78, true},
+            {"Linksys", -83, true}, {"", -50, true}, {"Garage", -88, true},
+        }};
         net::SavedNetworks _list{};
         uint8_t _live = 0;
+        uint32_t _nowMs = 0;
+        uint32_t _scanFrom = 0;
+        bool _scanning = false;
     };
 
     uint64_t loadOrMintInstanceId();

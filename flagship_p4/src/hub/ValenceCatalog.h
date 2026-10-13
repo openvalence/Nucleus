@@ -34,6 +34,7 @@
 #include <array>
 #include <cstdint>
 #include <string_view>
+#include <utility>
 
 #include "valence/channel/catalog.hpp"
 #include "valence/channel/log_channel.hpp"
@@ -595,8 +596,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // Keys 4 and 5 are wifi_join's ECHO results. Category setup: RFC-079 names
     // this channel as the commissioning surface's. ssid is not secret: 0x0018
     // shows it at configure (RFC-116 item 7). remove is destructive: a
-    // passphrase no client can read back is lost.
-    // TODO(RFC-116): ops 2-4 and keys 6-8 are draft numbers.
+    // passphrase no client can read back is lost. scan (RFC-118) answers at
+    // once; its results are 0x0019 and 0x001A below.
+    // TODO(RFC-116, RFC-118): ops 2-5 and keys 6-8 are draft numbers.
     c.addEntry({.id = valence::channels::provisioning, .name = "provisioning",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::configure, .maxRateHz = 5.0f,
@@ -605,7 +607,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                             .role = "action.provision",
                             .destructiveOptions = 1u << valence::net::draft::op_net_remove},
-                           {"reserved", "wifi_join", "save", "remove", "move"});
+                           {"reserved", "wifi_join", "save", "remove", "move", "scan"});
     c.addSchemaField({.key = 2, .name = "ssid", .type = CborFieldType::tstr_t, .unit = "",
                       .desc = "Network name"});
     c.addSchemaField({.key = 3, .name = "passphrase", .type = CborFieldType::tstr_t, .unit = "",
@@ -666,6 +668,35 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "ssid1", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
     c.addLayoutField({.name = "ssid2", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
     c.addLayoutField({.name = "ssid3", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
+
+    // ---- "visible-networks", "visible-networks-more" -- STATE, configure (RFC-118)
+    // What the last scan heard, one row per SSID at its strongest BSSID,
+    // strongest first: rows 0-6 here, 7-13 on the second channel (one does
+    // not fit SPEC 9.1's 242 B). Configure only: the set of networks a hub
+    // hears locates it. A client joins the two when their scan values match.
+    // NetworkDesk tick(), VisibleNetworks::pack().  [4+7+7x32 = 235 B each]
+    // TODO(RFC-118): 0x0019 and 0x001A are draft numbers.
+    for (const auto& [id, name] : {std::pair{valence::net::draft::ch_visible_networks, "visible-networks"},
+                                   std::pair{valence::net::draft::ch_visible_networks_more, "visible-networks-more"}}) {
+        c.addEntry({.id = id, .name = name,
+                    .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                    .access = AccessLevel::configure, .maxRateHz = 1.0f,
+                    .defaultPriority = Priority::background,
+                    .hasCategory = true, .category = valence::ui_categories::network});
+        c.addLayoutField({.name = "scan", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .desc = "Finished scans since boot; 0 none yet"});
+        c.addLayoutField({.name = "count", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
+                          .desc = "Networks on this channel"});
+        c.addLayoutField({.name = "secured", .type = PackedFieldType::bitfield8, .unit = "", .scale = 1.0f,
+                          .desc = "Bit i: row i needs a password"});
+        c.addLayoutField({.name = "saved", .type = PackedFieldType::bitfield8, .unit = "", .scale = 1.0f,
+                          .desc = "Bit i: row i is a saved network"});
+        for (const char* f : {"rssi0", "rssi1", "rssi2", "rssi3", "rssi4", "rssi5", "rssi6"})
+            c.addLayoutField({.name = f, .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f,
+                              .desc = "-128 past count"});
+        for (const char* f : {"ssid0", "ssid1", "ssid2", "ssid3", "ssid4", "ssid5", "ssid6"})
+            c.addLayoutField({.name = f, .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
+    }
 
     // ---- "motion" — STATE, elevated, 60 Hz ----------------------------------
     // The live carriage snapshot. scale 100 on positions = 10µm wire units;

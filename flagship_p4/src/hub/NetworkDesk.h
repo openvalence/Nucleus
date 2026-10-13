@@ -3,7 +3,9 @@
 // NetworkDesk -- the saved-network list on the hub (RFC-116, amending SPEC
 // §13.9): the one gate every 0x000F op passes whatever binding carried it,
 // the list edits, the live-network refusal, persistence, and the two STATE
-// channels networks (0x0017, watch) and network-names (0x0018, configure)
+// channels networks (0x0017, watch) and network-names (0x0018, configure);
+// the scan op and the networks it heard on visible-networks (0x0019) and
+// visible-networks-more (0x001A), both configure (RFC-118)
 // Constraints:
 // - HUB TASK ONLY. The station joins on its own task; the two meet through
 //   INetStation, never through shared memory.
@@ -12,14 +14,23 @@
 //   window open or the hub factory-fresh, and the list ops on any binding at
 //   configure; mayEditLive() lets an edit remove or overwrite the entry the
 //   station is joined through only under wifi_join's own terms.
-// - SSIDs leave only through network-names (configure) and the ECHO to the
-//   configure session that sent them. Passphrases leave through nothing: ECHO
+// - SSIDs leave only through network-names and the two visible-networks
+//   channels (configure) and the ECHO to the configure session that sent them. Passphrases leave through nothing: ECHO
 //   answers `true` for that key (SPEC §8.8 Secrets), and no log line here
 //   names either.
+// - SCANS (RFC-118), two policies by hub state, never while motion runs (a
+//   scan accepted before motion started waits for it to stop):
+//   joined (a live link): on demand only, at most one per
+//   scan_min_interval_ms, asks inside the interval coalescing into one, and
+//   the station keeps the link within scan_offchannel_max_ms of its home
+//   channel at a time;
+//   not joined (config mode, the offline BLE fallback): no link to protect,
+//   so a scan asked runs at once, and while a configure session is present
+//   the desk rescans every scan_offline_period_ms by itself.
 // - Hardware-free: valencesim runs it with its own station.
-// - TODO(RFC-116): valence::net::draft numbers become registry constants
-//   when the RFC lands.
-// See: Valence SPEC.md §8.8, §12.2, §13.9; RFC-QUEUE.md RFC-116;
+// - TODO(RFC-116, RFC-118): valence::net::draft numbers become registry
+//   constants when the RFCs land.
+// See: Valence SPEC.md §8.8, §12.2, §13.9; RFC-QUEUE.md RFC-116, RFC-118;
 // valence/net/saved_networks.hpp
 
 #include <algorithm>
@@ -61,6 +72,13 @@ public:
     // Makes the list durable. false = not now (an OTA transfer holds NVS
     // writes); asked again next tick.
     virtual bool persist(std::span<const uint8_t> blob) = 0;
+    // Starts one scan of every channel and returns at once; false = none can
+    // start now (a join runs, the radio is off), asked again next tick.
+    virtual bool beginScan() = 0;
+    // A scan finished since the last call: its networks go to `out` (which
+    // advances out.scan()) and true. Every finished scan counts, the join
+    // rule's own included.
+    virtual bool takeScan(net::VisibleNetworks& out) = 0;
 };
 
 // First boot of a list image: the one network the board already joined
@@ -85,6 +103,7 @@ public:
     static constexpr size_t kNetworksBytes = 9;    // generation u16, capacity, count, live, rssi x4
     static constexpr size_t kNamesBytes = 2 + 1 + net::SavedNetworks::kCapacity * 32;   // generation, open, ssid x4 str32
     static constexpr uint8_t kNoLive = 0xFF;
+    static constexpr size_t kVisibleBytes = net::VisibleNetworks::kChannelBytes;
 
     explicit NetworkDesk(INetStation& station) : _station(station) {}
 
@@ -93,6 +112,7 @@ public:
         _list = list;
         _offerDue = true;
         _namesDue = true;
+        _visibleDue = true;
     }
     // Where tick() publishes. Without it nothing publishes (a native suite).
     void attach(Hub& hub) { _hub = &hub; }
@@ -120,6 +140,7 @@ public:
             case net::draft::op_net_save:
             case net::draft::op_net_remove:
             case net::draft::op_net_move:
+            case net::draft::op_net_scan:
                 return std::nullopt;
             default:
                 return Refusal{NackCode::UNSUPPORTED_OP, "op"};
@@ -165,8 +186,8 @@ public:
         return r.saved.slot;
     }
 
-    // net_save, net_remove, net_move. The caller passed gate() first, with the
-    // same `binding` and `windowOrFresh`.
+    // net_save, net_remove, net_move, net_scan. The caller passed gate()
+    // first, with the same `binding` and `windowOrFresh`.
     Applied apply(const IntentValueMap& in, Binding binding, bool windowOrFresh) {
         const std::optional<uint8_t> op = opOf(in);
         if (const IntentValue* g = field(in, net::draft::key_generation)) {
@@ -221,6 +242,11 @@ public:
             if (*s != **to) changed();
             push(out, net::draft::key_slot, IntentValue::ofU64(*s));
             push(out, net::draft::key_to, IntentValue::ofU64(**to));
+        } else if (op == net::draft::op_net_scan) {
+            // BUSY with no retry_after_ms (SPEC 16.1): the client asks again
+            // once motion stops. The results come on 0x0019/0x001A, not here.
+            if (_motion) return refuse(NackCode::BUSY, "motion running");
+            _scanWanted = true;
         } else {
             return refuse(NackCode::UNSUPPORTED_OP, "op");
         }
@@ -231,8 +257,23 @@ public:
         return Applied::ok(out);
     }
 
-    // Once per hub tick: persist, hand the station the list, publish.
-    void tick() {
+    // Once per hub tick: persist, hand the station the list, start a scan that
+    // is due, publish. `motion`: a plan, a stream source, homing or a return
+    // runs now.
+    void tick(uint32_t nowMs, bool motion) {
+        _motion = motion;
+        const bool joined = _station.liveId() != 0;
+        const uint32_t since = nowMs - _scanAtMs;
+        if (!joined && !_scanWanted && (!_scanned || since >= net::draft::scan_offline_period_ms) &&
+            configurePresent())
+            _scanWanted = true;
+        const uint32_t gap = joined ? net::draft::scan_min_interval_ms : 0;
+        if (_scanWanted && !motion && (!_scanned || since >= gap) && _station.beginScan()) {
+            _scanWanted = false;
+            _scanned = true;
+            _scanAtMs = nowMs;
+        }
+        if (_station.takeScan(_visible)) _visibleDue = true;
         if (_persistDue) {
             std::array<uint8_t, net::SavedNetworks::kBlobBytes> blob{};
             _list.encode(blob);
@@ -257,7 +298,18 @@ public:
             if (_hub->publishState(net::draft::ch_network_names, n)) _namesDue = false;
             net::wipeBytes(n.data(), n.size());
         }
+        if (_visibleDue) {
+            std::array<std::byte, kVisibleBytes> a{}, b{};
+            _visible.pack(0, _list, a);
+            _visible.pack(1, _list, b);
+            const bool first = _hub->publishState(net::draft::ch_visible_networks, a);
+            const bool second = _hub->publishState(net::draft::ch_visible_networks_more, b);
+            if (first && second) _visibleDue = false;
+        }
     }
+
+    bool scanPending() const { return _scanWanted; }
+    const net::VisibleNetworks& visible() const { return _visible; }
 
     void packNetworks(std::span<std::byte, kNetworksBytes> s) const {
         putU16(s.subspan(0, 2), _generation);
@@ -298,6 +350,15 @@ private:
             return std::optional<size_t>{};
         return std::optional<size_t>{size_t(v->u64_val)};
     }
+    // A ready configure session on any binding (the picker's audience).
+    bool configurePresent() const {
+        if (_hub == nullptr) return false;
+        for (size_t i = 0;; ++i) {
+            const HubSession* s = _hub->sessionBySlot(i);
+            if (s == nullptr) return false;
+            if (s->occupied() && s->ready && uint8_t(s->role) >= uint8_t(AccessLevel::configure)) return true;
+        }
+    }
     static void push(IntentValueMap& m, uint8_t key, IntentValue v) {
         if (m.count < m.fields.size()) m.fields[m.count++] = {key, v};
     }
@@ -308,6 +369,7 @@ private:
         _persistDue = true;
         _offerDue = true;
         _namesDue = true;
+        _visibleDue = true;   // the saved bits
     }
 
     INetStation& _station;
@@ -319,6 +381,12 @@ private:
     bool _namesDue = false;
     bool _networksSent = false;
     std::array<std::byte, kNetworksBytes> _lastNetworks{};
+    net::VisibleNetworks _visible{};
+    bool _visibleDue = false;
+    bool _scanWanted = false;
+    bool _scanned = false;
+    bool _motion = false;
+    uint32_t _scanAtMs = 0;
 };
 
 }  // namespace valence

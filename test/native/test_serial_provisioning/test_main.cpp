@@ -196,6 +196,8 @@ public:
         ++persists;
         return true;
     }
+    bool beginScan() override { return false; }
+    bool takeScan(net::VisibleNetworks&) override { return false; }
 };
 
 // What ValenceDevice answers a 0x000F INTENT that reaches the hub: refused.
@@ -353,7 +355,7 @@ struct Rig {
             for (auto& l : links) l->port.loop(ms);
             hub->update(g_clock.nowUs());
             desk->tick();
-            netDesk->tick();
+            netDesk->tick(ms, false);
             if (clientsRun)
                 for (auto& l : links) l->client->update(g_clock.nowUs());
             geiger::drainToSinks();

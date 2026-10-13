@@ -13,7 +13,7 @@
 // rfc-1ek, rfc-2w2, Valence RFC-095
 
 #define VALENCE_CATALOG_ENTRIES 64
-#define VALENCE_CATALOG_LAYOUT_FIELDS 256
+#define VALENCE_CATALOG_LAYOUT_FIELDS 320
 #define VALENCE_CATALOG_SCHEMA_FIELDS 192
 #define VALENCE_CATALOG_LABELS 256
 #define NUCLEUS_ACCESSORIES 0
@@ -234,16 +234,32 @@ public:
     }
 };
 
-// The saved list's station half (RFC-116): live entry chosen by the test.
+// The saved list's station half (RFC-116): live entry chosen by the test. A
+// scan (RFC-118) finishes on the tick after it starts and hears `air`.
 class FakeNetStation final : public INetStation {
 public:
     uint8_t live = 0;
     int persists = 0;
+    int scans = 0;
+    bool scanning = false;
+    std::vector<net::Sighting> air{{"HomeNet", -51}, {"Office", -70}, {"Cafe", -60, false}, {"HomeNet", -80}};
     bool offerList(const net::SavedNetworks&) override { return true; }
     uint8_t liveId() const override { return live; }
     int8_t rssiOf(uint8_t id) const override { return id == live ? int8_t(-51) : int8_t(-67); }
     bool persist(std::span<const uint8_t>) override {
         ++persists;
+        return true;
+    }
+    bool beginScan() override {
+        if (scanning) return false;
+        scanning = true;
+        ++scans;
+        return true;
+    }
+    bool takeScan(net::VisibleNetworks& out) override {
+        if (!scanning) return false;
+        scanning = false;
+        out.take(air);
         return true;
     }
 };
@@ -307,8 +323,9 @@ struct Rig {
         nets->attach(*hub);
         device.bindNetworks(&*nets);
         link.emplace(g_clock, hubRng);
-        // A 13th wish takes WELCOME past the link's default 250 B; a WS frame has room.
-        if (motionHz > 0.0f || hubStatus || networks) link->profileA().mtu = 1024;
+        // A 13th wish takes WELCOME past the link's default 250 B, and a 15th
+        // the HELLO; a WS frame has room for both.
+        if (motionHz > 0.0f || hubStatus || networks) link->profileA().mtu = link->profileB().mtu = 1024;
         REQUIRE(hub->attachTransport(link->endpointA()));
         ClientIdentity id;
         id.instance_id.fill(std::byte{0});
@@ -338,6 +355,9 @@ struct Rig {
         if (networks) {
             REQUIRE(client->addSubscriptionWish(net::draft::ch_networks, 0.0f, Priority::background));
             REQUIRE(client->addSubscriptionWish(net::draft::ch_network_names, 0.0f, Priority::background));
+            // HELLO carries 15 wishes at most here; a suite subscribes 0x001A live.
+            if (role == AccessLevel::configure)
+                REQUIRE(client->addSubscriptionWish(net::draft::ch_visible_networks, 0.0f, Priority::background));
         }
         REQUIRE(client->connect());
         step(200);
@@ -348,7 +368,7 @@ struct Rig {
         for (int i = 0; i < rounds; ++i) {
             g_clock.advanceUs(1000);
             hub->update(g_clock.nowUs());
-            nets->tick();
+            nets->tick(uint32_t(g_clock.nowUs() / 1000), motionRuns(g_census));
             const uint8_t due = device.tick(g_clock.nowUs() / 1000);
             persisted |= due;
             if (due != 0) ++persistWrites;
@@ -3065,6 +3085,113 @@ TEST_CASE("VD-NET-2: at configure the names show, passphrases never; save, move,
 
     CHECK_FALSE(anyStateContains(rig->del, kHomePass));
     CHECK_FALSE(anyStateContains(rig->del, "cafe passphrase"));
+}
+
+namespace {
+std::string visibleSsid(const RecordingClient& d, uint16_t ch, size_t i) {
+    const auto& b = d.lastState.at(ch);
+    const char* p = reinterpret_cast<const char*>(b.data()) + 11 + i * 32;
+    return std::string(p, strnlen(p, 32));
+}
+}  // namespace
+
+TEST_CASE("VD-NET-4: scan at configure: ECHO at once, the rows on 0x0019 strongest first, the saved bit") {
+    auto rig = std::make_unique<Rig>(AccessLevel::configure, 0.0f, false, true);
+    REQUIRE(rig->client->subscribe(net::draft::ch_visible_networks_more, 0.0f, Priority::background));
+    rig->step(1200);
+    REQUIRE(rig->del.lastState.count(net::draft::ch_visible_networks) == 1);
+    CHECK(rig->del.lastState.at(net::draft::ch_visible_networks).size() == NetworkDesk::kVisibleBytes);
+    CHECK(uint8_t(rig->del.lastState.at(net::draft::ch_visible_networks)[0]) == 0);   // no scan yet
+    CHECK(rig->netStation.scans == 0);   // joined: no scan unless asked
+
+    REQUIRE(rig->client->sendIntent(channels::provisioning, netOp(net::draft::op_net_scan)).has_value());
+    rig->step(1200);
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(echoed(rig->del.lastEcho, 1) != nullptr);
+    CHECK(echoed(rig->del.lastEcho, 1)->u64_val == net::draft::op_net_scan);
+    CHECK(rig->netStation.scans == 1);
+    const auto& a = rig->del.lastState.at(net::draft::ch_visible_networks);
+    CHECK(uint8_t(a[0]) == 1);   // scan
+    CHECK(uint8_t(a[1]) == 3);   // HomeNet once, at its strongest
+    CHECK(uint8_t(a[2]) == 0b101);   // Cafe (row 1) is open
+    CHECK(uint8_t(a[3]) == 0b001);   // HomeNet is saved
+    CHECK(visibleSsid(rig->del, net::draft::ch_visible_networks, 0) == "HomeNet");
+    CHECK(visibleSsid(rig->del, net::draft::ch_visible_networks, 1) == "Cafe");
+    CHECK(int8_t(a[4]) == -51);
+    const auto& b = rig->del.lastState.at(net::draft::ch_visible_networks_more);
+    CHECK(uint8_t(b[0]) == 1);
+    CHECK(uint8_t(b[1]) == 0);
+
+    // Saving a heard network moves its saved bit with no new scan.
+    REQUIRE(rig->client->sendIntent(channels::provisioning, netSave("Office", "office passphrase")).has_value());
+    rig->step(1200);
+    CHECK(uint8_t(rig->del.lastState.at(net::draft::ch_visible_networks)[3]) == 0b101);
+    CHECK(rig->netStation.scans == 1);
+    CHECK_FALSE(anyStateContains(rig->del, "office passphrase"));
+}
+
+TEST_CASE("VD-NET-5: joined, scans coalesce inside 10 s and never run during motion; below configure, none") {
+    auto rig = std::make_unique<Rig>(AccessLevel::configure, 0.0f, false, true);
+    rig->step(200);
+    REQUIRE(rig->client->sendIntent(channels::provisioning, netOp(net::draft::op_net_scan)).has_value());
+    rig->step(100);
+    CHECK(rig->netStation.scans == 1);
+    for (int i = 0; i < 3; ++i) {
+        REQUIRE(rig->client->sendIntent(channels::provisioning, netOp(net::draft::op_net_scan)).has_value());
+        rig->step(100);
+    }
+    CHECK(rig->del.nacks.empty());
+    CHECK(rig->netStation.scans == 1);   // asked three times inside the interval: one scan, later
+    rig->step(int(net::draft::scan_min_interval_ms));
+    CHECK(rig->netStation.scans == 2);
+    rig->step(int(net::draft::scan_min_interval_ms) + 100);
+    CHECK(rig->netStation.scans == 2);   // nobody asked again
+
+    g_census.busy = true;
+    rig->step(1);   // the desk reads motion once a tick
+    REQUIRE(rig->client->sendIntent(channels::provisioning, netOp(net::draft::op_net_scan)).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::BUSY);
+    CHECK(rig->del.nacks[0].detail == "motion running");
+    CHECK(rig->netStation.scans == 2);
+    g_census.busy = false;
+
+    for (const AccessLevel role : {AccessLevel::watch, AccessLevel::control}) {
+        auto low = std::make_unique<Rig>(role, 0.0f, false, true);
+        low->step(200);
+        REQUIRE(low->client->sendIntent(channels::provisioning, netOp(net::draft::op_net_scan)).has_value());
+        low->step();
+        REQUIRE(low->del.nacks.size() == 1);
+        CHECK(low->del.nacks[0].code == NackCode::ACCESS_DENIED);
+        CHECK(low->netStation.scans == 0);
+        CHECK(low->del.lastState.count(net::draft::ch_visible_networks) == 0);
+    }
+}
+
+TEST_CASE("VD-NET-6: not joined (config mode, offline): a scan runs at once, and the hub rescans every 3 s") {
+    auto rig = std::make_unique<Rig>(AccessLevel::configure, 0.0f, false, true);
+    rig->netStation.live = 0;
+    rig->step(50);
+    CHECK(rig->netStation.scans == 1);   // a configure session is present: no ask needed
+    rig->step(int(net::draft::scan_offline_period_ms));
+    CHECK(rig->netStation.scans == 2);
+    REQUIRE(rig->client->sendIntent(channels::provisioning, netOp(net::draft::op_net_scan)).has_value());
+    rig->step(20);
+    CHECK(rig->netStation.scans == 3);   // no 10 s interval offline
+    rig->step(1100);                      // 0x0019 publishes at most once a second
+    CHECK(uint8_t(rig->del.lastState.at(net::draft::ch_visible_networks)[0]) == 3);
+    g_census.busy = true;
+    rig->step(int(net::draft::scan_offline_period_ms) * 2);
+    CHECK(rig->netStation.scans == 3);   // never during motion
+    g_census.busy = false;
+    rig->step(20);
+    CHECK(rig->netStation.scans == 4);
+
+    auto watch = std::make_unique<Rig>(AccessLevel::watch, 0.0f, false, true);
+    watch->netStation.live = 0;
+    watch->step(int(net::draft::scan_offline_period_ms) * 2);
+    CHECK(watch->netStation.scans == 0);   // no configure session: no self-driven scans
 }
 
 TEST_CASE("VD-NET-3: the join rule and first-boot migration") {

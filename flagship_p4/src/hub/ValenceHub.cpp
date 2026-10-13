@@ -418,7 +418,7 @@ void hubTask(void*) {
         phase.mark("hub.update");
         // After update(): a join that finished answers on this same tick.
         g_box->desk->tick();
-        g_box->nets->tick();
+        g_box->nets->tick(nowMs, motionRuns(motionCensus()));
         phase.mark("desk.tick");
 
         // The device half: deferred latch clear, the motion plane's STATE, the
