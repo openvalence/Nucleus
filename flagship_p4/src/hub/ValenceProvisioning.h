@@ -1,26 +1,28 @@
 #pragma once
 
 // ValenceProvisioning -- the `provisioning` desk (core channel 0x000F, SPEC
-// §13.9): wifi_join from a binding that may carry credentials, its gate, one
-// join at a time, and the deferred unicast answer
+// §13.9 as amended by RFC-116) on a binding that may carry credentials: every
+// op that arrives there, wifi_join's one join at a time and its deferred
+// unicast answer
 // Constraints:
 // - HUB TASK ONLY: offer(), tick() and forget(). The station joins on its own
 //   task (ValenceProvisioning.cpp) and is polled here, never waited on.
 // - CREDENTIALS NEVER LEAVE: no log line, ECHO value, NACK detail or STATE
 //   carries the SSID or the passphrase. The ECHO answers `true` for both keys
 //   (SPEC §8.8 Secrets). The desk's one copy is the attempt's, wiped once the
-//   station has joined and the store has persisted it, or once it failed.
-// - THE BINDING HALF OF THE GATE IS BY CONSTRUCTION: only a binding that may
-//   carry credentials (USB serial now, BLE GATT later) calls offer(). A 0x000F
-//   INTENT on any other binding reaches the hub, whose delegate refuses it.
+//   joined network is in the saved list, or once the join failed.
+// - Only a binding that may carry credentials (USB serial now, BLE GATT
+//   later) calls offer(); a 0x000F INTENT on any other binding reaches the
+//   hub, whose delegate hands it to the same NetworkDesk as Binding::network.
+//   Which op each binding may carry is NetworkDesk::gate(), the one home.
 // - A FEATURE EXISTS IFF ITS CHANNEL DOES (SPEC §6.3): with no INTENT entry
 //   0x000F in the catalog, offer() declines and the hub answers
 //   UNKNOWN_CHANNEL.
 // - This desk, not the hub, answers what it consumes: the hub's own gates run
 //   in the hub's order (session, ready, idempotency, access, CAS) without its
-//   rate limiter, then the window and the field checks. The last success ECHO
-//   answers a duplicate intent_id; a second join while one runs or persists is
-//   BUSY.
+//   rate limiter, then NetworkDesk::gate() and the field checks. The last
+//   success ECHO answers a duplicate intent_id; a second join while one runs is
+//   BUSY. The list ops answer at once.
 // - TODO(val-9u0.22): moves behind the hub delegate once the library answers an
 //   intent later than applyIntent() returns and tells it the binding.
 // See: Valence SPEC.md §6.4, §8.8, §9.3, §12.3, §13.9; ValenceSerialPort.h
@@ -33,6 +35,7 @@
 #include <span>
 #include <string_view>
 
+#include "NetworkDesk.h"
 #include "geiger/geiger.h"
 #include "valence/hub/hub.hpp"
 #include "valence/transport/transport.hpp"
@@ -56,44 +59,30 @@ struct JoinOutcome {
     JoinFailure why = JoinFailure::timeout;
 };
 
-// The platform half: the radio join and the durable store. The board's is
-// ValenceProvisioning.cpp; the native suite fakes it.
+// The platform half: the radio join. The board's is ValenceProvisioning.cpp;
+// the native suite fakes it.
 class IStation {
 public:
     virtual ~IStation() = default;
     // Starts one join and returns at once; false when none can start.
     virtual bool beginJoin(std::string_view ssid, std::string_view passphrase) = 0;
     // The started join's outcome, exactly once, no later than
-    // provision_join_timeout_ms plus the time to restore the prior network.
-    // nullopt while it runs. A failed join has restored the prior network.
+    // provision_join_timeout_ms. nullopt while it runs. After a failed join
+    // the station goes back to its saved list.
     virtual std::optional<JoinOutcome> pollJoin() = 0;
-    // Makes credentials that just joined durable. false = not now, ask again
-    // next tick (an OTA transfer holds NVS writes).
-    virtual bool persist(std::string_view ssid, std::string_view passphrase) = 0;
 };
 
 // ---- the desk ------------------------------------------------------------------
 
 class Provisioning {
 public:
-    // The channel's schema keys (registry.yaml core_channels 0x000F).
-    static constexpr uint8_t kKeyOp = 1;
-    static constexpr uint8_t kKeySsid = 2;
-    static constexpr uint8_t kKeyPassphrase = 3;
-    static constexpr uint8_t kKeyIpv4 = 4;
-    static constexpr uint8_t kKeyWsPort = 5;
-    // IEEE 802.11: an SSID is 1..32 octets. A WPA2 passphrase is 8..63
-    // printable ASCII, or exactly 64 hex digits of raw PSK. Empty is an open
-    // network (SPEC §13.9).
-    static constexpr size_t kSsidMax = 32;
-    static constexpr size_t kPassMin = 8;
-    static constexpr size_t kPassMax = 63;
-    static constexpr size_t kPskHexLen = 64;
+    static constexpr size_t kSsidMax = net::kSsidMax;
+    static constexpr size_t kPskHexLen = net::kPskHexLen;
 
     // `entry` is the catalog's 0x000F entry or nullptr; its presence and
     // access are copied here, the pointer is not kept.
-    Provisioning(Hub& hub, const CatalogEntry* entry, IStation& station, uint16_t wsPort)
-        : _hub(hub), _station(station), _wsPort(wsPort),
+    Provisioning(Hub& hub, const CatalogEntry* entry, IStation& station, NetworkDesk& nets, uint16_t wsPort)
+        : _hub(hub), _station(station), _nets(nets), _wsPort(wsPort),
           _declared(entry != nullptr && entry->cls == ChannelClass::INTENT),
           _access(entry != nullptr ? entry->access : AccessLevel::configure) {}
 
@@ -112,7 +101,7 @@ public:
         if (_attempt.link == &link) _attempt.link = nullptr;
     }
 
-    bool busy() const { return _running || _persistDue; }
+    bool busy() const { return _running; }
 
 private:
     struct Attempt {
@@ -125,14 +114,10 @@ private:
         std::array<char, kPskHexLen + 1> pass{};
         uint8_t ssidLen = 0;
         uint8_t passLen = 0;
+        std::optional<size_t> slot{};
     };
 
-    struct Refusal {
-        NackCode code;
-        const char* detail;   // a string literal: static storage
-    };
-
-    // ECHO payloads are small: {cfg_gen, intent_id, applied{5}}.
+    // ECHO payloads are small: {cfg_gen, intent_id, applied{<= 6}}.
     static constexpr size_t kEchoBytes = 64;
 
     const HubSession* sessionById(uint32_t id) const;
@@ -142,20 +127,19 @@ private:
     void nack(ITransport& link, NackCode code, uint16_t intentId, uint16_t seq,
               std::string_view detail = {}, uint32_t retryAfterMs = 0);
     static void send(ITransport& link, FrameType type, uint16_t channel, std::span<const std::byte> payload);
-    // nullopt = the fields pass.
-    static std::optional<Refusal> checkFields(const IntentMsg& in);
     static const IntentValue* field(const IntentMsg& in, uint8_t key);
+    void echo(ITransport* link, uint32_t sessionId, uint16_t intentId, const IntentValueMap& applied);
     static std::string_view failureDetail(JoinFailure why);
 
     Hub& _hub;
     IStation& _station;
+    NetworkDesk& _nets;
     const uint16_t _wsPort;
     const bool _declared;
     const AccessLevel _access;
 
     Attempt _attempt{};
     bool _running = false;
-    bool _persistDue = false;
 
     // The last success, for a duplicate intent_id (SPEC §9.3).
     uint32_t _echoSession = 0;
@@ -166,16 +150,20 @@ private:
 
 // ---- board functions (ValenceProvisioning.cpp; not built natively) -----------
 
-// The board station. provisioningBegin() starts its task and event hooks,
-// after main.cpp's wifi_up(); false leaves every join answered `station down`.
+// The board station: it owns every join, boot and reconnect included.
+// stationBegin() loads the saved list (migrating a single stored network
+// into slot 1 on first boot), registers its event hooks and starts its task;
+// main.cpp wifi_up() calls it before esp_wifi_start(). false = no task, so no
+// joins.
 IStation& provisioningStation();
-bool provisioningBegin();
-
-// The station's credentials, the one home boot (main.cpp wifi_up) and a
-// failed join's restore both read: the provisioned pair in NVS (written only
-// after a wifi_join joined), else the compiled-in secrets.h pair. True when
-// they came from NVS. Never logs either.
-bool stationCredentials(std::span<uint8_t, 32> ssid, std::span<uint8_t, 64> passphrase);
+INetStation& stationNets();
+bool stationBegin();
+// The list the station booted with, for the hub's NetworkDesk::adopt().
+// app_main only, after stationBegin().
+const net::SavedNetworks& stationBootList();
+// The live link's RSSI, from main.cpp's liveness loop (an esp_hosted RPC that
+// never runs on the hub task).
+void stationSetLinkRssi(int8_t rssi);
 
 // ---- desk implementation -----------------------------------------------------------
 
@@ -244,37 +232,6 @@ inline const IntentValue* Provisioning::field(const IntentMsg& in, uint8_t key) 
     return nullptr;
 }
 
-inline std::optional<Provisioning::Refusal> Provisioning::checkFields(const IntentMsg& in) {
-    const IntentValue* op = field(in, kKeyOp);
-    if (op == nullptr || op->kind != IntentValue::Kind::U64) return Refusal{NackCode::INVALID_VALUE, "op"};
-    if (op->u64_val != provisioning_ops::wifi_join) return Refusal{NackCode::UNSUPPORTED_OP, "op"};
-
-    const IntentValue* ssid = field(in, kKeySsid);
-    if (ssid == nullptr || ssid->kind != IntentValue::Kind::Tstr) return Refusal{NackCode::INVALID_VALUE, "ssid"};
-    if (ssid->tstr_val.empty() || ssid->tstr_val.size() > kSsidMax)
-        return Refusal{NackCode::INVALID_VALUE, "ssid length"};
-    // The station config is NUL-terminated below 32 octets.
-    if (ssid->tstr_val.find('\0') != std::string_view::npos) return Refusal{NackCode::INVALID_VALUE, "ssid"};
-
-    const IntentValue* pass = field(in, kKeyPassphrase);
-    if (pass == nullptr || pass->kind != IntentValue::Kind::Tstr)
-        return Refusal{NackCode::INVALID_VALUE, "passphrase"};
-    const std::string_view p = pass->tstr_val;
-    if (p.empty()) return std::nullopt;
-    if (p.size() == kPskHexLen) {
-        for (char c : p) {
-            const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-            if (!hex) return Refusal{NackCode::INVALID_VALUE, "passphrase"};
-        }
-        return std::nullopt;
-    }
-    if (p.size() < kPassMin || p.size() > kPassMax) return Refusal{NackCode::INVALID_VALUE, "passphrase length"};
-    for (char c : p) {
-        if (c < 0x20 || c > 0x7E) return Refusal{NackCode::INVALID_VALUE, "passphrase"};
-    }
-    return std::nullopt;
-}
-
 inline std::string_view Provisioning::failureDetail(JoinFailure why) {
     switch (why) {
         case JoinFailure::station_down: return "station down";
@@ -284,6 +241,19 @@ inline std::string_view Provisioning::failureDetail(JoinFailure why) {
         case JoinFailure::timeout:      break;
     }
     return "timed out";
+}
+
+inline void Provisioning::echo(ITransport* link, uint32_t sessionId, uint16_t intentId, const IntentValueMap& applied) {
+    EchoMsg e;
+    e.intent_id = intentId;
+    e.cfg_gen = _hub.cfgGen();
+    e.applied_count = 0;
+    for (uint32_t i = 0; i < applied.count && i < e.applied.size(); ++i) e.applied[e.applied_count++] = applied.fields[i];
+    _echoLen = encodeEcho(e, _echo);
+    _echoSession = sessionId;
+    _echoIntent = intentId;
+    if (link != nullptr && _echoLen != 0)
+        send(*link, FrameType::ECHO, channels::provisioning, std::span<const std::byte>(_echo.data(), _echoLen));
 }
 
 inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& link, uint32_t sessionId,
@@ -321,12 +291,25 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
         nack(link, NackCode::CONFLICT, in.intent_id, h->seq);
         return true;
     }
+
+    IntentValueMap map;
+    map.count = in.value_count;
+    map.fields = in.value;
+    const std::optional<uint8_t> op = NetworkDesk::opOf(map);
     // SPEC §13.9: an association window open now, or a factory-fresh hub.
-    if (!_hub.pairingWindowOpen() && _hub.pairing().claimed()) {
-        nack(link, NackCode::ACCESS_DENIED, in.intent_id, h->seq, "pairing window closed");
+    const bool windowOrFresh = _hub.pairingWindowOpen() || !_hub.pairing().claimed();
+    if (const auto refusal = NetworkDesk::gate(op, Binding::credential, windowOrFresh)) {
+        nack(link, refusal->code, in.intent_id, h->seq, refusal->detail);
         return true;
     }
-    if (const auto refusal = checkFields(in)) {
+    if (op != provisioning_ops::wifi_join) {
+        const NetworkDesk::Applied r = _nets.apply(map, Binding::credential);
+        if (!r) nack(link, r.error().code, in.intent_id, h->seq, r.error().detail);
+        else echo(&link, sessionId, in.intent_id, r.value());
+        return true;
+    }
+
+    if (const auto refusal = _nets.checkJoinTarget(map)) {
         nack(link, refusal->code, in.intent_id, h->seq, refusal->detail);
         return true;
     }
@@ -338,13 +321,15 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
         return true;
     }
 
-    const std::string_view ssidIn = field(in, kKeySsid)->tstr_val;
-    const std::string_view passIn = field(in, kKeyPassphrase)->tstr_val;
+    const std::string_view ssidIn = field(in, net::kKeySsid)->tstr_val;
+    const std::string_view passIn = field(in, net::kKeyPassphrase)->tstr_val;
     wipe();
     std::memcpy(_attempt.ssid.data(), ssidIn.data(), ssidIn.size());
     std::memcpy(_attempt.pass.data(), passIn.data(), passIn.size());
     _attempt.ssidLen = uint8_t(ssidIn.size());
     _attempt.passLen = uint8_t(passIn.size());
+    const IntentValue* slot = field(in, net::draft::key_slot);
+    _attempt.slot = slot != nullptr ? std::optional<size_t>(size_t(slot->u64_val)) : std::nullopt;
     if (!_station.beginJoin(ssid(), pass())) {
         wipe();
         nack(link, NackCode::NETWORK_JOIN_FAILED, in.intent_id, h->seq, failureDetail(JoinFailure::station_down));
@@ -363,11 +348,6 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
 }
 
 inline void Provisioning::tick() {
-    if (_persistDue) {
-        if (!_station.persist(ssid(), pass())) return;
-        _persistDue = false;
-        wipe();
-    }
     if (!_running) return;
     const std::optional<JoinOutcome> out = _station.pollJoin();
     if (!out) return;
@@ -381,34 +361,28 @@ inline void Provisioning::tick() {
         wipe();
         const std::string_view why = failureDetail(out->why);
         if (link != nullptr) nack(*link, NackCode::NETWORK_JOIN_FAILED, _attempt.intentId, _attempt.seq, why);
-        GLOGW(detail::kProvisioningTag, "wifi_join failed: %.*s; the prior network stays",
+        GLOGW(detail::kProvisioningTag, "wifi_join failed: %.*s; the saved list stays",
               int(why.size()), why.data());
         return;
     }
 
-    EchoMsg echo;
-    echo.intent_id = _attempt.intentId;
-    echo.cfg_gen = _hub.cfgGen();
-    echo.applied_count = 5;
-    echo.applied[0] = {kKeyOp, IntentValue::ofU64(provisioning_ops::wifi_join)};
-    echo.applied[1] = {kKeySsid, IntentValue::ofBool(true)};
-    echo.applied[2] = {kKeyPassphrase, IntentValue::ofBool(true)};
-    echo.applied[3] = {kKeyIpv4, IntentValue::ofU64(out->ipv4)};
-    echo.applied[4] = {kKeyWsPort, IntentValue::ofU64(_wsPort)};
-    _echoLen = encodeEcho(echo, _echo);
-    _echoSession = _attempt.sessionId;
-    _echoIntent = _attempt.intentId;
-    if (link != nullptr && _echoLen != 0)
-        send(*link, FrameType::ECHO, channels::provisioning, std::span<const std::byte>(_echo.data(), _echoLen));
-    GLOGI(detail::kProvisioningTag, "wifi_join joined: %u.%u.%u.%u, ws port %u",
+    // The slot was checked before the join; the list can only have changed
+    // through this desk or the hub delegate since, and a full list still
+    // refuses here rather than drop a network that joined.
+    const std::optional<size_t> slot = _nets.storeJoined(_attempt.slot, ssid(), pass());
+    wipe();
+    IntentValueMap applied;
+    applied.fields[0] = {net::kKeyOp, IntentValue::ofU64(provisioning_ops::wifi_join)};
+    applied.fields[1] = {net::kKeySsid, IntentValue::ofBool(true)};
+    applied.fields[2] = {net::kKeyPassphrase, IntentValue::ofBool(true)};
+    applied.fields[3] = {net::kKeyIpv4, IntentValue::ofU64(out->ipv4)};
+    applied.fields[4] = {net::kKeyWsPort, IntentValue::ofU64(_wsPort)};
+    applied.count = 5;
+    if (slot) applied.fields[applied.count++] = {net::draft::key_slot, IntentValue::ofU64(*slot)};
+    echo(link, _attempt.sessionId, _attempt.intentId, applied);
+    GLOGI(detail::kProvisioningTag, "wifi_join joined: %u.%u.%u.%u, ws port %u, slot %d",
           unsigned(out->ipv4 >> 24), unsigned((out->ipv4 >> 16) & 0xFF), unsigned((out->ipv4 >> 8) & 0xFF),
-          unsigned(out->ipv4 & 0xFF), unsigned(_wsPort));
-
-    _persistDue = true;
-    if (_station.persist(ssid(), pass())) {
-        _persistDue = false;
-        wipe();
-    }
+          unsigned(out->ipv4 & 0xFF), unsigned(_wsPort), slot ? int(*slot + 1) : 0);
 }
 
 }  // namespace valence

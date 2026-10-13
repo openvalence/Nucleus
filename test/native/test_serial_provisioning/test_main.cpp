@@ -167,10 +167,8 @@ private:
 class FakeStation final : public IStation {
 public:
     int joins = 0;
-    int persists = 0;
     bool startable = true;
-    bool persistNow = true;
-    std::string lastSsid, lastPass, savedSsid, savedPass;
+    std::string lastSsid, lastPass;
     std::optional<JoinOutcome> outcome;   // the test finishes a join by setting it
 
     bool beginJoin(std::string_view s, std::string_view p) override {
@@ -181,11 +179,21 @@ public:
         return true;
     }
     std::optional<JoinOutcome> pollJoin() override { return std::exchange(outcome, std::nullopt); }
-    bool persist(std::string_view s, std::string_view p) override {
+};
+
+// The saved list's station half: persists counted, the live entry chosen by
+// the test.
+class FakeNets final : public INetStation {
+public:
+    int persists = 0;
+    bool persistNow = true;
+    uint8_t live = 0;
+    bool offerList(const net::SavedNetworks&) override { return true; }
+    uint8_t liveId() const override { return live; }
+    int8_t rssiOf(uint8_t) const override { return net::kRssiUnseen; }
+    bool persist(std::span<const uint8_t>) override {
         if (!persistNow) return false;
         ++persists;
-        savedSsid = s;
-        savedPass = p;
         return true;
     }
 };
@@ -238,13 +246,16 @@ bool buildTestCatalog(Catalog32& c, bool declareProvisioning) {
                     .defaultPriority = Priority::normal, .hasCategory = true, .category = ui_categories::setup});
         c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                                 .role = "action.provision"},
-                               {"reserved", "wifi_join"});
+                               {"reserved", "wifi_join", "save", "remove", "move"});
         c.addSchemaField({.key = 2, .name = "ssid", .type = CborFieldType::tstr_t, .unit = "",
                           .flags = setting_flags::secret});
         c.addSchemaField({.key = 3, .name = "passphrase", .type = CborFieldType::tstr_t, .unit = "",
                           .flags = setting_flags::secret});
         c.addSchemaField({.key = 4, .name = "ipv4", .type = CborFieldType::uint_t, .unit = ""});
         c.addSchemaField({.key = 5, .name = "ws_port", .type = CborFieldType::uint_t, .unit = ""});
+        c.addSchemaField({.key = 6, .name = "slot", .type = CborFieldType::uint_t, .unit = ""});
+        c.addSchemaField({.key = 7, .name = "to", .type = CborFieldType::uint_t, .unit = ""});
+        c.addSchemaField({.key = 8, .name = "generation", .type = CborFieldType::uint_t, .unit = ""});
     }
     // A second entry, so the undeclared catalog is not empty.
     c.addEntry({.id = 0x3000, .name = "config-set", .cls = ChannelClass::INTENT, .dir = Direction::c2h,
@@ -315,13 +326,16 @@ struct Rig {
     TestDelegate del{};
     std::optional<Hub> hub{};
     FakeStation station{};
+    FakeNets nets{};
+    std::optional<NetworkDesk> netDesk{};
     std::optional<Provisioning> desk{};
     std::vector<std::unique_ptr<Link>> links;
 
     explicit Rig(bool declare = true, int bindings = 1) {
         REQUIRE(buildTestCatalog(catalog, declare));
         hub.emplace(catalog, g_clock, hubRng, del);
-        desk.emplace(*hub, catalog.find(channels::provisioning), station, uint16_t(82));
+        netDesk.emplace(nets);
+        desk.emplace(*hub, catalog.find(channels::provisioning), station, *netDesk, uint16_t(82));
         for (int i = 0; i < bindings; ++i) {
             links.push_back(std::make_unique<Link>(uint32_t(100 + i)));
             Link& l = *links.back();
@@ -340,6 +354,7 @@ struct Rig {
             for (auto& l : links) l->port.loop(ms);
             hub->update(g_clock.nowUs());
             desk->tick();
+            netDesk->tick();
             if (clientsRun)
                 for (auto& l : links) l->client->update(g_clock.nowUs());
             geiger::drainToSinks();
@@ -618,7 +633,7 @@ TEST_CASE("desk: a bad SSID or passphrase is refused INVALID_VALUE and starts no
         CHECK(rig->at().ears.nacks[0].detail == c.detail);
     }
     rig->at().ears.nacks.clear();
-    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass, 2)));
+    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass, 9)));
     rig->step();
     REQUIRE(rig->at().ears.nacks.size() == 1);
     CHECK(rig->at().ears.nacks[0].code == NackCode::UNSUPPORTED_OP);
@@ -641,7 +656,7 @@ TEST_CASE("desk: a join that worked echoes true for both secrets, the address an
     rig->finish({true, kIp, JoinFailure::timeout});
     REQUIRE(rig->at().ears.echoes.size() == 1);
     const IntentValueMap& a = rig->at().ears.echoes[0].second;
-    REQUIRE(a.count == 5);
+    REQUIRE(a.count == 6);
     CHECK(a.fields[0].key == 1);
     CHECK(a.fields[0].value.u64_val == provisioning_ops::wifi_join);
     for (const size_t i : {size_t(1), size_t(2)}) {
@@ -653,10 +668,13 @@ TEST_CASE("desk: a join that worked echoes true for both secrets, the address an
     CHECK(a.fields[3].value.u64_val == kIp);
     CHECK(a.fields[4].key == 5);
     CHECK(a.fields[4].value.u64_val == 82);
+    CHECK(a.fields[5].key == 6);
+    CHECK(a.fields[5].value.u64_val == 0);
 
-    CHECK(rig->station.persists == 1);
-    CHECK(rig->station.savedSsid == kSsid);
-    CHECK(rig->station.savedPass == kPass);
+    CHECK(rig->nets.persists == 1);
+    REQUIRE(rig->netDesk->list().count() == 1);
+    CHECK(rig->netDesk->list().ssid(0) == kSsid);
+    CHECK(rig->netDesk->list().passphrase(0) == kPass);
     CHECK_FALSE(rig->desk->busy());
 
     CHECK_FALSE(contains(rig->at().wire.sentByHub, kSsid));
@@ -678,7 +696,8 @@ TEST_CASE("desk: a join that failed answers NETWORK_JOIN_FAILED without the cred
     REQUIRE(rig->at().ears.nacks.size() == 1);
     CHECK(rig->at().ears.nacks[0].code == NackCode::NETWORK_JOIN_FAILED);
     CHECK(rig->at().ears.nacks[0].detail == "authentication failed");
-    CHECK(rig->station.persists == 0);
+    CHECK(rig->nets.persists == 0);
+    CHECK(rig->netDesk->list().count() == 0);
     CHECK_FALSE(contains(rig->at().wire.sentByHub, kSsid));
     CHECK_FALSE(contains(rig->at().wire.sentByHub, kPass));
     CHECK_FALSE(logged(kSsid));
@@ -711,25 +730,45 @@ TEST_CASE("desk: a duplicate intent_id joins the attempt, and after it gets the 
     CHECK(echoes == 2);
 }
 
-TEST_CASE("desk: a store that cannot write yet keeps the desk busy, then persists once") {
+TEST_CASE("desk: a store that cannot write yet holds the list in RAM and persists once it can") {
     auto rig = std::make_unique<Rig>();
     rig->live();
     rig->configure();
     rig->hub->openPresenceWindow();
-    rig->station.persistNow = false;
+    rig->nets.persistNow = false;
     REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
     rig->step();
     rig->finish({true, kIp, JoinFailure::timeout});
-    CHECK(rig->desk->busy());
-    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin("Other", "another passphrase")));
-    rig->step();
-    REQUIRE_FALSE(rig->at().ears.nacks.empty());
-    CHECK(rig->at().ears.nacks.back().code == NackCode::BUSY);
-    rig->station.persistNow = true;
-    rig->step();
-    CHECK(rig->station.persists == 1);
-    CHECK(rig->station.savedSsid == kSsid);
     CHECK_FALSE(rig->desk->busy());
+    CHECK(rig->netDesk->list().count() == 1);
+    CHECK(rig->nets.persists == 0);
+    rig->nets.persistNow = true;
+    rig->step();
+    CHECK(rig->nets.persists == 1);
+    rig->step();
+    CHECK(rig->nets.persists == 1);
+}
+
+TEST_CASE("desk: on a credential binding the list ops answer at once, and the live entry may go") {
+    auto rig = std::make_unique<Rig>();
+    rig->live();
+    rig->configure();
+    IntentValueMap save = wifiJoin("Second", "second passphrase", net::draft::op_net_save);
+    REQUIRE(rig->client().sendIntent(channels::provisioning, save));
+    rig->step();
+    REQUIRE(rig->at().ears.echoes.size() == 1);
+    CHECK(rig->station.joins == 0);   // saved, not joined; no window needed
+    REQUIRE(rig->netDesk->list().count() == 1);
+    rig->nets.live = rig->netDesk->list().id(0);
+    IntentValueMap remove{};
+    remove.count = 2;
+    remove.fields[0] = {1, IntentValue::ofU64(net::draft::op_net_remove)};
+    remove.fields[1] = {6, IntentValue::ofU64(0)};
+    REQUIRE(rig->client().sendIntent(channels::provisioning, remove));
+    rig->step();
+    CHECK(rig->at().ears.nacks.empty());
+    CHECK(rig->netDesk->list().count() == 0);
+    CHECK_FALSE(contains(rig->at().wire.sentByHub, "second passphrase"));
 }
 
 TEST_CASE("desk: a station that cannot start a join answers station down") {

@@ -40,6 +40,7 @@
 #include "valence/channel/safety_events_channel.hpp"
 #include "valence/channel/settings_trial_channel.hpp"
 #include "valence/channel/trust_channels.hpp"
+#include "valence/net/saved_networks.hpp"
 
 #include "motion/ValenceMotion.h"
 
@@ -588,12 +589,79 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // nobody may be denied and nobody's may be shed.
     if (!valence::addSafetyEventsChannel(c)) return false;
 
+    // ---- "provisioning" -- INTENT, configure (SPEC 13.9, RFC-116) ----------
+    // wifi_join from BLE, serial or in-process only (ValenceProvisioning.h);
+    // save, remove and move from any binding at configure (NetworkDesk.h).
+    // Keys 4 and 5 are wifi_join's ECHO results. Category setup: RFC-079 names
+    // this channel as the commissioning surface's.
+    // TODO(RFC-116): ops 2-4 and keys 6-8 are draft numbers.
+    c.addEntry({.id = valence::channels::provisioning, .name = "provisioning",
+                .cls = ChannelClass::INTENT, .dir = Direction::c2h,
+                .access = AccessLevel::configure, .maxRateHz = 5.0f,
+                .defaultPriority = Priority::critical,
+                .hasCategory = true, .category = valence::ui_categories::setup});
+    c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
+                            .role = "action.provision"},
+                           {"reserved", "wifi_join", "save", "remove", "move"});
+    c.addSchemaField({.key = 2, .name = "ssid", .type = CborFieldType::tstr_t, .unit = "",
+                      .desc = "Network name", .flags = valence::setting_flags::secret});
+    c.addSchemaField({.key = 3, .name = "passphrase", .type = CborFieldType::tstr_t, .unit = "",
+                      .desc = "Password; empty for an open network", .flags = valence::setting_flags::secret});
+    c.addSchemaField({.key = 4, .name = "ipv4", .type = CborFieldType::uint_t, .unit = ""});
+    c.addSchemaField({.key = 5, .name = "ws_port", .type = CborFieldType::uint_t, .unit = ""});
+    c.addSchemaField({.key = 6, .name = "slot", .type = CborFieldType::uint_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f,
+                      .max = float(valence::net::SavedNetworks::kCapacity - 1)});
+    c.addSchemaField({.key = 7, .name = "to", .type = CborFieldType::uint_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f,
+                      .max = float(valence::net::SavedNetworks::kCapacity - 1)});
+    c.addSchemaField({.key = 8, .name = "generation", .type = CborFieldType::uint_t, .unit = ""});
+
     // ---- "settings-trial" -- INTENT, control (RFC-099) ----------------------
     // Declaring it is what tells a client this hub keeps a `trial` write
     // unpersisted; the hub answers commit and revert itself. Each settings
     // card below carries a trial_mask (meta.trial_pending), bit i the i-th
     // setting of its layout, as enabled_mask indexes it.
     if (!valence::addSettingsTrialChannel(c)) return false;
+
+    // ---- "networks" -- STATE, watch (RFC-116) -------------------------------
+    // Slot occupancy for every tier: no SSID, no passphrase. live = the list
+    // index the station is joined through, 255 none; rssi<i> = entry i's
+    // strongest BSSID in the last scan, the link's for the live entry, -128
+    // not heard. NetworkDesk::packNetworks().  [2+1+1+1+4 = 9 B]
+    // TODO(RFC-116): 0x0017 is a draft number.
+    c.addEntry({.id = valence::net::draft::ch_networks, .name = "networks",
+                .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                .access = AccessLevel::watch, .maxRateHz = 1.0f,
+                .defaultPriority = Priority::background,
+                .hasCategory = true, .category = valence::ui_categories::network});
+    c.addLayoutField({.name = "generation", .type = PackedFieldType::u16, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "capacity", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
+                      .desc = "Saved network slots"});
+    c.addLayoutField({.name = "count", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
+                      .desc = "Saved networks"});
+    c.addLayoutField({.name = "live", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .desc = "Slot the hub is joined through"});
+    c.addLayoutField({.name = "rssi0", .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f});
+    c.addLayoutField({.name = "rssi1", .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f});
+    c.addLayoutField({.name = "rssi2", .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f});
+    c.addLayoutField({.name = "rssi3", .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f});
+
+    // ---- "network-names" -- STATE, configure (RFC-116) ----------------------
+    // The saved SSIDs in list order, for configure sessions only: the entry's
+    // access gates SUBSCRIBE (SPEC 12.2). open bit i = entry i has no
+    // passphrase. NetworkDesk::packNames().  [1+4x32 = 129 B]
+    // TODO(RFC-116): 0x0018 is a draft number.
+    c.addEntry({.id = valence::net::draft::ch_network_names, .name = "network-names",
+                .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                .access = AccessLevel::configure, .maxRateHz = 1.0f,
+                .defaultPriority = Priority::background,
+                .hasCategory = true, .category = valence::ui_categories::network});
+    c.addLayoutField({.name = "open", .type = PackedFieldType::bitfield8, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "ssid0", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "ssid1", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "ssid2", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
+    c.addLayoutField({.name = "ssid3", .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
 
     // ---- "motion" — STATE, elevated, 60 Hz ----------------------------------
     // The live carriage snapshot. scale 100 on positions = 10µm wire units;

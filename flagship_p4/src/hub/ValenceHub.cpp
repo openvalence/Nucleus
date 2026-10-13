@@ -9,8 +9,8 @@
 //   is hardware-free so the host twin (sim/valencesim) runs it verbatim. What
 //   stays here is what only the P4 has: NVS, PSRAM, esp_netif, the task.
 // - PERSISTED STATE IS FIVE NVS BLOBS in namespace "valence", one per concern
-//   ("sta", the provisioned station, is ValenceProvisioning.cpp's, written
-//   once per wifi_join that joined); the other four:
+//   ("nets", the saved-network list, is ValenceProvisioning.cpp's, written
+//   by NetworkDesk on the hub task when the list changes); the other four:
 //   "cfg" (StoredState.h: 0x1000, 0x1030 and 0x1120-0x1122 with cfg_gen,
 //   stored::kConfigBlobBytes),
 //   "presets" (PatternPresetStore: the 24 slots with their generation,
@@ -208,6 +208,8 @@ struct HubBox {
     // The serial binding's rings and scratch, ~8 KB; hub task only, nothing
     // ISR-reachable (the driver's rings are its own, internal).
     ValenceSerialPort serial{};
+    // The saved-network list (RFC-116); hub task only once the task runs.
+    std::optional<NetworkDesk> nets{};
     // Built after the hub it reads; hub task only.
     std::optional<Provisioning> desk{};
     // SPEC 13.8: one UDP socket and the reply template. Hub task only.
@@ -358,6 +360,7 @@ void hubTask(void*) {
         phase.mark("hub.update");
         // After update(): a join that finished answers on this same tick.
         g_box->desk->tick();
+        g_box->nets->tick();
         phase.mark("desk.tick");
 
         // The device half: deferred latch clear, the motion plane's STATE, the
@@ -560,12 +563,16 @@ bool hubBegin() {
           unsigned(sizeof(HubBox)), static_cast<unsigned long>(g_box->hub->bootId()),
           FIRMWARE_VERSION);
 
-    // The provisioning desk and the USB serial binding, before the hub task
-    // that pumps both. Non-fatal: without the pipe the hub still serves WS,
-    // and without the station every wifi_join answers `station down`.
+    // The saved-network list, the provisioning desk and the USB serial
+    // binding, before the hub task that pumps them. Non-fatal: without the
+    // pipe the hub still serves WS, and without the station (wifi_up failed)
+    // every wifi_join answers `station down`.
+    g_box->nets.emplace(stationNets());
+    g_box->nets->adopt(stationBootList());
+    g_box->nets->attach(*g_box->hub);
+    g_box->device.bindNetworks(&*g_box->nets);
     g_box->desk.emplace(*g_box->hub, g_box->catalog.find(channels::provisioning), provisioningStation(),
-                        kWsPort);
-    provisioningBegin();
+                        *g_box->nets, kWsPort);
     if (ISerialPipe* usb = usbSerialPipeBegin()) g_box->serial.begin(*g_box->hub, *usb, &*g_box->desk);
 
     tcpTallyWatch(kWsPort);

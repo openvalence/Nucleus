@@ -29,6 +29,7 @@
 #include <string_view>
 
 #include "IngressDropTally.h"
+#include "NetworkDesk.h"
 #include "StoredState.h"
 #include "ValenceCatalog.h"
 #include "motion/ValenceMotion.h"
@@ -112,6 +113,9 @@ LinkTcp deviceLinkTcp();
 class ValenceDevice final : public HubDelegate {
 public:
     void bindTokenGate(IUiTokenGate* g) { _tokenGate = g; }
+    // The saved-network list behind 0x000F on a network binding (RFC-116).
+    // Unbound, 0x000F answers UNSUPPORTED_OP.
+    void bindNetworks(NetworkDesk* n) { _nets = n; }
 
     // The role a HELLO lands at when no pairing token and no live /uitoken
     // vouches for it. The firmware never raises it from watch; the host twin
@@ -244,6 +248,7 @@ private:
     Result<IntentValueMap, NackCode> applyPatternAdvanced(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applyPresets(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> applySafety(const IntentValueMap& requested);
+    Result<IntentValueMap, NackCode> applyNetworks(const IntentValueMap& requested);
     Result<IntentValueMap, NackCode> refuseUnpowered(const char* what);
     // `code`, with `detail` as its SPEC 16.1 reason.
     Result<IntentValueMap, NackCode> refuse(NackCode code, const char* detail);
@@ -291,6 +296,7 @@ private:
     Hub* _hub = nullptr;
     const Catalog32* _catalog = nullptr;
     IUiTokenGate* _tokenGate = nullptr;
+    NetworkDesk* _nets = nullptr;
     AccessLevel _unvouchedRole = AccessLevel::watch;
 
     StoredConfig _cfg{};
