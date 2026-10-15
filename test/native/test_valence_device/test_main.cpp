@@ -702,7 +702,7 @@ TEST_CASE("VD-12: PAIR press opens the presence window; 3+ presses do nothing") 
 }
 
 TEST_CASE("VD-13: a planned reboot takes the armed persists at once, then none") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     IntentValueMap m{};
     m.count = 1;
     m.fields[0] = IntentValueField{3, IntentValue::ofF32(42.0f)};   // jog_speed
@@ -754,7 +754,7 @@ TEST_CASE("VD-15: releasing the button resumes nothing; only release clears, int
 }
 
 TEST_CASE("VD-16: a release while the button is pressed is refused and names the button") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     setEstop(estop::Contacts::pressed);
     rig->step();
     REQUIRE(rig->hub->estopLatched());
@@ -927,7 +927,7 @@ void expectNotANumberRefused(Rig& rig, uint16_t channel, const IntentValueMap& b
 }  // namespace
 
 TEST_CASE("VD-22: NaN and infinity are refused INVALID_VALUE naming the field, and nothing moves") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     IntentValueMap base{};
     SUBCASE("config-set") {
         expectNotANumberRefused(*rig, ch::config_set, base, 1, IntentValue::ofF32(12.5f),
@@ -1316,7 +1316,7 @@ uint8_t stateU8(Rig& rig, uint16_t channel, size_t offset) {
 }  // namespace
 
 TEST_CASE("VD-TR-1: a trial jog speed is live, marked, never stored, and commit stores it") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     persistBitsOver(*rig, 2500);   // drain the boot's own writes
     const float before = rig->device.config().jog_speed;
     const float trial = before + 7.0f;
@@ -1340,7 +1340,7 @@ TEST_CASE("VD-TR-1: a trial jog speed is live, marked, never stored, and commit 
 }
 
 TEST_CASE("VD-TR-2: revert and a session's end restore the kinetic baseline") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     const float trim0 = storedF32(*rig, kBlobTrimMax);
     REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(6, IntentValue::ofF32(0.6f)), std::nullopt, false,
                                     true).has_value());
@@ -1371,7 +1371,7 @@ TEST_CASE("VD-TR-2: revert and a session's end restore the kinetic baseline") {
 }
 
 TEST_CASE("VD-TR-3: keys gated on live state refuse a trial; the flip waits for a window trial") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     REQUIRE(rig->client->sendIntent(ch::kinetic_set, oneKey(7, IntentValue::ofF32(40.0f)), std::nullopt, false,
                                     true).has_value());
     REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(8, IntentValue::ofU64(1)), std::nullopt, false, true)
@@ -1436,7 +1436,7 @@ TEST_CASE("VD-HOME-2: a moving machine is refused before the arbiter is asked") 
 }
 
 TEST_CASE("VD-HOME-3: a started cycle ECHOes; its completion clears home_required, force_home waits") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     rig->hub->setHomeRequired(true);
     rig->step();
     const int echoes = rig->del.echoes;
@@ -1566,7 +1566,7 @@ TEST_CASE("VD-HOME-6: a failed cycle is logged in words with its leg; nothing is
 // bd val-3kd: while a real cycle's measurement stands, max_rail and the
 // window never reach past the stop it found.
 TEST_CASE("VD-HOME-7: after a real home, max_rail and the window clamp to the measured stroke, echoed") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     REQUIRE(rig->device.config().window_max == factory::window_max);   // 500, set before any home
     completeHome(*rig, 267.69f);
     CHECK(rig->device.config().max_rail == doctest::Approx(267.69f));
@@ -1606,7 +1606,7 @@ TEST_CASE("VD-HOME-7: after a real home, max_rail and the window clamp to the me
 
 TEST_CASE("VD-HOME-8: force_home measures nothing; a window wholly past the stop never blocks the adoption, it collapses") {
     // Homed by assertion only: the catalog ceiling, as before any home.
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(8, IntentValue::ofF32(800.0f))).has_value());
     rig->step();
     REQUIRE(echoed(rig->del.lastEcho, 8) != nullptr);
@@ -1633,7 +1633,7 @@ TEST_CASE("VD-HOME-8: force_home measures nothing; a window wholly past the stop
 // bd val-8yv: SPEC 9.6 holds the travel window inside max_rail on every write
 // of it, and 0x1000 never publishes a window past it.
 TEST_CASE("VD-HOME-9: a max_rail write holds the window inside it; a window write wholly past it is refused") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     logCapture();
     clearLog();
     REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(2, IntentValue::ofF32(400.0f))).has_value());
@@ -1829,7 +1829,7 @@ TEST_CASE("VD-EVEN: at constant speed every 0x1100 push steps the same distance 
 }
 
 TEST_CASE("VD-MODES-9: home_speed writes on modes-set key 9, clamped, published at 0x1030's tail, stored") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     persistBitsOver(*rig, 2500);
     const uint16_t gen = rig->hub->cfgGen();
     CHECK(stateF32(*rig, ch::machine_modes, 8) == doctest::Approx(factory::home_speed));
@@ -1893,7 +1893,7 @@ TEST_CASE("VD-TR-4: home_speed and datagram_estop take a trial: live, marked, ne
 // same write leaves, never the rail of before it. The rig's motion layer is a
 // census: each step below sets the rail the arbiter's takeWindow() would.
 TEST_CASE("VD-FLIP-2: flipped, a write of max_rail and the window together lands the window where it was asked") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     g_census.rail_mm = rig->device.config().max_rail;   // 500, the factory rail
     REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(8, IntentValue::ofU64(1))).has_value());
     rig->step();
@@ -2021,7 +2021,7 @@ TEST_CASE("VD-SEG-2: every sample past its time at ingress counts late; only seg
 // ---- bd val-68v / val-88t: the kinetic cards carry what Kinetic² reads ----------
 
 TEST_CASE("VD-K2-1: the catalog advertises only settings the planner reads") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     CHECK(rig->catalog.find(0x1121) == nullptr);   // kinetic-chase, retired
 
     // Every setting on the two kinetic cards is a 0x3120 key, and every 0x3120
@@ -2080,7 +2080,7 @@ TEST_CASE("VD-K2-1: the catalog advertises only settings the planner reads") {
 }
 
 TEST_CASE("VD-K2-2: smoothness, handle_floor, trim_max and react_ms write on kinetic-set keys 4, 5, 6 and 8, clamped, published, stored") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     persistBitsOver(*rig, 2500);
     const uint16_t gen = rig->hub->cfgGen();
     IntentValueMap m{};
@@ -2340,7 +2340,7 @@ TEST_CASE("VD-CONFORM: the board catalog passes conformance::checkCatalog") {
 // ---- bd val-4rr: a persist waits for a still window -------------------------------
 
 TEST_CASE("VD-PERSIST-1: a save requested mid-stroke lands in the next still window, once, never during motion") {
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     rig->step(3000);
     rig->persisted = 0;
     rig->persistWrites = 0;
@@ -2365,7 +2365,7 @@ TEST_CASE("VD-PERSIST-1: a save requested mid-stroke lands in the next still win
 
 TEST_CASE("VD-PERSIST-2: under ESTOP a due write goes whatever the strip shows; a home cycle holds it") {
     {
-        auto rig = std::make_unique<Rig>();
+        auto rig = std::make_unique<Rig>(AccessLevel::configure);
         rig->step(3000);
         rig->persisted = 0;
         g_still = false;
@@ -2374,7 +2374,7 @@ TEST_CASE("VD-PERSIST-2: under ESTOP a due write goes whatever the strip shows; 
         rig->step(3000);
         CHECK(rig->persisted == kPersistConfig);
     }
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
     rig->step(3000);
     rig->persisted = 0;
     g_census.homing = true;
@@ -3285,4 +3285,289 @@ TEST_CASE("VD-NET-3: the join rule and first-boot migration") {
     CHECK(fromSecrets.ssid(0) == "compiled");
     CHECK(fromSecrets.passphrase(0) == "compiled passphrase");
     CHECK(firstBootList(std::nullopt, "your-ssid", "short").count() == 0);
+}
+
+// ---- write tiers (SPEC 12.2, operator ruling 2026-10-15) ----------------------
+
+namespace {
+
+constexpr AccessLevel kWatch = AccessLevel::watch;
+constexpr AccessLevel kControl = AccessLevel::control;
+constexpr AccessLevel kConfigure = AccessLevel::configure;
+
+// The ruling as a table: every writable entry (INTENT, c2h STREAM) and the tier
+// each of its keys and ops needs. key 0 is the entry's own row; option -1 is
+// every option of the key. A writable entry missing here fails VD-TIER-MATRIX.
+struct TierRow {
+    uint16_t channel;
+    uint8_t key;
+    int option;
+    AccessLevel need;
+};
+constexpr TierRow kTierRows[] = {
+    // Any tier: Halt and pause. Every other safety op drives.
+    {channels::safety_intents, 0, -1, kControl},
+    {channels::safety_intents, 1, safety_ops::pause, kWatch},
+    {channels::safety_intents, 1, safety_ops::estop, kWatch},
+    // Configure: machine settings and limits, trust, network.
+    {channels::session_admin, 0, -1, kConfigure},
+    {channels::provisioning, 0, -1, kConfigure},
+    {ch::config_set, 0, -1, kConfigure},
+    {ch::modes_set, 0, -1, kConfigure},
+    {ch::kinetic_set, 0, -1, kConfigure},
+    {ch::drive_set, 0, -1, kConfigure},
+    {ch::machine_admin, 0, -1, kConfigure},
+    {ch::machine_admin, 1, 1, kControl},   // clear_fault
+    {ch::home, 1, 0, kConfigure},          // the placeholder, strict side
+    {ch::home, 1, 2, kConfigure},          // force_home asserts the stroke
+    {ch::home, 2, -1, kConfigure},         // that stroke
+    // Control: driving inside those limits.
+    {channels::settings_trial, 0, -1, kControl},
+    {ch::home, 0, -1, kControl},
+    {ch::move, 0, -1, kControl},
+    {ch::osc_set, 0, -1, kControl},
+    {ch::pattern_cmd, 0, -1, kControl},
+    {ch::pattern_advanced_cmd, 0, -1, kControl},
+    {ch::pattern_presets_cmd, 0, -1, kControl},
+    {ch::motion_input, 0, -1, kControl},
+    {ch::motion_segment, 0, -1, kControl},
+    {ch::osc_drive, 0, -1, kControl},
+};
+
+std::optional<AccessLevel> expectedTier(uint16_t channel, uint8_t key, int option) {
+    std::optional<AccessLevel> entry, field, exact;
+    for (const TierRow& r : kTierRows) {
+        if (r.channel != channel) continue;
+        if (r.key == 0) entry = r.need;
+        else if (r.key == key && r.option == -1) field = r.need;
+        else if (r.key == key && r.option == option) exact = r.need;
+    }
+    return exact ? exact : field ? field : entry;
+}
+
+AccessLevel raised(AccessLevel a, AccessLevel b) { return uint8_t(b) > uint8_t(a) ? b : a; }
+
+// One probe per key, and per option of a key that gates by option, with the
+// tier the catalog declares for it: the entry's floor raised by the field's
+// access and the option's (Hub::requiredAccessFor). A STREAM is key 0.
+struct TierProbe {
+    uint16_t channel;
+    uint8_t key;
+    int option;
+    AccessLevel declared;
+    CborFieldType type;
+    float min;
+};
+
+std::vector<TierProbe> writableProbes(const Catalog32& c) {
+    std::vector<TierProbe> out;
+    for (uint16_t i = 0; i < c.count; ++i) {
+        const CatalogEntry& e = c.entries[i];
+        if (e.cls != ChannelClass::INTENT && !(e.cls == ChannelClass::STREAM && e.dir == Direction::c2h)) continue;
+        if (!e.usesSchema()) {
+            out.push_back({e.id, 0, -1, e.access, CborFieldType::uint_t, 0.0f});
+            continue;
+        }
+        for (const SchemaField& f : c.schemaFields(e)) {
+            const AccessLevel base = f.hasAccess ? raised(e.access, f.access) : e.access;
+            const auto oa = c.optionAccess(f);
+            if (oa.empty()) {
+                out.push_back({e.id, f.key, -1, base, f.type, f.hasMin ? f.min : 0.0f});
+                continue;
+            }
+            for (size_t o = 0; o < oa.size(); ++o)
+                out.push_back({e.id, f.key, int(o), raised(base, oa[o]), f.type, 0.0f});
+        }
+    }
+    return out;
+}
+
+const std::array<std::byte, 8> kProbeBytes{};
+
+IntentValue probeValue(const TierProbe& p) {
+    switch (p.type) {
+        case CborFieldType::uint_t:
+            return IntentValue::ofU64(p.option >= 0 ? uint64_t(p.option) : uint64_t(std::max(0.0f, p.min)));
+        case CborFieldType::int_t: return IntentValue::ofI64(int64_t(p.min));
+        case CborFieldType::f32_t: return IntentValue::ofF32(p.min);
+        case CborFieldType::bool_t: return IntentValue::ofBool(false);
+        case CborFieldType::tstr_t: return IntentValue::ofTstr("probe");
+        case CborFieldType::bstr_t: return IntentValue::ofBstr(kProbeBytes);
+    }
+    return IntentValue::ofU64(0);
+}
+
+// The one answer to an intent, sent now: NACK code and detail, or an ECHO.
+struct Answer {
+    std::optional<NackCode> nack;
+    std::string detail;
+    bool echoed = false;
+};
+
+Answer answerTo(Rig& rig, uint16_t channel, const IntentValueMap& m) {
+    const size_t nacks = rig.del.nacks.size();
+    const int echoes = rig.del.echoes;
+    REQUIRE(rig.client->sendIntent(channel, m).has_value());
+    rig.step(40);
+    Answer a;
+    if (rig.del.nacks.size() > nacks) {
+        a.nack = rig.del.nacks.back().code;
+        a.detail = rig.del.nacks.back().detail;
+    }
+    a.echoed = rig.del.echoes > echoes;
+    return a;
+}
+
+IntentValueMap forceHome(float stroke) {
+    IntentValueMap m{};
+    m.count = 2;
+    m.fields[0] = IntentValueField{1, IntentValue::ofU64(2)};
+    m.fields[1] = IntentValueField{2, IntentValue::ofF32(stroke)};
+    return m;
+}
+
+// The settings a control session asks to change and must not: limits,
+// ceilings, Kinetic tuning, homing, and force_home's asserted stroke.
+struct SettingWrite {
+    uint16_t channel;
+    IntentValueMap value;
+};
+std::vector<SettingWrite> settingWrites() {
+    return {{ch::config_set, oneKey(2, IntentValue::ofF32(300.0f))},   // window_max
+            {ch::config_set, oneKey(5, IntentValue::ofF32(100.0f))},   // input_speed ceiling
+            {ch::config_set, oneKey(8, IntentValue::ofF32(400.0f))},   // max_rail
+            {ch::kinetic_set, oneKey(2, IntentValue::ofF32(5.0f))},    // vmax override
+            {ch::kinetic_set, oneKey(4, IntentValue::ofF32(0.5f))},    // smoothness
+            {ch::modes_set, oneKey(9, IntentValue::ofF32(20.0f))},     // home_speed
+            {ch::home, forceHome(250.0f)}};
+}
+
+}  // namespace
+
+TEST_CASE("VD-TIER-MATRIX: every writable entry is classified, and the catalog declares the ruling's tier") {
+    auto cat = std::make_unique<Catalog32>();
+    DeviceFeatures all{};
+    all.has_current_sensor = all.has_power_monitor = all.has_motion = all.has_drive = all.has_pattern = true;
+    REQUIRE(buildValenceCatalog(*cat, all));
+    const auto probes = writableProbes(*cat);
+    REQUIRE(probes.size() > 50);
+    for (const TierProbe& p : probes) {
+        CAPTURE(p.channel);
+        CAPTURE(int(p.key));
+        CAPTURE(p.option);
+        const auto want = expectedTier(p.channel, p.key, p.option);
+        REQUIRE_MESSAGE(want.has_value(), "unclassified writable entry: give it a row in kTierRows");
+        CHECK(int(p.declared) == int(*want));
+    }
+    for (const TierRow& r : kTierRows) {
+        CAPTURE(r.channel);
+        CHECK(cat->find(r.channel) != nullptr);   // no stale row
+    }
+}
+
+TEST_CASE("VD-TIER-LIVE: the hub refuses every writable key below its tier, at watch, control and configure") {
+    for (const AccessLevel role : {kWatch, kControl, kConfigure}) {
+        auto rig = std::make_unique<Rig>(role);
+        for (const TierProbe& p : writableProbes(rig->catalog)) {
+            if (p.key == 0) continue;   // a STREAM: its tier gates the PUBLISH grant (SPEC 6.2)
+            CAPTURE(int(role));
+            CAPTURE(p.channel);
+            CAPTURE(int(p.key));
+            CAPTURE(p.option);
+            const Answer a = answerTo(*rig, p.channel, oneKey(p.key, probeValue(p)));
+            const bool below = uint8_t(role) < uint8_t(p.declared);
+            const bool denied = a.nack == NackCode::ACCESS_DENIED || a.nack == NackCode::NOT_CONTROLLER;
+            CHECK(denied == below);
+            if (below && denied) {
+                CHECK(*a.nack == (p.declared == kControl ? NackCode::NOT_CONTROLLER : NackCode::ACCESS_DENIED));
+                CHECK(a.detail == (p.declared == kControl ? "needs control" : "needs configure"));
+            }
+        }
+    }
+}
+
+TEST_CASE("VD-TIER-1: control jogs, runs patterns and the oscillator; settings and limits need configure") {
+    auto rig = std::make_unique<Rig>(kControl);
+    rig->step(50);
+    const auto cfg = rig->del.lastState.at(ch::machine_config);
+    const auto limits = rig->del.lastState.at(ch::kinetic_limits);
+    const auto planner = rig->del.lastState.at(ch::kinetic_planner);
+    const auto modes = rig->del.lastState.at(ch::machine_modes);
+    const uint16_t gen = rig->hub->cfgGen();
+    for (const SettingWrite& w : settingWrites()) {
+        CAPTURE(w.channel);
+        const Answer a = answerTo(*rig, w.channel, w.value);
+        CHECK(a.nack == NackCode::ACCESS_DENIED);
+        CHECK(a.detail == "needs configure");
+        CHECK_FALSE(a.echoed);
+    }
+    rig->step(50);
+    CHECK(rig->del.lastState.at(ch::machine_config) == cfg);
+    CHECK(rig->del.lastState.at(ch::kinetic_limits) == limits);
+    CHECK(rig->del.lastState.at(ch::kinetic_planner) == planner);
+    CHECK(rig->del.lastState.at(ch::machine_modes) == modes);
+    CHECK(rig->hub->cfgGen() == gen);
+    CHECK(g_forceHomes == 0);
+
+    // Driving: a jog, the pattern's share-of-window knobs, the oscillator.
+    CHECK(answerTo(*rig, ch::move, moveTo(100.0f)).echoed);
+    CHECK(answerTo(*rig, ch::pattern_cmd, oneKey(3, IntentValue::ofF32(40.0f))).echoed);   // speed
+    CHECK(answerTo(*rig, ch::pattern_cmd, oneKey(5, IntentValue::ofF32(60.0f))).echoed);   // stroke
+    CHECK(answerTo(*rig, ch::osc_set, oneKey(2, IntentValue::ofF32(2.0f))).echoed);        // frequency
+    // Streams publish at control: the hub's PUBLISH grant reads this floor.
+    for (const uint16_t s : {ch::motion_input, ch::motion_segment, ch::osc_drive}) {
+        CAPTURE(s);
+        CHECK(rig->catalog.find(s)->access == kControl);
+    }
+
+    auto run = std::make_unique<Rig>(kControl);
+    const Answer started = answerTo(*run, ch::pattern_cmd, oneKey(1, IntentValue::ofBool(true)));
+    CHECK(started.echoed);
+    CHECK_FALSE(started.nack.has_value());
+    CHECK(answerTo(*run, ch::pattern_cmd, oneKey(1, IntentValue::ofBool(false))).echoed);
+}
+
+TEST_CASE("VD-TIER-2: configure changes every setting control was refused") {
+    auto rig = std::make_unique<Rig>(kConfigure);
+    for (const SettingWrite& w : settingWrites()) {
+        CAPTURE(w.channel);
+        const Answer a = answerTo(*rig, w.channel, w.value);
+        CHECK_FALSE(a.nack.has_value());
+        CHECK(a.echoed);
+    }
+    CHECK(g_forceHomes == 1);
+}
+
+TEST_CASE("VD-TIER-3: watch halts and pauses; it neither drives nor configures") {
+    auto rig = std::make_unique<Rig>(kWatch, 0.0f, false, true);
+    Answer a = answerTo(*rig, ch::move, moveTo(100.0f));
+    CHECK(a.nack == NackCode::NOT_CONTROLLER);
+    CHECK(a.detail == "needs control");
+    a = answerTo(*rig, ch::config_set, oneKey(2, IntentValue::ofF32(300.0f)));
+    CHECK(a.nack == NackCode::ACCESS_DENIED);
+    CHECK(a.detail == "needs configure");
+    a = answerTo(*rig, channels::safety_intents, safetyOp(safety_ops::pause));
+    CHECK_FALSE(a.nack.has_value());
+    CHECK(rig->hub->pauseLatched());
+    a = answerTo(*rig, channels::safety_intents, safetyOp(safety_ops::estop));
+    CHECK_FALSE(a.nack.has_value());
+    CHECK(rig->hub->estopLatched());
+}
+
+TEST_CASE("VD-TIER-4: a control session asks configure, a PAIR double press grants it in place, its setting lands") {
+    auto rig = std::make_unique<Rig>(kControl);
+    REQUIRE(answerTo(*rig, ch::config_set, oneKey(3, IntentValue::ofF32(60.0f))).nack == NackCode::ACCESS_DENIED);
+    REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
+    rig->step();
+    CHECK_FALSE(rig->del.granted.has_value());
+    CHECK(rig->device.pairLook() == PairLook::request);
+    pair(*rig, button::PairGesture::double_press);
+    rig->step();
+    REQUIRE(rig->del.granted.has_value());
+    CHECK(*rig->del.granted == kConfigure);
+    CHECK(rig->hub->pairing().hasConfigureToken());
+    const Answer a = answerTo(*rig, ch::config_set, oneKey(3, IntentValue::ofF32(60.0f)));
+    CHECK_FALSE(a.nack.has_value());
+    CHECK(a.echoed);
+    CHECK(rig->device.config().jog_speed == doctest::Approx(60.0f));
 }

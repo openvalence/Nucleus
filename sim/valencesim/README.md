@@ -37,7 +37,7 @@ socket, no clock and no thread. Two fronts drive it:
 | `/uitoken` token: slot table, rate gate, HMAC derivation | `flagship_p4/src/hub/UiTokenTable.h`, compiled verbatim | real |
 | `/uitoken` endpoint | `src/SimUiToken.cpp` (`serve`), on IXWebSocket's HTTP server in the exe and `integral_http` in wasm, a `std::mutex` for the board's spinlock | same contract; the exe binds 127.0.0.1 |
 | Config and tuning persistence (0x1000, 0x1030, 0x1120, 0x1122, cfg_gen) | `StoredState.h` codec, compiled verbatim | persisted: `PREFIX.cfg` holds the board's NVS `cfg` blob; a file stands in for NVS |
-| Push-to-pair gesture | `--pairing-window` opens the hub's presence window at boot; in wasm, `integral_pair_press` is a PAIR press the delegate takes as the board's (`ValenceDevice::serviceButtons`) | the press, not the button: no debounce or hold core (bd val-sf7.6) |
+| Push-to-pair gesture | `--pairing-window` opens the hub's presence window at boot; in wasm, `integral_pair_press` is a PAIR press and `integral_pair_double_press` a double press, each taken by the delegate as the board's (`ValenceDevice::servicePair`) | the press, not the button: no debounce or hold core (bd val-sf7.6) |
 | Geiger log lines from device code | `lib/geiger`'s host platform layer (`GEIGER_HOST_PLATFORM`), drained on the hub thread into the sim's log | real: device lines print beside the sim's own, stamped with the hub clock |
 | Log channel 0x0008 | a Geiger sink in `src/main.cpp`, Warn and above into `Hub::publishLog`, as the board's `system/ValenceLogBridge.cpp` | same contract: Warn floor, the hub's own truncation and replay ring; no task-name gate, because every drain here is on the hub thread |
 | Motor switch (`system/MotorSwitch.h` state machine) | `src/SimMotorSwitch.cpp` | absent by default: power on from boot, hub-status reads `on`, ESTOP is a halt that keeps home (`estop_cuts_power` false). `--motor-switch` runs the board's own machine on the hub clock with healthy readings (an RC pre-charge into 150 uF through 100 R), declares `estop_cuts_power` true, and enables at boot; `--msw-fault` injects one fault-line window |
@@ -147,6 +147,7 @@ out stays valid until the next call of the same function.
 | `integral_state_get(&out, &len)` | The persisted state as one blob: repeated `[u8 key][u32 LE length][bytes]`, keys 1 cfg, 2 presets, 3 hub_iid, the board's NVS blobs |
 | `integral_destroy()` | Closes every client. The machine stays in memory; drop the module to free it |
 | `integral_pair_press()` | One PAIR press: the presence window opens at the next hub tick |
+| `integral_pair_double_press()` | A PAIR double press: the one pending configure ask is granted configure at the next hub tick (Valence RFC-114) |
 | `integral_datagram(data, len, src_ipv4, ws_port, &out)` | One UDP datagram the host received on its SPEC 13.8 port, `src_ipv4` in host order, `ws_port` the WebSocket port it serves this machine on. Returns the length of the reply at `*out`, 0 for none, after the ESTOP hook (RFC-053) and the per-source limiter; send the reply to the datagram's source |
 
 Log lines (the boot banner with the etag, device GLOG lines) arrive on the

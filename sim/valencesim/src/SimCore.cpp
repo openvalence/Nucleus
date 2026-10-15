@@ -23,14 +23,15 @@ namespace valence {
 uint32_t deviceFreeHeapBytes() { return 0; }
 LinkTcp deviceLinkTcp() { return {}; }
 // The twin has no HOME button: its reboot has no meaning for a desktop
-// process. PAIR is the front's simPairPress(); the pairing_window option opens
-// the same window at boot.
+// process. PAIR is the front's simPairPress() and simPairDoublePress(); the
+// pairing_window option opens the same window at boot.
 namespace {
 button::PairGesture g_pairPress = button::PairGesture::none;
 }  // namespace
 button::Gesture homeButtonTake() { return button::Gesture::none; }
 button::PairGesture pairButtonTake() { return std::exchange(g_pairPress, button::PairGesture::none); }
 void simPairPress() { g_pairPress = button::PairGesture::press; }
+void simPairDoublePress() { g_pairPress = button::PairGesture::double_press; }
 // The twin has no drive: DRV_ALM never asserts.
 bool driveAlarmTake() { return false; }
 // The twin has no e-stop wired: it reads present and released, always.

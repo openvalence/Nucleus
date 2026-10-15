@@ -332,6 +332,10 @@ EMSCRIPTEN_KEEPALIVE int integral_http(const char* method, const char* path, con
 // tick, as the board's press opens it.
 EMSCRIPTEN_KEEPALIVE void integral_pair_press() { valence::simPairPress(); }
 
+// The PAIR button, pressed twice: the one pending configure ask is approved
+// at the next hub tick, as the board's double press approves it.
+EMSCRIPTEN_KEEPALIVE void integral_pair_double_press() { valence::simPairDoublePress(); }
+
 // One UDP datagram the host received on its SPEC 13.8 port from `src_ipv4`
 // (host order), `ws_port` the WebSocket port it serves this machine on. The
 // reply's length with *out set, 0 for none: an ESTOP datagram (consumed, maybe

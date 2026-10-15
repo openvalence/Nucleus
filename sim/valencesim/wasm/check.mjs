@@ -1,7 +1,8 @@
 // check.mjs -- Integral's in-process front, end to end in node: boot, a
 // valence-js session over an in-memory socket, the catalog against its etag,
-// one jog that moves the carriage, a discovery probe before and after a PAIR
-// press. Exit 0 pass, 1 fail.
+// one jog that moves the carriage, a config-set a control session is refused
+// and the configure ask a PAIR double press grants (RFC-114), a discovery
+// probe before and after a PAIR press. Exit 0 pass, 1 fail.
 //
 //   node sim/valencesim/wasm/check.mjs [build/integral.js] [--etag HEX]
 //
@@ -16,7 +17,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const flag = (f, d) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : d; };
 const modPath = resolve(args.find((a) => a.endsWith('.js')) || here + '/build/integral.js');
-const ETAG = flag('--etag', '18d4fd5ec0de7e5a');
+const ETAG = flag('--etag', 'b310da1445ea519a');
 
 let fails = 0;
 const ok = (name, cond, extra) => {
@@ -125,7 +126,11 @@ const s = createSession({
   subscriptions: [[CH.SAFETY, 0, PRIORITY.critical], [CH.MOTION, 50, PRIORITY.elevated]],
 });
 let meta = null;
+const nacks = [];
+let grant = null;
 s.on('catalog', (e, m, mt) => { meta = mt; });
+s.on('nack', (n) => nacks.push(n));
+s.on('pairGrant', (g) => { grant = g; });
 s.on('state', (ch, v) => { if (ch === CH.MOTION && v && Number.isFinite(v.pos_10um)) motion.push(v.pos_10um); });
 
 const until = (pred, ms) => new Promise((res) => {
@@ -152,6 +157,24 @@ if (live) {
   if (move) await s.sendIntent(move.id, { 1: 80 }).catch((e) => ok('jog accepted', false, e.message));
   const moved = await until(() => motion.length && Math.abs(motion.at(-1) - 80) < 0.5, 8000);
   ok('jog lands at 80 mm', moved, p0 + ' -> ' + motion.at(-1) + ' mm');
+
+  // ---- configure tier: control drives, only configure sets (SPEC 12.2) ------
+  const cfg = (s.catalog || []).find((e) => e.name === 'config-set');
+  ok('catalog carries "config-set" at configure', !!cfg && cfg.access === 2, cfg && 'access=' + cfg.access);
+  if (cfg) {
+    const refused = await s.sendIntent(cfg.id, { 3: 60 }).then(() => false, () => true);
+    const n = nacks.at(-1);
+    ok('control: config-set refused ACCESS_DENIED "needs configure"', refused && !!n && n.name === 'ACCESS_DENIED'
+      && n.detail === 'needs configure', n && n.name + ' ' + n.detail);
+    ok('configure ask sent', s.sendPairReq({ role: 2 }));
+    await until(() => false, 50);
+    ok('no grant before the double press', grant === null);
+    M._integral_pair_double_press();
+    ok('PAIR double press grants configure', await until(() => grant && grant.role === 2, 2000),
+      grant && 'role=' + grant.role);
+    ok('session upgraded in place', s.state.roles === 2, 'roles=' + s.state.roles);
+    ok('configure: config-set accepted', await s.sendIntent(cfg.id, { 3: 60 }).then(() => true, (e) => (ok('', false, e.message), false)));
+  }
   s.close();
 }
 

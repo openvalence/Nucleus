@@ -27,6 +27,13 @@
 //   changing the hub in lockstep.
 //   Wire sizes are noted per entry so a budget overrun is caught by eye;
 //   there is no packed struct to static_assert against.
+//   Write tiers (SPEC 12.2, operator ruling 2026-10-15): a write that changes
+//   a machine setting or limit needs `configure` (window, rail, ceilings,
+//   Kinetic tuning, homing, drive, network, trust, persisted config).
+//   `control` drives inside those limits: streams, jog, home, patterns and
+//   their share-of-window knobs, the oscillator, presets, source ownership.
+//   pause and estop stay `watch`. test_valence_device's VD-TIER-MATRIX holds
+//   every writable entry to this; a new one fails it until classified there.
 // See: Valence spec/AUTHORING.md ("you want X on screen -> you author Y" —
 // read it BEFORE editing annotations here), SPEC.md and registry.yaml
 // (Valence repo).
@@ -2188,7 +2195,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
     };
 
-    // ---- "config-set" — INTENT, control, 10 Hz ------------------------------
+    // ---- "config-set" — INTENT, configure, 10 Hz ----------------------------
     // Every field optional; present keys are applied. cfg_gen bumps on
     // success. Key 7 "input_jerk" and key 8 "max_rail" (below) are
     // append-only additions — keys 1-6 keep their meaning exactly, and
@@ -2196,7 +2203,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     auto addConfigSet = [&]() {
     c.addEntry({.id = ch::config_set, .name = "config-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
-                .access = AccessLevel::control, .maxRateHz = 10.0f,
+                .access = AccessLevel::configure, .maxRateHz = 10.0f,
                 .defaultPriority = Priority::normal});
     //
     // Each key advertises the SAME bounds its 0x0081 twin does, so a client
@@ -2264,8 +2271,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     //
     // *** OP 2 (force_home) RELEASES AN E-STOP LATCH INTO PAUSE. *** That is exactly why
     // RFC-025 placed these under safety review rather than in a convenience
-    // bucket, and why they are `control` and rate-capped like every other op
-    // here. Op 2 declares the machine homed WITHOUT a homing cycle, so the
+    // bucket, and why they are rate-capped like every other op here. Op 2
+    // needs `configure` (its stroke is a limit, SPEC 12.2). Op 2 declares the machine homed WITHOUT a homing cycle, so the
     // stroke window it hands the arbiter is an ASSERTION, not a measurement —
     // on a machine with a motor attached that is a real collision hazard; the
     // hazard note's one home is motionForceHome() in ValenceMotion.h.
@@ -2285,14 +2292,15 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                             .role = "action.home"},
                            {"reserved", "home", "force_home"},
-                           {AccessLevel::control,   // 0 (placeholder, never an op)
-                            AccessLevel::control,   // 1 home
-                            AccessLevel::control}); // 2 force_home  — RELEASES THE E-STOP LATCH
+                           {AccessLevel::configure,   // 0 (placeholder, never an op)
+                            AccessLevel::control,     // 1 home
+                            AccessLevel::configure}); // 2 force_home: asserts the stroke; RELEASES THE E-STOP LATCH
     c.addSchemaField({.key = 2, .name = "stroke", .type = CborFieldType::f32_t, .unit = "mm",
-                      .hasMin = true, .hasMax = true, .min = 1.0f, .max = 2000.0f});
+                      .hasMin = true, .hasMax = true, .min = 1.0f, .max = 2000.0f,
+                      .access = AccessLevel::configure, .hasAccess = true});
     };
 
-    // ---- "modes-set" — INTENT, control, 5 Hz --------------------------------
+    // ---- "modes-set" — INTENT, configure, 5 Hz ------------------------------
     // The write half of 0x008A. Every key optional; present keys applied,
     // and the ECHO carries the POST-CLAMP value the handler actually took.
     //
@@ -2305,7 +2313,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     auto addModesSet = [&]() {
     c.addEntry({.id = ch::modes_set, .name = "modes-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
-                .access = AccessLevel::control, .maxRateHz = 5.0f,
+                .access = AccessLevel::configure, .maxRateHz = 5.0f,
                 .defaultPriority = Priority::normal});
     // KEY 1 IS DELIBERATELY UNUSED. It held "blend_mode"; see the field
     // comment on machine-modes' `blend_mode_reserved`. ValenceDevice::
@@ -2341,13 +2349,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 9, .name = "home_speed", .type = CborFieldType::f32_t, .unit = "mm/s",
                       .hasMin = true, .hasMax = true, .min = ceiling::home_speed_min, .max = ceiling::speed_max});
-    // RFC-053 item 3: configure tier to change, above the entry's control.
     c.addSchemaField({.key = 10, .name = "datagram_estop", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
-                      .access = AccessLevel::configure, .hasAccess = true});
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     };
 
-    // ---- "kinetic-set" — INTENT, control, 5 Hz ---------------------------
+    // ---- "kinetic-set" — INTENT, configure, 5 Hz -------------------------
     // The single writer behind both kinetic-* cards: keys 1..8, contiguous,
     // 1-3 kinetic-limits' and 4-8 kinetic-planner's (RFC-108). Every key
     // optional, only the keys PRESENT are applied, and each echoes the value
@@ -2360,7 +2366,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     auto addKineticSet = [&]() {
     c.addEntry({.id = ch::kinetic_set, .name = "kinetic-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
-                .access = AccessLevel::control, .maxRateHz = 5.0f,
+                .access = AccessLevel::configure, .maxRateHz = 5.0f,
                 .defaultPriority = Priority::normal});
     c.addSchemaField({.key = 1, .name = "jmax_ovr", .type = CborFieldType::f32_t, .unit = "1/s3",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2000000.0f});
@@ -2380,7 +2386,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     };
 
-    // ---- "drive-set" -- INTENT, the writer behind drive-tune ----------------
+    // ---- "drive-set" -- INTENT, configure, the writer behind drive-tune -----
     // 1 Hz, not 5: every accepted write reaches the drive over a shared 19200
     // Modbus wire that the setpoint stream also uses, and in step/dir mode it
     // costs a four-write enable/save/disable sequence. A human turning a knob
@@ -2388,7 +2394,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     auto addDriveSet = [&]() {
     c.addEntry({.id = ch::drive_set, .name = "drive-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
-                .access = AccessLevel::control, .maxRateHz = 1.0f,
+                .access = AccessLevel::configure, .maxRateHz = 1.0f,
                 .defaultPriority = Priority::normal});
     c.addSchemaField({.key = 1, .name = "accel_reg", .type = CborFieldType::uint_t,
                       .unit = "rpm/s",
@@ -2468,10 +2474,10 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                             .role = "action.admin"},
                            {"reserved", "clear_fault", "save_config", "servo_scan"},
-                           {AccessLevel::control,   // 0 placeholder, never an op
-                            AccessLevel::control,   // 1 clear_fault
-                            AccessLevel::control,   // 2 save_config
-                            AccessLevel::control}); // 3 servo_scan
+                           {AccessLevel::configure,   // 0 placeholder, never an op
+                            AccessLevel::control,     // 1 clear_fault
+                            AccessLevel::configure,   // 2 save_config: persists configuration
+                            AccessLevel::configure}); // 3 servo_scan: drive commissioning
     };
 
     // ---- "pattern-advanced-cmd" — INTENT, control, 20 Hz --------------------
