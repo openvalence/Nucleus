@@ -145,7 +145,7 @@ private:
             {"virtual", -42, true}, {"Workshop", -48, true}, {"Workshop-Lab", -55, true},
             {"Guest", -61, false}, {"Neighbor", -67, true}, {"Workshop", -70, true},
             {"Printer-Direct", -72, true}, {"Cafe", -75, false}, {"Upstairs", -78, true},
-            {"Linksys", -83, true}, {"", -50, true}, {"Garage", -88, true},
+            {"Attic", -83, true}, {"", -50, true}, {"Garage", -88, true},
         }};
         net::SavedNetworks _list{};
         uint8_t _live = 0;
