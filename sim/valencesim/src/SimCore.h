@@ -30,6 +30,7 @@
 #include "hub/ValenceCatalog.h"
 #include "hub/ValenceDevice.h"
 #include "patterns/ValencePattern.h"
+#include "system/ButtonGesture.h"
 
 namespace valence {
 
@@ -40,6 +41,18 @@ void simPairPress();
 // The PAIR button, pressed twice: the one pending configure ask is approved at
 // the next hub tick (Valence RFC-114, ValenceDevice::servicePair).
 void simPairDoublePress();
+// The dev tool's buttons (NeutrinoObserver): a gesture the board's own
+// ButtonGesture cores resolved from the button's level, parked for the
+// delegate's next tick as the board's BoardIo task parks it. The thread that
+// calls pass().
+void simPairGesture(button::PairGesture g);
+void simHomeGesture(button::Gesture g);
+// The external e-stop's contacts: pressed until released. The thread that
+// calls pass().
+void simEstopPressed(bool pressed);
+// One DRV_ALM assertion, taken at the next hub tick. The thread that calls
+// pass().
+void simDriveAlarm();
 
 // The board's three NVS keys, as blobs a front stores where it likes.
 enum class SimBlob : uint8_t { cfg = 1, presets = 2, iid = 3 };
@@ -79,6 +92,14 @@ public:
 
     Hub& hub() { return *_hub; }
     SimUiToken& minter() { return _minter; }
+    const ValenceDevice& device() const { return _device; }
+    const Catalog32& catalog() const { return _catalog; }
+    // A HOME hold ran its brake and latched ESTOP: the board restarts now.
+    bool rebootDue() const { return _device.rebootDue(); }
+    // The board's rebootNow() up to the restart: pending blobs stored, every
+    // session GOODBYE REBOOTING. The front then exits; whoever launched it
+    // starts it again.
+    void prepareReboot();
     bench::SessionLog log;
 
 private:

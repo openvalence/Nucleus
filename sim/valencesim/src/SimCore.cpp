@@ -22,22 +22,29 @@ namespace valence {
 
 uint32_t deviceFreeHeapBytes() { return 0; }
 LinkTcp deviceLinkTcp() { return {}; }
-// The twin has no HOME button: its reboot has no meaning for a desktop
-// process. PAIR is the front's simPairPress() and simPairDoublePress(); the
-// pairing_window option opens the same window at boot.
+// The buttons, the e-stop contacts and DRV_ALM are the front's: the wasm
+// front presses PAIR (simPairPress, simPairDoublePress), the native front's
+// dev tool works every one (NeutrinoObserver). Untouched, HOME never fires,
+// the e-stop reads present and released and DRV_ALM never asserts.
 namespace {
 button::PairGesture g_pairPress = button::PairGesture::none;
+button::Gesture g_homePress = button::Gesture::none;
+bool g_estopPressed = false;
+bool g_driveAlarm = false;
 }  // namespace
-button::Gesture homeButtonTake() { return button::Gesture::none; }
+button::Gesture homeButtonTake() { return std::exchange(g_homePress, button::Gesture::none); }
 button::PairGesture pairButtonTake() { return std::exchange(g_pairPress, button::PairGesture::none); }
 void simPairPress() { g_pairPress = button::PairGesture::press; }
 void simPairDoublePress() { g_pairPress = button::PairGesture::double_press; }
-// The twin has no drive: DRV_ALM never asserts.
-bool driveAlarmTake() { return false; }
-// The twin has no e-stop wired: it reads present and released, always.
+void simPairGesture(button::PairGesture g) { g_pairPress = g; }
+void simHomeGesture(button::Gesture g) { g_homePress = g; }
+void simEstopPressed(bool pressed) { g_estopPressed = pressed; }
+void simDriveAlarm() { g_driveAlarm = true; }
+bool driveAlarmTake() { return std::exchange(g_driveAlarm, false); }
 estop::Reading estopInputRead() {
     estop::Reading r;
     r.known = true;
+    r.state = g_estopPressed ? estop::Contacts::pressed : estop::Contacts::released;
     return r;
 }
 
@@ -195,6 +202,15 @@ bool SimCore::begin(const SimConfig& opt, IClock& clock, ISimStore& store) {
         log.logf('W', "valencesim: --pairing-window: presence window open (the gesture's twin)");
     }
     return true;
+}
+
+void SimCore::prepareReboot() {
+    const uint8_t due = _device.takePendingPersist();
+    std::span<std::byte> scratch(_scratch);
+    if (due & kPersistConfig) _store->save(SimBlob::cfg, scratch.first(_device.encodeConfigBlob(scratch, _hub->cfgGen())));
+    if (due & kPersistPresets) _store->save(SimBlob::presets, scratch.first(_device.encodePresetsBlob(scratch)));
+    _hub->goodbyeAll(NackCode::REBOOTING);
+    log.logf('W', "valencesim: rebooting: HOME hold");
 }
 
 void SimCore::pass(uint64_t nowUs, const std::function<void(uint32_t)>& pump) {

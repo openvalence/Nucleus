@@ -8,6 +8,7 @@
 // See: SimMotion.cpp, flagship_p4/src/motion/ValenceMotion.h
 
 #include <cstdint>
+#include <span>
 
 namespace valence {
 
@@ -31,5 +32,10 @@ void simMotionSetRailEndAt(float at_mm);
 // force HUB-late episodes (planned late, arrived on time). 0, the default,
 // plans at arrival. SIM-ONLY: the board has no such knob.
 void simMotionSetPlanDelayMs(uint32_t ms);
+
+// The plan strip as last published (MotionArbiter::publishedStrip()): the
+// position in mm at t0_us + i ms for i in [0, n), n 0 or out.size(). For the
+// dev tool's rail.
+uint16_t simMotionStrip(uint64_t& t0_us, std::span<float> out);
 
 }  // namespace valence

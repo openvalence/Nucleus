@@ -19,6 +19,7 @@
 
 #include "SimMotion.h"
 
+#include <algorithm>
 #include <array>
 #include <optional>
 
@@ -226,6 +227,13 @@ void simMotionTick(uint64_t now_us) { g_sim.tick(now_us); }
 void simMotionSetHomeSenseAt(float at_mm) { g_sim.placeHomeStop(at_mm); }
 void simMotionSetRailEndAt(float at_mm) { g_sim.placeFarStop(at_mm); }
 void simMotionSetPlanDelayMs(uint32_t ms) { g_sim.setPlanDelayUs(uint64_t(ms) * 1000u); }
+uint16_t simMotionStrip(uint64_t& t0_us, std::span<float> out) {
+    const auto s = g_sim.arbiter().publishedStrip();
+    t0_us = s.t0_us;
+    const size_t n = std::min<size_t>(s.n, out.size());
+    std::copy_n(s.p_mm.begin(), n, out.begin());
+    return uint16_t(n);
+}
 
 // ---- motion/ValenceMotion.h -------------------------------------------------
 

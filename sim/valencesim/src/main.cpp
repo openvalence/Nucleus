@@ -6,7 +6,7 @@
 //              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
 //              [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]] [--plan-delay-ms N]
 //              [--uncommissioned] [--no-discovery] [--discovery-port N]
-//              [--headless] [--no-mdns] [--enforce]
+//              [--devtool-port N] [--exit-with-stdin] [--headless] [--no-mdns] [--enforce]
 //
 // Constraints:
 // - HOST-ONLY: never touches a device, never deploys, no pio.
@@ -31,6 +31,12 @@
 //   as 8 bytes little-endian. Each is written to a temp file and renamed over
 //   the old one so a kill mid-write leaves the previous blob whole. PREFIX
 //   defaults to valencesim-state beside the exe.
+// - THE DEV TOOL CHANNEL (--devtool-port) is the only way in for the
+//   physical inputs and the network faults; its threads never reach SimCore
+//   (NeutrinoObserver.h). A HOME hold reboots: the run ends with
+//   kRebootExitCode for whoever launched it to start it again.
+// - stdout carries every log line and blocks when full: a launcher that does
+//   not read it must discard it (the dev tool reads the log off its channel).
 // See: sim/valencesim/README.md
 
 #include <algorithm>
@@ -57,13 +63,17 @@
 #include <timeapi.h>
 #endif
 
+#include "NeutrinoObserver.h"
+#include "NeutrinoWsPort.h"
 #include "SimCore.h"
 #include "hub/ValenceDiscovery.h"
 #include "hub/ValenceEstopDatagram.h"
 #include "motion/ValenceMotion.h"
-#include "net/WsServerPort.h"
 
 namespace {
+
+// The run ended on a HOME hold: the board restarts here, the launcher does.
+constexpr int kRebootExitCode = 75;
 
 std::atomic<bool> g_stop{false};
 void onSignal(int) { g_stop = true; }
@@ -137,6 +147,8 @@ struct Options {
     std::string statePrefix;   // empty = valencesim-state beside the exe
     bool discovery = true;
     uint16_t discoveryPort = uint16_t(valence::udp_discovery::port);
+    uint16_t devtoolPort = 0;   // --devtool-port: 0 is no dev tool channel
+    bool exitWithStdin = false; // --exit-with-stdin: stdin closing ends the run
 };
 
 bool parseArgs(int argc, char** argv, Options& o) {
@@ -160,6 +172,8 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (!std::strcmp(a, "--state") && hasNext) o.statePrefix = argv[++i];
         else if (!std::strcmp(a, "--no-discovery")) o.discovery = false;
         else if (!std::strcmp(a, "--discovery-port") && hasNext) o.discoveryPort = uint16_t(std::atoi(argv[++i]));
+        else if (!std::strcmp(a, "--devtool-port") && hasNext) o.devtoolPort = uint16_t(std::atoi(argv[++i]));
+        else if (!std::strcmp(a, "--exit-with-stdin")) o.exitWithStdin = true;
         // No TUI and no mDNS responder exist, and --enforce names what is now
         // the only posture; all three are accepted so older command lines run
         // unchanged.
@@ -271,12 +285,22 @@ int main(int argc, char** argv) {
                      "                  [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]\n"
                      "                  [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]] [--plan-delay-ms N]\n"
                      "                  [--uncommissioned] [--no-discovery] [--discovery-port N]\n"
-                     "                  [--headless] [--no-mdns] [--enforce]\n");
+                     "                  [--devtool-port N] [--exit-with-stdin] [--headless] [--no-mdns] [--enforce]\n");
         return 2;
     }
 
     ix::initNetSystem();
     std::signal(SIGINT, onSignal);
+    if (opt.exitWithStdin) {
+        // The launcher holds our stdin: its exit, however it ends, closes the
+        // pipe, and the run ends with it. Detached: it may still be blocked in
+        // the read when main returns.
+        std::thread([] {
+            while (std::getchar() != EOF) {
+            }
+            g_stop = true;
+        }).detach();
+    }
 #ifndef _WIN32
     // macOS has no MSG_NOSIGNAL and IXWebSocket sets SO_NOSIGPIPE only on
     // sockets it connects, never on accepted ones: a client that drops
@@ -310,7 +334,7 @@ int main(int argc, char** argv) {
         log.logf('W', "valencesim: --no-estop-udp: ESTOP datagrams are dropped, never latched");
     }
 
-    bench::ValenceBenchWsPort port;
+    valence::NeutrinoWsPort port;
     if (!port.begin(&hub, opt.wsPort, &log, opt.bindHost)) {
         std::fprintf(stderr, "valencesim: WS listen failed on %s:%u\n", opt.bindHost.c_str(), unsigned(opt.wsPort));
         return 1;
@@ -326,15 +350,37 @@ int main(int argc, char** argv) {
         log.logf('I', "valencesim: GET /uitoken on 127.0.0.1:%u", unsigned(opt.httpPort));
     }
 
+    valence::NeutrinoObserver observer;
+    if (opt.devtoolPort != 0 && !observer.begin(*core, port, opt.devtoolPort, opt.wsPort, opt.httpPort, err)) {
+        std::fprintf(stderr, "valencesim: devtool listen failed on 127.0.0.1:%u -- %s\n", unsigned(opt.devtoolPort),
+                     err.c_str());
+        return 1;
+    }
+
     const auto pump = [&](uint32_t nowMs) {
         port.loop(nowMs);
-        discovery.poll(hub, nowMs);
+        if (!observer.wifiDown()) discovery.poll(hub, nowMs);
     };
     TickPacer pacer(std::chrono::microseconds(valence::kMotionTickUs));
     if (!pacer.precise()) log.logf('W', "valencesim: no high-resolution timer, the motion tick runs coarse");
     const auto start = std::chrono::steady_clock::now();
+    int exitCode = 0;
+    std::optional<uint64_t> rebootAtUs;
     while (!g_stop) {
-        core->pass(g_clock.nowUs64(), pump);
+        const uint64_t nowUs = g_clock.nowUs64();
+        core->pass(nowUs, pump);
+        port.tick(nowUs);
+        if (opt.devtoolPort != 0) observer.pass(nowUs);
+        // The board's rebootNow(): blobs stored, GOODBYE REBOOTING, 200 ms
+        // for the frames to leave, then the restart.
+        if (!rebootAtUs && core->rebootDue()) {
+            core->prepareReboot();
+            rebootAtUs = nowUs + 200000u;
+        }
+        if (rebootAtUs && nowUs >= *rebootAtUs) {
+            exitCode = kRebootExitCode;
+            break;
+        }
         if (opt.durationS > 0 &&
             std::chrono::steady_clock::now() - start > std::chrono::seconds(opt.durationS)) {
             break;
@@ -343,6 +389,7 @@ int main(int argc, char** argv) {
     }
 
     geiger::drainToSinks();
+    observer.stop();
     if (http) http->stop();
     discovery.end();
     port.stop();
@@ -350,5 +397,5 @@ int main(int argc, char** argv) {
     timeEndPeriod(1);
 #endif
     ix::uninitNetSystem();
-    return 0;
+    return exitCode;
 }

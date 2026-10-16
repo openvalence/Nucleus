@@ -39,6 +39,8 @@ add_executable(valencesim
     "${NUCLEUS_ROOT}/flagship_p4/src/patterns/PatternEngine.cpp"
     "${NUCLEUS_ROOT}/flagship_p4/src/patterns/advanced/AdvancedPattern.cpp"
     src/SimUiToken.cpp
+    src/NeutrinoWsPort.cpp
+    src/NeutrinoObserver.cpp
     "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceDevice.cpp"
     "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceDiscovery.cpp"
     "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceEstopDatagram.cpp"

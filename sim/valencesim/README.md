@@ -13,7 +13,7 @@ socket, no clock and no thread. Two fronts drive it:
 
 | Front | Where | Used by |
 |---|---|---|
-| Native exe `valencesim` | `src/main.cpp`, `CMakeLists.txt` | Phosphor's test suites (`test/valence-sim.mjs` and the rest), the bench, the twin's pin recorder: a WebSocket server, `/uitoken` on HTTP, UDP discovery, files for state, the wall clock |
+| Native exe `valencesim` | `src/main.cpp`, `CMakeLists.txt` | Phosphor's test suites (`test/valence-sim.mjs` and the rest), the bench, the twin's pin recorder, the Neutrino dev tool (Phosphor `neutrino/`): a WebSocket server, `/uitoken` on HTTP, UDP discovery, files for state, the wall clock, the dev tool channel |
 | `integral.wasm` + `integral.js` | `wasm/integral.cpp`, `wasm/CMakeLists.txt` | Phosphor's built-in machine, in process on every platform: a worker drives it over a MessagePort (bd val-atu, Phosphor ph-5u0g.1) |
 
 ## What is real and what is not
@@ -32,12 +32,12 @@ socket, no clock and no thread. Two fronts drive it:
 | Durable hub identity (WELCOME identity key 5, SPEC §6.3) | minted once like the board's `hub_iid` NVS key | persisted: `PREFIX.iid`, 8 bytes little-endian |
 | Pattern presets (0x5220) | `PatternPresetStore` inside the delegate | persisted: `PREFIX.presets` holds the board's NVS `presets` blob, same debounce |
 | `background_run` | the delegate's `PatternSettings` | in memory, same as the board: persisting it waits on an operator ruling (bd val-wcm) |
-| WebSocket port | native: `../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home; wasm: the host's MessagePort through `integral_send`/`integral_poll` | real host binding |
+| WebSocket port | native: `src/NeutrinoWsPort.cpp`, Valence Bench's per-connection transport (`../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home) behind a `NeutrinoLink` per client; its accept, close and sweep logic is a copy of the bench port's (drift seam, bd val-sf7.7); wasm: the host's MessagePort through `integral_send`/`integral_poll` | real host binding |
 | UDP discovery responder (SPEC 13.8) | `flagship_p4/src/hub/ValenceDiscovery.cpp`, compiled verbatim (Winsock or POSIX here, lwIP on the board) | real: answers DISCOVER_PROBE on the registry port with the twin's name, `hub_instance_id`, WS port, version, etag and pairing window. The wasm front has no socket: its host hands each datagram to `integral_datagram`, which runs the `.h` responder and the ESTOP hook |
 | `/uitoken` token: slot table, rate gate, HMAC derivation | `flagship_p4/src/hub/UiTokenTable.h`, compiled verbatim | real |
 | `/uitoken` endpoint | `src/SimUiToken.cpp` (`serve`), on IXWebSocket's HTTP server in the exe and `integral_http` in wasm, a `std::mutex` for the board's spinlock | same contract; the exe binds 127.0.0.1 |
 | Config and tuning persistence (0x1000, 0x1030, 0x1120, 0x1122, cfg_gen) | `StoredState.h` codec, compiled verbatim | persisted: `PREFIX.cfg` holds the board's NVS `cfg` blob; a file stands in for NVS |
-| Push-to-pair gesture | `--pairing-window` opens the hub's presence window at boot; in wasm, `integral_pair_press` is a PAIR press and `integral_pair_double_press` a double press, each taken by the delegate as the board's (`ValenceDevice::servicePair`) | the press, not the button: no debounce or hold core (bd val-sf7.6) |
+| Push-to-pair gesture | `--pairing-window` opens the hub's presence window at boot; in wasm, `integral_pair_press` is a PAIR press and `integral_pair_double_press` a double press, each taken by the delegate as the board's (`ValenceDevice::servicePair`); natively, the dev tool channel's PAIR and HOME levels run through the board's own `system/ButtonGesture.h` cores (press, double press, the 5 s demote hold; HOME press homes, HOME hold reboots) | wasm: the press, not the button (bd val-sf7.6); native with the dev tool: the button |
 | Geiger log lines from device code | `lib/geiger`'s host platform layer (`GEIGER_HOST_PLATFORM`), drained on the hub thread into the sim's log | real: device lines print beside the sim's own, stamped with the hub clock |
 | Log channel 0x0008 | a Geiger sink in `src/main.cpp`, Warn and above into `Hub::publishLog`, as the board's `system/ValenceLogBridge.cpp` | same contract: Warn floor, the hub's own truncation and replay ring; no task-name gate, because every drain here is on the hub thread |
 | Motor switch (`system/MotorSwitch.h` state machine) | `src/SimMotorSwitch.cpp` | absent by default: power on from boot, hub-status reads `on`, ESTOP is a halt that keeps home (`estop_cuts_power` false). `--motor-switch` runs the board's own machine on the hub clock with healthy readings (an RC pre-charge into 150 uF through 100 R), declares `estop_cuts_power` true, and enables at boot; `--msw-fault` injects one fault-line window |
@@ -45,7 +45,8 @@ socket, no clock and no thread. Two fronts drive it:
 | WiFi scan (RFC-118, 0x0019/0x001A) | `SimNetStation` | a made-up neighborhood, fixed RSSI, 1.2 s per scan: `Neutrino` -42, `Workshop` -48, `Workshop-Lab` -55, `Guest` -61 open, `Neighbor` -67, `Printer-Direct` -72, `Cafe` -75 open, `Upstairs` -78, `Attic` -83, `Garage` -88 (secured unless marked open); a second `Workshop` BSSID at -70 folds in, a hidden one is left out |
 | Hub-status (0x0006) heap figure | reported as 0 | the `deviceFreeHeapBytes()` contract in `ValenceDevice.h`: 0 where the host has no meaningful answer |
 | Hub-status (0x0006) `tcp_sent` / `tcp_resent` | reported as 0 | the `deviceLinkTcp()` contract in `ValenceDevice.h`: the board counts its lwIP segments (`system/ValenceTcpTally.cpp`); the twin has no TCP stack of its own, so a client reads no loss rather than a modeled one |
-| Drive link (RS485 Modbus to the drive, `system/ValenceDriveLink.h`) and DRV_ALM | `driveAlarmTake()` in `src/main.cpp` | absent: the twin has no drive, so DRV_ALM never asserts and the delegate's drive-alarm latch never fires; the latch itself is suite `test_valence_device`'s |
+| Drive link (RS485 Modbus to the drive, `system/ValenceDriveLink.h`) and DRV_ALM | `driveAlarmTake()` in `src/SimCore.cpp` | absent: the twin has no drive; DRV_ALM asserts only when the dev tool sends `drive-alarm`, once per send, and the delegate's own latch takes it |
+| External e-stop contacts (`system/ValenceEstopInput.h`) | `estopInputRead()` in `src/SimCore.cpp` | present and released, unless the dev tool presses them (`estop down`): the delegate latches ESTOP and refuses the release until they read released, as on the board |
 
 Parity is one-way: the firmware is never edited to close a sim gap. Anything
 marked as a copy above is a drift seam and is tracked on the board.
@@ -79,7 +80,7 @@ valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--durat
            [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
            [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]] [--plan-delay-ms N]
            [--uncommissioned] [--no-discovery] [--discovery-port N]
-           [--headless] [--no-mdns] [--enforce]
+           [--devtool-port N] [--exit-with-stdin] [--headless] [--no-mdns] [--enforce]
 ```
 
 | Flag | Effect |
@@ -100,6 +101,8 @@ valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--durat
 | `--no-discovery` | no UDP discovery socket: keeps a test run off the registry port |
 | `--discovery-port N` | answer DISCOVER_PROBE on N instead of the registry's `udp_discovery.port`, so a test talks to this twin and no other. A port another process holds costs only discovery (logged), never the run |
 | `--state PREFIX` | where the persisted blobs live (`PREFIX.cfg`, `PREFIX.presets`, `PREFIX.iid`); default `valencesim-state` beside the exe. Delete `.cfg` and `.presets` for factory values; deleting `.iid` makes the twin a different hub |
+| `--devtool-port N` | open the dev tool channel on 127.0.0.1:N (below); 0 or absent, none |
+| `--exit-with-stdin` | end the run when stdin closes: a launcher holding the pipe takes the twin down with it, however it exits |
 | `--headless`, `--no-mdns`, `--enforce`, `machine` | accepted for command-line compatibility; there is no TUI and no mDNS, and the device posture is the only one |
 
 A HELLO that no pairing token and no live `/uitoken` vouches for lands at
@@ -109,6 +112,50 @@ mints `/uitoken` per connect (`acquireToken` in valence-js); run
 
 Kill any stale `valencesim` on 80/82 first, or a test talks to the wrong
 binary.
+
+## The dev tool channel
+
+Phosphor's Neutrino app (`../Phosphor/neutrino/`, bd val-sf7.7, ph-1wa3)
+launches this exe with `--devtool-port` and draws the machine from it. The
+channel is sim-only and binds 127.0.0.1, never the LAN: it carries the
+physical inputs (a PAIR button, an e-stop) that no protocol message may.
+`src/NeutrinoObserver.h` owns it; `src/NeutrinoDevtool.h` holds the
+crossings and the codec, `src/NeutrinoLink.h` the per-client fault layer.
+
+Threads: the hub thread runs SimCore and is the only caller of it, the Hub,
+motion and the links. IXWebSocket's connection threads parse a command line
+into a 64-deep input queue; the hub drains it every pass with a try-lock, so
+it never waits on them. The hub publishes a snapshot every 33 ms into a
+depth-one mailbox, again by try-lock and a swap of two buffers; a broadcaster
+thread takes it, encodes it and sends it. A snapshot the broadcaster missed
+hands its samples and log lines to the next, so the 1 ms samples arrive whole.
+
+In, one text line per message:
+
+| Line | Effect |
+|---|---|
+| `pair down`, `pair up` | the PAIR button's level, through the board's `PairButton` core: tap, double press, 5 s demote hold |
+| `home down`, `home up` | the HOME button's level, through the board's `Button` core: a press homes (needs `--home-sense-at`), a 3 s hold reboots: the run ends with exit code 75 after GOODBYE `REBOOTING`, for the launcher to start it again |
+| `estop down`, `estop up` | the external e-stop's contacts pressed or released |
+| `drive-alarm` | one DRV_ALM assertion |
+| `switch-fault` | MSW_FLT_N low for 2 s (with `--motor-switch`) |
+| `faults all\|SLOT LATENCY_MS JITTER_MS LOSS_PCT` | every client's, or one port slot's, link: one-way latency, uniform jitter on top, the share of frames retransmitted (200 ms late, holding the frames behind them: TCP never loses a frame, it delays it). A slot's knobs add to the global ones; a disconnect clears them |
+| `wifi-drop SECONDS` | nothing moves either way and discovery goes quiet for that long; `0` ends a drop |
+| `kick SLOT` | close that slot's connection |
+
+Out, JSON text: a `hello` once per connection (name, version, ports, hub
+instance id, catalog etag, size and entry list), then `snap` at 30 Hz:
+motion (`m`: the census's position, plan, target, window, rail, limits,
+flags, the motion source and the intent owner's session), the published plan
+strip (`strip`, 128 entries 1 ms apart from `t0`), the safety latch, pairing
+(presence and pairing windows, pending configure asks, the PAIR light), the
+physical levels, the Wi-Fi drop's time left, the global faults, every client
+(port slot, address, name, kind, tier, session state, RTT measured at the hub
+from a PING in to its PONG out, frames queued in the fault layer, RX drops,
+retransmits, refused and failed writes, stream bundles in and dropped, its own
+faults; sessions parked without a connection list as slot 255), the 1 ms
+samples since the last snapshot (`s`: flat `us, mm, mm/s` triples) and the log
+lines since the last.
 
 ## The wasm front
 
@@ -168,6 +215,9 @@ module's `print`/`printErr`.
   `integral_http("GET", "/uitoken")` and passes the hex token as bytes.
 
 ## Verify
+
+The dev tool channel's crossings, codec and fault link: suite
+`test_neutrino_devtool` (`pio test -e native -f native/test_neutrino_devtool`).
 
 From `../Phosphor`: `node test/pairing-roundtrip.mjs` starts its own sim. For
 the rest, start `valencesim machine --homed --duration 600`, then pass
