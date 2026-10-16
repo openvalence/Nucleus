@@ -9,6 +9,7 @@
 //   a swap, never while hub logic or socket I/O runs.
 // - THE HUB THREAD NEVER WAITS. Its side of both crossings is a try-lock: a
 //   lock the other side holds right now means "next pass", never a block.
+//   Its wake of the reader is a notify after the unlock, which waits on no one.
 // - Lossless at the mailbox: a snapshot the reader has not taken yet hands
 //   its samples and log lines to the next one (absorb), capped at
 //   kMaxSamples / kMaxLogLines.
@@ -17,7 +18,9 @@
 // See: sim/valencesim/README.md (the dev tool), NeutrinoObserver.h
 
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -224,19 +227,34 @@ public:
         if (_fresh) v.absorb(_slot);
         std::swap(_slot, v);
         _fresh = true;
+        lk.unlock();
+        _ready.notify_one();
         return true;
     }
     // Reader thread. False when nothing new was published since the last take.
     bool take(T& out) {
         std::lock_guard<std::mutex> lk(_m);
+        return takeLocked(out);
+    }
+    // Reader thread. take(), waiting up to `wait` for a publish. Do not pace
+    // the reader with a sleep instead: in a windowless Windows process a sleep
+    // rounds up to the 15.6 ms timer tick and beats against the hub's cadence.
+    bool take(T& out, std::chrono::milliseconds wait) {
+        std::unique_lock<std::mutex> lk(_m);
+        _ready.wait_for(lk, wait, [this] { return _fresh; });
+        return takeLocked(out);
+    }
+
+private:
+    bool takeLocked(T& out) {
         if (!_fresh) return false;
         std::swap(out, _slot);
         _fresh = false;
         return true;
     }
 
-private:
     std::mutex _m;
+    std::condition_variable _ready;
     T _slot{};
     bool _fresh = false;
 };

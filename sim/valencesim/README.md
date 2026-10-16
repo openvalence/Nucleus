@@ -127,7 +127,7 @@ motion and the links. IXWebSocket's connection threads parse a command line
 into a 64-deep input queue; the hub drains it every pass with a try-lock, so
 it never waits on them. The hub publishes a snapshot every 33 ms into a
 depth-one mailbox, again by try-lock and a swap of two buffers; a broadcaster
-thread takes it, encodes it and sends it. A snapshot the broadcaster missed
+thread, woken by the publish, takes it, encodes it and sends it. A snapshot the broadcaster missed
 hands its samples and log lines to the next, so the 1 ms samples arrive whole.
 
 In, one text line per message:
@@ -139,7 +139,7 @@ In, one text line per message:
 | `estop down`, `estop up` | the external e-stop's contacts pressed or released |
 | `drive-alarm` | one DRV_ALM assertion |
 | `switch-fault` | MSW_FLT_N low for 2 s (with `--motor-switch`) |
-| `faults all\|SLOT LATENCY_MS JITTER_MS LOSS_PCT` | every client's, or one port slot's, link: one-way latency, uniform jitter on top, the share of frames retransmitted (200 ms late, holding the frames behind them: TCP never loses a frame, it delays it). A slot's knobs add to the global ones; a disconnect clears them |
+| `faults all\|SLOT LATENCY_MS JITTER_MS LOSS_PCT` | every client's, or one port slot's, link: one-way latency, uniform jitter on top, the share of frames retransmitted (200 ms late, the minimum TCP retransmission timeout, with head-of-line blocking: TCP never loses a frame, it delays it). A slot's knobs add to the global ones; a disconnect clears them |
 | `wifi-drop SECONDS` | a Wi-Fi outage for that long: every link holds its frames in both directions (up to 256 each way, delivered in order on restore) and the UDP port goes unpolled, so discovery and RFC-053 e-stop datagrams get no answer. An owning session falls silent past its deadman window and the hub releases its source (SPEC 11.3); `0` ends a drop |
 | `kick SLOT` | close that slot's connection |
 

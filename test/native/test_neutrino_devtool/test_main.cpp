@@ -180,6 +180,24 @@ TEST_CASE("mailbox: a hub publishing every pass and a slower reader see every sa
     CHECK(inOrder);
 }
 
+TEST_CASE("mailbox: a waiting take wakes on the publish, and times out without one") {
+    devtool::SnapshotMailbox box;
+    devtool::Snapshot s;
+    CHECK_FALSE(box.take(s, std::chrono::milliseconds(5)));
+    const auto t0 = std::chrono::steady_clock::now();
+    std::thread hub([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        devtool::Snapshot h;
+        h.seq = 7;
+        while (!box.publish(h)) std::this_thread::yield();
+    });
+    REQUIRE(box.take(s, std::chrono::milliseconds(5000)));
+    const auto waited = std::chrono::steady_clock::now() - t0;
+    hub.join();
+    CHECK(s.seq == 7);
+    CHECK(waited < std::chrono::milliseconds(2000));
+}
+
 // ---- the command line --------------------------------------------------------------
 
 TEST_CASE("parseInput: every command, and the malformed ones refused") {

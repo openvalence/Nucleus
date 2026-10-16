@@ -111,8 +111,7 @@ void NeutrinoObserver::broadcast() {
     devtool::Snapshot snap;
     std::string json;
     while (!_stop) {
-        std::this_thread::sleep_for(std::chrono::microseconds(kSnapshotPeriodUs));
-        if (!_mailbox.take(snap)) continue;
+        if (!_mailbox.take(snap, std::chrono::milliseconds(100))) continue;
         devtool::encodeSnapshot(snap, json);
         for (const auto& ws : _server->getClients()) {
             if (ws->bufferedAmount() < kSendBacklogBytes) ws->sendText(json);
