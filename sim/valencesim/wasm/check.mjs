@@ -187,7 +187,7 @@ function probe(src, nonce) {
   return n ? decodeDiscoverReply(bytesAt(u32(cell), n)) : null;
 }
 const r1 = probe(0x0a000001, 0x1234abcd);
-ok('a probe gets the Virtual reply', !!r1 && r1.nonce === 0x1234abcd && r1.hub_name === 'Virtual' && r1.ws_port === 8282
+ok('a probe gets the Neutrino reply', !!r1 && r1.nonce === 0x1234abcd && r1.hub_name === 'Neutrino' && r1.ws_port === 8282
   && r1.catalog_etag === bootEtag, JSON.stringify(r1));
 ok('the same source inside its window gets none', probe(0x0a000001, 1) === null);
 ok('no window before the press', !!r1 && !r1.pairing_window_open);
