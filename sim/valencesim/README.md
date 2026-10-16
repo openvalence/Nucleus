@@ -14,7 +14,7 @@ socket, no clock and no thread. Two fronts drive it:
 | Front | Where | Used by |
 |---|---|---|
 | Native exe `valencesim` | `src/main.cpp`, `CMakeLists.txt` | Phosphor's test suites (`test/valence-sim.mjs` and the rest), the bench, the twin's pin recorder: a WebSocket server, `/uitoken` on HTTP, UDP discovery, files for state, the wall clock |
-| `integral.wasm` + `integral.js` | `wasm/integral.cpp`, `wasm/CMakeLists.txt` | Phosphor's built-in machine, in process on every platform: a worker drives it over a MessagePort; no sidecar (bd val-atu, Phosphor ph-5u0g.1) |
+| `integral.wasm` + `integral.js` | `wasm/integral.cpp`, `wasm/CMakeLists.txt` | Phosphor's built-in machine, in process on every platform: a worker drives it over a MessagePort (bd val-atu, Phosphor ph-5u0g.1) |
 
 ## What is real and what is not
 
@@ -69,8 +69,8 @@ Valence and Kinetic checkouts must exist beside this repo (override with
 Linux and macOS: the same two `cmake` lines without the compiler flags (a
 C++23 GCC or Clang, `cmake`, `ninja`, `git`; built with GCC 16 and with Clang
 23 on libc++, macOS itself untried). Output `build/valencesim`; Linux GCC
-links libstdc++ in. Phosphor's CI builds all three for its sidecar (Phosphor
-`docs/BUILD.md`).
+links libstdc++ in. The native exe serves tests and the bench; Phosphor does
+not bundle it and runs the wasm build in process instead (below).
 
 ## Run
 
@@ -85,7 +85,7 @@ valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--durat
 | Flag | Effect |
 |---|---|
 | `--port N` | WebSocket port, default 82 |
-| `--bind ADDR` | WebSocket listen address, default `0.0.0.0` (every interface); `127.0.0.1` keeps the twin off the LAN (Phosphor's sidecar) |
+| `--bind ADDR` | WebSocket listen address, default `0.0.0.0` (every interface); `127.0.0.1` keeps the twin off the LAN |
 | `--http N` | `/uitoken` port on 127.0.0.1, default 80 |
 | `--homed` | force_home at boot with the stored max rail, so motion is accepted at once |
 | `--uncommissioned` | boot as a first-run hub (RFC-079): the setup record is cleared, so stream and pattern motion are refused (pattern start NACKs `INTERLOCK`) until `config-set` writes have carried all eight keys; Manual moves still run. Without it the twin is COMMISSIONED whatever its state file says, so client tests stream at once |
@@ -124,7 +124,7 @@ node sim/valencesim/wasm/check.mjs
 ```
 
 Output `sim/valencesim/wasm/build/integral.js` (ES6 module factory
-`createIntegral`) and `integral.wasm`, about 540 KB raw and 170 KB gzipped;
+`createIntegral`) and `integral.wasm`, about 660 KB raw and 207 KB gzipped;
 build products, never committed. Same sources and capacities as the exe, no
 pthreads, no asyncify, no filesystem. `check.mjs` boots it, opens a
 valence-js session over an in-memory socket, verifies the catalog against the

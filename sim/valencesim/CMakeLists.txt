@@ -3,7 +3,8 @@ project(valencesim CXX)
 
 # Host build only -- never part of a PlatformIO firmware build. GCC or Clang:
 # MinGW-w64 on Windows (the Valence Bench toolchain, never MSVC), Linux and
-# macOS. Phosphor bundles the result as its simulator sidecar.
+# macOS. The native exe serves tests and the bench; Phosphor runs the wasm
+# build (wasm/) in process and does not bundle this exe.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -68,7 +69,7 @@ target_compile_options(valencesim PRIVATE -O2 -Wall -Wextra)
 if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_link_options(valencesim PRIVATE -static)
 elseif(UNIX AND NOT APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    # A bundled sidecar meets distros older than the build host's libstdc++.
+    # A copied exe meets distros older than the build host's libstdc++.
     target_link_options(valencesim PRIVATE -static-libstdc++ -static-libgcc)
 endif()
 
