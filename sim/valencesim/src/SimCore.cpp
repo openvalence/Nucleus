@@ -159,7 +159,7 @@ bool SimCore::begin(const SimConfig& opt, IClock& clock, ISimStore& store) {
     {
         // One saved network, as a migrated board boots with.
         net::SavedNetworks boot;
-        boot.save(std::nullopt, "virtual", "virtual-passphrase");
+        boot.save(std::nullopt, "Neutrino", "neutrino-passphrase");
         _nets.adopt(boot);
         _nets.attach(hub);
         _device.bindNetworks(&_nets);

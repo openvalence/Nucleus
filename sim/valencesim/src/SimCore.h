@@ -142,7 +142,7 @@ private:
         // A second "Workshop" BSSID folds into the first; the hidden one is
         // left out.
         static constexpr std::array<net::Sighting, 12> kNeighborhood{{
-            {"virtual", -42, true}, {"Workshop", -48, true}, {"Workshop-Lab", -55, true},
+            {"Neutrino", -42, true}, {"Workshop", -48, true}, {"Workshop-Lab", -55, true},
             {"Guest", -61, false}, {"Neighbor", -67, true}, {"Workshop", -70, true},
             {"Printer-Direct", -72, true}, {"Cafe", -75, false}, {"Upstairs", -78, true},
             {"Attic", -83, true}, {"", -50, true}, {"Garage", -88, true},
