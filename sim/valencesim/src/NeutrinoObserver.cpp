@@ -144,9 +144,12 @@ void NeutrinoObserver::apply(const devtool::Input& in, uint64_t nowUs) {
         case K::faults:
             if (in.slot < 0) _port->setGlobalFaults(in.faults);
             else _port->setClientFaults(uint8_t(in.slot), in.faults);
-            _log->logf('W', "devtool: faults %s%d: %u ms +%u ms jitter, %.1f%% loss", in.slot < 0 ? "all" : "slot ",
-                       in.slot < 0 ? 0 : int(in.slot), unsigned(in.faults.latency_ms), unsigned(in.faults.jitter_ms),
-                       double(in.faults.loss_pct));
+            if (in.slot < 0)
+                _log->logf('W', "devtool: faults, every client: %u ms, +%u ms jitter, %.1f%% loss",
+                           unsigned(in.faults.latency_ms), unsigned(in.faults.jitter_ms), double(in.faults.loss_pct));
+            else
+                _log->logf('W', "devtool: faults, slot %d: %u ms, +%u ms jitter, %.1f%% loss", int(in.slot),
+                           unsigned(in.faults.latency_ms), unsigned(in.faults.jitter_ms), double(in.faults.loss_pct));
             break;
         case K::wifi_drop:
             _wifiHeld = in.ms != 0;
