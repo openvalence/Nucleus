@@ -359,7 +359,8 @@ int main(int argc, char** argv) {
 
     const auto pump = [&](uint32_t nowMs) {
         port.loop(nowMs);
-        if (!observer.wifiDown()) discovery.poll(hub, nowMs);
+        discovery.setDatagramHook(valence::devtool::discoveryHook(observer.wifiDown(), &valence::estopDatagramHook));
+        discovery.poll(hub, nowMs);
     };
     TickPacer pacer(std::chrono::microseconds(valence::kMotionTickUs));
     if (!pacer.precise()) log.logf('W', "valencesim: no high-resolution timer, the motion tick runs coarse");

@@ -357,3 +357,33 @@ TEST_CASE("faults combine: delays add, losses compound") {
     CHECK(c.jitter_ms == 6);
     CHECK(c.loss_pct == doctest::Approx(75.0f));
 }
+
+// ---- the Wi-Fi drop on the discovery port (bd val-6sa) ----------------------
+
+namespace {
+int g_liveOffered = 0;
+bool liveHook(std::span<const std::byte>, uint32_t, uint32_t) {
+    ++g_liveOffered;
+    return false;
+}
+}  // namespace
+
+TEST_CASE("discovery: a Wi-Fi drop consumes every datagram unanswered, the restore answers again") {
+    DiscoveryResponder r;
+    r.setIdentity("Neutrino", "0.1", 82);
+    std::array<std::byte, kDiscoverProbeBytes> probe{};
+    REQUIRE(encodeDiscoverProbe(DiscoverProbe{kProtocolVersion, 7}, probe) == probe.size());
+    std::array<std::byte, kDiscoverReplyBytes> out{};
+    g_liveOffered = 0;
+
+    r.setDatagramHook(devtool::discoveryHook(true, &liveHook));
+    CHECK(r.answer(probe, 0x0A000001u, 0, out) == 0);
+    CHECK(r.answer(probe, 0x0A000002u, 1, out) == 0);
+    CHECK(g_liveOffered == 0);
+    CHECK(r.replies() == 0);
+
+    r.setDatagramHook(devtool::discoveryHook(false, &liveHook));
+    CHECK(r.answer(probe, 0x0A000001u, 2, out) == out.size());
+    CHECK(g_liveOffered == 1);
+    CHECK(r.replies() == 1);
+}

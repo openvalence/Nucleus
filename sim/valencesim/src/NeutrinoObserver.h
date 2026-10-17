@@ -52,8 +52,9 @@ public:
     // Hub thread, every pass after SimCore::pass(): inputs, buttons, the
     // Wi-Fi drop's clock, the 1 ms sample, and the snapshot at display rate.
     void pass(uint64_t nowUs);
-    // Hub thread. A Wi-Fi drop is running: the front stops answering
-    // discovery, as a board off the air does.
+    // Hub thread. A Wi-Fi drop is running: the front drains the discovery
+    // port and discards what arrives (devtool::discoveryHook), as a board off
+    // the air never receives it.
     bool wifiDown() const { return _wifiHeld; }
 
 private:

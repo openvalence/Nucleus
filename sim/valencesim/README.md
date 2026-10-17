@@ -140,7 +140,7 @@ In, one text line per message:
 | `drive-alarm` | one DRV_ALM assertion |
 | `switch-fault` | MSW_FLT_N low for 2 s (with `--motor-switch`) |
 | `faults all\|SLOT LATENCY_MS JITTER_MS LOSS_PCT` | every client's, or one port slot's, link: one-way latency, uniform jitter on top, the share of frames retransmitted (200 ms late, the minimum TCP retransmission timeout, with head-of-line blocking: TCP never loses a frame, it delays it). A slot's knobs add to the global ones; a disconnect clears them |
-| `wifi-drop SECONDS` | a Wi-Fi outage for that long: every link holds its frames in both directions (up to 256 each way, delivered in order on restore) and the UDP port goes unpolled, so discovery and RFC-053 e-stop datagrams get no answer. An owning session falls silent past its deadman window and the hub releases its source (SPEC 11.3); `0` ends a drop |
+| `wifi-drop SECONDS` | a Wi-Fi outage for that long: every link holds its frames in both directions (up to 256 each way, delivered in order on restore) and the UDP port is drained and its datagrams discarded every pass, so a discovery probe or RFC-053 e-stop sent during the drop is lost, as on a real outage, never acted on after the restore. An owning session falls silent past its deadman window and the hub releases its source (SPEC 11.3); `0` ends a drop |
 | `kick SLOT` | close that slot's connection |
 
 Out, JSON text: a `hello` once per connection (name, version, ports, hub

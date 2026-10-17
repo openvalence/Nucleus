@@ -33,9 +33,24 @@
 #include <vector>
 
 #include "NeutrinoLink.h"
+#include "hub/ValenceDiscovery.h"
 #include "motion/ValenceMotion.h"
 
 namespace valence::devtool {
+
+// ---- the Wi-Fi drop on the discovery port ----------------------------------------
+
+// A board off the air never receives what is sent during the outage; the host's
+// socket queues it. While a drop runs, the hub thread keeps polling the port and
+// this hook consumes every datagram unanswered, so no probe is answered and no
+// RFC-053 e-stop latches after the restore (bd val-6sa).
+inline bool discardDatagram(std::span<const std::byte>, uint32_t, uint32_t) { return true; }
+
+// The hook the discovery port runs this pass: `live` (the one the composition
+// root wired) unless the Wi-Fi drop is running.
+inline DiscoveryResponder::DatagramHook discoveryHook(bool wifiDown, DiscoveryResponder::DatagramHook live) {
+    return wifiDown ? &discardDatagram : live;
+}
 
 // ---- inputs ------------------------------------------------------------------
 
