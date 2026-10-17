@@ -1802,7 +1802,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "amplitude", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::osc_amp_mm,
                       .dflt = SettingDefault::ofFloat(MotionOsc{}.amplitude), .group = "Oscillator",
-                      .desc = "Peak displacement",
+                      .desc = "Wave height from center, mm; set before limits trim it",
                       .step = 0.1f, .settingKey = 3, .hasSettingKey = true, .hasStep = true,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
     c.addLayoutField({.name = "dwell_crest", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
@@ -1816,7 +1816,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .desc = "Hold at the trough, share of a cycle",
                       .step = 0.01f, .settingKey = 6, .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "active", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .group = "Oscillator", .desc = "Rendering now",
+                      .group = "Oscillator", .desc = "1 while the oscillation is adding motion to the rail",
                       .role = roles::osc_active});
     c.addLayoutField({.name = "amplitude_effective", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
                       .group = "Oscillator", .desc = "Peak displacement the ceilings and window leave",
