@@ -619,15 +619,20 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .desc = "Network name"});
     c.addSchemaField({.key = 3, .name = "passphrase", .type = CborFieldType::tstr_t, .unit = "",
                       .desc = "Password; empty for an open network", .flags = valence::setting_flags::secret});
-    c.addSchemaField({.key = 4, .name = "ipv4", .type = CborFieldType::uint_t, .unit = ""});
-    c.addSchemaField({.key = 5, .name = "ws_port", .type = CborFieldType::uint_t, .unit = ""});
+    c.addSchemaField({.key = 4, .name = "ipv4", .type = CborFieldType::uint_t, .unit = "",
+                      .desc = "Joined address, big-endian"});
+    c.addSchemaField({.key = 5, .name = "ws_port", .type = CborFieldType::uint_t, .unit = "",
+                      .desc = "Joined WebSocket port"});
     c.addSchemaField({.key = 6, .name = "slot", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f,
-                      .max = float(valence::net::SavedNetworks::kCapacity - 1)});
+                      .max = float(valence::net::SavedNetworks::kCapacity - 1),
+                      .desc = "Saved network slot"});
     c.addSchemaField({.key = 7, .name = "to", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f,
-                      .max = float(valence::net::SavedNetworks::kCapacity - 1)});
-    c.addSchemaField({.key = 8, .name = "generation", .type = CborFieldType::uint_t, .unit = ""});
+                      .max = float(valence::net::SavedNetworks::kCapacity - 1),
+                      .desc = "Move destination"});
+    c.addSchemaField({.key = 8, .name = "generation", .type = CborFieldType::uint_t, .unit = "",
+                      .desc = "Refused if the list changed"});
 
     // ---- "settings-trial" -- INTENT, control (RFC-099) ----------------------
     // Declaring it is what tells a client this hub keeps a `trial` write
@@ -2159,11 +2164,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasRank = true, .rank = valence::ui_ranks::detail,
                 .hasStoreId = true, .storeId = kPresetStoreId});
     c.addLayoutField({.name = "generation", .type = PackedFieldType::u16, .unit = "count", .scale = 1.0f,
-                      .group = card::pattern_presets});
+                      .group = card::pattern_presets, .desc = "Preset list change counter"});
     c.addLayoutField({.name = "count",      .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f,
-                      .group = card::pattern_presets});
+                      .group = card::pattern_presets, .desc = "Saved presets"});
     c.addLayoutField({.name = "capacity",   .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f,
-                      .group = card::pattern_presets});
+                      .group = card::pattern_presets, .desc = "Preset slots"});
     };
 
     // ---- "move" — INTENT, control, 20 Hz, critical --------------------------
@@ -2190,7 +2195,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .hasRank = true, .rank = valence::ui_ranks::hero});
     c.addSchemaField({.key = 1, .name = "position", .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2000.0f,
-                      .role = roles::command_position,
+                      .desc = "Jog target", .role = roles::command_position,
                       .hasRank = true, .rank = valence::ui_ranks::hero,
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
     };
@@ -2297,6 +2302,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                             AccessLevel::configure}); // 2 force_home: asserts the stroke; RELEASES THE E-STOP LATCH
     c.addSchemaField({.key = 2, .name = "stroke", .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 2000.0f,
+                      .desc = "Stroke force_home asserts",
                       .access = AccessLevel::configure, .hasAccess = true});
     };
 
