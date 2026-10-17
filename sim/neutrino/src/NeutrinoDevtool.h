@@ -15,7 +15,7 @@
 //   kMaxSamples / kMaxLogLines.
 // - No IXWebSocket, no SimCore: native suite test_neutrino_devtool compiles
 //   this header alone.
-// See: sim/valencesim/README.md (the dev tool), NeutrinoObserver.h
+// See: sim/neutrino/README.md (the dev tool), NeutrinoObserver.h
 
 #include <array>
 #include <chrono>

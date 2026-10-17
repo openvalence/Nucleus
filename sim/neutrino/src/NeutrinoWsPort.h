@@ -13,7 +13,7 @@
 // - A copy of bench::ValenceBenchWsPort's accept, close and sweep logic
 //   (../Valence/hub/bench/src/net/WsServerPort.cpp): a drift seam, tracked on
 //   the board. The transport class itself is compiled from its home.
-// See: NeutrinoLink.h, sim/valencesim/README.md
+// See: NeutrinoLink.h, sim/neutrino/README.md
 
 #include <array>
 #include <cstdint>

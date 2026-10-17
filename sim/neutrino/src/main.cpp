@@ -1,8 +1,8 @@
-// valencesim -- the native front of Integral, the Nucleus device twin: the
+// neutrino-sim -- the native front of Neutrino, the Nucleus device twin: the
 // machine (src/SimCore.h) behind a WebSocket speaking valence.v1, /uitoken on
 // HTTP, UDP discovery and a wall clock
 //
-//   valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
+//   neutrino-sim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
 //              [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
 //              [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]] [--plan-delay-ms N]
 //              [--uncommissioned] [--no-discovery] [--discovery-port N]
@@ -30,14 +30,14 @@
 //   and PREFIX.iid holds the P4's hub_iid (WELCOME identity key 5, SPEC §6.3)
 //   as 8 bytes little-endian. Each is written to a temp file and renamed over
 //   the old one so a kill mid-write leaves the previous blob whole. PREFIX
-//   defaults to valencesim-state beside the exe.
+//   defaults to neutrino-sim-state beside the exe.
 // - THE DEV TOOL CHANNEL (--devtool-port) is the only way in for the
 //   physical inputs and the network faults; its threads never reach SimCore
 //   (NeutrinoObserver.h). A HOME hold reboots: the run ends with
 //   kRebootExitCode for whoever launched it to start it again.
 // - stdout carries every log line and blocks when full: a launcher that does
 //   not read it must discard it (the dev tool reads the log off its channel).
-// See: sim/valencesim/README.md
+// See: sim/neutrino/README.md
 
 #include <algorithm>
 #include <array>
@@ -144,7 +144,7 @@ struct Options {
     int durationS = 0;
     bool noEstopUdp = false;   // --no-estop-udp: RFC-053 datagrams never latch
     valence::SimConfig sim;    // the machine's own options
-    std::string statePrefix;   // empty = valencesim-state beside the exe
+    std::string statePrefix;   // empty = neutrino-sim-state beside the exe
     bool discovery = true;
     uint16_t discoveryPort = uint16_t(valence::udp_discovery::port);
     uint16_t devtoolPort = 0;   // --devtool-port: 0 is no dev tool channel
@@ -181,7 +181,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
                  !std::strcmp(a, "--enforce"))
             continue;
         else {
-            std::fprintf(stderr, "valencesim: unknown flag '%s'\n", a);
+            std::fprintf(stderr, "neutrino-sim: unknown flag '%s'\n", a);
             return false;
         }
     }
@@ -281,7 +281,7 @@ int main(int argc, char** argv) {
     Options opt;
     if (!parseArgs(argc, argv, opt)) {
         std::fprintf(stderr,
-                     "usage: valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]\n"
+                     "usage: neutrino-sim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]\n"
                      "                  [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]\n"
                      "                  [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]] [--plan-delay-ms N]\n"
                      "                  [--uncommissioned] [--no-discovery] [--discovery-port N]\n"
@@ -316,7 +316,7 @@ int main(int argc, char** argv) {
     auto core = std::make_unique<valence::SimCore>();
     bench::SessionLog& log = core->log;
     log.setEcho(true);
-    FileStore store(opt.statePrefix.empty() ? exeDir(argv[0]) / "valencesim-state"
+    FileStore store(opt.statePrefix.empty() ? exeDir(argv[0]) / "neutrino-sim-state"
                                             : std::filesystem::path(opt.statePrefix));
     const std::string storeName = store.name();
     opt.sim.storeName = storeName.c_str();
@@ -331,12 +331,12 @@ int main(int argc, char** argv) {
     discovery.setReplyFlagsHook(&valence::estopDatagramReplyFlags);
     if (opt.noEstopUdp) {
         valence::estopDatagramSetEnabled(false);
-        log.logf('W', "valencesim: --no-estop-udp: ESTOP datagrams are dropped, never latched");
+        log.logf('W', "neutrino-sim: --no-estop-udp: ESTOP datagrams are dropped, never latched");
     }
 
     valence::NeutrinoWsPort port;
     if (!port.begin(&hub, opt.wsPort, &log, opt.bindHost)) {
-        std::fprintf(stderr, "valencesim: WS listen failed on %s:%u\n", opt.bindHost.c_str(), unsigned(opt.wsPort));
+        std::fprintf(stderr, "neutrino-sim: WS listen failed on %s:%u\n", opt.bindHost.c_str(), unsigned(opt.wsPort));
         return 1;
     }
     // Non-fatal, as on the P4: a port another twin holds only costs discovery.
@@ -345,14 +345,14 @@ int main(int argc, char** argv) {
     std::unique_ptr<ix::HttpServer> http = startUiTokenHttp(core->minter(), opt.httpPort, err);
     if (!http) {
         // Non-fatal, as on the P4: watch-tier and paired clients still work.
-        log.logf('W', "valencesim: /uitoken unavailable on :%u -- %s", unsigned(opt.httpPort), err.c_str());
+        log.logf('W', "neutrino-sim: /uitoken unavailable on :%u -- %s", unsigned(opt.httpPort), err.c_str());
     } else {
-        log.logf('I', "valencesim: GET /uitoken on 127.0.0.1:%u", unsigned(opt.httpPort));
+        log.logf('I', "neutrino-sim: GET /uitoken on 127.0.0.1:%u", unsigned(opt.httpPort));
     }
 
     valence::NeutrinoObserver observer;
     if (opt.devtoolPort != 0 && !observer.begin(*core, port, opt.devtoolPort, opt.wsPort, opt.httpPort, err)) {
-        std::fprintf(stderr, "valencesim: devtool listen failed on 127.0.0.1:%u -- %s\n", unsigned(opt.devtoolPort),
+        std::fprintf(stderr, "neutrino-sim: devtool listen failed on 127.0.0.1:%u -- %s\n", unsigned(opt.devtoolPort),
                      err.c_str());
         return 1;
     }
@@ -363,7 +363,7 @@ int main(int argc, char** argv) {
         discovery.poll(hub, nowMs);
     };
     TickPacer pacer(std::chrono::microseconds(valence::kMotionTickUs));
-    if (!pacer.precise()) log.logf('W', "valencesim: no high-resolution timer, the motion tick runs coarse");
+    if (!pacer.precise()) log.logf('W', "neutrino-sim: no high-resolution timer, the motion tick runs coarse");
     const auto start = std::chrono::steady_clock::now();
     int exitCode = 0;
     std::optional<uint64_t> rebootAtUs;

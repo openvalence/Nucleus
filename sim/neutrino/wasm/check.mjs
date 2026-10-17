@@ -1,10 +1,10 @@
-// check.mjs -- Integral's in-process front, end to end in node: boot, a
+// check.mjs -- Neutrino's in-process front, end to end in node: boot, a
 // valence-js session over an in-memory socket, the catalog against its etag,
 // one jog that moves the carriage, a config-set a control session is refused
 // and the configure ask a PAIR double press grants (RFC-114), a discovery
 // probe before and after a PAIR press. Exit 0 pass, 1 fail.
 //
-//   node sim/valencesim/wasm/check.mjs [build/integral.js] [--etag HEX]
+//   node sim/neutrino/wasm/check.mjs [build/neutrino.js] [--etag HEX]
 //
 // The socket below is the shape a Phosphor worker host follows (README.md,
 // "The host contract"); this file is its acceptance proof, not a library.
@@ -16,7 +16,7 @@ import { createSession, CH, PRIORITY, toHex, fromHex, encodeDiscoverProbe, decod
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const flag = (f, d) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : d; };
-const modPath = resolve(args.find((a) => a.endsWith('.js')) || here + '/build/integral.js');
+const modPath = resolve(args.find((a) => a.endsWith('.js')) || here + '/build/neutrino.js');
 const ETAG = flag('--etag', 'b310da1445ea519a');
 
 let fails = 0;
@@ -26,8 +26,8 @@ const ok = (name, cond, extra) => {
 };
 
 const logs = [];
-const { default: createIntegral } = await import(pathToFileURL(modPath).href);
-const M = await createIntegral({ print: (l) => logs.push(l), printErr: (l) => logs.push(l) });
+const { default: createNeutrino } = await import(pathToFileURL(modPath).href);
+const M = await createNeutrino({ print: (l) => logs.push(l), printErr: (l) => logs.push(l) });
 
 // ---- the C ABI's plumbing: wasm32, so pointers and size_t are u32 -----------
 const cell = M._malloc(8);
@@ -40,17 +40,17 @@ function call(fn, bytes, ...rest) {
 }
 function http(method, path) {
   const m = M.stringToNewUTF8(method), pa = M.stringToNewUTF8(path);
-  const code = M._integral_http(m, pa, 0, 0, cell, cell + 4);
+  const code = M._neutrino_http(m, pa, 0, 0, cell, cell + 4);
   M._free(m); M._free(pa);
   return { code, body: new TextDecoder().decode(bytesAt(u32(cell), u32(cell + 4))) };
 }
 function stateBlob() {
-  M._integral_state_get(cell, cell + 4);
+  M._neutrino_state_get(cell, cell + 4);
   return bytesAt(u32(cell), u32(cell + 4));
 }
 
 const opts = M.stringToNewUTF8(JSON.stringify({ homed: true }));
-ok('integral_create boots', M._integral_create(opts, 0, 0) === 1);
+ok('neutrino_create boots', M._neutrino_create(opts, 0, 0) === 1);
 M._free(opts);
 const bootEtag = (logs.join('\n').match(/etag ([0-9a-f]+)/) || [])[1];
 ok('boot log names the etag', !!bootEtag, bootEtag);
@@ -58,7 +58,7 @@ ok('boot log names the etag', !!bootEtag, bootEtag);
 // ---- the socket a worker hands createSession --------------------------------
 const sockets = new Map();
 let nextId = 1;
-class IntegralSocket {
+class NeutrinoSocket {
   constructor(url) {
     this.url = url;
     this.protocol = 'valence.v1';
@@ -67,7 +67,7 @@ class IntegralSocket {
     this.onopen = this.onmessage = this.onclose = this.onerror = null;
     this.id = nextId++;
     queueMicrotask(() => {
-      if (M._integral_connect(this.id) !== 1) { this._closed(1013); return; }
+      if (M._neutrino_connect(this.id) !== 1) { this._closed(1013); return; }
       sockets.set(this.id, this);
       this.readyState = 1;
       if (this.onopen) this.onopen({});
@@ -76,11 +76,11 @@ class IntegralSocket {
   send(data) {
     if (this.readyState !== 1) return;
     const b = data instanceof Uint8Array ? data : new Uint8Array(data.buffer ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) : data);
-    call((id, p, n) => M._integral_send(id, p, n), b, this.id);
+    call((id, p, n) => M._neutrino_send(id, p, n), b, this.id);
   }
   close() {
     if (this.readyState >= 2) return;
-    M._integral_disconnect(this.id);
+    M._neutrino_disconnect(this.id);
     this._closed(1000);
   }
   _closed(code) {
@@ -98,11 +98,11 @@ function pump() {
   const target = Math.floor(performance.now() - t0) * 1000;
   while (simUs < target) {
     simUs += 1000;
-    if (M._integral_tick(BigInt(simUs)) & 1) dirtySeen = true;
+    if (M._neutrino_tick(BigInt(simUs)) & 1) dirtySeen = true;
   }
   for (const s of [...sockets.values()]) {
     for (;;) {
-      const r = M._integral_poll(s.id, cell, cell + 4);
+      const r = M._neutrino_poll(s.id, cell, cell + 4);
       if (r === 0) break;
       if (r < 0) { s._closed(1006); break; }
       const msg = bytesAt(u32(cell), u32(cell + 4));
@@ -116,8 +116,8 @@ const timer = setInterval(pump, 1);
 const cache = new Map();
 const motion = [];
 const s = createSession({
-  host: 'integral', port: 0, clientKind: 'webui', clientName: 'integral check', autoReconnect: false,
-  WebSocketImpl: IntegralSocket,
+  host: 'neutrino', port: 0, clientKind: 'webui', clientName: 'neutrino check', autoReconnect: false,
+  WebSocketImpl: NeutrinoSocket,
   catalogStore: { load: (h) => cache.get(h) || null, save: (h, etag, bytes) => cache.set(h, { etag, bytes }), clear: (h) => cache.delete(h) },
   token: async () => {
     const r = http('GET', '/uitoken');
@@ -169,7 +169,7 @@ if (live) {
     ok('configure ask sent', s.sendPairReq({ role: 2 }));
     await until(() => false, 50);
     ok('no grant before the double press', grant === null);
-    M._integral_pair_double_press();
+    M._neutrino_pair_double_press();
     ok('PAIR double press grants configure', await until(() => grant && grant.role === 2, 2000),
       grant && 'role=' + grant.role);
     ok('session upgraded in place', s.state.roles === 2, 'roles=' + s.state.roles);
@@ -183,7 +183,7 @@ ok('state blob reported dirty and non-empty', dirtySeen && stateBlob().length > 
 
 // ---- the host's datagrams: the board's responder, then the PAIR press ----------
 function probe(src, nonce) {
-  const n = call((ip, p, len) => M._integral_datagram(p, len, ip, 8282, cell), encodeDiscoverProbe(nonce), src);
+  const n = call((ip, p, len) => M._neutrino_datagram(p, len, ip, 8282, cell), encodeDiscoverProbe(nonce), src);
   return n ? decodeDiscoverReply(bytesAt(u32(cell), n)) : null;
 }
 const r1 = probe(0x0a000001, 0x1234abcd);
@@ -191,7 +191,7 @@ ok('a probe gets the Neutrino reply', !!r1 && r1.nonce === 0x1234abcd && r1.hub_
   && r1.catalog_etag === bootEtag, JSON.stringify(r1));
 ok('the same source inside its window gets none', probe(0x0a000001, 1) === null);
 ok('no window before the press', !!r1 && !r1.pairing_window_open);
-M._integral_pair_press();
+M._neutrino_pair_press();
 await until(() => false, 30);
 const r2 = probe(0x0a000002, 7);
 ok('PAIR press opens the presence window', !!r2 && r2.pairing_window_open, JSON.stringify(r2 && r2.flags));

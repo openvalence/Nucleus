@@ -15,7 +15,7 @@
 //   only the host can guarantee.
 // - Properties the endpoint promises: single-use, kTtlMs, one mint per
 //   kMinIntervalMs device-wide, at most kSlots live tokens, CONTROL tier only.
-// See: flagship_p4/src/hub/ValenceUiToken.h, sim/valencesim/src/SimUiToken.h,
+// See: flagship_p4/src/hub/ValenceUiToken.h, sim/neutrino/src/SimUiToken.h,
 //      Valence SPEC.md §12.8, test/native/test_ui_token
 
 #include <array>

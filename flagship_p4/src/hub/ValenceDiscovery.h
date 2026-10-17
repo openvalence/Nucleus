@@ -19,7 +19,7 @@
 // - ONE LISTENER PER PORT: a unicast datagram reaches one socket only, and
 //   RFC-053 puts the ESTOP datagram on this port too. Every datagram goes to
 //   the datagram hook first; one it consumes is never answered.
-// - ONE FILE, TWO HOSTS: the board and sim/valencesim compile
+// - ONE FILE, TWO HOSTS: the board and sim/neutrino compile
 //   ValenceDiscovery.cpp verbatim (lwIP sockets on the board, Winsock in the
 //   sim). Everything in this header is hardware-free; suite
 //   test_valence_discovery runs it natively.

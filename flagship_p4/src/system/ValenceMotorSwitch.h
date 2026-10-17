@@ -4,7 +4,7 @@
 // verdict, the enable request, the power cut, and its status
 // Constraints:
 // - Declarations only, no IDF: the board (ValenceMotorSwitch.cpp) and the host
-//   twin (sim/valencesim SimMotorSwitch.cpp) each link one implementation,
+//   twin (sim/neutrino SimMotorSwitch.cpp) each link one implementation,
 //   and the hardware-free hub delegate calls through this header.
 // - motorSwitchCut(): ANY task, never blocks; MOTOR_EN and PRECHARGE_EN are
 //   low when it returns. It is the ESTOP's power cut (SPEC 11.2, H1 path).

@@ -4,7 +4,7 @@
 // - Host-only: NeutrinoDevtool.h and NeutrinoLink.h alone, no IXWebSocket and
 //   no SimCore. The concurrency cases run real threads against the real
 //   queue and mailbox; the link runs on a synthetic microsecond clock.
-// See: sim/valencesim/src/NeutrinoDevtool.h, sim/valencesim/src/NeutrinoLink.h,
+// See: sim/neutrino/src/NeutrinoDevtool.h, sim/neutrino/src/NeutrinoLink.h,
 // bd val-sf7.7
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -20,8 +20,8 @@
 // Named here so the library finder resolves lib/valence for the sim headers.
 #include "valence/transport/transport.hpp"
 
-#include "../../../sim/valencesim/src/NeutrinoDevtool.h"
-#include "../../../sim/valencesim/src/NeutrinoLink.h"
+#include "../../../sim/neutrino/src/NeutrinoDevtool.h"
+#include "../../../sim/neutrino/src/NeutrinoLink.h"
 
 using namespace valence;
 using devtool::Input;

@@ -5,7 +5,7 @@
 // steers the emitter by, and the census it publishes
 // Constraints:
 // - HARDWARE-FREE. No IDF, FreeRTOS or board header here or in the .cpp: the
-//   board (ValenceMotion.cpp) and the host twin (sim/valencesim) compile this
+//   board (ValenceMotion.cpp) and the host twin (sim/neutrino) compile this
 //   one copy, so a gate change lands once and both run it. The emitter and the
 //   clock are handed IN; a host owns the task, the queues and the lock.
 // - THE ARBITER IS THE SOLE CALLER of the emitter (architecture.md section 2):

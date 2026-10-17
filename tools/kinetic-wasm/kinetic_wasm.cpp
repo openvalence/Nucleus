@@ -7,7 +7,7 @@
 // - NO PLANNING LIVES HERE. The shaping is ../Kinetic (include/kinetic2), the
 //   intent path is flagship_p4/src/motion/MotionArbiter.cpp, the wire decode
 //   is flagship_p4/src/motion/StreamIntent.h, the emitter is
-//   sim/valencesim/src/IdealEmitter.h: every one compiled verbatim, the same
+//   sim/neutrino/src/IdealEmitter.h: every one compiled verbatim, the same
 //   sources the P4 links. This file is plumbing: the clock, the tick order and
 //   the ABI structs. A planning rule written here is one the machine does not
 //   run.
@@ -29,7 +29,7 @@
 #include <initializer_list>
 #include <new>
 
-#include "../../sim/valencesim/src/IdealEmitter.h"
+#include "../../sim/neutrino/src/IdealEmitter.h"
 #include "geiger/geiger.h"
 #include "motion/MotionArbiter.h"
 #include "motion/StreamIntent.h"

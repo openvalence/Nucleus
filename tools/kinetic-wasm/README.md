@@ -9,7 +9,7 @@ It is built from the planner's source files, listed below.
 | The planner (Kinetic²): the knot timeline, the window solver, the brake | `../Kinetic/include/kinetic2/` |
 | Intent path: window clamp, limit sets, mm to engine frame, rest reseed, tuning map, the intent-to-knot boundary | `flagship_p4/src/motion/MotionArbiter.cpp` |
 | 0x2101 sample to intent | `flagship_p4/src/motion/StreamIntent.h` |
-| Emitter (renders the steering word with ideal edge timing) | `sim/valencesim/src/IdealEmitter.h` |
+| Emitter (renders the steering word with ideal edge timing) | `sim/neutrino/src/IdealEmitter.h` |
 | Clock, tick order, the C ABI | `kinetic_wasm.cpp` (plumbing only) |
 
 The gates (e-stop, pause, override, power, ownership) compile in but are opened

@@ -4,7 +4,7 @@
 // the stored 0x1000 config, and every retained STATE publisher
 // Constraints:
 // - HARDWARE-FREE. No IDF, FreeRTOS or board header may be included here or in
-//   ValenceDevice.cpp: the host device twin (sim/valencesim) compiles both
+//   ValenceDevice.cpp: the host device twin (sim/neutrino) compiles both
 //   verbatim, and a platform include is how the twin stops being a twin. Time
 //   and heap enter through the two functions below, motion through
 //   motion/ValenceMotion.h; each composition links its own implementation.
@@ -16,7 +16,7 @@
 //   plane values to serve.
 // - HONEST OR ABSENT: an intent this machine cannot really apply is NACKed
 //   UNSUPPORTED_OP and never echoed (ValenceDevice.cpp carries the detail).
-// See: ValenceHub.cpp (the P4 composition), sim/valencesim (the host one),
+// See: ValenceHub.cpp (the P4 composition), sim/neutrino (the host one),
 // Valence SPEC.md §4.2, §6.3, §9.1, §9.3, §12.2
 
 #include <array>
@@ -145,7 +145,7 @@ public:
     // door between them (C-1).
     void pushConfigToMotion() const;
 
-    // HOST TWIN ONLY (valencesim's commissioning posture): replaces the
+    // HOST TWIN ONLY (neutrino-sim's commissioning posture): replaces the
     // first-run record for this run, before pushConfigToMotion(). Marks
     // nothing dirty; a later config persist writes whatever it then holds.
     // The board never calls it: its record comes from the owner's writes.

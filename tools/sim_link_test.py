@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """sim_link_test.py -- a dead or wedged WebSocket peer costs the other sessions
-nothing (bd val-ni0). Launches valencesim on a loopback port and runs:
+nothing (bd val-ni0). Launches neutrino-sim on a loopback port and runs:
 
   wedged  a client that stops reading: an observer keeps its STATE rate, a
           fresh client gets WELCOME, and the wedged one is disconnected
@@ -8,7 +8,7 @@ nothing (bd val-ni0). Launches valencesim on a loopback port and runs:
   silent  a client that goes dark with its socket open: its slot is reaped
 
 Exit 0 when every check holds. Usage:
-    python tools/sim_link_test.py [--exe sim/valencesim/build/valencesim.exe]
+    python tools/sim_link_test.py [--exe sim/neutrino/build/neutrino-sim.exe]
 """
 import argparse
 import base64
@@ -171,7 +171,7 @@ def silent(results, exe_log):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--exe", default=os.path.join(HERE, "..", "sim", "valencesim", "build", "valencesim.exe"))
+    ap.add_argument("--exe", default=os.path.join(HERE, "..", "sim", "neutrino", "build", "neutrino-sim.exe"))
     a = ap.parse_args()
     tmp = tempfile.mkdtemp(prefix="sim_link_")
     log = os.path.join(tmp, "sim.log")

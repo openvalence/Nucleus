@@ -6,7 +6,7 @@
 //   includes neither; this TU sees all three, so it is where the mirror is
 //   nailed.
 // - The delegate and every retained STATE publisher are ValenceDevice, which
-//   is hardware-free so the host twin (sim/valencesim) runs it verbatim. What
+//   is hardware-free so the host twin (sim/neutrino) runs it verbatim. What
 //   stays here is what only the P4 has: NVS, PSRAM, esp_netif, the task.
 // - PERSISTED STATE IS FIVE NVS BLOBS in namespace "valence", one per concern
 //   ("nets", the saved-network list, is ValenceProvisioning.cpp's, written

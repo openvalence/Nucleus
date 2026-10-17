@@ -18,7 +18,7 @@
 //   `estop` op share (SPEC 11.2): the frame's seq becomes estop_seq on the
 //   transition, and the snapshot and the edge are the WS path's. A datagram
 //   that finds ESTOP latched changes nothing and re-broadcasts nothing.
-// - Hardware-free: the board, sim/valencesim and suite test_estop_datagram
+// - Hardware-free: the board, sim/neutrino and suite test_estop_datagram
 //   compile the .cpp verbatim.
 // - NUCLEUS_ESTOP_DATAGRAM=0 compiles the path out (RFC-053 item 3's build
 //   flag): every datagram reads not_estop.

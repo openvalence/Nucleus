@@ -1,21 +1,21 @@
-// integral.cpp -- the in-process front of Integral, the Nucleus device twin:
+// neutrino.cpp -- the in-process front of Neutrino, the Nucleus device twin:
 // SimCore behind a C ABI a host (Phosphor's worker) drives. The host owns time
 // and carries every byte; this file owns no clock, no socket and no thread.
 // Constraints:
 // - ONE instance per module: SimCore is a process singleton (SimCore.h).
-//   integral_create succeeds once; a fresh machine is a fresh module.
-// - One integral_send is one WebSocket message, which is one Valence frame
-//   (the native port's rule); one integral_poll returns one. A pointer
-//   integral_poll, integral_http or integral_state_get hands out stays valid
+//   neutrino_create succeeds once; a fresh machine is a fresh module.
+// - One neutrino_send is one WebSocket message, which is one Valence frame
+//   (the native port's rule); one neutrino_poll returns one. A pointer
+//   neutrino_poll, neutrino_http or neutrino_state_get hands out stays valid
 //   until the next call of that same function.
-// - Time only moves in integral_tick, in 1 ms passes (the P4's motion tick).
+// - Time only moves in neutrino_tick, in 1 ms passes (the P4's motion tick).
 // - Mirrors bench::ValenceBenchWsPort where a host can see it: the RX ring is
 //   bounded and drops, a TX backlog over kMuteBytes mutes the client until
 //   the host drains it, a close waits one hub tick for frames already received.
 // - The host's datagrams get the board's responder and ESTOP hook
 //   (ValenceDiscovery.h, ValenceEstopDatagram.h) between ticks, as the
 //   board's hub task polls its socket between hub updates.
-// See: sim/valencesim/README.md (the ABI and the host contract)
+// See: sim/neutrino/README.md (the ABI and the host contract)
 
 #include <emscripten/emscripten.h>
 
@@ -35,7 +35,7 @@
 
 namespace {
 
-// The host's clock, set by integral_tick before every pass.
+// The host's clock, set by neutrino_tick before every pass.
 class HostDrivenClock final : public valence::IClock {
 public:
     uint32_t nowUs() const override { return uint32_t(now); }
@@ -130,7 +130,7 @@ public:
     bool used = false;
     bool attached = false;
     bool hubClosed = false;     // the hub ended it; the host sees -1 once TX drains
-    bool clientClosed = false;  // integral_disconnect; detached at a hub tick
+    bool clientClosed = false;  // neutrino_disconnect; detached at a hub tick
     bool closeHeld = false;
     bool muted = false;
     std::deque<valence::FrameBuffer> rx;
@@ -212,8 +212,8 @@ extern "C" {
 
 // json_opts keys: homed, pairing_window, uncommissioned, motor_switch (bool);
 // msw_fault_s, home_sense_at_mm, rail_end_at_mm, plan_delay_ms (number). state: the blob
-// integral_state_get last returned, or null. 1 booted, 0 refused.
-EMSCRIPTEN_KEEPALIVE int integral_create(const char* json_opts, const uint8_t* state, size_t state_len) {
+// neutrino_state_get last returned, or null. 1 booted, 0 refused.
+EMSCRIPTEN_KEEPALIVE int neutrino_create(const char* json_opts, const uint8_t* state, size_t state_len) {
     if (g_core != nullptr) return 0;
     const char* j = json_opts ? json_opts : "";
     valence::SimConfig cfg;
@@ -239,8 +239,8 @@ EMSCRIPTEN_KEEPALIVE int integral_create(const char* json_opts, const uint8_t* s
 // Runs every 1 ms pass from the previous call up to now_us (the host's
 // monotonic clock, any epoch). Past 250 passes behind, the clock jumps and the
 // arbiter's stall cap holds, as on a stalled board. Returns bit0 when the
-// state blob changed since the last tick: persist integral_state_get.
-EMSCRIPTEN_KEEPALIVE int integral_tick(uint64_t now_us) {
+// state blob changed since the last tick: persist neutrino_state_get.
+EMSCRIPTEN_KEEPALIVE int neutrino_tick(uint64_t now_us) {
     if (g_core == nullptr) return 0;
     if (g_firstTick) {
         g_firstTick = false;
@@ -259,7 +259,7 @@ EMSCRIPTEN_KEEPALIVE int integral_tick(uint64_t now_us) {
 
 // A WebSocket opened. 1 attached, 0 refused (every session slot busy, or the
 // id is already open).
-EMSCRIPTEN_KEEPALIVE int integral_connect(int client_id) {
+EMSCRIPTEN_KEEPALIVE int neutrino_connect(int client_id) {
     if (g_core == nullptr || slotOf(client_id)) return 0;
     for (auto& s : g_slots) {
         if (s.used) continue;
@@ -276,13 +276,13 @@ EMSCRIPTEN_KEEPALIVE int integral_connect(int client_id) {
 }
 
 // The client closed. Frames already sent are still read at the next hub tick.
-EMSCRIPTEN_KEEPALIVE void integral_disconnect(int client_id) {
+EMSCRIPTEN_KEEPALIVE void neutrino_disconnect(int client_id) {
     if (MemTransport* s = slotOf(client_id)) s->clientClosed = true;
 }
 
 // One WebSocket message from the client. 1 queued, 0 dropped (unknown or
 // closed client, oversize, or the RX ring full).
-EMSCRIPTEN_KEEPALIVE int integral_send(int client_id, const uint8_t* data, size_t len) {
+EMSCRIPTEN_KEEPALIVE int neutrino_send(int client_id, const uint8_t* data, size_t len) {
     MemTransport* s = slotOf(client_id);
     if (!s || s->clientClosed || s->hubClosed || len == 0 || len > valence::kFrameBufferCapacity) return 0;
     if (s->rx.size() >= MemTransport::kRxDepth) return 0;
@@ -296,7 +296,7 @@ EMSCRIPTEN_KEEPALIVE int integral_send(int client_id, const uint8_t* data, size_
 
 // The next message to the client: 1 with *out/*len set, 0 none pending, -1
 // the hub closed this client (it is released; fire the socket's close).
-EMSCRIPTEN_KEEPALIVE int integral_poll(int client_id, uint8_t** out, size_t* len) {
+EMSCRIPTEN_KEEPALIVE int neutrino_poll(int client_id, uint8_t** out, size_t* len) {
     MemTransport* s = slotOf(client_id);
     if (!s) return -1;
     if (s->tx.empty()) {
@@ -317,7 +317,7 @@ EMSCRIPTEN_KEEPALIVE int integral_poll(int client_id, uint8_t** out, size_t* len
 
 // The hub's HTTP surface: GET /uitoken (RFC-029 section 4), else 404. Returns
 // the status; *out/*out_len is the body.
-EMSCRIPTEN_KEEPALIVE int integral_http(const char* method, const char* path, const uint8_t* body, size_t body_len,
+EMSCRIPTEN_KEEPALIVE int neutrino_http(const char* method, const char* path, const uint8_t* body, size_t body_len,
                                        const uint8_t** out, size_t* out_len) {
     (void)body;
     (void)body_len;
@@ -330,17 +330,17 @@ EMSCRIPTEN_KEEPALIVE int integral_http(const char* method, const char* path, con
 
 // The PAIR button, pressed once: the presence window opens at the next hub
 // tick, as the board's press opens it.
-EMSCRIPTEN_KEEPALIVE void integral_pair_press() { valence::simPairPress(); }
+EMSCRIPTEN_KEEPALIVE void neutrino_pair_press() { valence::simPairPress(); }
 
 // The PAIR button, pressed twice: the one pending configure ask is approved
 // at the next hub tick, as the board's double press approves it.
-EMSCRIPTEN_KEEPALIVE void integral_pair_double_press() { valence::simPairDoublePress(); }
+EMSCRIPTEN_KEEPALIVE void neutrino_pair_double_press() { valence::simPairDoublePress(); }
 
 // One UDP datagram the host received on its SPEC 13.8 port from `src_ipv4`
 // (host order), `ws_port` the WebSocket port it serves this machine on. The
 // reply's length with *out set, 0 for none: an ESTOP datagram (consumed, maybe
 // latched), not a probe, or the source answered within its window.
-EMSCRIPTEN_KEEPALIVE int integral_datagram(const uint8_t* data, size_t len, uint32_t src_ipv4, uint32_t ws_port,
+EMSCRIPTEN_KEEPALIVE int neutrino_datagram(const uint8_t* data, size_t len, uint32_t src_ipv4, uint32_t ws_port,
                                            const uint8_t** out) {
     if (g_core == nullptr) return 0;
     const valence::Hub& hub = g_core->hub();
@@ -353,8 +353,8 @@ EMSCRIPTEN_KEEPALIVE int integral_datagram(const uint8_t* data, size_t len, uint
 }
 
 // The persisted state as one blob, for the host to keep and hand back to
-// integral_create.
-EMSCRIPTEN_KEEPALIVE void integral_state_get(const uint8_t** out, size_t* len) {
+// neutrino_create.
+EMSCRIPTEN_KEEPALIVE void neutrino_state_get(const uint8_t** out, size_t* len) {
     g_store.encode(g_stateOut);
     *out = g_stateOut.data();
     *len = g_stateOut.size();
@@ -362,7 +362,7 @@ EMSCRIPTEN_KEEPALIVE void integral_state_get(const uint8_t** out, size_t* len) {
 
 // Closes every client. The machine stays in memory (SimCore.h); drop the
 // module to free it.
-EMSCRIPTEN_KEEPALIVE void integral_destroy() {
+EMSCRIPTEN_KEEPALIVE void neutrino_destroy() {
     if (g_core == nullptr) return;
     for (auto& s : g_slots)
         if (s.used) release(s);

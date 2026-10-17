@@ -8,7 +8,7 @@
 // - THE TOKEN IS THE BOARD'S: slot table, rate gate and HMAC derivation are
 //   flagship_p4/src/hub/UiTokenTable.h, compiled verbatim. This class owns
 //   only the lock, the per-boot secret and the route; the listener is the
-//   front's (src/main.cpp's HTTP server, or integral_http in the wasm build).
+//   front's (src/main.cpp's HTTP server, or neutrino_http in the wasm build).
 // - THREADING: serve() may run on an HTTP connection thread, consume()
 //   on the hub thread. The one mutex covers the table and nothing else, and
 //   the HMAC runs outside it, as on the board; neither side touches

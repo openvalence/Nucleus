@@ -1,6 +1,6 @@
-# Integral -- the Nucleus device twin
+# Neutrino -- the Nucleus device twin
 
-Formerly valencesim. Integral serves `valence.v1` the way the Flagship P4
+Neutrino serves `valence.v1` the way the Flagship P4
 does, so clients run and test with no hardware. It is the device twin; Valence
 Bench (`../Valence/hub/bench`) is the opposite tool, a catalog-shaped test
 double with no device semantics.
@@ -13,8 +13,8 @@ socket, no clock and no thread. Two fronts drive it:
 
 | Front | Where | Used by |
 |---|---|---|
-| Native exe `valencesim` | `src/main.cpp`, `CMakeLists.txt` | Phosphor's test suites (`test/valence-sim.mjs` and the rest), the bench, the twin's pin recorder, the Neutrino dev tool (Phosphor `neutrino/`): a WebSocket server, `/uitoken` on HTTP, UDP discovery, files for state, the wall clock, the dev tool channel |
-| `integral.wasm` + `integral.js` | `wasm/integral.cpp`, `wasm/CMakeLists.txt` | Phosphor's built-in machine, in process on every platform: a worker drives it over a MessagePort (bd val-atu, Phosphor ph-5u0g.1) |
+| Native exe `neutrino-sim` | `src/main.cpp`, `CMakeLists.txt` | Phosphor's test suites (`test/neutrino-twin.mjs` and the rest), the bench, the twin's pin recorder, the Neutrino dev tool (Phosphor `neutrino/`): a WebSocket server, `/uitoken` on HTTP, UDP discovery, files for state, the wall clock, the dev tool channel |
+| `neutrino.wasm` + `neutrino.js` | `wasm/neutrino.cpp`, `wasm/CMakeLists.txt` | Phosphor's built-in machine, in process on every platform: a worker drives it over a MessagePort (bd val-atu, Phosphor ph-5u0g.1) |
 
 ## What is real and what is not
 
@@ -32,12 +32,12 @@ socket, no clock and no thread. Two fronts drive it:
 | Durable hub identity (WELCOME identity key 5, SPEC §6.3) | minted once like the board's `hub_iid` NVS key | persisted: `PREFIX.iid`, 8 bytes little-endian |
 | Pattern presets (0x5220) | `PatternPresetStore` inside the delegate | persisted: `PREFIX.presets` holds the board's NVS `presets` blob, same debounce |
 | `background_run` | the delegate's `PatternSettings` | in memory, same as the board: persisting it waits on an operator ruling (bd val-wcm) |
-| WebSocket port | native: `src/NeutrinoWsPort.cpp`, Valence Bench's per-connection transport (`../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home) behind a `NeutrinoLink` per client; its accept, close and sweep logic is a copy of the bench port's (drift seam, bd val-sf7.7); wasm: the host's MessagePort through `integral_send`/`integral_poll` | real host binding |
-| UDP discovery responder (SPEC 13.8) | `flagship_p4/src/hub/ValenceDiscovery.cpp`, compiled verbatim (Winsock or POSIX here, lwIP on the board) | real: answers DISCOVER_PROBE on the registry port with the twin's name, `hub_instance_id`, WS port, version, etag and pairing window. The wasm front has no socket: its host hands each datagram to `integral_datagram`, which runs the `.h` responder and the ESTOP hook |
+| WebSocket port | native: `src/NeutrinoWsPort.cpp`, Valence Bench's per-connection transport (`../Valence/hub/bench/src/net/WsServerPort.cpp`, compiled from its home) behind a `NeutrinoLink` per client; its accept, close and sweep logic is a copy of the bench port's (drift seam, bd val-sf7.7); wasm: the host's MessagePort through `neutrino_send`/`neutrino_poll` | real host binding |
+| UDP discovery responder (SPEC 13.8) | `flagship_p4/src/hub/ValenceDiscovery.cpp`, compiled verbatim (Winsock or POSIX here, lwIP on the board) | real: answers DISCOVER_PROBE on the registry port with the twin's name, `hub_instance_id`, WS port, version, etag and pairing window. The wasm front has no socket: its host hands each datagram to `neutrino_datagram`, which runs the `.h` responder and the ESTOP hook |
 | `/uitoken` token: slot table, rate gate, HMAC derivation | `flagship_p4/src/hub/UiTokenTable.h`, compiled verbatim | real |
-| `/uitoken` endpoint | `src/SimUiToken.cpp` (`serve`), on IXWebSocket's HTTP server in the exe and `integral_http` in wasm, a `std::mutex` for the board's spinlock | same contract; the exe binds 127.0.0.1 |
+| `/uitoken` endpoint | `src/SimUiToken.cpp` (`serve`), on IXWebSocket's HTTP server in the exe and `neutrino_http` in wasm, a `std::mutex` for the board's spinlock | same contract; the exe binds 127.0.0.1 |
 | Config and tuning persistence (0x1000, 0x1030, 0x1120, 0x1122, cfg_gen) | `StoredState.h` codec, compiled verbatim | persisted: `PREFIX.cfg` holds the board's NVS `cfg` blob; a file stands in for NVS |
-| Push-to-pair gesture | `--pairing-window` opens the hub's presence window at boot; in wasm, `integral_pair_press` is a PAIR press and `integral_pair_double_press` a double press, each taken by the delegate as the board's (`ValenceDevice::servicePair`); natively, the dev tool channel's PAIR and HOME levels run through the board's own `system/ButtonGesture.h` cores (press, double press, the 5 s demote hold; HOME press homes, HOME hold reboots) | wasm: the press, not the button (bd val-sf7.6); native with the dev tool: the button |
+| Push-to-pair gesture | `--pairing-window` opens the hub's presence window at boot; in wasm, `neutrino_pair_press` is a PAIR press and `neutrino_pair_double_press` a double press, each taken by the delegate as the board's (`ValenceDevice::servicePair`); natively, the dev tool channel's PAIR and HOME levels run through the board's own `system/ButtonGesture.h` cores (press, double press, the 5 s demote hold; HOME press homes, HOME hold reboots) | wasm: the press, not the button (bd val-sf7.6); native with the dev tool: the button |
 | Geiger log lines from device code | `lib/geiger`'s host platform layer (`GEIGER_HOST_PLATFORM`), drained on the hub thread into the sim's log | real: device lines print beside the sim's own, stamped with the hub clock |
 | Log channel 0x0008 | a Geiger sink in `src/main.cpp`, Warn and above into `Hub::publishLog`, as the board's `system/ValenceLogBridge.cpp` | same contract: Warn floor, the hub's own truncation and replay ring; no task-name gate, because every drain here is on the hub thread |
 | Motor switch (`system/MotorSwitch.h` state machine) | `src/SimMotorSwitch.cpp` | absent by default: power on from boot, hub-status reads `on`, ESTOP is a halt that keeps home (`estop_cuts_power` false). `--motor-switch` runs the board's own machine on the hub clock with healthy readings (an RC pre-charge into 150 uF through 100 R), declares `estop_cuts_power` true, and enables at boot; `--msw-fault` injects one fault-line window |
@@ -57,11 +57,11 @@ WinLibs MinGW-w64 on PATH, from PowerShell:
 
 ```
 $env:PATH = "C:\Users\Atlan\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin;" + $env:PATH
-cmake -S sim/valencesim -B sim/valencesim/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++ -DCMAKE_C_COMPILER=gcc
-cmake --build sim/valencesim/build
+cmake -S sim/neutrino -B sim/neutrino/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++ -DCMAKE_C_COMPILER=gcc
+cmake --build sim/neutrino/build
 ```
 
-Output: `sim/valencesim/build/valencesim.exe`, statically linked. The first
+Output: `sim/neutrino/build/neutrino-sim.exe`, statically linked. The first
 configure fetches IXWebSocket v11.4.6 and applies Valence Bench's
 subprotocol-echo patch from `../Valence/hub/bench/cmake/`. The sibling
 Valence and Kinetic checkouts must exist beside this repo (override with
@@ -69,14 +69,14 @@ Valence and Kinetic checkouts must exist beside this repo (override with
 
 Linux and macOS: the same two `cmake` lines without the compiler flags (a
 C++23 GCC or Clang, `cmake`, `ninja`, `git`; built with GCC 16 and with Clang
-23 on libc++, macOS itself untried). Output `build/valencesim`; Linux GCC
+23 on libc++, macOS itself untried). Output `build/neutrino-sim`; Linux GCC
 links libstdc++ in. The native exe serves tests and the bench; Phosphor does
 not bundle it and runs the wasm build in process instead (below).
 
 ## Run
 
 ```
-valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
+neutrino-sim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--duration S]
            [--pairing-window] [--motor-switch [--msw-fault S]] [--state PREFIX]
            [--no-estop-udp] [--home-sense-at MM [--rail-end-at MM]] [--plan-delay-ms N]
            [--uncommissioned] [--no-discovery] [--discovery-port N]
@@ -100,7 +100,7 @@ valencesim [machine] [--port 82] [--bind 0.0.0.0] [--http 80] [--homed] [--durat
 | `--plan-delay-ms N` | SIM-ONLY, a test fault with no board counterpart: every solve lands N ms after it starts, as a slow solve lands on the board's planner task. Intents are accepted on arrival; the plan tick that solves them runs N ms later with its strip anchored at the arrival, and intents that arrive meanwhile wait. The steer keeps rendering the strip it has, so a stream sees `LATE PLAN`, `PLANNER STALL` and a plan that runs out while its segments arrived on time: the HUB cause in Phosphor's link health classification (ph-9t5l). Default 0, no delay |
 | `--no-discovery` | no UDP discovery socket: keeps a test run off the registry port |
 | `--discovery-port N` | answer DISCOVER_PROBE on N instead of the registry's `udp_discovery.port`, so a test talks to this twin and no other. A port another process holds costs only discovery (logged), never the run |
-| `--state PREFIX` | where the persisted blobs live (`PREFIX.cfg`, `PREFIX.presets`, `PREFIX.iid`); default `valencesim-state` beside the exe. Delete `.cfg` and `.presets` for factory values; deleting `.iid` makes the twin a different hub |
+| `--state PREFIX` | where the persisted blobs live (`PREFIX.cfg`, `PREFIX.presets`, `PREFIX.iid`); default `neutrino-sim-state` beside the exe. Delete `.cfg` and `.presets` for factory values; deleting `.iid` makes the twin a different hub |
 | `--devtool-port N` | open the dev tool channel on 127.0.0.1:N (below); 0 or absent, none |
 | `--exit-with-stdin` | end the run when stdin closes: a launcher holding the pipe takes the twin down with it, however it exits |
 | `--headless`, `--no-mdns`, `--enforce`, `machine` | accepted for command-line compatibility; there is no TUI and no mDNS, and the device posture is the only one |
@@ -110,7 +110,7 @@ A HELLO that no pairing token and no live `/uitoken` vouches for lands at
 mints `/uitoken` per connect (`acquireToken` in valence-js); run
 `valence-auth.mjs --expect-enforced` to prove the posture.
 
-Kill any stale `valencesim` on 80/82 first, or a test talks to the wrong
+Kill any stale `neutrino-sim` on 80/82 first, or a test talks to the wrong
 binary.
 
 ## The dev tool channel
@@ -165,13 +165,13 @@ With the emsdk at `../.tools/emsdk` (the workspace's; `emsdk_env` or its
 `upstream/emscripten` on PATH, plus Ninja):
 
 ```
-emcmake cmake -S sim/valencesim/wasm -B sim/valencesim/wasm/build -G Ninja
-cmake --build sim/valencesim/wasm/build
-node sim/valencesim/wasm/check.mjs
+emcmake cmake -S sim/neutrino/wasm -B sim/neutrino/wasm/build -G Ninja
+cmake --build sim/neutrino/wasm/build
+node sim/neutrino/wasm/check.mjs
 ```
 
-Output `sim/valencesim/wasm/build/integral.js` (ES6 module factory
-`createIntegral`) and `integral.wasm`, about 660 KB raw and 207 KB gzipped;
+Output `sim/neutrino/wasm/build/neutrino.js` (ES6 module factory
+`createNeutrino`) and `neutrino.wasm`, about 660 KB raw and 207 KB gzipped;
 build products, never committed. Same sources and capacities as the exe, no
 pthreads, no asyncify, no filesystem. `check.mjs` boots it, opens a
 valence-js session over an in-memory socket, verifies the catalog against the
@@ -184,35 +184,35 @@ out stays valid until the next call of the same function.
 
 | Function | Contract |
 |---|---|
-| `integral_create(json_opts, state, state_len)` | Boots the machine. Options: `homed`, `pairing_window`, `uncommissioned`, `motor_switch` (bool), `msw_fault_s`, `home_sense_at_mm`, `rail_end_at_mm`, `plan_delay_ms` (number), the flags of the same names above. `state` is the blob `integral_state_get` last returned, or null. 1 booted, 0 refused. Once per module instance |
-| `integral_tick(now_us)` | Runs every 1 ms pass up to `now_us` (any epoch, monotonic); more than 250 ms behind, the clock jumps and the arbiter's stall cap holds, as on a stalled board. The hub ticks every 5 ms of it. Returns bit0 when the state blob changed |
-| `integral_connect(id)` | A socket opened: 1 attached, 0 refused (all five slots busy) |
-| `integral_send(id, data, len)` | One WebSocket message (one frame, at most 512 B). 1 queued, 0 dropped (ring of 32 full, oversize, unknown id) |
-| `integral_poll(id, &out, &len)` | 1: the next message to the client; 0: none; -1: the hub closed it (fire `onclose`; the id is free) |
-| `integral_disconnect(id)` | The client closed; frames already sent are read at the next hub tick |
-| `integral_http(method, path, body, len, &out, &out_len)` | Status and body. Only `GET /uitoken` exists (RFC-029 section 4); anything else is 404 |
-| `integral_state_get(&out, &len)` | The persisted state as one blob: repeated `[u8 key][u32 LE length][bytes]`, keys 1 cfg, 2 presets, 3 hub_iid, the board's NVS blobs |
-| `integral_destroy()` | Closes every client. The machine stays in memory; drop the module to free it |
-| `integral_pair_press()` | One PAIR press: the presence window opens at the next hub tick |
-| `integral_pair_double_press()` | A PAIR double press: the one pending configure ask is granted configure at the next hub tick (Valence RFC-114) |
-| `integral_datagram(data, len, src_ipv4, ws_port, &out)` | One UDP datagram the host received on its SPEC 13.8 port, `src_ipv4` in host order, `ws_port` the WebSocket port it serves this machine on. Returns the length of the reply at `*out`, 0 for none, after the ESTOP hook (RFC-053) and the per-source limiter; send the reply to the datagram's source |
+| `neutrino_create(json_opts, state, state_len)` | Boots the machine. Options: `homed`, `pairing_window`, `uncommissioned`, `motor_switch` (bool), `msw_fault_s`, `home_sense_at_mm`, `rail_end_at_mm`, `plan_delay_ms` (number), the flags of the same names above. `state` is the blob `neutrino_state_get` last returned, or null. 1 booted, 0 refused. Once per module instance |
+| `neutrino_tick(now_us)` | Runs every 1 ms pass up to `now_us` (any epoch, monotonic); more than 250 ms behind, the clock jumps and the arbiter's stall cap holds, as on a stalled board. The hub ticks every 5 ms of it. Returns bit0 when the state blob changed |
+| `neutrino_connect(id)` | A socket opened: 1 attached, 0 refused (all five slots busy) |
+| `neutrino_send(id, data, len)` | One WebSocket message (one frame, at most 512 B). 1 queued, 0 dropped (ring of 32 full, oversize, unknown id) |
+| `neutrino_poll(id, &out, &len)` | 1: the next message to the client; 0: none; -1: the hub closed it (fire `onclose`; the id is free) |
+| `neutrino_disconnect(id)` | The client closed; frames already sent are read at the next hub tick |
+| `neutrino_http(method, path, body, len, &out, &out_len)` | Status and body. Only `GET /uitoken` exists (RFC-029 section 4); anything else is 404 |
+| `neutrino_state_get(&out, &len)` | The persisted state as one blob: repeated `[u8 key][u32 LE length][bytes]`, keys 1 cfg, 2 presets, 3 hub_iid, the board's NVS blobs |
+| `neutrino_destroy()` | Closes every client. The machine stays in memory; drop the module to free it |
+| `neutrino_pair_press()` | One PAIR press: the presence window opens at the next hub tick |
+| `neutrino_pair_double_press()` | A PAIR double press: the one pending configure ask is granted configure at the next hub tick (Valence RFC-114) |
+| `neutrino_datagram(data, len, src_ipv4, ws_port, &out)` | One UDP datagram the host received on its SPEC 13.8 port, `src_ipv4` in host order, `ws_port` the WebSocket port it serves this machine on. Returns the length of the reply at `*out`, 0 for none, after the ESTOP hook (RFC-053) and the per-source limiter; send the reply to the datagram's source |
 
 Log lines (the boot banner with the etag, device GLOG lines) arrive on the
 module's `print`/`printErr`.
 
 ### The host contract
 
-- The host owns time. `integral_tick` is the only thing that advances it;
+- The host owns time. `neutrino_tick` is the only thing that advances it;
   call it at least every few milliseconds with the host's monotonic clock.
   Ticking slower than the catalog's fastest rate (the 60 Hz motion STATE, a
   20 Hz jog) delays every STATE push and makes motion jump.
-- After each tick, drain `integral_poll` for every open client.
-- Persist: when `integral_tick` returns bit0, store `integral_state_get`'s
-  blob (IndexedDB or localStorage) and pass it to the next `integral_create`.
+- After each tick, drain `neutrino_poll` for every open client.
+- Persist: when `neutrino_tick` returns bit0, store `neutrino_state_get`'s
+  blob (IndexedDB or localStorage) and pass it to the next `neutrino_create`.
   A machine started without it mints a new hub identity.
 - One machine per module instance; a restart is a new instance.
 - The HTTP side has one route; a session's token provider calls
-  `integral_http("GET", "/uitoken")` and passes the hex token as bytes.
+  `neutrino_http("GET", "/uitoken")` and passes the hex token as bytes.
 
 ## Verify
 
@@ -220,6 +220,6 @@ The dev tool channel's crossings, codec and fault link: suite
 `test_neutrino_devtool` (`pio test -e native -f native/test_neutrino_devtool`).
 
 From `../Phosphor`: `node test/pairing-roundtrip.mjs` starts its own sim. For
-the rest, start `valencesim machine --homed --duration 600`, then pass
+the rest, start `neutrino-sim machine --homed --duration 600`, then pass
 `127.0.0.1 82` (or `--ip 127.0.0.1` / `--host 127.0.0.1`) to each test.
 Per-file results are stamped on the board, not here.

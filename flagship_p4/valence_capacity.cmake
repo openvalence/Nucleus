@@ -1,6 +1,6 @@
 # The Flagship's Valence catalog capacities (RFC-077 item 8): the ONE home.
 # flagship_p4/CMakeLists.txt applies them to every component of the P4 build
-# and sim/valencesim/CMakeLists.txt to the twin, so both instantiate the same
+# and sim/neutrino/CMakeLists.txt to the twin, so both instantiate the same
 # Catalog32 and the hub's encode scratch at the same size. They are BUILD
 # FLAGS, never a #define in a source file: two translation units seeing two
 # values would be two Catalog32 types (ODR), and nothing would say so.
@@ -8,7 +8,7 @@
 # Sizing (val-9u0.5, recomputed 2026-10-13 for the visible-networks channels
 # 0x0019 and 0x001A, RFC-118): the machine budget is 54 / 292 / 176 / 200 and
 # 31,104 B encoded. Machine use is 53 entries, 288 layout, 141 schema and
-# 30,796 B encoded [verified 2026-10-13 -- valencesim 0.1.54 headroom line: 6
+# 30,796 B encoded [verified 2026-10-13 -- neutrino-sim 0.1.54 headroom line: 6
 # accessories]. Each
 # accessory gets the per-accessory budget below. The accessory count is
 # the most that keeps the total entries at or under catalog_max_entries (256),

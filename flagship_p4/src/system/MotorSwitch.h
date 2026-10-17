@@ -5,7 +5,7 @@
 // Constraints:
 // - Hardware-free and allocation-free. A host reads the pins into Readings,
 //   steps the machine, and drives MOTOR_EN and PRECHARGE_EN from outputs().
-//   ValenceMotorSwitch.cpp is the board's host, sim/valencesim's
+//   ValenceMotorSwitch.cpp is the board's host, sim/neutrino's
 //   SimMotorSwitch.cpp the twin's; suite test_motor_switch drives this file.
 // - SINGLE OWNER. No method is safe against a concurrent call; the host
 //   serializes them (the board under one spinlock, ValenceMotorSwitch.cpp).

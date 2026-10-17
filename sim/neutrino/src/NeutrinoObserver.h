@@ -16,7 +16,7 @@
 // - SIM-ONLY: nothing here exists on the board. The buttons run through the
 //   board's own ButtonGesture cores; their gestures reach the delegate through
 //   the same take functions the board's BoardIo task fills.
-// See: NeutrinoDevtool.h, sim/valencesim/README.md (the dev tool)
+// See: NeutrinoDevtool.h, sim/neutrino/README.md (the dev tool)
 
 #include <array>
 #include <atomic>

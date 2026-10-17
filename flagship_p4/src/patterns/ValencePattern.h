@@ -10,7 +10,7 @@
 // - patternSetSettings() may be called from any task and never blocks: a
 //   newer set overwrites an unapplied older one, the only one that matters.
 // - Each composition links its own implementation: ValencePattern.cpp (the
-//   P4's pattern task) or sim/valencesim's SimPattern.cpp (one thread).
+//   P4's pattern task) or sim/neutrino's SimPattern.cpp (one thread).
 // See: PatternEngine.h, PatternSettings.h, bd val-091.12
 
 #include <cstdint>

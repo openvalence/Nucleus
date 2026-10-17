@@ -5,7 +5,7 @@
 // that parks an armed seek and wakes the planner task
 // Constraints:
 // - IDF-free here; ValenceHomeSense.cpp is the board host and the sim has its
-//   own stand-in (sim/valencesim/src/SimMotion.cpp).
+//   own stand-in (sim/neutrino/src/SimMotion.cpp).
 // - homeSenseBegin() runs once, from MotionTask::begin(), before either
 //   motion task exists. With BOARD_GPIO_HOME_SENSE -1 it touches no pad and the
 //   sense it returns is absent: home op 1 refuses, never seeks open-loop.

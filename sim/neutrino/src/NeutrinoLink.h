@@ -19,7 +19,7 @@
 // - RTT is measured at the hub: a client PING pulled from the transport to
 //   the hub's PONG handed back to it, so it holds both directions' injected
 //   delay and no socket time.
-// See: sim/valencesim/README.md (the dev tool)
+// See: sim/neutrino/README.md (the dev tool)
 
 #include <algorithm>
 #include <cstdint>

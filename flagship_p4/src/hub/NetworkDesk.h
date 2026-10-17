@@ -32,7 +32,7 @@
 // - A CONFIGURE SESSION IS PRESENT when one is ready at configure on any
 //   binding, serial and in-process included; a parked (STALE) one is not. An
 //   ask pending when the last one leaves is dropped.
-// - Hardware-free: valencesim runs it with its own station.
+// - Hardware-free: neutrino-sim runs it with its own station.
 // - TODO(RFC-116, RFC-118): valence::net::draft numbers become registry
 //   constants when the RFCs land.
 // See: Valence SPEC.md §8.8, §12.2, §13.9; RFC-QUEUE.md RFC-116, RFC-118;

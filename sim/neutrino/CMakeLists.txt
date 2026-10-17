@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(valencesim CXX)
+project(neutrino-sim CXX)
 
 # Host build only -- never part of a PlatformIO firmware build. GCC or Clang:
 # MinGW-w64 on Windows (the Valence Bench toolchain, never MSVC), Linux and
@@ -29,7 +29,7 @@ FetchContent_Declare(ixwebsocket
     PATCH_COMMAND ${CMAKE_COMMAND} -P ${VALENCE_ROOT}/hub/bench/cmake/PatchIXWebSocket.cmake)
 FetchContent_MakeAvailable(ixwebsocket)
 
-add_executable(valencesim
+add_executable(neutrino-sim
     src/main.cpp
     src/SimCore.cpp
     src/SimMotion.cpp
@@ -46,7 +46,7 @@ add_executable(valencesim
     "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceEstopDatagram.cpp"
     "${BENCH_SRC}/net/WsServerPort.cpp")
 
-target_include_directories(valencesim PRIVATE
+target_include_directories(neutrino-sim PRIVATE
     src
     "${NUCLEUS_ROOT}/flagship_p4/src"
     "${NUCLEUS_ROOT}/flagship_p4/src/hub"
@@ -58,29 +58,29 @@ target_include_directories(valencesim PRIVATE
     "${BENCH_SRC}")
 
 # Device GLOG sites are audible here; without it Geiger's host branch is mute.
-target_compile_definitions(valencesim PRIVATE GEIGER_HOST_PLATFORM)
+target_compile_definitions(neutrino-sim PRIVATE GEIGER_HOST_PLATFORM)
 
 # The board's catalog capacities, from their one home, so the twin's catalog
 # and scratch are the P4's.
 include("${NUCLEUS_ROOT}/flagship_p4/valence_capacity.cmake")
-target_compile_definitions(valencesim PRIVATE ${VALENCE_CAPACITY_DEFINITIONS})
+target_compile_definitions(neutrino-sim PRIVATE ${VALENCE_CAPACITY_DEFINITIONS})
 
-target_compile_options(valencesim PRIVATE -O2 -Wall -Wextra)
+target_compile_options(neutrino-sim PRIVATE -O2 -Wall -Wextra)
 
 # Standalone exe: no libstdc++/libgcc/winpthread DLL hunting.
 if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_link_options(valencesim PRIVATE -static)
+    target_link_options(neutrino-sim PRIVATE -static)
 elseif(UNIX AND NOT APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # A copied exe meets distros older than the build host's libstdc++.
-    target_link_options(valencesim PRIVATE -static-libstdc++ -static-libgcc)
+    target_link_options(neutrino-sim PRIVATE -static-libstdc++ -static-libgcc)
 endif()
 
 # Firmware sources include lwIP's socket header on every non-Winsock host.
 if(NOT WIN32)
-    target_include_directories(valencesim PRIVATE posix)
+    target_include_directories(neutrino-sim PRIVATE posix)
 endif()
 
-target_link_libraries(valencesim PRIVATE ixwebsocket)
+target_link_libraries(neutrino-sim PRIVATE ixwebsocket)
 if(WIN32)
-    target_link_libraries(valencesim PRIVATE ws2_32 dnsapi shell32 winmm)
+    target_link_libraries(neutrino-sim PRIVATE ws2_32 dnsapi shell32 winmm)
 endif()

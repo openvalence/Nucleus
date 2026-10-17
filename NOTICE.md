@@ -41,7 +41,7 @@ Section numbers are CERN-OHL-S-2.0's own.
 | espressif/wifi_remote_over_eppp 0.3.3 | https://components.espressif.com/components/espressif/wifi_remote_over_eppp | Apache-2.0 (per its `idf_component.yml`; the package ships no LICENSE file) | Transport glue for esp_wifi_remote (managed component) |
 | espressif/eppp_link 1.1.6 | https://components.espressif.com/components/espressif/eppp_link | Apache-2.0 | PPP link between the P4 and the C6 (managed component) |
 | espressif/esp_serial_slave_link 1.1.2 | https://components.espressif.com/components/espressif/esp_serial_slave_link | Apache-2.0 | SDIO link driver under eppp_link (managed component) |
-| IXWebSocket 11.4.6 | https://github.com/machinezone/IXWebSocket | BSD-3-Clause, Copyright (c) 2018 Machine Zone, Inc. | WebSocket server of the host simulator `sim/valencesim` only; fetched by CMake, not in the firmware |
+| IXWebSocket 11.4.6 | https://github.com/machinezone/IXWebSocket | BSD-3-Clause, Copyright (c) 2018 Machine Zone, Inc. | WebSocket server of the host simulator `sim/neutrino` only; fetched by CMake, not in the firmware |
 | doctest 2.4.12 | https://github.com/doctest/doctest | MIT (per its `library.json`; no LICENSE file in the fetched package) | Native test runner only (`pio test -e native`); not in any shipped image |
 | ch32fun (PlatformIO `ch32v003fun` framework) | https://github.com/cnlohr/ch32fun | unknown (not fetched on this host) | The `flagship_ch32v003` monitor firmware build |
 | Valence protocol (`spec/`) | https://github.com/openvalence/Valence | CC BY 4.0 (Valence/LICENSE-SPEC) | The wire protocol Nucleus speaks; consumed by pinned sha in `valence.pin` |

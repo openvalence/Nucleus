@@ -3,7 +3,7 @@
 // SimCore -- the twin's machine: catalog, delegate, Hub, motion, patterns,
 // motor switch, /uitoken table and persistence, with no socket and no clock
 // of its own. Two fronts drive it: src/main.cpp (the native exe: WS, HTTP,
-// UDP discovery, a wall clock) and wasm/integral.cpp (the in-process build:
+// UDP discovery, a wall clock) and wasm/neutrino.cpp (the in-process build:
 // the host drives time and carries the bytes).
 // Constraints:
 // - ONE thread calls everything here, and pass() is the only tick (T5).
@@ -14,7 +14,7 @@
 //   destroyed before exit.
 // - Stored state is read BEFORE the Hub is constructed (the P4's hubBegin
 //   order); a front never loads a blob after begin().
-// See: sim/valencesim/README.md
+// See: sim/neutrino/README.md
 
 #include <array>
 #include <cstddef>
@@ -123,7 +123,7 @@ private:
     // through slot 0 at boot, and the live entry follows its id through
     // moves; when it goes, slot 0 is live. RSSI made up per slot. The list
     // lives in RAM only. A scan (RFC-118) hears the made-up neighborhood
-    // below, fixed RSSI, kScanMs after it starts; sim/valencesim/README.md
+    // below, fixed RSSI, kScanMs after it starts; sim/neutrino/README.md
     // lists it for client suites.
     // ponytail: no persistence across sim restarts; add an ISimStore blob if a
     // suite needs it.

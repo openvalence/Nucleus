@@ -27,7 +27,7 @@ machine's budget is 48 entries, 240 layout, 160 schema, 192 labels and
 (80% of 32,768) it had before RFC-077 until layout rose with the RFC-095
 dwells (val-091.67) and bytes with the section card headings (val-mwu), then
 both with the oscillator, datagram_estop and the oscillator's drives (val-o9r:
-47 entries, 235 layout, 28,329 B in use [verified 2026-10-09 -- valencesim
+47 entries, 235 layout, 28,329 B in use [verified 2026-10-09 -- neutrino-sim
 headroom line]).
 
 ## Per accessory, at 30 channels
@@ -65,7 +65,7 @@ The hub's encode scratch is 76 KiB. Both live in
 the PSRAM `HubBox` (T2), never on a stack and never in static RAM. PSRAM free
 is 33.5 MB (`memory-budget.md`), so this is well under 1% of it.
 
-**Headroom as the hub computes it** [verified 2026-10-09 -- valencesim boot
+**Headroom as the hub computes it** [verified 2026-10-09 -- neutrino-sim boot
 log at Valence f79567d]: 6 accessories; free 187 entries, 203 layout,
 206 schema, 360 safe, 33,930 B. `catalogHeadroom()` in `ValenceDevice.h` is
 the one computation; the accessories roster (val-9u0.19) advertises its answer

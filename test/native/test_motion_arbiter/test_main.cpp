@@ -29,7 +29,7 @@
 #include "../../../flagship_p4/src/motion/MotionArbiter.cpp"
 #include "../../../flagship_p4/src/patterns/advanced/AdvancedPattern.cpp"
 #include "../../../flagship_p4/src/patterns/PatternEngine.cpp"
-#include "../../../sim/valencesim/src/IdealEmitter.h"
+#include "../../../sim/neutrino/src/IdealEmitter.h"
 
 using valence::MotionAnomaly;
 using valence::MotionArbiter;

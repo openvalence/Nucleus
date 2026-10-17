@@ -1,19 +1,19 @@
-# Integral's in-process front: integral.wasm + integral.js (README.md, "The
+# Neutrino's in-process front: neutrino.wasm + neutrino.js (README.md, "The
 # wasm front").
 #
 # Build (from the Nucleus root, with emsdk activated):
-#   emcmake cmake -S sim/valencesim/wasm -B sim/valencesim/wasm/build -G Ninja
-#   cmake --build sim/valencesim/wasm/build
-# Output: sim/valencesim/wasm/build/integral.{js,wasm} (gitignored).
+#   emcmake cmake -S sim/neutrino/wasm -B sim/neutrino/wasm/build -G Ninja
+#   cmake --build sim/neutrino/wasm/build
+# Output: sim/neutrino/wasm/build/neutrino.{js,wasm} (gitignored).
 #
 # The machine's sources are the native exe's, by path; nothing is copied. No
 # pthreads and no asyncify: the host drives every call synchronously.
 
 cmake_minimum_required(VERSION 3.24)
-project(integral CXX)
+project(neutrino CXX)
 
 if(NOT EMSCRIPTEN)
-    message(FATAL_ERROR "integral builds with em++ (emcmake). The native front is ../CMakeLists.txt.")
+    message(FATAL_ERROR "neutrino builds with em++ (emcmake). The native front is ../CMakeLists.txt.")
 endif()
 
 set(CMAKE_CXX_STANDARD 23)
@@ -25,8 +25,8 @@ get_filename_component(NUCLEUS_ROOT "${SIM_ROOT}/../.." ABSOLUTE)
 set(VALENCE_ROOT "${NUCLEUS_ROOT}/../Valence" CACHE PATH "Sibling Valence checkout")
 set(KINETIC_ROOT "${NUCLEUS_ROOT}/../Kinetic" CACHE PATH "Sibling Kinetic checkout")
 
-add_executable(integral
-    integral.cpp
+add_executable(neutrino
+    neutrino.cpp
     "${SIM_ROOT}/src/SimCore.cpp"
     "${SIM_ROOT}/src/SimMotion.cpp"
     "${SIM_ROOT}/src/SimMotorSwitch.cpp"
@@ -38,7 +38,7 @@ add_executable(integral
     "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceDevice.cpp"
     "${NUCLEUS_ROOT}/flagship_p4/src/hub/ValenceEstopDatagram.cpp")
 
-target_include_directories(integral PRIVATE
+target_include_directories(neutrino PRIVATE
     "${SIM_ROOT}/src"
     "${SIM_ROOT}/posix"
     "${NUCLEUS_ROOT}/flagship_p4/src"
@@ -51,20 +51,20 @@ target_include_directories(integral PRIVATE
     # Header-only here: HostPlatform.h (HostRandom) and SessionLog.h.
     "${VALENCE_ROOT}/hub/bench/src")
 
-target_compile_definitions(integral PRIVATE GEIGER_HOST_PLATFORM)
+target_compile_definitions(neutrino PRIVATE GEIGER_HOST_PLATFORM)
 include("${NUCLEUS_ROOT}/flagship_p4/valence_capacity.cmake")
-target_compile_definitions(integral PRIVATE ${VALENCE_CAPACITY_DEFINITIONS})
-target_compile_options(integral PRIVATE -O2 -Wall -Wextra)
+target_compile_definitions(neutrino PRIVATE ${VALENCE_CAPACITY_DEFINITIONS})
+target_compile_options(neutrino PRIVATE -O2 -Wall -Wextra)
 
-target_link_options(integral PRIVATE
+target_link_options(neutrino PRIVATE
     -O2
     -sMODULARIZE=1
     -sEXPORT_ES6=1
-    -sEXPORT_NAME=createIntegral
+    -sEXPORT_NAME=createNeutrino
     -sENVIRONMENT=web,worker,node
     -sALLOW_MEMORY_GROWTH=1
     -sSTACK_SIZE=1MB
     -sFILESYSTEM=0
-    -sEXPORTED_FUNCTIONS=_malloc,_free,_integral_create,_integral_tick,_integral_connect,_integral_disconnect,_integral_send,_integral_poll,_integral_http,_integral_state_get,_integral_destroy,_integral_pair_press,_integral_pair_double_press,_integral_datagram
+    -sEXPORTED_FUNCTIONS=_malloc,_free,_neutrino_create,_neutrino_tick,_neutrino_connect,_neutrino_disconnect,_neutrino_send,_neutrino_poll,_neutrino_http,_neutrino_state_get,_neutrino_destroy,_neutrino_pair_press,_neutrino_pair_double_press,_neutrino_datagram
     -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32,stringToNewUTF8,UTF8ToString)
-set_target_properties(integral PROPERTIES SUFFIX ".js")
+set_target_properties(neutrino PROPERTIES SUFFIX ".js")
