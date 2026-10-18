@@ -1904,7 +1904,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasUnitId = true, .unitId = valence::unit_ids::percent});
     c.addLayoutField({.name = "max_depth", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
-                      .dflt = SettingDefault::ofInt(10),
+                      .dflt = SettingDefault::ofInt(100),
                       .group = "Depth window",
                       .desc = "Deepest point of the stroke",
                       .role = roles::advgen_depth_max,
