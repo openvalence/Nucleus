@@ -1895,7 +1895,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasRank = true, .rank = valence::ui_ranks::hidden});
     c.addLayoutField({.name = "master", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
-                      .dflt = SettingDefault::ofInt(0),
+                      .dflt = SettingDefault::ofInt(10),
                       .group = "Advanced pattern",
                       .desc = "Overall stroke speed, 0 holds position",
                       .role = roles::advgen_master,

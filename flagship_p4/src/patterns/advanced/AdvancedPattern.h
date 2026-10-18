@@ -113,9 +113,10 @@ float halfStrokeSeconds(const StrokePlan& plan, float input_speed_mm_s, float di
 
 // The whole advanced control set. Defaults are the catalog's `default`
 // annotations: the depth pair spans the whole stroke window, which is the
-// bound (operator 2026-10-18), and master speed 0 holds a fresh boot still.
+// bound, and master speed 10 %, so a Start strokes at once, slowly
+// (operator 2026-10-18).
 struct Settings {
-    BaseControl master    {0,   0, 100, false};  // no modulator
+    BaseControl master    {10,  0, 100, false};  // no modulator
     BaseControl max_depth {100, 0, 100, false};
     BaseControl min_depth {0,   0, 100, true};
     BaseControl in_speed  {100, 1, 100, false};

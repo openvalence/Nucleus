@@ -328,7 +328,7 @@ TEST_CASE("preset payload round-trips and the store bumps its generation") {
     CHECK(b.ap.out_speed.value == 33);
     CHECK(b.ap.byId(advpat::SPEED_IN)->modifier == a.ap.byId(advpat::SPEED_IN)->modifier);
     // Depths and master speed are never carried by a preset.
-    CHECK(b.ap.master.value == 0);
+    CHECK(b.ap.master.value == 10);
     CHECK(b.ap.max_depth.value == 100);
 
     PatternPresetStore st;
