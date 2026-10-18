@@ -17,7 +17,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const flag = (f, d) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : d; };
 const modPath = resolve(args.find((a) => a.endsWith('.js')) || here + '/build/neutrino.js');
-const ETAG = flag('--etag', 'b310da1445ea519a');
+const ETAG = flag('--etag', '30eb939bfbb4d965');
 
 let fails = 0;
 const ok = (name, cond, extra) => {
@@ -160,8 +160,12 @@ if (live) {
 
   // ---- configure tier: control drives, only configure sets (SPEC 12.2) ------
   const cfg = (s.catalog || []).find((e) => e.name === 'config-set');
-  ok('catalog carries "config-set" at configure', !!cfg && cfg.access === 2, cfg && 'access=' + cfg.access);
+  const jogSpeed = cfg && (cfg.schema || []).find((f) => f.key === 3);
+  ok('"config-set" floor control, a limit key raised to configure', !!cfg && cfg.access === 1 && !!jogSpeed
+    && jogSpeed.access === 2, cfg && 'access=' + cfg.access + ' key3=' + (jogSpeed && jogSpeed.access));
   if (cfg) {
+    ok('control: the stroke window is accepted', await s.sendIntent(cfg.id, { 2: 300 }).then(() => true,
+      (e) => (ok('', false, e.message), false)));
     const refused = await s.sendIntent(cfg.id, { 3: 60 }).then(() => false, () => true);
     const n = nacks.at(-1);
     ok('control: config-set refused ACCESS_DENIED "needs configure"', refused && !!n && n.name === 'ACCESS_DENIED'

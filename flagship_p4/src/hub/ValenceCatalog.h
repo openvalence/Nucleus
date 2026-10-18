@@ -27,11 +27,14 @@
 //   changing the hub in lockstep.
 //   Wire sizes are noted per entry so a budget overrun is caught by eye;
 //   there is no packed struct to static_assert against.
-//   Write tiers (SPEC 12.2, operator ruling 2026-10-15): a write that changes
-//   a machine setting or limit needs `configure` (window, rail, ceilings,
-//   Kinetic tuning, homing, drive, network, trust, persisted config).
-//   `control` drives inside those limits: streams, jog, home, patterns and
-//   their share-of-window knobs, the oscillator, presets, source ownership.
+//   Write tiers (SPEC 12.2, operator rulings 2026-10-15 and 2026-10-17): a
+//   write that changes a machine setting or limit needs `configure` (rail,
+//   ceilings, Kinetic tuning, homing, drive, network, trust, persisted
+//   config). `control` drives inside those limits: streams, jog, home,
+//   patterns and their share-of-window knobs, the oscillator, presets,
+//   source ownership, and the stroke window and flip (user motion choices
+//   the hub holds inside max_rail). An entry mixing both sits at `control`
+//   and raises each limit key with field `access`; access only raises.
 //   pause and estop stay `watch`. test_valence_device's VD-TIER-MATRIX holds
 //   every writable entry to this; a new one fails it until classified there.
 // See: Valence spec/AUTHORING.md ("you want X on screen -> you author Y" —
@@ -2200,7 +2203,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasUnitId = true, .unitId = valence::unit_ids::mm});
     };
 
-    // ---- "config-set" — INTENT, configure, 10 Hz ----------------------------
+    // ---- "config-set" — INTENT, control floor, 10 Hz ------------------------
+    // The window (keys 1, 2) is control; every other key is a limit and
+    // raises to configure. A new key MUST carry its access.
     // Every field optional; present keys are applied. cfg_gen bumps on
     // success. Key 7 "input_jerk" and key 8 "max_rail" (below) are
     // append-only additions — keys 1-6 keep their meaning exactly, and
@@ -2208,7 +2213,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     auto addConfigSet = [&]() {
     c.addEntry({.id = ch::config_set, .name = "config-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
-                .access = AccessLevel::configure, .maxRateHz = 10.0f,
+                .access = AccessLevel::control, .maxRateHz = 10.0f,
                 .defaultPriority = Priority::normal});
     //
     // Each key advertises the SAME bounds its 0x0081 twin does, so a client
@@ -2222,20 +2227,26 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSchemaField({.key = 2, .name = "window_max",  .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm});
     c.addSchemaField({.key = 3, .name = "jog_speed",  .type = CborFieldType::f32_t, .unit = "mm/s",
-                      .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max});
+                      .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max,
+                      .access = AccessLevel::configure, .hasAccess = true});
     c.addSchemaField({.key = 4, .name = "jog_accel",  .type = CborFieldType::f32_t, .unit = "mm/s2",
-                      .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max});
+                      .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max,
+                      .access = AccessLevel::configure, .hasAccess = true});
     c.addSchemaField({.key = 5, .name = "input_speed", .type = CborFieldType::f32_t, .unit = "mm/s",
-                      .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max});
+                      .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max,
+                      .access = AccessLevel::configure, .hasAccess = true});
     c.addSchemaField({.key = 6, .name = "input_accel", .type = CborFieldType::f32_t, .unit = "mm/s2",
-                      .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max});
+                      .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max,
+                      .access = AccessLevel::configure, .hasAccess = true});
     c.addSchemaField({.key = 7, .name = "input_jerk",  .type = CborFieldType::f32_t, .unit = "mm/s3",
-                      .hasMin = true, .hasMax = true, .min = ceiling::jerk_min, .max = ceiling::jerk_max});
+                      .hasMin = true, .hasMax = true, .min = ceiling::jerk_min, .max = ceiling::jerk_max,
+                      .access = AccessLevel::configure, .hasAccess = true});
     // key 8 "max_rail": promoted from read-only derived truth to a real
     // setting — see the field comment on 0x0081's `max_rail` for the full
     // rationale.
     c.addSchemaField({.key = 8, .name = "max_rail",    .type = CborFieldType::f32_t, .unit = "mm",
-                      .hasMin = true, .hasMax = true, .min = ceiling::rail_min, .max = ceiling::rail_mm});
+                      .hasMin = true, .hasMax = true, .min = ceiling::rail_min, .max = ceiling::rail_mm,
+                      .access = AccessLevel::configure, .hasAccess = true});
     };
 
     // ---- "pattern-cmd" — INTENT, control, 20 Hz -----------------------------
@@ -2306,7 +2317,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .access = AccessLevel::configure, .hasAccess = true});
     };
 
-    // ---- "modes-set" — INTENT, configure, 5 Hz ------------------------------
+    // ---- "modes-set" — INTENT, control floor, 5 Hz --------------------------
+    // The flip (key 8) is control; every other key raises to configure. A new
+    // key MUST carry its access.
     // The write half of 0x008A. Every key optional; present keys applied,
     // and the ECHO carries the POST-CLAMP value the handler actually took.
     //
@@ -2319,7 +2332,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     auto addModesSet = [&]() {
     c.addEntry({.id = ch::modes_set, .name = "modes-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
-                .access = AccessLevel::configure, .maxRateHz = 5.0f,
+                .access = AccessLevel::control, .maxRateHz = 5.0f,
                 .defaultPriority = Priority::normal});
     // KEY 1 IS DELIBERATELY UNUSED. It held "blend_mode"; see the field
     // comment on machine-modes' `blend_mode_reserved`. ValenceDevice::
@@ -2347,16 +2360,20 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // case, and a gap costs nothing.
     if (feat.has_drive) {
         c.addSchemaField({.key = 6, .name = "home_style", .type = CborFieldType::uint_t, .unit = "",
-                          .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
+                          .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                          .access = AccessLevel::configure, .hasAccess = true});
     }
     c.addSchemaField({.key = 7, .name = "schedule_horizon", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = float(kHorizonMs.size() - 1)});
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = float(kHorizonMs.size() - 1),
+                      .access = AccessLevel::configure, .hasAccess = true});
     c.addSchemaField({.key = 8, .name = "flipped", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 9, .name = "home_speed", .type = CborFieldType::f32_t, .unit = "mm/s",
-                      .hasMin = true, .hasMax = true, .min = ceiling::home_speed_min, .max = ceiling::speed_max});
+                      .hasMin = true, .hasMax = true, .min = ceiling::home_speed_min, .max = ceiling::speed_max,
+                      .access = AccessLevel::configure, .hasAccess = true});
     c.addSchemaField({.key = 10, .name = "datagram_estop", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                      .access = AccessLevel::configure, .hasAccess = true});
     };
 
     // ---- "kinetic-set" — INTENT, configure, 5 Hz -------------------------

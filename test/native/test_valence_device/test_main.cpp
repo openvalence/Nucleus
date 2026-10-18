@@ -127,7 +127,8 @@ ReturnStart motionReturn() {
     }
     return g_returnAnswer;
 }
-void motionSetFlipped(bool) {}
+bool g_flipped = false;
+void motionSetFlipped(bool on) { g_flipped = on; }
 void motionSetJogLimits(float, float) {}
 void motionSetInputLimits(float, float, float) {}
 void motionSetWindow(float, float, float) {}
@@ -302,6 +303,7 @@ struct Rig {
         g_homeGesture = button::Gesture::none;
         g_pairGesture = button::PairGesture::none;
         g_forceHomes = 0;
+        g_flipped = false;
         g_homeAnswer = HomeStart::started;
         g_homeCalls = 0;
         g_driveAlarm = false;
@@ -3322,6 +3324,9 @@ constexpr TierRow kTierRows[] = {
     {ch::home, 1, 2, kConfigure},          // force_home asserts the stroke
     {ch::home, 2, -1, kConfigure},         // that stroke
     // Control: driving inside those limits.
+    {ch::config_set, 1, -1, kControl},     // window_min (operator 2026-10-17)
+    {ch::config_set, 2, -1, kControl},     // window_max
+    {ch::modes_set, 8, -1, kControl},      // flipped
     {channels::settings_trial, 0, -1, kControl},
     {ch::home, 0, -1, kControl},
     {ch::move, 0, -1, kControl},
@@ -3426,15 +3431,14 @@ IntentValueMap forceHome(float stroke) {
     return m;
 }
 
-// The settings a control session asks to change and must not: limits,
+// The settings a control session asks to change and must not: the rail,
 // ceilings, Kinetic tuning, homing, and force_home's asserted stroke.
 struct SettingWrite {
     uint16_t channel;
     IntentValueMap value;
 };
 std::vector<SettingWrite> settingWrites() {
-    return {{ch::config_set, oneKey(2, IntentValue::ofF32(300.0f))},   // window_max
-            {ch::config_set, oneKey(5, IntentValue::ofF32(100.0f))},   // input_speed ceiling
+    return {{ch::config_set, oneKey(5, IntentValue::ofF32(100.0f))},   // input_speed ceiling
             {ch::config_set, oneKey(8, IntentValue::ofF32(400.0f))},   // max_rail
             {ch::kinetic_set, oneKey(2, IntentValue::ofF32(5.0f))},    // vmax override
             {ch::kinetic_set, oneKey(4, IntentValue::ofF32(0.5f))},    // smoothness
@@ -3527,6 +3531,33 @@ TEST_CASE("VD-TIER-1: control jogs, runs patterns and the oscillator; settings a
     CHECK(answerTo(*run, ch::pattern_cmd, oneKey(1, IntentValue::ofBool(false))).echoed);
 }
 
+TEST_CASE("VD-TIER-1b: control moves the stroke window and flips; a write carrying a limit beside it is refused whole") {
+    auto rig = std::make_unique<Rig>(kControl);
+    g_census.rail_mm = rig->device.config().max_rail;
+    Answer a = answerTo(*rig, ch::config_set, oneKey(1, IntentValue::ofF32(40.0f)));
+    CHECK_FALSE(a.nack.has_value());
+    CHECK(a.echoed);
+    a = answerTo(*rig, ch::config_set, oneKey(2, IntentValue::ofF32(300.0f)));
+    CHECK_FALSE(a.nack.has_value());
+    CHECK(a.echoed);
+    CHECK(rig->device.config().window_min == doctest::Approx(40.0f));
+    CHECK(rig->device.config().window_max == doctest::Approx(300.0f));
+    a = answerTo(*rig, ch::modes_set, oneKey(8, IntentValue::ofU64(1)));
+    CHECK_FALSE(a.nack.has_value());
+    CHECK(a.echoed);
+    CHECK(g_flipped);
+
+    IntentValueMap both{};
+    both.count = 2;
+    both.fields[0] = IntentValueField{2, IntentValue::ofF32(250.0f)};
+    both.fields[1] = IntentValueField{8, IntentValue::ofF32(400.0f)};   // max_rail
+    const uint16_t gen = rig->hub->cfgGen();
+    a = answerTo(*rig, ch::config_set, both);
+    CHECK(a.nack == NackCode::ACCESS_DENIED);
+    CHECK(a.detail == "needs configure");
+    CHECK(rig->hub->cfgGen() == gen);
+}
+
 TEST_CASE("VD-TIER-2: configure changes every setting control was refused") {
     auto rig = std::make_unique<Rig>(kConfigure);
     for (const SettingWrite& w : settingWrites()) {
@@ -3543,7 +3574,14 @@ TEST_CASE("VD-TIER-3: watch halts and pauses; it neither drives nor configures")
     Answer a = answerTo(*rig, ch::move, moveTo(100.0f));
     CHECK(a.nack == NackCode::NOT_CONTROLLER);
     CHECK(a.detail == "needs control");
-    a = answerTo(*rig, ch::config_set, oneKey(2, IntentValue::ofF32(300.0f)));
+    for (const SettingWrite& w : {SettingWrite{ch::config_set, oneKey(2, IntentValue::ofF32(300.0f))},
+                                  SettingWrite{ch::modes_set, oneKey(8, IntentValue::ofU64(1))}}) {
+        CAPTURE(w.channel);
+        a = answerTo(*rig, w.channel, w.value);   // the window and the flip
+        CHECK(a.nack == NackCode::NOT_CONTROLLER);
+        CHECK(a.detail == "needs control");
+    }
+    a = answerTo(*rig, ch::config_set, oneKey(8, IntentValue::ofF32(400.0f)));   // max_rail
     CHECK(a.nack == NackCode::ACCESS_DENIED);
     CHECK(a.detail == "needs configure");
     a = answerTo(*rig, channels::safety_intents, safetyOp(safety_ops::pause));
