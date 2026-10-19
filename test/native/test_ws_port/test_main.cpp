@@ -296,3 +296,15 @@ TEST_CASE("WP-06: a peer whose ACKs lag keeps its STATE flowing and loses no con
     CHECK_FALSE(t.stalledOut(nowMs()));
     CHECK(s.closes == 0);
 }
+
+TEST_CASE("WP-07: a frame stamped after the reaper took its clock is proof of life, not 49 days of silence") {
+    reset();
+    static ValenceWsTransport t;
+    t.bind(kHd, 1009);
+    const uint32_t walkMs = nowMs();          // the hub task's clock for this slot walk
+    g_nowUs += 1000;                          // the httpd task stamps one millisecond later
+    t.noteRx();
+    CHECK_FALSE(t.idleOut(walkMs));
+    CHECK_FALSE(t.idleOut(walkMs + ValenceWsTransport::kIdleReapMs));
+    CHECK(t.idleOut(walkMs + ValenceWsTransport::kIdleReapMs + 2));
+}

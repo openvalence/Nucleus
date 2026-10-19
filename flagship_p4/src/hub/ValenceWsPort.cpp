@@ -250,7 +250,10 @@ bool ValenceWsTransport::stalledOut(uint32_t nowMs) const {
 }
 
 bool ValenceWsTransport::idleOut(uint32_t nowMs) const {
-    return uint32_t(nowMs - _lastRxMs.load(std::memory_order_relaxed)) > kIdleReapMs;
+    // nowMs was sampled before the slot walk; the httpd task's noteRx() can
+    // stamp a later millisecond in between. Signed, so a stamp newer than
+    // nowMs reads as no silence, never as 49 days (val-ag22).
+    return int32_t(nowMs - _lastRxMs.load(std::memory_order_relaxed)) > int32_t(kIdleReapMs);
 }
 
 uint8_t ValenceWsTransport::pollCongestionLevel(uint32_t nowMs) {
