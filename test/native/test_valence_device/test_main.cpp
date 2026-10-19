@@ -70,6 +70,10 @@ ReturnStart g_returnAnswer = ReturnStart::queued;
 // The fake gesture source: what the BoardIo task would have parked.
 button::Gesture g_homeGesture = button::Gesture::none;
 button::PairGesture g_pairGesture = button::PairGesture::none;
+// The fake update door (ValenceOta.h): a pending request takes the next
+// double press; in flight holds the release.
+bool g_otaPending = false;
+bool g_otaInFlight = false;
 int g_forceHomes = 0;
 // What the fake arbiter answers home op 1 with, and how often it was asked.
 HomeStart g_homeAnswer = HomeStart::started;
@@ -185,6 +189,8 @@ PowerNow motorSwitchPower() { return g_powerNow; }
 button::Gesture homeButtonTake() { return std::exchange(g_homeGesture, button::Gesture::none); }
 button::PairGesture pairButtonTake() { return std::exchange(g_pairGesture, button::PairGesture::none); }
 bool driveAlarmTake() { return std::exchange(g_driveAlarm, false); }
+bool otaPressTake() { return std::exchange(g_otaPending, false); }
+bool otaInFlight() { return g_otaInFlight; }
 
 estop::Reading estopInputRead() { return g_estop; }
 
@@ -302,6 +308,7 @@ struct Rig {
         g_returnAnswer = ReturnStart::queued;
         g_homeGesture = button::Gesture::none;
         g_pairGesture = button::PairGesture::none;
+        g_otaPending = g_otaInFlight = false;
         g_forceHomes = 0;
         g_flipped = false;
         g_homeAnswer = HomeStart::started;
@@ -647,6 +654,16 @@ TEST_CASE("VD-08: a refused release names why for intentNackDetail") {
     g_census.busy = false;
     CHECK(rig->device.canClearEstop());
     CHECK(rig->device.intentNackDetail(channels::safety_intents, NackCode::CLEAR_REFUSED).empty());
+}
+
+TEST_CASE("VD-08b: no release while a firmware update is in flight: motor power stays off") {
+    auto rig = std::make_unique<Rig>();
+    g_otaInFlight = true;
+    CHECK_FALSE(rig->device.canClearEstop());
+    CHECK(rig->device.intentNackDetail(channels::safety_intents, NackCode::CLEAR_REFUSED) ==
+          "firmware update in flight");
+    g_otaInFlight = false;
+    CHECK(rig->device.canClearEstop());
 }
 
 // ---- bd val-091.26: the HOME and PAIR buttons ---------------------------------
@@ -2963,6 +2980,36 @@ TEST_CASE("VD-PAIR-10: a ledger with entries but no configure owner (as after a 
     rig->step();
     REQUIRE(rig->del.nacks.size() == 1);
     CHECK(rig->del.nacks[0].code == NackCode::NOT_CONTROLLER);
+}
+
+TEST_CASE("VD-PAIR-11: a pending update request owns the double press; the configure request waits for the next") {
+    auto rig = std::make_unique<Rig>();
+    seedConfigureOwner(*rig);
+    REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
+    rig->step();
+    REQUIRE(rig->device.pairLook() == PairLook::request);
+    g_otaPending = true;
+    pair(*rig, button::PairGesture::double_press);
+    rig->step();
+    CHECK_FALSE(g_otaPending);                           // the update took it
+    CHECK_FALSE(rig->del.granted.has_value());           // and nothing else
+    CHECK(rig->device.pairLook() == PairLook::request);  // still asking
+    pair(*rig, button::PairGesture::double_press);       // no update pending now
+    rig->step();
+    REQUIRE(rig->del.granted.has_value());
+    CHECK(*rig->del.granted == AccessLevel::configure);
+}
+
+TEST_CASE("VD-PAIR-12: a pending update request leaves the press and the hold their meanings") {
+    auto rig = std::make_unique<Rig>();
+    seedConfigureOwner(*rig);
+    g_otaPending = true;
+    pair(*rig, button::PairGesture::press);
+    CHECK(rig->hub->presenceWindowOpen());
+    CHECK(g_otaPending);
+    pair(*rig, button::PairGesture::hold);
+    CHECK(rig->device.pairLook() == PairLook::demoted);
+    CHECK(g_otaPending);
 }
 
 // ---- RFC-116: the saved-network list over a network binding --------------------

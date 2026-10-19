@@ -17,9 +17,9 @@ constexpr const char* kTag = "http";
 // of them, which during a flash write is the one that must not be evicted.
 constexpr size_t kClientSockets = 3;
 
-// /uitoken, /ota, /diag*, plus one spare so adding a route is not a
-// head-scratching 404.
-constexpr size_t kUriHandlers = 4;
+// /uitoken, POST /ota/arm, GET /ota/arm, POST /ota, /diag*, plus one spare so
+// adding a route is not a head-scratching 404.
+constexpr size_t kUriHandlers = 6;
 
 httpd_handle_t g_srv = nullptr;
 

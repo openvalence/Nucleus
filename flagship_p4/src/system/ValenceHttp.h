@@ -3,8 +3,9 @@
 // ValenceHttp -- the one esp_http_server instance on port 80, shared by every
 // operator-facing route
 // Constraints:
-// - ONE HOME for the :80 server and its config (C-1). /uitoken, /ota and /diag
-//   all register onto the handle this returns; none of them starts a server.
+// - ONE HOME for the :80 server and its config (C-1). /uitoken, /ota/arm,
+//   /ota and /diag all register onto the handle this returns; none of them
+//   starts a server.
 //   Two instances cannot share a port, and two esp_http_server instances must
 //   never share a ctrl_port either -- the second one silently refuses to start.
 // - The client-socket count here is one term of the lwIP socket arithmetic,

@@ -41,6 +41,7 @@
 #include "system/ValenceDriveLink.h"
 #include "system/ValenceEstopInput.h"
 #include "system/ValenceMotorSwitch.h"
+#include "system/ValenceOta.h"
 
 #include "valence/util/byte_io.hpp"
 
@@ -1676,6 +1677,11 @@ std::optional<uint8_t> ValenceDevice::sourceForChannel(uint16_t channel_id) {
 // refusal names the act that resolves it.
 bool ValenceDevice::canClearEstop() {
     _nackDetail[0] = '\0';
+    // Motor power stays off for the whole of a firmware update (ValenceOta.h).
+    if (otaInFlight()) {
+        noteDetail("firmware update in flight");
+        return false;
+    }
     if (const char* held = estopRefusal(estopInputRead())) {
         GLOGW(kTag, "release refused CLEAR_REFUSED: %s", held);
         noteDetail(held);
@@ -2217,6 +2223,13 @@ void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
             return;
         }
         case button::PairGesture::double_press:
+            // A pending firmware update request owns the double press
+            // (ValenceOta.h): it never also approves a configure request.
+            if (otaPressTake()) {
+                _pairFlashUntilMs = nowMs;
+                GLOGW(kTag, "PAIR double press: the pending firmware update request approved");
+                return;
+            }
             approveAsk("PAIR double press", nowMs);
             return;
         case button::PairGesture::hold: {

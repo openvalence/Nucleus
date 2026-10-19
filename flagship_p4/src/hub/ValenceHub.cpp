@@ -425,8 +425,9 @@ void hubTask(void*) {
         // 0x1000 republish and the hub-status line. It says which debounced
         // writes are due; the writes themselves are NVS and so live here.
         // HELD, never dropped, while an update is writing the other app slot:
-        // the motion gate is already down, and an NVS commit (now and then a
-        // sector erase) has no business interleaving with that transfer. A
+        // the machine is idle with motor power off (ValenceOta.h), and an NVS
+        // commit (now and then a sector erase) has no business interleaving
+        // with that transfer. A
         // successful update reboots before the hold drains, so a change made
         // DURING an update does not survive it; one made before it does.
         g_persistDue |= g_box->device.tick(nowMs);

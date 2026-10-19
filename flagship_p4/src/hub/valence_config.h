@@ -22,9 +22,10 @@
 //   CMake option of that name (flagship_p4/CMakeLists.txt, env
 //   flagship_p4_bench) defines it to 1. It makes the motion arbiter's
 //   motor-power gate advisory so the devkit can run patterns with the switch
-//   off, and it suffixes FIRMWARE_VERSION with "-bench" so that image can
-//   never pass for a release in /diag or at ota.py's --expect. Nothing else
-//   may read it.
+//   off, it suffixes FIRMWARE_VERSION with "-bench" so that image can never
+//   pass for a release in /diag or at ota.py's --expect, and it compiles in
+//   the X-OTA-Token bench override that skips the PAIR double press
+//   (ValenceOta.h). A bench image must never ship. Nothing else may read it.
 // See: .claude/rules/governance.md (C-1), ValenceCatalog.h, MotionArbiter.h
 // (the gate), bd val-091.58
 
@@ -34,9 +35,9 @@
 
 #define FIRMWARE_MAJOR_MINOR "0.1"
 #if NUCLEUS_BENCH_NO_MOTOR
-#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".57-p4hub-bench"
+#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".58-p4hub-bench"
 #else
-#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".57-p4hub"
+#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".58-p4hub"
 #endif
 
 // Identity strings for WELCOME key 37 (RFC-016a). Static storage, so the views

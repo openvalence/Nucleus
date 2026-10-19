@@ -17,6 +17,7 @@
 #include "system/ValenceDriveLink.h"
 #include "system/ValenceEstopInput.h"
 #include "system/ValenceMotorSwitch.h"
+#include "system/ValenceOta.h"
 
 namespace valence {
 
@@ -41,6 +42,9 @@ void simHomeGesture(button::Gesture g) { g_homePress = g; }
 void simEstopPressed(bool pressed) { g_estopPressed = pressed; }
 void simDriveAlarm() { g_driveAlarm = true; }
 bool driveAlarmTake() { return std::exchange(g_driveAlarm, false); }
+// The twin takes no firmware updates: no request is ever pending or in flight.
+bool otaPressTake() { return false; }
+bool otaInFlight() { return false; }
 estop::Reading estopInputRead() {
     estop::Reading r;
     r.known = true;

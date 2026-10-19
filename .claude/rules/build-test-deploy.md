@@ -99,19 +99,35 @@ not be cited as a reason to re-run a failed build.
 
 ## Deployment
 
-**OTA is the default path, and there is no bridge in it.** `POST /ota` on the
-board's own port 80, RAW body, `X-OTA-Token`, `esp_ota_ops` into the idle slot,
-reboot. No forwarding hop exists: the sockets are on the P4.
+**OTA is the default path, and there is no bridge in it.** Plain HTTP on the
+board's own port 80, RAW body, `esp_ota_ops` into the idle slot, reboot. No
+forwarding hop exists: the sockets are on the P4. The routes and their rules
+live in `flagship_p4/src/system/ValenceOta.h` (C-1); in short:
 
+- **A release image is let in only by a PAIR double press at the machine**
+  (operator ruling 2026-10-18, bd val-ktal). `POST /ota/arm` opens a request
+  (202, an id and a window), the press approves it, `POST /ota?id=` sends the
+  image once. While a request is pending the double press is the update's,
+  never also a Valence configure approval. There is no update key in a
+  release image and no signature check; integrity is esp_ota's.
+- **The bench image skips the press.** `flagship_p4_bench` (the
+  `NUCLEUS_BENCH_NO_MOTOR` profile, `valence_config.h`) also takes
+  `X-OTA-Token` from git-ignored `flagship_p4/src/secrets.h`
+  (`SECRET_OTA_TOKEN`, template in `secrets.example.h`). Anyone holding that
+  key can flash a bench board without touching it: **a bench image must never
+  ship.** The release env `flagship_p4` cannot compile the key in. Never put
+  the token on a command line and never inline it.
+- **Idle or nothing, bench included.** Both routes answer 409 with a plain
+  reason unless motion is parked and motor power is off. Nothing stops the
+  machine for an update; stop it (latch the E-stop) and run again. The ESTOP
+  release is refused while an update is in flight.
 - `python tools/ota.py --image <bin> --expect <version> [--ip <ip>] [--dry-run]`.
   It refuses an image whose compiled FIRMWARE_VERSION is not `--expect`
   (there is no default image), reads the running FIRMWARE_VERSION off the
-  hub's `/diag` header (WELCOME identity carries MAJOR.MINOR only, RFC-102), pushes
-  the image, then waits for a NEW version AND for that image to buy itself.
-  Both, or it is not a deploy.
-- The token lives in git-ignored `flagship_p4/src/secrets.h`
-  (`SECRET_OTA_TOKEN`, template in `secrets.example.h`) and the tool reads it
-  from there. Never put it on a command line and never inline it.
+  hub's `/diag` header (WELCOME identity carries MAJOR.MINOR only, RFC-102),
+  pushes the image (a `-bench` image with the token; a release image after
+  printing "double-press PAIR" and waiting for the press), then waits for a
+  NEW version AND for that image to buy itself. Both, or it is not a deploy.
 - **A NEW IMAGE IS ON TRIAL.** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` leaves
   it PENDING_VERIFY; it is bought only once the hub has been observed TICKING
   across two liveness intervals with an IP. The hub task is subscribed to the
@@ -127,7 +143,8 @@ reboot. No forwarding hop exists: the sockets are on the P4.
 - **Serial is the rescue path**, and the one case that REQUIRES it is a
   partition-table change: the table is flashed only by
   `pio run -d flagship_p4 -t upload`.
-- **Before flashing:** machine idle, operator aware. **After:** the version is
+- **Before flashing:** machine idle with motor power off (the firmware
+  refuses otherwise), operator aware. **After:** the version is
   what the hub's WELCOME identity says, not what you uploaded. Upload
   completed is not deployed (C-8).
 

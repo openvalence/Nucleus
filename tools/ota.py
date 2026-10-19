@@ -2,7 +2,8 @@
 """ota -- deploy a firmware image to the Nucleus P4 over POST /ota, and prove it.
 
 Three steps, and the third is the one that makes this a deploy rather than an
-upload: read the version the hub is REPORTING now, push the image, then wait
+upload: read the version the hub is REPORTING now, push the image (after the
+PAIR double press it needs, below), then wait
 until a hub answers with a DIFFERENT version. "Upload completed" is not
 "deployed" (C-8); the only evidence that counts is the running hub's own
 FIRMWARE_VERSION, read off the /diag header. WELCOME identity carries
@@ -12,9 +13,20 @@ Constraints:
 - RAW BODY, NEVER MULTIPART. The firmware streams the request straight into
   esp_ota_write. urllib sends exactly the bytes and a Content-Length, which is
   what the handler reads to size the erase.
-- THE TOKEN IS NEVER A COMMAND-LINE ARGUMENT by default: it is read out of the
-  git-ignored flagship_p4/src/secrets.h, the same file the firmware compiles
-  it from, so the two cannot drift. --token overrides for a foreign board.
+- A RELEASE IMAGE NEEDS A PERSON AT THE MACHINE. POST /ota/arm opens a
+  request, this tool prints "double-press PAIR", polls GET /ota/arm until the
+  press approves it, then sends the image with the request's id
+  (flagship_p4/src/system/ValenceOta.h). There is no key that skips it.
+- A BENCH IMAGE (version ending -bench) is pushed with X-OTA-Token instead,
+  no press: only bench firmware compiles that key in. The token is never a
+  command-line argument by default: it is read out of the git-ignored
+  flagship_p4/src/secrets.h, the same file the firmware compiles it from, so
+  the two cannot drift. --token overrides for a foreign board.
+- A firmware answering 404 to /ota/arm predates the press; it takes the token,
+  and the tool falls back to it. Remove the fallback once no board runs a
+  pre-0.1.58 image.
+- 409 is the machine refusing because it is not idle: motion running or
+  motor power on. The reason is printed; stop the machine and run again.
 - THE IMAGE IS CHECKED BEFORE IT LEAVES THE HOST. --image and --expect are
   both required, and the FIRMWARE_VERSION string compiled into the .bin must
   equal --expect or nothing is sent. There is no default image: two build
@@ -69,14 +81,53 @@ def diag_head(ip, timeout=10.0):
             head = r.read().decode("utf-8", "replace").splitlines()[0]
     except Exception:
         return None, None
-    m = re.match(r"#\s+\S+\s+(\S+)\s.*img=(\w+)", head)
+    m = re.match(r"#\s+\S+\s+(\S+)\s.*\bimg=(\w+)", head)
     return (m.group(1), m.group(2)) if m else (None, None)
 
 
-def post_image(ip, image, token, timeout):
+def http(method, url, timeout=10.0, data=None, headers=None):
+    """(status, body text); status None when nothing answered."""
+    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+    except Exception as e:
+        return None, str(e)
+
+
+def arm(ip):
+    """The approved request id; 'legacy' when the firmware predates /ota/arm; None on failure."""
+    status, body = http("POST", "http://%s/ota/arm" % ip, data=b"")
+    if status == 404:
+        return "legacy"
+    if status != 202:
+        print("POST /ota/arm -> %s: %s" % (status, body.strip()))
+        return None
+    req = json.loads(body)
+    rid, window = req["id"], int(req["window_s"])
+    print(">>> double-press PAIR on the machine within %d s <<<" % window)
+    deadline = time.time() + window + 5
+    while time.time() < deadline:
+        time.sleep(1.0)
+        status, body = http("GET", "http://%s/ota/arm?id=%s" % (ip, rid))
+        state = json.loads(body).get("state") if status == 200 else None
+        if state == "approved":
+            print("approved: PAIR double press seen")
+            return rid
+        if state == "expired":
+            break
+    print("FAIL: no PAIR double press inside the window; nothing sent")
+    return None
+
+
+def post_image(ip, image, token, rid, timeout):
     body = open(image, "rb").read()
-    req = urllib.request.Request("http://%s/ota" % ip, data=body, method="POST")
-    req.add_header("X-OTA-Token", token)
+    url = "http://%s/ota" % ip + ("?id=%s" % rid if rid else "")
+    req = urllib.request.Request(url, data=body, method="POST")
+    if token:
+        req.add_header("X-OTA-Token", token)
     req.add_header("Content-Type", "application/octet-stream")
     t0 = time.time()
     try:
@@ -136,17 +187,26 @@ def main():
     if args.dry_run:
         print("dry run : image matches, nothing sent")
         return 0
-    token = args.token
-    if token is None:
-        token, err = read_token(args.secrets)
-        if token is None:
-            print("FAIL: %s" % err)
-            return 1
-
     before, _ = diag_head(args.ip)
     print("running : %s" % (before or "<no answer>"))
 
-    status, body, secs, sent = post_image(args.ip, args.image, token, args.timeout)
+    token, rid = None, None
+    if not built.endswith("-bench"):
+        rid = arm(args.ip)
+        if rid is None:
+            return 1
+        if rid == "legacy":
+            print("firmware predates /ota/arm: falling back to X-OTA-Token")
+            rid = None
+    if rid is None:
+        token = args.token
+        if token is None:
+            token, err = read_token(args.secrets)
+            if token is None:
+                print("FAIL: %s" % err)
+                return 1
+
+    status, body, secs, sent = post_image(args.ip, args.image, token, rid, args.timeout)
     print("POST /ota -> %s in %.1f s (%.0f kB/s)" % (status, secs, sent / 1024.0 / max(secs, 1e-3)))
     for line in body.strip().splitlines():
         print("  %s" % line)

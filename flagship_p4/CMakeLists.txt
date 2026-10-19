@@ -9,7 +9,7 @@ endforeach()
 # The bench profile (valence_config.h says what it changes). OFF for every
 # release image; only the flagship_p4_bench environment turns it on. A build
 # profile, never a runtime switch (bd val-091.58).
-option(NUCLEUS_BENCH_NO_MOTOR "devkit bench: motor-power gate advisory, version suffixed -bench" OFF)
+option(NUCLEUS_BENCH_NO_MOTOR "devkit bench: motor-power gate advisory, version suffixed -bench, OTA bench token in place of the PAIR press" OFF)
 if(NUCLEUS_BENCH_NO_MOTOR)
     idf_build_set_property(COMPILE_DEFINITIONS "NUCLEUS_BENCH_NO_MOTOR=1" APPEND)
     message(WARNING "NUCLEUS_BENCH_NO_MOTOR: bench profile, the motor-power gate is advisory")
