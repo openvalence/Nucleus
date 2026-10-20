@@ -2,6 +2,17 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.62 (2026-10-20)
+
+### For users
+
+- Nothing to notice. The machine has room for a larger catalog of its own before an accessory loses its place.
+
+### Technical
+
+- **Catalog encode scratch 76 KiB -> 256 KiB** (val-1vs). `VALENCE_CATALOG_SCRATCH_BYTES` 77,824 -> 262,144 in `flagship_p4/valence_capacity.cmake`, in the PSRAM `HubBox`. The machine catalog has no fixed byte budget now: the 80% headroom rule on the scratch, `catalog_max_entries` (256, which still sets 6 accessories), `catalog_max_entry_bytes` (4,096 B) and `catalog_max_bytes` (1 MiB, Valence RFC-121, draft) bind. Free headroom 31,090 B -> 178,546 B; etag unchanged, `d5895d9c2c5bd88d`.
+- Built and host-tested; not flashed yet.
+
 ## 0.1.61 (2026-10-20)
 
 ### For users

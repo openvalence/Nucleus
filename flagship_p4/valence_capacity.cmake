@@ -5,17 +5,22 @@
 # FLAGS, never a #define in a source file: two translation units seeing two
 # values would be two Catalog32 types (ODR), and nothing would say so.
 #
-# Sizing (val-9u0.5, recomputed 2026-10-13 for the visible-networks channels
-# 0x0019 and 0x001A, RFC-118): the machine budget is 54 / 292 / 176 / 200 and
-# 31,104 B encoded. Machine use is 53 entries, 288 layout, 141 schema and
-# 31,169 B encoded, 65 B over that budget since the react_ms desc (val-668m);
-# the 6 accessories still fit the scratch (31,090 B free) [verified 2026-10-20
-# -- neutrino-sim boot log, boardFeatures(), etag d5895d9c2c5bd88d]. Each
-# accessory gets the per-accessory budget below. The accessory count is
-# the most that keeps the total entries at or under catalog_max_entries (256),
-# the floor every client is built to handle: (256 - 54) / 31 = 6.
-# The encode scratch keeps the 80% headroom floor over the machine's 31,104 B
-# plus 6 x 5,120 B, within 76 KiB: (31,104 + 30,720) / 0.8 = 77,280.
+# Sizing (val-9u0.5, val-1vs): the machine's pools are 54 entries, 292 layout,
+# 176 schema and 200 labels; its encoded bytes have no fixed budget. Each
+# accessory gets the per-accessory budget below. What binds:
+# - catalog_max_entries (256), the floor every client handles: the accessory
+#   count is the most that keeps total entries at or under it,
+#   (256 - 54) / 31 = 6.
+# - catalog_max_entry_bytes (4,096): the encoder refuses a larger entry.
+# - The 80% headroom rule: the machine catalog plus 6 x 5,120 B stays under
+#   80% of VALENCE_CATALOG_SCRATCH_BYTES (209,715 B at 256 KiB);
+#   catalogHeadroom() is the check.
+# - catalog_max_bytes (1 MiB, Valence RFC-121, DRAFT): the scratch never
+#   exceeds it.
+# The scratch is a member of the Hub, which lives in the PSRAM HubBox
+# (ValenceHub.cpp): never build a Hub on a stack or in static RAM.
+# Machine use: 53 entries, 288 layout, 141 schema, 31,169 B encoded
+# [verified 2026-10-20 -- neutrino-sim boot log, etag d5895d9c2c5bd88d].
 
 set(NUCLEUS_ACCESSORIES 6)
 # Per accessory: 30 channels (r 0x02-0x1F) + the accessory-status entry (r 0x01).
@@ -48,7 +53,7 @@ set(VALENCE_CAPACITY_DEFINITIONS
     # STOREs (RFC-076, RFC-078) are the host's own when they land.
     VALENCE_CATALOG_STORES=6
     VALENCE_CATALOG_SAFE_SLOTS=${_safe}
-    VALENCE_CATALOG_SCRATCH_BYTES=77824
+    VALENCE_CATALOG_SCRATCH_BYTES=262144
     NUCLEUS_ACCESSORIES=${NUCLEUS_ACCESSORIES}
     NUCLEUS_ACCESSORY_ENTRIES=${NUCLEUS_ACCESSORY_ENTRIES}
     NUCLEUS_ACCESSORY_LAYOUT_FIELDS=${NUCLEUS_ACCESSORY_LAYOUT_FIELDS}
