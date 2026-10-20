@@ -308,6 +308,23 @@ HomeSense& noHomeSense();
 
 // ---- the arbiter ------------------------------------------------------------
 
+// The reaction horizon the hub chooses per submit (operator ruling 2026-10-20,
+// bd val-668m): as long as the planner needs to cover its own solve
+// (2 x the smoothed solve cost + 4 ms), never under the react_ms setting (the
+// floor), never over half the stream's measured lead (a short-lead client keeps
+// its through points moving: at a 100 ms lead, 32 ms rested every knot), never
+// over kReactCapUs (imperceptible on a click, inside the 128 ms strip). A solve
+// past lead / 2 lands late and is counted (LATE PLAN), as before.
+inline constexpr uint32_t kReactCapUs = 64000;
+constexpr uint32_t adaptiveReactUs(float plan_us_avg, float lead_us_avg, uint32_t floor_us) {
+    float want = 2.0f * plan_us_avg + 4000.0f;
+    const float half_lead = 0.5f * lead_us_avg;
+    const float cap = half_lead < float(kReactCapUs) ? half_lead : float(kReactCapUs);
+    if (want > cap) want = cap;
+    const float fl = float(floor_us);
+    return uint32_t(want < fl ? fl : want);
+}
+
 class MotionArbiter {
 public:
     // The engine's clock, microseconds. Read only to time the window solve.
@@ -608,7 +625,15 @@ private:
     // Engine::expect on axis 0, mirrored for expectUntil(). Every submit sets
     // it (a Stream segment's horizon, else 0), and a brake clears it.
     void setExpect(uint64_t until_us);
+public:
+    // Books one solve's cost (the planner's own); public so the host tests can
+    // drive the horizon with a solve cost they choose.
     void notePlanCost(uint32_t us);
+    // The reaction horizon the last submit chose (adaptiveReactUs).
+    uint32_t reactHorizonUs() const { return _react_us_now; }
+    // The smoothed lead of the accepted knots: due time minus arrival, hub clock.
+    uint32_t leadUsAvg() const { return uint32_t(_lead_us_avg); }
+private:
 
     // The engine's frame: its normalized 0..1 is the travel window, or the
     // whole rail while the operator jogs under override (the engine clamps to
@@ -935,6 +960,13 @@ private:
     uint32_t _plan_us_last = 0;
     uint32_t _plan_us_max  = 0;
     float    _plan_us_avg  = 0.0f;
+    // Lead of the accepted knots (the knot's due time minus its arrival),
+    // EMA alpha 1/4: about the last four knots. 0 after a reset.
+    float    _lead_us_avg  = 0.0f;
+    MotionSource _lead_source = MotionSource::Manual;   // the source the lead is measured for
+    uint32_t _react_us_now = 0;    // the horizon the last submit chose
+    uint32_t _react_floor_us = kinetic2::Config{}.react_us;   // the react_ms setting (applyTuning)
+    uint32_t _react_us_logged = 0; // the last horizon logged (one line per change, throttled)
     float    _demand_mm = 0.0f;
     bool     _stream    = false;
     uint32_t _anomalies = 0;
