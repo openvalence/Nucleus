@@ -905,6 +905,61 @@ TEST_CASE("a 32-segment bundle spanning the 1000 ms schedule horizon parks whole
     CHECK(c.failures == 0);
 }
 
+// ---- bd val-668m: the reaction horizon follows the solve and the lead ------------
+
+TEST_CASE("adaptiveReactUs: the clamps (floor, half the lead, the 64 ms cap)") {
+    using valence::adaptiveReactUs;
+    using valence::kReactCapUs;
+    CHECK(adaptiveReactUs(0.0f, 1'000'000.0f, 4000) == 4000);          // nothing solved yet: the floor
+    CHECK(adaptiveReactUs(1000.0f, 1'000'000.0f, 4000) == 6000);       // 2 x 1 ms + 4 ms
+    CHECK(adaptiveReactUs(20000.0f, 1'000'000.0f, 4000) == 44000);     // 2 x 20 ms + 4 ms
+    CHECK(adaptiveReactUs(40000.0f, 1'000'000.0f, 4000) == kReactCapUs);   // never over 64 ms
+    CHECK(adaptiveReactUs(40000.0f, 100'000.0f, 4000) == 50000);       // never over half a 100 ms lead
+    CHECK(adaptiveReactUs(40000.0f, 2000.0f, 4000) == 4000);           // a jog's lead: the floor wins
+    CHECK(adaptiveReactUs(0.0f, 1'000'000.0f, 10000) == 10000);        // the setting raises the floor
+    CHECK(adaptiveReactUs(40000.0f, 0.0f, 4000) == 4000);              // no lead measured: the floor
+}
+
+TEST_CASE("the horizon a submit chooses: short lead stays at the floor, slow solves grow it, the lead halves it") {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    auto stream = [&](uint32_t lead_us, int n) {
+        for (int i = 0; i < n; ++i) {
+            MotionIntent in;
+            in.source = MotionSource::Stream;
+            in.target_mm = (i % 2 == 0) ? 230.0f : 170.0f;
+            in.duration_us = 50'000;
+            in.anchor_us = g_now_us + lead_us - 50'000;   // due lead_us from now
+            REQUIRE(r->arb.accept(in, g_now_us));
+            r->run(50'000);
+        }
+    };
+    // Fast solves (the host's), a long lead: the floor plus twice the solve.
+    stream(400'000, 6);
+    CHECK(r->arb.leadUsAvg() > 300'000u);
+    CHECK(r->arb.reactHorizonUs() >= 4000u);
+    CHECK(r->arb.reactHorizonUs() < 20000u);
+    // Slow solves (20 ms, as dense reversals cost on the P4): the horizon grows.
+    for (int i = 0; i < 24; ++i) r->arb.notePlanCost(20000);   // the alpha 1/8 EMA at 19 ms
+    stream(400'000, 2);
+    CHECK(r->arb.reactHorizonUs() >= 30000u);
+    CHECK(r->arb.reactHorizonUs() <= valence::kReactCapUs);
+    // The same slow solves on a short lead (the queue drained first: a knot
+    // due before the newest pending one is refused): never past half the lead.
+    r->run(600'000);
+    for (int i = 0; i < 24; ++i) r->arb.notePlanCost(20000);
+    stream(60'000, 6);
+    CHECK(r->arb.leadUsAvg() < 100'000u);
+    CHECK(r->arb.reactHorizonUs() <= r->arb.leadUsAvg() / 2 + 1000u);
+    CHECK(r->arb.reactHorizonUs() >= 4000u);
+    // A jog: due at once, the floor.
+    REQUIRE(r->submit(MotionSource::Manual, 150.0f));
+    CHECK(r->arb.reactHorizonUs() == 4000u);
+    const MotionCensus c = r->census();
+    CHECK(c.rejected == 0);
+}
+
 TEST_CASE("flip: targets mirror in, positions and the window mirror out, the engine stays physical") {
     auto r = rig();
     r->arb.forceHome(400.0f);

@@ -490,6 +490,7 @@ void MotionArbiter::notePlanCost(uint32_t us) {
 
 void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
     _engine.resetAt(p_norm, now_us);   // clears the expectation
+    _lead_us_avg    = 0.0f;
     _k2_expect_us   = 0;
     _k2_newest_us   = now_us;
     _k2_newest_p    = p_norm;
@@ -587,6 +588,29 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     // to this one alone.
     kinetic2::Config cfg = _engine.config();
     cfg.limits = lim;
+    // The reaction horizon for this submit (adaptiveReactUs): the lead of this
+    // knot joins the smoothed lead first, so a stream's first knots converge
+    // within four. A jog's lead is nothing (due at once), a sample's its
+    // latency, a segment's its end past now. Set before the supersede and jog
+    // hand-offs below (Engine::truncateAfter commits at the horizon too).
+    {
+        const uint64_t due = in.duration_us > 0 ? in.anchor_us + in.duration_us
+                           : manual              ? now_us
+                                                 : now_us + _k2_latency_us;
+        const float lead = due > now_us ? float(due - now_us) : 0.0f;
+        // Per source: a jog after a stream takes its own lead at once, a new
+        // stream starts from its first knot's and converges within four.
+        if (in.source != _lead_source) { _lead_source = in.source; _lead_us_avg = lead; }
+        else _lead_us_avg += (lead - _lead_us_avg) * 0.25f;
+        _react_us_now = adaptiveReactUs(_plan_us_avg, _lead_us_avg, _react_floor_us);
+        cfg.react_us = _react_us_now;
+        if (_react_us_now + 1000 < _react_us_logged || _react_us_now > _react_us_logged + 1000) {
+            _react_us_logged = _react_us_now;
+            GLOGI_EVERY_MS(1000, kTag, "horizon: react %lu us (plan avg %lu us, lead avg %lu us, floor %lu us)",
+                           static_cast<unsigned long>(_react_us_now), static_cast<unsigned long>(_plan_us_avg),
+                           static_cast<unsigned long>(_lead_us_avg), static_cast<unsigned long>(_react_floor_us));
+        }
+    }
     _engine.setConfig(cfg);
 
     // At rest the state is the emitter's count and nothing else: a reseed from
@@ -908,7 +932,8 @@ void MotionArbiter::applyTuning(const MotionTuning& t) {
     c.smoothness   = t.smoothness;
     c.handle_floor = t.handle_floor;
     c.trim_max     = t.trim_max;
-    c.react_us     = t.react_us;
+    _react_floor_us = t.react_us;
+    c.react_us     = t.react_us;   // the floor; each submit raises it to cover the solve (adaptiveReactUs)
     _engine.setConfig(c);
     _k2_latency_us = sampleLatencyUs(t);
     _ovr_v = t.vmax_ovr;
