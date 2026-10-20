@@ -35,9 +35,9 @@
 
 #define FIRMWARE_MAJOR_MINOR "0.1"
 #if NUCLEUS_BENCH_NO_MOTOR
-#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".60-p4hub-adapt-bench"
+#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".61-p4hub-bench"
 #else
-#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".58-p4hub"
+#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".61-p4hub"
 #endif
 
 // Identity strings for WELCOME key 37 (RFC-016a). Static storage, so the views

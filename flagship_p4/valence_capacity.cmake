@@ -8,8 +8,9 @@
 # Sizing (val-9u0.5, recomputed 2026-10-13 for the visible-networks channels
 # 0x0019 and 0x001A, RFC-118): the machine budget is 54 / 292 / 176 / 200 and
 # 31,104 B encoded. Machine use is 53 entries, 288 layout, 141 schema and
-# 31,092 B encoded [verified 2026-10-17 -- host encodeCatalog of
-# buildValenceCatalog(boardFeatures()), etag b16115d6091122d2]. Each
+# 31,169 B encoded, 65 B over that budget since the react_ms desc (val-668m);
+# the 6 accessories still fit the scratch (31,090 B free) [verified 2026-10-20
+# -- neutrino-sim boot log, boardFeatures(), etag d5895d9c2c5bd88d]. Each
 # accessory gets the per-accessory budget below. The accessory count is
 # the most that keeps the total entries at or under catalog_max_entries (256),
 # the floor every client is built to handle: (256 - 54) / 31 = 6.
