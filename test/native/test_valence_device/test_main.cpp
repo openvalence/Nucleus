@@ -1485,6 +1485,24 @@ TEST_CASE("VD-HOME-3: a started cycle ECHOes; its completion clears home_require
     CHECK((rig->hub->safetyModes() & safety_mode_bits::HOME_REQUIRED) == 0);
 }
 
+TEST_CASE("VD-HOME-COLD: after a cold start home_required reads true until a home or force_home completes (val-mvw4)") {
+    auto rig = std::make_unique<Rig>();
+    // The arbiter boots unhomed: the published bit follows it, never a flag of its own.
+    g_census.homed = false;
+    rig->step();
+    CHECK((rig->hub->safetyModes() & safety_mode_bits::HOME_REQUIRED) != 0);
+    rig->step(50);
+    CHECK((rig->hub->safetyModes() & safety_mode_bits::HOME_REQUIRED) != 0);
+    // A force_home asserts homed without a cycle (no homes count): the bit clears.
+    g_census.homed = true;
+    rig->step();
+    CHECK((rig->hub->safetyModes() & safety_mode_bits::HOME_REQUIRED) == 0);
+    // Unhomed again (an e-stop that cuts power): the bit returns.
+    g_census.homed = false;
+    rig->step();
+    CHECK((rig->hub->safetyModes() & safety_mode_bits::HOME_REQUIRED) != 0);
+}
+
 // ---- bd val-zsr: the two-sided cycle's hub half --------------------------------
 
 namespace {

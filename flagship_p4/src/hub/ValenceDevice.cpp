@@ -2412,13 +2412,15 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _returnPending = false;
         _hub->setOverride(false);
     }
-    // A completed home cycle clears home_required (SPEC 11.2). A counter for
-    // the same reason as the return's; an ESTOP since it left the machine
-    // unhomed, and that latch's home_required stands. Its measured rail
-    // becomes max_rail.
+    // home_required is the arbiter's homed, every refresh, one source (SPEC
+    // 11.2, val-mvw4): homed never survives a reboot, and a published bit a
+    // reboot left false told clients no homing was needed while every move
+    // was refused NOT_HOMED. An e-stop that cuts power drops homed on the
+    // arbiter, so that latch reads home_required too. The setter publishes
+    // only on a change. A completed cycle's measured rail becomes max_rail.
+    _hub->setHomeRequired(!mo.homed);
     if (mo.homes != _homesSeen) {
         _homesSeen = mo.homes;
-        if (mo.homed && !mo.estop) _hub->setHomeRequired(false);
         if (mo.home_rail_mm > 0.0f) adoptMeasuredRail(mo.home_rail_mm);
     }
     // The log channel (Warn, on this task: system/ValenceLogBridge) carries

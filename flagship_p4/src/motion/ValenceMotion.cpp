@@ -222,6 +222,17 @@ bool MotionTask::begin() {
     // Neither task exists yet, so this caller is the arbiter's one owner.
     _arb.setHomeSense(homeSenseBegin(&parkSeekFromIsr, &wakeMotionFromIsr));
     _arb.begin(espNowUs());
+#if NUCLEUS_BENCH_NO_MOTOR
+    // The bench profile boots homed at its position, as if force_home ran:
+    // no motor and no home switch, so homed means nothing here, and every OTA
+    // reboot asked for a configure-tier force_home (val-mvw4). Release builds
+    // never do this and never persist homed: the LP core's quadrature count
+    // restarts at 0 on a reboot and the motor may have moved while the board
+    // was down, so a remembered homed would publish a wrong position as
+    // trusted.
+    (void)_arb.forceHome(0.0f);   // the default stroke
+    GLOGI(kTag, "bench: homed at boot, no motor");
+#endif
     refreshSnapshot(espNowUs());
     // Both on core 1 with the hub; core 0 keeps app_main and the esp_hosted
     // SDIO service. The planner AT the hub's priority, never above it: a
