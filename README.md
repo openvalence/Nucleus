@@ -1,6 +1,7 @@
 # Nucleus
 
 Nucleus is the firmware for the OSSM Flagship linear motion controller.
+What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 Names:
 
