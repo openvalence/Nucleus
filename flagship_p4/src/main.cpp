@@ -450,7 +450,8 @@ extern "C" void app_main() {
                "lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s rssi=%d drops=%lu ip=%s  "
                "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu stream_late=%lu  "
                "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu "
-               "faults=%lu stalls=%lu backstops=%lu lapses=%lu fence=%lu  selfcheck=%s:%u/%u %s  msw=%s  drv=%s alm=%u rdy=%u  "
+               "faults=%lu stalls=%lu backstops=%lu lapses=%lu fence=%lu pstalls=%lu lateplans=%lu refused=%lu "
+               "hardstops=%lu  selfcheck=%s:%u/%u %s  msw=%s  drv=%s alm=%u rdy=%u  "
                "therm=%.1fC fan=%.0f%%/%.0frpm\n",
                static_cast<unsigned long>(n * 5),
                int_free, int_max, int_min, psram_free,
@@ -481,6 +482,10 @@ extern "C" void app_main() {
                static_cast<unsigned long>(mo.backstops),
                static_cast<unsigned long>(mo.lease_lapses),
                static_cast<unsigned long>(mo.fence_hits),
+               static_cast<unsigned long>(mo.planner_stalls),
+               static_cast<unsigned long>(mo.late_plans),
+               static_cast<unsigned long>(mo.plans_refused),
+               static_cast<unsigned long>(mo.hard_stops),
                sc.allowed ? "pass" : "held", unsigned(sc.failed), unsigned(sc.skipped), sc.first,
                valence::motorswitch::stateName(msw.state),
                drv.built ? valence::aim::linkStateName(drv.link.state) : "absent",

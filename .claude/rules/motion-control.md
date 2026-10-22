@@ -50,7 +50,7 @@ home sense's rise, which parks the emitter from the interrupt
 (`MotionArbiter::homeSenseRose()`); a backoff ends on a distance counted on
 the emitter's step count, its last tick rendering the remainder so it lands
 on the count. The plan-tracking feedforward, its velocity cap and its
-residual kick never steer during a cycle; the engine is reset at the count
+residual never steer during a cycle; the engine is reset at the count
 when the cycle ends, as after an e-stop. Exclusivity is the rail: a cycle
 owns it from the request to its end, `accept()` refuses every intent
 meanwhile, and one producer steers per tick: the seek producer runs on the
@@ -67,23 +67,45 @@ window is solved at the next sample, and the sampler evaluates it.
 - **The planner and the steer (bd val-8rt).** Two tasks on HP core 1
   (`subsystem-map.md`). The planner (priority 5) owns the engine: it drains
   the intents, samples the engine once per tick (`MotionArbiter::planTick()`)
-  and publishes THE STRIP, the plan's position in mm every `kMotionTickUs`
-  for `kStripLen` (128) entries, read with `kinetic2::Engine::peek()`, which
-  returns bit for bit what the sampler returns later. A plan change (a
-  submit, a brake, a reset) refills it whole; a tick without one shifts it
-  and appends the new tail. The steer (priority 6, `MotionArbiter::steerTick()`)
-  copies the strip under the host's lock every tick, interpolates it at now
-  and steers, so a window solve of up to 128 ms on the planner never delays
-  a steer. Past the strip's end the last entry holds, the carriage stops
-  there, and the steer counts a planner stall (`plannerStalls()`, logged
-  once a second). An engine reset carries a new generation: the steer steers
-  nothing from an older strip and re-anchors its feedforward at the reset's
-  position. A new plan landing off the strip the steer was rendering (a
-  solve longer than `react_us`) moves the previous command by the gap, so
-  the gap closes at the bounded kick, never as a burst (`latePlans()`,
-  counted past one step, logged past ten). The first steer after a tick
-  the steer held (an e-stop, power, a frame move, no strip) starts its
-  feedforward from the plan itself.
+  and publishes THE STRIP, the commanded position in mm every
+  `kMotionTickUs` for `kStripLen` (128) entries: the plan read with
+  `kinetic2::Engine::peek()`, which returns bit for bit what the sampler
+  returns later, the oscillator and the connector (below) summed, with the
+  backstop frame and the limit set it was filled under, so the steer never
+  reads the window. A plan change (a submit, a brake, a reset) refills it
+  whole, from the clock after the tick's solve; a tick without one shifts it
+  and appends the new tail. The steer (priority 6,
+  `MotionArbiter::steerTick()`) copies the strip under the host's lock every
+  tick, interpolates it at now and steers, so a window solve of up to 128 ms
+  on the planner never delays a steer. **Past the strip's end the steer
+  plays its TAIL (bd val-cy1g)**: a stop from the state the strip ends in,
+  computed and certified at every fill (`certifiedStop()`): the fastest
+  jerk-limited stop under the set the plan renders under, never a reversal,
+  at rest at its end, inside the backstop frame, or braked harder to the
+  edge, up to `kHardStopMax` times the set's accel and jerk, and counted
+  (census `hard_stops`). The steer counts the run (census `planner_stalls`,
+  logged once a second). An engine reset that rebases carries a new
+  generation: the steer steers nothing from an older strip and re-anchors
+  its feedforward at the reset's position. **THE HANDOVER (bd val-xfy2):
+  consecutive strips of a generation are one trajectory.** A whole refill
+  takes the new plan with the connector in flight when that holds the set
+  across its first ticks against the trajectory the steer was rendering (a
+  plan on time: the engine plans every change from its own state at the
+  sample). Otherwise (a solve longer than `react_us`, the planner back after
+  the tail, a PAUSE cutting the oscillator, a lapse) the trajectory in
+  flight is kept `kHandoverTicks` and joined through a CONNECTOR: the gap to
+  the new plan there, as a state on the grid, brought to rest at 0 by
+  `Profile::point()` and summed with the plan, under the set, then half,
+  then a quarter of it, the first whose sum holds every ceiling and the
+  frame on the grid (census `late_plans`, a brake's or a cut's fade
+  uncounted). None holds: the plan is REFUSED (census `plans_refused`): the
+  trajectory in flight stops on a certified stop from the handover, the
+  engine is reset at that stop's rest without a new generation, and every
+  intent is refused until the carriage is there; the request is not
+  incorporated. Nothing installs a plan as a velocity offset. The first
+  steer after a tick the steer held (an e-stop, power, a re-origin, a home
+  cycle, no strip) starts from the plan itself, which each of those reset at
+  the carriage; a window move holds no tick.
   `evaluate()` is both halves on one task: the sim, kinetic-wasm and the
   native suites [verified 2026-10-08 -- test_motion_arbiter, the strip cases
   driving planTick() and steerTick() apart; test_kinetic_wasm_trace
@@ -96,9 +118,9 @@ window is solved at the next sample, and the sampler evaluates it.
   the input set and never leaves the window, by an envelope smoothed over one
   fade and fitted to the plan a fade ahead; a plan changed with less notice
   than that can exceed a ceiling until the fade ends. It renders nothing
-  unhomed or uncommissioned; PAUSE cuts it at once, the strip carrying `cut`
-  so the kick closes the gap and no late plan is counted; an engine reset
-  stops it. Its parameters cross from the hub task as a seqlocked post
+  unhomed or uncommissioned; PAUSE cuts it at once and the refill's handover
+  fades the gap it leaves through a connector, never counted a late plan; an
+  engine reset stops it. Its parameters cross from the hub task as a seqlocked post
   (`setOscillator()`) [verified 2026-10-09 -- test_motion_arbiter, the
   oscillator cases: the strip under 300 mm strokes at the input set keeps
   every ceiling and the window, sheds to under a step at full speed].
@@ -207,20 +229,29 @@ window is solved at the next sample, and the sampler evaluates it.
   priced over at most `kTickDtCapS`, two `kMotionTickUs`, so none exceeds the
   vmax of the set the plan in flight was planned under (the jog set's for a
   Manual plan and the RETURN, the input set's otherwise) plus that long of
-  the input amax; a tick later than that is re-anchored to the plan, steers
-  the plan's own velocity, and is counted (census `stalls`, on the status
-  line). Between ticks the LP core renders the last steer open loop, so a
-  steer-task stall (a flash write with the cache off; never the window
-  solve, which runs on the planner) carries the carriage that steer for at
-  most `kLeaseUs`, then the LP core stops it (the lease, below), and never
-  past the frame's edge (the fence). The next tick counts the lapse (census
-  `lease_lapses`, `lapses=` on the status line) and never re-anchors
-  `_p_cmd_mm` to the count: a stall between the clock read and the steer
-  reaches `steerTick()` with a `dt_s` measured before it, and
-  the residual as feedforward over that is an uncommanded reversal (measured
-  -600 mm/s against a 223 mm/s plan). The residual closes at the bounded kick
-  [verified 2026-10-06 -- test_motion_arbiter, a 283 ms stall moves the
-  carriage 0.896 mm at 223.5 mm/s, then steers 233 mm/s].
+  the input amax; a tick later than that steers the plan's own mean velocity
+  across it and is counted (census `stalls`, on the status line). Between
+  ticks the LP core renders the last steer open loop, so a steer-task stall
+  (a flash write with the cache off; never the window solve, which runs on
+  the planner) carries the carriage that steer for at most `kLeaseUs`, then
+  the LP core stops it (the lease, below), and never past the frame's edge
+  (the fence). The next tick counts the lapse (census `lease_lapses`,
+  `lapses=` on the status line), parks, and asks the planner to re-plan
+  from the carriage at rest (the handover from rest), steering again only
+  from the strip that answers; it never re-anchors `_p_cmd_mm` to the count:
+  a stall between the clock read and the steer reaches `steerTick()` with a
+  `dt_s` measured before it, and the residual as feedforward over that is an
+  uncommanded reversal (measured -600 mm/s against a 223 mm/s plan).
+  **THE RESIDUAL** is what the emitter could not render on time (the ramp
+  out of rest, the count's quantization), measured against the previous
+  command, never the plan now (the feedforward runs one tick behind it by
+  construction), deadbanded at a step: a velocity offset of at most one tick
+  of the set's accel, reached under the accel the plan leaves free and
+  changed by at most one tick of its jerk. It never joins a plan
+  [verified 2026-10-22 -- test_motion_arbiter, the brake tail and handover
+  cases: the steered velocity's change per tick inside the set's accel and
+  its change inside the jerk through strip exhaustion, a late plan, a late
+  reversal refused, a window write, a PAUSE cut and a lapse].
 - **Whichever task samples the engine first after a submit needs a deep
   stack**: the window solve copies the pending knots and runs the solver's
   fixed arrays on the calling stack, KB-scale. That is the planner task only.

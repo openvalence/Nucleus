@@ -21,19 +21,16 @@ namespace {
 
 constexpr const char* kTag = "motion";
 
-// Residual tracking. The emitter renders a VELOCITY, so a step it could not
-// emit on time is a step nothing else repays: the residual against position
-// truth is closed here, and only once it exceeds one whole step so the
-// quantization of the count itself never becomes commanded jitter.
+// Residual tracking (steerTick()). The emitter renders a VELOCITY, so a step
+// it could not emit on time is a step nothing else repays: the residual
+// against position truth is closed at this rate, and only past a whole step,
+// so the quantization of the count itself never becomes commanded jitter.
 constexpr float kTrackHz = 50.0f;
+constexpr float kResidualDeadbandMm = kMmPerStep;
 
 // A rendered direction reversal has to clear this much travel before it counts
 // as a stroke, so dither around a standstill never inflates the odometer.
 constexpr float kStrokeMinMm = 1.0f;
-
-// A late plan is counted past one step and logged past ten: a gap of a step
-// or two is the ordinary re-plan seam (bd val-alf).
-constexpr float kLatePlanLogMm = 10.0f * kMmPerStep;
 
 bool isGenerator(MotionSource s) { return s == MotionSource::Pattern || s == MotionSource::Advanced; }
 
@@ -84,6 +81,21 @@ int32_t fenceCount(float mm, bool up) {
         while (float(c + 1) * kMmPerStep <= mm) ++c;
     }
     return c;
+}
+
+// The state a grid sequence is in at its newest sample p0 (p1, p2 the two
+// before): the second difference is the acceleration the steer renders
+// across the last two ticks, and the velocity is the last tick's mean
+// carried to its end by half of it. Differences first, so the subtraction
+// of two nearby floats is exact.
+kinetic2::State gridState(float p2, float p1, float p0) {
+    constexpr float dt = float(kMotionTickUs) * 1e-6f;
+    const float d1 = p0 - p1, d2 = p1 - p2;
+    kinetic2::State s;
+    s.p = p0;
+    s.a = (d1 - d2) / (dt * dt);
+    s.v = d1 / dt + 0.5f * s.a * dt;
+    return s;
 }
 
 }  // namespace
@@ -381,6 +393,12 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
             GLOGW(kTag, "BENCH: motor power gate bypassed");
         }
     }
+    // A refused plan's stop (handover()) renders to its end: nothing joins it.
+    if (now_us < _held_until_us) {
+        ++_rejected;
+        GLOGW_EVERY_MS(1000, kTag, "REJECT: a late plan's stop is braking to rest");
+        return false;
+    }
     // PAUSE suspends every source (SPEC 11.1). Under override the operator's
     // jog is the one motion accepted, except while the return runs.
     const bool jog = in.source == MotionSource::Manual && _override.load();
@@ -400,7 +418,7 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
     // The jog plans in the rail frame, entered only at rest: a frame change
     // under a moving plan would be a discontinuity.
     if (jog && !_rail_frame) {
-        if (_engine.isBusy(now_us)) {
+        if (_engine.isBusy(now_us) || joining(now_us)) {
             ++_rejected;
             GLOGW_EVERY_MS(1000, kTag, "REJECT: jog waits for the pause brake to finish");
             return false;
@@ -478,7 +496,7 @@ bool MotionArbiter::plan(float target, const MotionIntent& in, const EngineLimit
     // that brake ends (planStep()): capped at 50 mm/s, a 1200 mm/s brake
     // was a one-tick stop at the emitter.
     if (in.source != MotionSource::Manual) _jog_after_us = 0;
-    _plan_manual.store(in.source == MotionSource::Manual && _jog_after_us == 0);
+    _plan_manual = in.source == MotionSource::Manual && _jog_after_us == 0;
     return true;
 }
 
@@ -488,7 +506,7 @@ void MotionArbiter::notePlanCost(uint32_t us) {
     _plan_us_avg += (float(us) - _plan_us_avg) * 0.125f;
 }
 
-void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
+void MotionArbiter::resetEngine(float p_norm, uint64_t now_us, bool rebase) {
     _engine.resetAt(p_norm, now_us);   // clears the expectation
     _lead_us_avg    = 0.0f;
     _k2_expect_us   = 0;
@@ -503,15 +521,19 @@ void MotionArbiter::resetEngine(float p_norm, uint64_t now_us) {
     _seg_read    = SegRead{p_norm, p_norm, now_us, now_us, 0};
     _seg_eng_us  = now_us;
     _seg_through = false;
-    // The steer re-anchors its feedforward here and steers nothing from a
-    // strip published before this reset (steerTick()); the oscillation stops
-    // with the plan it rode.
-    _anchor_mm   = positionMm();
+    // The oscillation stops with the plan it rode.
     _osc.reset();
     _osc_head = 0.0f;
-    _strip_continuous = false;
     _strip_stale = true;
-    _strip_gen.fetch_add(1);
+    if (rebase) {
+        // The steer re-anchors its feedforward here and steers nothing from a
+        // strip published before this reset (steerTick()); the connector and
+        // a refused plan's hold go with the trajectory they joined.
+        _anchor_mm = positionMm();
+        _conn_h_us = _conn_end_us = 0;
+        _held_until_us = 0;
+        _strip_gen.fetch_add(1);
+    }
     _eng_lo   = frameLo();
     _eng_span = span();
 }
@@ -520,7 +542,7 @@ void MotionArbiter::reseedEngine(uint64_t now_us) {
     // The plan's own curve, not the count: the engine restates it and keeps
     // it through the reaction horizon or the next knot (Engine::reframe,
     // RFC-105 (bb)), so the strip the steer follows runs on in mm and the
-    // carriage's lag stays the kick's to close, as through any re-plan.
+    // refill's handover finds nothing to join.
     // Never a re-plan from now: a write inside a knot's horizon trims that
     // knot to rest on the write's state (bd val-4dt, val-83q). Ceilings scale
     // with the curve, so it keeps its mm ceilings until the next intent sets
@@ -547,7 +569,6 @@ void MotionArbiter::reseedEngine(uint64_t now_us) {
         _k2_newest_us = h.t_us;
         _k2_newest_p  = h.p;
     }
-    _strip_continuous = true;
     _strip_stale = true;
     _eng_lo   = frameLo();
     _eng_span = span();
@@ -617,7 +638,10 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     // the engine's own idea of where it stopped carries every move's sub-step
     // residue into the next one. pending() first: isBusy() solves, and a
     // bundle must not solve once per sample.
-    if (_engine.pending() == 0 && !_engine.isBusy(now_us)) resetEngine(toNorm(positionMm()), now_us);
+    // Never under a connector: the trajectory still moves toward the
+    // engine's rest, and the new knot plans from that rest.
+    if (_engine.pending() == 0 && !joining(now_us) && !_engine.isBusy(now_us))
+        resetEngine(toNorm(positionMm()), now_us);
 
     // Engine::expect, after the reset above (a reset clears it): a Stream
     // segment's free knot renders through while more segments are expected;
@@ -678,7 +702,7 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
         // under, whether or not a sample solved it since the last intent.
         _jog_after_us = 0;
         _engine.setLimits(limitsFor(false));
-        if (!_plan_manual.load() && _engine.isBusy(now_us)) {
+        if (!_plan_manual && _engine.isBusy(now_us)) {
             brakeEngine(now_us);
             _jog_after_us = _k2_brake_to_us;
         }
@@ -901,12 +925,14 @@ void MotionArbiter::brakeToRest(uint64_t now_us) {
     _engine.setLimits(limitsFor(false));
     const kinetic2::State st = sampleEngine(now_us);
     [[maybe_unused]] const float v = st.v * span();   // log only
-    // The oscillation stops with the motion (SPEC 9.7): this tick's refill
-    // carries the cut, and an idle carriage comes to rest on the plan.
-    _osc_cut = _osc.active();
+    // The oscillation stops with the motion (SPEC 9.7): the next refill's
+    // handover fades it through a connector, and an idle carriage comes to
+    // rest on the plan.
+    const bool cut = _osc.active();
     _osc.reset();
+    _handover_quiet = true;
     if (!brakeEngine(now_us)) {
-        _pause_pos_mm.store(_osc_cut ? toMm(st.p) : positionMm());
+        _pause_pos_mm.store(cut || joining(now_us) ? toMm(st.p) : positionMm());
         return;
     }
     // Where it comes to rest: the brake's end, held by the backstop
@@ -993,17 +1019,21 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // steer parks for this tick (an empty strip) and re-anchors at the reset,
     // and the next accepted intent plans from the new frame's rest. A rest
     // the oscillator is riding reseeds instead, so the oscillation runs on.
-    // The generation moves BEFORE the flag drops, so no strip of the old
-    // frame steers in between.
+    // A reset's generation moves BEFORE the flags drop, so the steer never
+    // takes a strip of the old origin in between; a reseed's strip runs on in
+    // mm and keeps its generation, so the steer never holds a tick for it.
     if (_frame_moved) {
-        _strip_gen.fetch_add(1);
-        _frame_moved = false;
         const bool origin_moved = _origin_moved;
-        _origin_moved = false;
         // A cycle counted in the old frame: its seek or backoff is void.
         const bool homing = _homing.load();
+        const bool reset = origin_moved || homing ||
+                           (_engine.pending() == 0 && !_engine.isBusy(now_us) && !_osc.active() &&
+                            !joining(now_us));
+        if (reset) _strip_gen.fetch_add(1);
+        _frame_moved = false;
+        _origin_moved = false;
         if (homing) homeEnd("the travel window changed", now_us);
-        if (origin_moved || homing || (_engine.pending() == 0 && !_engine.isBusy(now_us) && !_osc.active())) {
+        if (reset) {
             resetEngine(toNorm(positionMm()), now_us);
             return false;
         }
@@ -1031,8 +1061,9 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     }
 
     // RETURN (SPEC 11.1): an ordinary Manual plan at the jog set, planned here
-    // because the engine is this task's. The rail clamp still applies.
-    if (_return_req.exchange(false) && _override.load()) {
+    // because the engine is this task's. The rail clamp still applies. A
+    // refused plan's stop runs first: the request waits for its rest.
+    if (now_us >= _held_until_us && _return_req.exchange(false) && _override.load()) {
         MotionIntent back;
         back.source = MotionSource::Manual;
         float target = _pause_pos_mm.load();
@@ -1048,16 +1079,18 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // submit and records the brake the engine takes when the timeline runs
     // dry still moving (sampleEngine()). The strip (fillStrip()) reads the
     // plan after it without side effects, and sums the oscillator into it.
+    // Busy while the engine plans motion or the connector still moves the
+    // trajectory toward its rest.
     const kinetic2::State st = sampleEngine(now_us);
-    const bool busy = _engine.isBusy(now_us);
+    const bool busy = _engine.isBusy(now_us) || joining(now_us);
     _plan_read = readPlan(st, now_us);
     _plan_busy = busy;
     // The jog set's ceiling holds until the plan planned under it has ended.
     if (!busy) {
-        _plan_manual.store(false);
+        _plan_manual = false;
         _jog_after_us = 0;
     } else if (_jog_after_us != 0 && now_us >= _jog_after_us) {
-        _plan_manual.store(true);
+        _plan_manual = true;
         _jog_after_us = 0;
     }
 
@@ -1078,8 +1111,6 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
     PlanStrip& s = _strip;
     s.gen = _strip_gen.load();
     s.anchor_mm = _anchor_mm;
-    s.continuous = _strip_continuous;
-    s.cut = false;
     constexpr uint64_t kSpanUs = uint64_t(kStripLen) * kMotionTickUs;
     // The plan from t0 on, mm, in _plan_ext after the kOscEdge ticks before
     // t0. Read this far ahead only while the oscillator renders: its
@@ -1087,41 +1118,49 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
     float* plan = _plan_ext.data() + kOscEdge;
     streamOscillator(now_us);
     const size_t ahead = _osc.idle() ? kStripLen : kPlanExt - kOscEdge;
+    // A lapse the steer asked to be re-planned from: a whole refill joined
+    // from the carriage at rest.
+    const uint32_t replan = _replan_req.load();
+    const bool from_rest = live && replan != _replan_seen;
+    bool refilled = false;
     if (!live) {
         s.n = 0;
         _osc.reset();
         _osc_head = 0.0f;
-    } else if (_strip_stale || s.n == 0 || now_us < s.t0_us || now_us - s.t0_us >= kSpanUs ||
+    } else if (from_rest || _strip_stale || s.n == 0 || (now_us >= s.t0_us && now_us - s.t0_us >= kSpanUs) ||
                ahead > _plan_ahead) {
-        // A whole refill: one walk of the window, one piece per knot interval.
-        // The ticks before t0 are what the last strip planned there, for the
-        // oscillator's differences; after a reset, the plan's own start.
+        // A whole refill, from the clock after this tick's solve: the steer
+        // rendered the strip in flight until then (handover()). One walk of
+        // the window, one piece per knot interval. The ticks before t0 are
+        // what the last strip planned there, for the oscillator's
+        // differences; after a reset, the plan's own start.
+        const uint64_t t0 = std::max(now_us, _now_us());
         std::array<float, kOscEdge> before{};
         for (size_t i = 0; i < kOscEdge; ++i) {
-            const float at = float(int64_t(now_us) - int64_t(s.t0_us)) / float(kMotionTickUs) + float(i);
+            const float at = float(int64_t(t0) - int64_t(s.t0_us)) / float(kMotionTickUs) + float(i);
             const float x = std::fmin(std::fmax(at, 0.0f), float(kPlanExt - 1));
             const size_t j = std::min(size_t(x), kPlanExt - 2);
             before[i] = _plan_ext[j] + (_plan_ext[j + 1] - _plan_ext[j]) * (x - float(j));
         }
-        const bool had = s.n != 0 && now_us >= s.t0_us && now_us - s.t0_us < kSpanUs;
+        const bool had = s.n != 0 && t0 >= s.t0_us && t0 - s.t0_us < kSpanUs;
         _strip_stale = false;
-        s.t0_us = now_us;
+        s.t0_us = t0;
         s.n = uint16_t(kStripLen);
-        s.cut = _osc_cut;
-        _osc_cut = false;
-        ++s.plan;
         _plan_ahead = ahead;
-        _engine.peek(0, now_us, kMotionTickUs, ahead, plan);
+        _engine.peek(0, t0, kMotionTickUs, ahead, plan);
         for (size_t i = 0; i < ahead; ++i) plan[i] = toMm(plan[i]);
         for (size_t i = 0; i < kOscEdge; ++i) _plan_ext[i] = had ? before[i] : plan[0];
-    } else if (const size_t k = size_t((now_us - s.t0_us) / kMotionTickUs); k > 0) {
+        refilled = true;
+    } else if (now_us >= s.t0_us) {
         // The same plan, advanced by the ticks elapsed: only the new tail is
         // read from the engine.
-        std::copy(_plan_ext.begin() + k, _plan_ext.end(), _plan_ext.begin());
-        s.t0_us += uint64_t(k) * kMotionTickUs;
-        float* tail = plan + (_plan_ahead - k);
-        _engine.peek(0, s.t0_us + uint64_t(_plan_ahead - k) * kMotionTickUs, kMotionTickUs, k, tail);
-        for (size_t i = 0; i < k; ++i) tail[i] = toMm(tail[i]);
+        if (const size_t k = size_t((now_us - s.t0_us) / kMotionTickUs); k > 0) {
+            std::copy(_plan_ext.begin() + k, _plan_ext.end(), _plan_ext.begin());
+            s.t0_us += uint64_t(k) * kMotionTickUs;
+            float* tail = plan + (_plan_ahead - k);
+            _engine.peek(0, s.t0_us + uint64_t(_plan_ahead - k) * kMotionTickUs, kMotionTickUs, k, tail);
+            for (size_t i = 0; i < k; ++i) tail[i] = toMm(tail[i]);
+        }
     }
     feedOscillator(s.t0_us, plan, s.n != 0 && !_osc.idle());
     if (s.n != 0) {
@@ -1146,31 +1185,245 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
         }
         _osc_head = osc[0];
         for (size_t i = 0; i < kStripLen; ++i) s.p_mm[i] = plan[i] + osc[i];
+        if (refilled) {
+            handover(s, from_rest, now_us);
+            if (joining(now_us)) _plan_busy = true;   // the census reads the join at once
+        }
+        applyConnector(s);
+        s.lo_mm = backstopLo();
+        s.hi_mm = backstopHi();
+        s.lim = renderLimits();
+        // THE TAIL (bd val-cy1g): the stop the steer plays past the last
+        // entry while the planner is late, from the state the strip ends in
+        // as the steer renders it (the plan, the oscillator and the
+        // connector), certified here so the steer never computes one.
+        const size_t n = s.n;
+        s.tail = certifiedStop(gridState(s.p_mm[n - 3], s.p_mm[n - 2], s.p_mm[n - 1]),
+                               s.t0_us + uint64_t(n - 1) * kMotionTickUs, s.lim, s.lo_mm, s.hi_mm, s.tail_hard);
     }
-    // ponytail: the whole strip is copied under the lock every tick (~0.5 KB);
+    if (from_rest) _replan_seen = replan;
+    s.replan = _replan_seen;
+    // ponytail: the whole strip is copied under the lock every tick (~0.7 KB);
     // a ring with a published head is the upgrade if the copy ever shows.
     if (_lock) _lock(true);
     _strip_pub = s;
     if (_lock) _lock(false);
 }
 
-bool MotionArbiter::stripAt(const PlanStrip& s, uint64_t t_us, float& p_mm) {
-    if (s.n == 0) return false;
-    if (t_us < s.t0_us) {
-        p_mm = s.p_mm[0];
-        return false;
+void MotionArbiter::handover(PlanStrip& s, bool from_rest, uint64_t now_us) {
+    // The trajectory in flight: the strip last published, which this task
+    // alone writes, so it is read here without the lock; after a lapse, the
+    // carriage at rest where the LP core stopped it.
+    const PlanStrip& old = _strip_pub;
+    const bool quiet = _handover_quiet;
+    _handover_quiet = false;
+    // After a rebasing reset the steer re-anchors at the carriage: nothing
+    // to join.
+    if (!from_rest && (old.n == 0 || old.gen != s.gen)) {
+        _conn = kinetic2::Profile{};
+        _conn_h_us = _conn_end_us = 0;
+        return;
     }
+
+    constexpr int h = int(kHandoverTicks);
+    constexpr float dt = float(kMotionTickUs) * 1e-6f;
+    const int n = int(s.n);
+    const float rest = positionMm();
+    auto tAt = [&](int k) { return uint64_t(int64_t(s.t0_us) + int64_t(k) * int64_t(kMotionTickUs)); };
+    // The trajectory in flight at k in [-3, h], index k + 3.
+    std::array<float, h + 4> o{};
+    for (int k = -3; k <= h; ++k) o[size_t(k + 3)] = from_rest ? rest : stripAt(old, tAt(k));
+    // The candidate, index k + 3 for k in [-3, n): the trajectory in flight
+    // before the handover, the new one from it.
+    std::array<float, kStripLen + 3> c{};
+    float* const at = c.data() + 3;
+    for (int k = -3; k < 0; ++k) at[k] = o[size_t(k + 3)];
+    const EngineLimits lim = renderLimits();
+    const float lo = std::fmin(backstopLo(), o[2]);
+    const float hi = std::fmax(backstopHi(), o[2]);
+
+    // The grid's own differences: the steer renders x[k] - x[k-1] over each
+    // tick, so these are its velocity, acceleration and jerk. x[k] is read
+    // for k in [from - 3, to).
+    struct Peaks {
+        float v = 0.0f, a = 0.0f, j = 0.0f, lo = 1e30f, hi = -1e30f;
+    };
+    auto peaksOf = [&](const float* x, int from, int to) {
+        Peaks pk;
+        for (int k = from; k < to; ++k) {
+            const float d1 = x[k] - x[k - 1], d2 = x[k - 1] - x[k - 2], d3 = x[k - 2] - x[k - 3];
+            pk.v = std::fmax(pk.v, std::fabs(d1) / dt);
+            pk.a = std::fmax(pk.a, std::fabs(d1 - d2) / (dt * dt));
+            pk.j = std::fmax(pk.j, std::fabs((d1 - d2) - (d2 - d3)) / (dt * dt * dt));
+            pk.lo = std::fmin(pk.lo, x[k]);
+            pk.hi = std::fmax(pk.hi, x[k]);
+        }
+        return pk;
+    };
+    // The set's ceilings, or the plan's own peak where a piece already runs
+    // over one (PieceOverCeiling is the solver's to report), with the float
+    // rounding of a strip position in those differences.
+    const Peaks own = peaksOf(s.p_mm.data(), 3, n);
+    const Peaks was = peaksOf(o.data() + 3, 0, h + 1);
+    const float ulp = 2.4e-7f * std::fmax(std::fmax(std::fabs(lo), std::fabs(hi)), 1.0f);
+    const float cap_v = std::fmax(lim.vmax, std::fmax(own.v, was.v)) * 1.01f + 2.0f * ulp / dt;
+    const float cap_a = std::fmax(lim.amax, std::fmax(own.a, was.a)) * 1.02f + 4.0f * ulp / (dt * dt);
+    const float cap_j = std::fmax(lim.jmax, std::fmax(own.j, was.j)) * 1.02f + 8.0f * ulp / (dt * dt * dt);
+    auto legal = [&](int from, int to) {
+        const Peaks pk = peaksOf(at, from, std::min(to, n));
+        return pk.v <= cap_v && pk.a <= cap_a && pk.j <= cap_j && pk.lo >= lo - kMmPerStep && pk.hi <= hi + kMmPerStep;
+    };
+
+    // 1. The new plan with the connector in flight. The engine plans every
+    // change from its own state at the sample, continuous with what it
+    // planned before, so a plan on time joins here unchanged.
+    for (int k = 0; k < n; ++k) at[k] = s.p_mm[size_t(k)] + connAt(tAt(k), s.p_mm[size_t(k)]);
+    if (legal(0, 3)) return;
+
+    // The rest joins at the handover, kHandoverTicks on: the trajectory in
+    // flight through the tick before it, its gap to the new plan there as a
+    // state on the grid, which a connector closes.
+    const uint64_t t_h = tAt(h);
+    for (int k = 0; k < h; ++k) at[k] = o[size_t(k + 3)];
+    const kinetic2::State gap = gridState(o[size_t(h + 1)] - s.p_mm[size_t(h - 2)],
+                                          o[size_t(h + 2)] - s.p_mm[size_t(h - 1)],
+                                          o[size_t(h + 3)] - s.p_mm[size_t(h)]);
+    auto keep = [&](const kinetic2::Profile& e, uint64_t end_us) {
+        _conn = e;
+        _conn_h_us = t_h;
+        _conn_end_us = end_us;
+        _conn_pre_t0 = s.t0_us;
+        for (int k = 0; k < h; ++k) _conn_pre[size_t(k)] = o[size_t(k + 3)];
+    };
+
+    // 2. A connector: the gap brought to rest at 0 (Profile::point), summed
+    // with the plan, under the set and then shares of it, the first whose sum
+    // holds every ceiling and the frame. Past the strip the plan is unseen,
+    // so a connector longer than the strip joins only a plan at rest there.
+    const uint64_t t_last = tAt(n - 1);
+    for (const float share : {1.0f, 0.5f, 0.25f}) {
+        EngineLimits le = lim;
+        le.vmax *= share;
+        le.amax *= share;
+        le.jmax *= share;
+        const kinetic2::Profile e = kinetic2::Profile::point(gap, 0.0f, t_h, le);
+        if (e.n <= 0) continue;
+        const uint64_t end = e.end_us();
+        if (end > t_last && _engine.isBusy(t_last)) continue;
+        for (int k = h; k < n; ++k) {
+            const uint64_t t = tAt(k);
+            at[k] = s.p_mm[size_t(k)] + (t < end ? e.at(t).p : 0.0f);
+        }
+        if (!legal(h, n)) continue;
+        keep(e, std::max(t_h, end));
+        if (!quiet) {
+            ++_late_plans;
+            _late_plan_max_mm = std::fmax(_late_plan_max_mm, std::fabs(gap.p));
+            GLOGW_EVERY_MS(1000, kTag,
+                           "LATE PLAN: %.3f mm, %.1f mm/s off the trajectory in flight, joined over %.1f ms "
+                           "(largest %.3f mm)",
+                           double(gap.p), double(gap.v), double(end - t_h) * 1e-3, double(_late_plan_max_mm));
+        }
+        return;
+    }
+
+    // 3. Refused: no connector joins it inside the set. The trajectory in
+    // flight stops instead, certified from its state at the handover; the
+    // engine holds that stop's rest and every intent is refused until the
+    // carriage is there. Not incorporated, and counted.
+    bool hard = false;
+    kinetic2::Profile stop =
+        certifiedStop(gridState(o[size_t(h + 1)], o[size_t(h + 2)], o[size_t(h + 3)]), t_h, lim, backstopLo(),
+                      backstopHi(), hard);
+    if (hard) ++_hard_stops;
+    const float p_rest = stop.end().p;
+    resetEngine(toNorm(p_rest), now_us, false);
+    _strip_stale = false;   // this refill publishes the reset
+    _held_until_us = stop.n > 0 ? stop.end_us() : 0;
+    if (_paused.load()) _pause_pos_mm.store(p_rest);
+    stop.s0.p -= p_rest;   // the stop as a gap over the rest
+    keep(stop, std::max(t_h, stop.end_us()));
+    _plan_ext.fill(p_rest);
+    s.p_mm.fill(p_rest);
+    _osc_head = 0.0f;
+    ++_plans_refused;
+    GLOGW(kTag, "LATE PLAN REFUSED: %.3f mm, %.1f mm/s off the trajectory in flight, no connector holds the set; "
+                "stopping at %.2f mm",
+          double(gap.p), double(gap.v), double(p_rest));
+}
+
+float MotionArbiter::connAt(uint64_t t, float plan_mm) const {
+    if (t >= _conn_end_us) return 0.0f;
+    if (t < _conn_h_us) {
+        const uint64_t j = t > _conn_pre_t0 ? (t - _conn_pre_t0) / kMotionTickUs : 0;
+        return _conn_pre[size_t(std::min<uint64_t>(j, kHandoverTicks - 1))] - plan_mm;
+    }
+    return _conn.at(t).p;
+}
+
+void MotionArbiter::applyConnector(PlanStrip& s) const {
+    for (size_t i = 0; i < s.n; ++i) {
+        const uint64_t t = s.t0_us + uint64_t(i) * kMotionTickUs;
+        if (t >= _conn_end_us) return;
+        s.p_mm[i] += connAt(t, s.p_mm[i]);
+    }
+}
+
+kinetic2::Profile MotionArbiter::certifiedStop(const kinetic2::State& s, uint64_t at_us, const EngineLimits& lim,
+                                               float lo, float hi, bool& hard) {
+    hard = false;
+    const float flo = std::fmin(lo, s.p) - kMmPerStep;
+    const float fhi = std::fmax(hi, s.p) + kMmPerStep;
+    // Profile::brake stops along the velocity, or the acceleration from rest;
+    // a stop that turns back (float residue at a vanishing speed) is braked
+    // from the velocity alone, which cannot.
+    const float sgn = s.v != 0.0f ? (s.v > 0.0f ? 1.0f : -1.0f) : (s.a > 0.0f ? 1.0f : -1.0f);
+    auto stop = [&](float k) {
+        EngineLimits l = lim;
+        l.amax *= k;
+        l.jmax *= k;
+        kinetic2::Profile pr = kinetic2::Profile::brake(s, at_us, l);
+        if (sgn * (pr.end().p - s.p) < 0.0f) pr = kinetic2::Profile::brake(kinetic2::State{s.p, s.v, 0.0f}, at_us, l);
+        return pr;
+    };
+    auto inside = [&](const kinetic2::Profile& pr) {
+        const float e = pr.end().p;
+        return e >= flo && e <= fhi;
+    };
+    kinetic2::Profile pr = stop(1.0f);
+    if (inside(pr)) return pr;
+    // Harder, to the edge: the least multiple of the set's accel and jerk
+    // that stops inside, by bisection; past kHardStopMax the backstop holds.
+    hard = true;
+    float k_in = kHardStopMax, k_out = 1.0f;
+    if (!inside(stop(k_in))) return stop(k_in);
+    for (int i = 0; i < 12; ++i) {
+        const float mid = 0.5f * (k_in + k_out);
+        if (inside(stop(mid))) k_in = mid;
+        else k_out = mid;
+    }
+    return stop(k_in);
+}
+
+EngineLimits MotionArbiter::renderLimits() const {
+    EngineLimits l = limitsFor(_plan_manual);
+    const float sp = span();
+    l.vmax *= sp;
+    l.amax *= sp;
+    l.jmax *= sp;
+    return l;
+}
+
+float MotionArbiter::stripAt(const PlanStrip& s, uint64_t t_us) {
+    if (s.n == 0) return 0.0f;
+    if (t_us <= s.t0_us) return s.p_mm[0];
     const uint64_t at = t_us - s.t0_us;
     const uint64_t k = at / kMotionTickUs;
     const uint64_t last = uint64_t(s.n) - 1;
-    if (k >= last) {
-        p_mm = s.p_mm[last];
-        return k == last && at % kMotionTickUs == 0;
-    }
+    if (k >= last) return at == last * kMotionTickUs ? s.p_mm[last] : s.tail.at(t_us).p;
     // On a grid point: the entry itself, bit for bit.
     const float f = float(at % kMotionTickUs) / float(kMotionTickUs);
-    p_mm = s.p_mm[k] + (s.p_mm[k + 1] - s.p_mm[k]) * f;
-    return true;
+    return s.p_mm[k] + (s.p_mm[k + 1] - s.p_mm[k]) * f;
 }
 
 bool MotionArbiter::stillFor(uint64_t now_us, uint32_t window_us) const {
@@ -1190,6 +1443,12 @@ bool MotionArbiter::stillFor(uint64_t now_us, uint32_t window_us) const {
             lo = std::fmin(lo, s.p_mm[i]);
             hi = std::fmax(hi, s.p_mm[i]);
         }
+        // Past the last entry the tail renders: it ends at its rest.
+        if (end_us > s.t0_us + uint64_t(last) * kMotionTickUs) {
+            const float e = s.tail.end().p;
+            lo = std::fmin(lo, e);
+            hi = std::fmax(hi, e);
+        }
         still = hi - lo < kMmPerStep;
     }
     if (_lock) _lock(false);
@@ -1199,55 +1458,40 @@ bool MotionArbiter::stillFor(uint64_t now_us, uint32_t window_us) const {
 // ---- the steer's tick -------------------------------------------------------
 
 void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
-    // A lapse is the emitter's own stop, kLeaseUs after the last renewal.
-    // NEVER re-anchor _p_cmd_mm to the count here: the residual would become
-    // feedforward over a dt_s measured before the stall, an uncommanded
-    // reversal. The residual closes at the bounded kick below.
+    // A LAPSE IS THE LP CORE'S OWN STOP, kLeaseUs after the last renewal: the
+    // carriage stands wherever it stopped. The plan's velocity is never the
+    // next steer from there, and _p_cmd_mm is never re-anchored to the count
+    // over a dt_s measured before the stall (an uncommanded reversal): the
+    // steer parks and asks the planner for a strip joined from the carriage
+    // at rest (fillStrip(), handover()), and steers that strip.
     const uint32_t lapses = _emitter.lapses();
     if (lapses != _lapses_seen) {
         _lease_lapses += lapses - _lapses_seen;
         _lapses_seen = lapses;
-        GLOGW_EVERY_MS(1000, kTag, "LEASE LAPSE: the LP core stopped itself at %.3f mm", double(positionMm()));
+        _replan_req.store(++_replan_want);
+        GLOGW_EVERY_MS(1000, kTag, "LEASE LAPSE: the LP core stopped itself at %.3f mm, re-planning from there",
+                       double(positionMm()));
+    }
+    // A LATE TICK IS A STALL, NEVER A BURST (bd val-1w8): counted here,
+    // whichever gate the tick takes; the residual and the cap below are
+    // priced over at most kTickDtCapS, whatever the clock did.
+    const bool stall = dt_s > kTickDtCapS;
+    if (stall) {
+        ++_stalls;
+        GLOGW_EVERY_MS(1000, kTag, "STALL: tick %.1f ms after the last, residual and cap held to kTickDtCapS",
+                       double(dt_s * 1e3f));
     }
 
-    // The newest strip, after reading where the one it replaces put the plan
-    // now.
-    float p_was = 0.0f;
-    const bool was_in = stripAt(_steer_strip, now_us, p_was);
     if (_lock) _lock(true);
     _steer_strip = _strip_pub;
     if (_lock) _lock(false);
     const PlanStrip& s = _steer_strip;
-    float p_plan_mm = 0.0f;
-    const bool in = stripAt(s, now_us, p_plan_mm);
     if (s.gen != _seen_gen) {
         // An engine reset: the feedforward starts again from where the
-        // carriage stood at it, once per reset. A reseed's plan runs on in mm
-        // from the command in flight.
+        // carriage stood at it, once per reset.
         _seen_gen = s.gen;
-        _seen_plan = s.plan;
-        if (!s.continuous) _p_cmd_mm = s.anchor_mm;
-    } else if (s.plan != _seen_plan) {
-        _seen_plan = s.plan;
-        // A NEW PLAN IS A RESIDUAL, NEVER A BURST. A solve longer than the
-        // reaction horizon lands a plan the carriage has already left: the
-        // previous command moves by the gap between the two plans now, so
-        // the feedforward keeps the old plan's velocity for this tick and the
-        // bounded kick closes the gap. The move never widens the backstop's
-        // frame.
-        if (was_in && in) {
-            const float d = p_plan_mm - p_was;
-            if (std::fabs(d) > kMmPerStep && !s.cut) {
-                ++_late_plans;
-                _late_plan_max_mm = std::fmax(_late_plan_max_mm, std::fabs(d));
-                if (std::fabs(d) > kLatePlanLogMm)
-                    GLOGW_EVERY_MS(1000, kTag, "LATE PLAN: %.3f mm off the strip in flight, closed by the kick (largest %.3f mm)",
-                                   double(d), double(_late_plan_max_mm));
-            }
-            const float lo = std::fmin(backstopLo(), _p_cmd_mm);
-            const float hi = std::fmax(backstopHi(), _p_cmd_mm);
-            _p_cmd_mm = std::fmin(std::fmax(_p_cmd_mm + d, lo), hi);
-        }
+        _p_cmd_mm = s.anchor_mm;
+        _res_v = _res_a = 0.0f;
     }
 
     // The gates. The planner applies the same ones on its own tick; these
@@ -1264,37 +1508,43 @@ void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
         _steer_gap = true;
         return;
     }
-    // A frame move, an engine reset the planner has not published yet, or no
-    // plan: parked for this tick.
-    if (_frame_moved || s.n == 0 || s.gen != _strip_gen.load()) {
+    // A re-origin the planner has not reset for, an engine reset it has not
+    // published, no plan, or a lapse it has not answered: parked for this
+    // tick. A window move is none of these: every strip carries the frame
+    // it was filled in.
+    if (_origin_moved || s.n == 0 || s.gen != _strip_gen.load() || s.replan != _replan_want) {
         _emitter.steer(0.0f);
         _steer_gap = true;
         _emitter.renew();
         return;
     }
-    // Past the strip's end the planner is late: the last entry holds, so the
-    // carriage stops there.
-    if (!in && now_us > s.t0_us) {
+    // THE TRAJECTORY. Consecutive strips of a gen are one (handover()): a
+    // new plan reaches the steer already joined to the one it was rendering.
+    // Past the last entry the planner is late and the strip's tail, a stop
+    // certified at its fill, renders to rest (bd val-cy1g).
+    float p_plan_mm = stripAt(s, now_us);
+    if (now_us > s.t0_us + uint64_t(s.n - 1) * kMotionTickUs) {
         if (!_strip_starved) {
             _strip_starved = true;
             ++_planner_stalls;
+            if (s.tail_hard) ++_hard_tails;
         }
-        GLOGW_EVERY_MS(1000, kTag, "PLANNER STALL: the strip ended %.1f ms ago, holding at %.2f mm",
+        GLOGW_EVERY_MS(1000, kTag, "PLANNER STALL: the strip ended %.1f ms ago, stopping on its tail at %.2f mm",
                        double(now_us - s.t0_us - uint64_t(s.n - 1) * kMotionTickUs) * 1e-3, double(p_plan_mm));
     } else {
         _strip_starved = false;
     }
 
     // THE POSITION BACKSTOP (operator ruling 2026-10-06, bd val-1w8). The
-    // demand never leaves the backstop's frame (backstopLo()..backstopHi()),
+    // demand never leaves the backstop's frame (the strip's lo_mm..hi_mm),
     // whatever the plan does: a curve that bulges, a brake that is not aware
     // of the window, a frame gone stale. The frame widens only to the previous
     // demand, so a carriage left outside it is never pulled in by the clamp,
     // only by a plan. A home cycle never reaches here (the gate above): the
     // seek has to reach the stops. The LP core's fence is the second line, and
     // the only one an HP stall cannot skip (syncFence()).
-    float lo = backstopLo();
-    float hi = backstopHi();
+    float lo = s.lo_mm;
+    float hi = s.hi_mm;
     if (_p_cmd_mm < lo) lo = _p_cmd_mm;
     if (_p_cmd_mm > hi) hi = _p_cmd_mm;
     const bool held = p_plan_mm < lo || p_plan_mm > hi;
@@ -1312,62 +1562,61 @@ void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
     } else {
         _backstop_on = false;
     }
-    // The first steer after a gated tick starts from the plan itself: what
-    // the plan did while the emitter was held is residual, never feedforward.
+    // The first steer after a gated tick starts from the plan itself. Every
+    // gate but a lapse (answered above) follows an engine reset at the
+    // carriage, so the plan starts where the carriage stands.
     if (_steer_gap) {
         _steer_gap = false;
         _p_cmd_mm = p_plan_mm;
+        _res_v = _res_a = 0.0f;
+        _ff_prev = 0.0f;
     }
 
-    // A LATE TICK IS A STALL, NEVER A BURST (bd val-1w8). The kick and the
-    // cap below are priced over at most kTickDtCapS, whatever the clock did;
-    // what the carriage fell behind during a stall closes at that bounded
-    // kick, never as a catch-up.
-    const bool stall = dt_s > kTickDtCapS;
+    // What the carriage fell behind during a stall the LP core rendered
+    // through closes at the residual, never as a catch-up.
     const float dt = stall ? kTickDtCapS : dt_s;
-    if (stall) {
-        ++_stalls;
-        GLOGW_EVERY_MS(1000, kTag, "STALL: tick %.1f ms after the last, kick and cap held to kTickDtCapS",
-                       double(dt_s * 1e3f));
-    }
 
-    // Feedforward: the plan's OWN mean velocity across the interval that just
-    // elapsed. Summed over a move this telescopes to exactly the plan's
-    // displacement, which is why the emitter needs no other position input.
-    // The mean of a legal curve is under its ceiling over any interval, so a
-    // stall renders no burst through it. Into a held edge it is the distance
-    // left to the edge, never the plan's displacement past it.
-    float v = (p_plan_mm - _p_cmd_mm) / dt_s;
+    // Feedforward: the trajectory's OWN mean velocity across the interval
+    // that just elapsed, rendered over the next. Summed over a move this
+    // telescopes to exactly its displacement, which is why the emitter needs
+    // no other position input. The mean of a legal curve is under its
+    // ceiling over any interval, so a stall renders no burst through it.
+    // Into a held edge it is the distance left to the edge, never the plan's
+    // displacement past it.
+    // THE RESIDUAL against position truth (bd val-xfy2): what the emitter
+    // could not render on time (the ramp out of rest, whose first edge
+    // periods are long) and the count's quantization past the deadband,
+    // measured against where the steers so far sent the carriage: the
+    // previous command, one tick of travel behind the plan by construction
+    // of the feedforward, never the plan now. A velocity offset of at most
+    // one tick of the set's accel, reached under the accel the plan leaves
+    // free and changed by at most one tick of the set's jerk: it never joins
+    // a plan (handover() does) and never steps the velocity.
+    const float c_max = s.lim.amax * dt;
+    const float err_mm = _p_cmd_mm - positionMm();
+    const float v_ff = (p_plan_mm - _p_cmd_mm) / dt_s;
     _p_cmd_mm = p_plan_mm;
+    const float want = std::fabs(err_mm) > kResidualDeadbandMm ? std::clamp(err_mm * kTrackHz, -c_max, c_max) : 0.0f;
+    const float room = std::fmax(s.lim.amax - std::fabs(v_ff - _ff_prev) / dt, 0.0f);
+    _ff_prev = v_ff;
+    const float dv = want - _res_v;
+    const float a_to =
+        std::copysign(std::fmin(std::fmin(room, std::sqrt(2.0f * s.lim.jmax * std::fabs(dv))), std::fabs(dv) / dt), dv);
+    const float da = s.lim.jmax * dt;
+    _res_a = std::clamp(a_to, _res_a - da, _res_a + da);
+    _res_v = std::clamp(_res_v + _res_a * dt, -c_max, c_max);
+    float v = v_ff + _res_v;
 
-    // Residual against POSITION TRUTH, deadbanded at one step. It exists for
-    // the ramp out of rest: the opening velocity is small, so the first edge
-    // period is long, and the emitter cannot render the plan's first steps on
-    // time however often it is re-steered.
-    // BOUNDED, because the residual is proportional to an error no ceiling
-    // shaped and is therefore the one term that can hand the emitter a
-    // demand the machine cannot make. Its ceiling is the accel limit's own
-    // answer to "how much velocity may one tick add".
-    const float kick_max = inputAmaxMm() * dt;
-    const float err_mm = p_plan_mm - positionMm();
-    if (std::fabs(err_mm) > kMmPerStep) {
-        float kick = err_mm * kTrackHz;
-        if (kick >  kick_max) kick =  kick_max;
-        if (kick < -kick_max) kick = -kick_max;
-        v += kick;
-    }
     // The emitter floor is a FAULT DETECTOR, never a shaper (architecture.md
-    // section 2), so the arbiter holds its own last word. The bound is the sum
-    // of the two terms that make it: the plan, under the speed ceiling it was
-    // planned under (the jog set's for a Manual plan, the input set's
-    // otherwise), plus the correction, capped at one tick of accel above.
-    // Deliberately NOT the bare ceiling -- at a demand that sits ON vmax, a
-    // tracking correction has to be allowed above it or the residual can never
-    // close (measured: 25 ms of added lag on the ceiling-limited run). Never
-    // the input set's alone under a jog planned above it: a 1500 mm/s jog
-    // under a 1000 mm/s input set rendered at 1050 mm/s and crawled the rest
-    // at the kick (measured 2026-10-08: 227 mm in 1.05 s).
-    const float v_cap = (_plan_manual.load() ? _jog_v : inputVmaxMm()) + kick_max;
+    // section 2), so the arbiter holds its own last word: the vmax of the set
+    // the plan renders under (the jog set's for a Manual plan and the RETURN,
+    // the input set's otherwise), plus the residual's bound. Never the bare
+    // ceiling -- at a demand that sits ON vmax the residual has to be allowed
+    // above it or it can never close (measured: 25 ms of added lag on the
+    // ceiling-limited run). Never the input set's alone under a jog planned
+    // above it: a 1500 mm/s jog under a 1000 mm/s input set rendered at 1050
+    // mm/s and crawled the rest (measured 2026-10-08: 227 mm in 1.05 s).
+    const float v_cap = s.lim.vmax + c_max;
     if (v >  v_cap) v =  v_cap;
     if (v < -v_cap) v = -v_cap;
 
@@ -1382,20 +1631,20 @@ void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
     if (v > v_hi) v = v_hi;
     if (v < v_lo) v = v_lo;
 
-    syncFence();
+    syncFence(s.lo_mm, s.hi_mm);
     _emitter.steer(v);
     _emitter.renew();
 }
 
-void MotionArbiter::syncFence() {
+void MotionArbiter::syncFence(float lo_mm, float hi_mm) {
     // A home cycle searches a stop past each datum's safety margin by up to
     // two search margins (MotionArbiter.h, homing), in the frame of its last
     // relabel; otherwise the backstop's frame. The emitter orders the two
     // stores.
     const bool seeking = _home != HomePhase::idle;
     const float reach = kHomeSafetyMarginMm + 2.0f * kHomeSearchMarginMm;
-    const int32_t lo = _origin + fenceCount(seeking ? -reach : backstopLo(), false);
-    const int32_t hi = _origin + fenceCount(seeking ? _max_rail + reach : backstopHi(), true);
+    const int32_t lo = _origin + fenceCount(seeking ? -reach : lo_mm, false);
+    const int32_t hi = _origin + fenceCount(seeking ? _max_rail + reach : hi_mm, true);
     if (lo == _fence_lo && hi == _fence_hi) return;
     _emitter.fence(lo, hi);
     _fence_lo = lo;
@@ -1406,7 +1655,7 @@ void MotionArbiter::syncFence() {
 // Planner task only, except homeSenseRose(). The seek producer: every leg is a
 // constant velocity steered straight onto the emitter, ended by a count or a
 // stall, and the engine holds at the count until the cycle ends and is reset
-// there. The plan-tracking path, its velocity cap and its residual kick never
+// there. The plan-tracking path, its velocity cap and its residual never
 // steer during a cycle, and the window clamp never sees one: an approach has
 // to reach a stop the window excludes. Positions are the physical frame's
 // throughout (MotionArbiter.h, homing): the start is declared at the far
@@ -1430,7 +1679,7 @@ void MotionArbiter::homeLeg(HomePhase phase, float end_mm, float v_mm_s, uint64_
 
 void MotionArbiter::homeSteer(float v_mm_s) {
     _seek_v = v_mm_s;
-    syncFence();
+    syncFence(backstopLo(), backstopHi());
     _emitter.steer(v_mm_s);
     // Pairs with homeSenseRose()'s fence: either this read sees the trip, or
     // the interrupt's park lands after the steer above.
@@ -1472,7 +1721,7 @@ void MotionArbiter::homeSeek(bool touch, bool armed, uint64_t now_us) {
 void MotionArbiter::homeStart(uint64_t now_us) {
     if (!_homing.load()) return;   // ended between the request and this tick
     _home_leg = 0;
-    if (_engine.isBusy(now_us)) return homeEnd("the machine is moving", now_us);
+    if (_engine.isBusy(now_us) || joining(now_us)) return homeEnd("the machine is moving", now_us);
     _home_flip = _flipped.load();
     // The position reference is replaced from here: a cycle that does not
     // finish leaves the machine unhomed, never homed at a stale origin.
@@ -1736,9 +1985,10 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.sample_us      = now_us;
     c.steps          = steps - _origin;
     c.position_mm    = float(c.steps) * kMmPerStep;
-    // The plan's position with the oscillation summed in: what the steer is
-    // following, so the residual stays a tracking error.
-    c.plan_mm        = seeking ? c.position_mm : toMm(s.pos) + _osc_head;
+    // The strip's head, the plan with the oscillation and the connector
+    // summed in: what the steer is following, so the residual stays a
+    // tracking error.
+    c.plan_mm        = seeking ? c.position_mm : _strip.n != 0 ? _strip.p_mm[0] : toMm(s.pos) + _osc_head;
     c.target_mm      = seeking ? float(_leg_end - _origin) * kMmPerStep : toMm(s.target);
     c.velocity_mm_s  = vel_mm_s;
     c.residual_steps = static_cast<int32_t>(std::lround((c.plan_mm - c.position_mm) * kStepsPerMm));
@@ -1753,6 +2003,10 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.stalls         = _stalls;
     c.backstops      = _backstops;
     c.lease_lapses   = _lease_lapses;
+    c.planner_stalls = _planner_stalls;
+    c.late_plans     = _late_plans;
+    c.plans_refused  = _plans_refused;
+    c.hard_stops     = _hard_stops + _hard_tails;
     c.homed          = _homed;
     c.estop          = _estop;
     c.motor_on       = _powered.load();
