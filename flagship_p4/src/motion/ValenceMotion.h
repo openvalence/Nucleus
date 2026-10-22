@@ -130,6 +130,15 @@ struct MotionCensus {
                                    // held at its edge (MotionArbiter.cpp)
     uint32_t lease_lapses   = 0;   // the LP core stopped itself on a lease no
                                    // tick renewed for kLeaseUs (MotionArbiter.h)
+    uint32_t planner_stalls = 0;   // runs past the strip's end: the steer
+                                   // stopped on the strip's tail (MotionArbiter.h)
+    uint32_t late_plans     = 0;   // plans joined to the trajectory in flight
+                                   // through a connector (MotionArbiter.cpp handover())
+    uint32_t plans_refused  = 0;   // plans no connector joined inside the set:
+                                   // the trajectory stopped instead and the
+                                   // request was not incorporated
+    uint32_t hard_stops     = 0;   // stops braked harder than the set to stay
+                                   // inside the frame
     uint32_t stack_free     = 0;   // planner task stack high-water headroom, bytes
     bool     homed          = false;
     bool     estop          = false;

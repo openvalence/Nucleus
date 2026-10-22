@@ -2331,9 +2331,9 @@ TEST_CASE("fence: a home cycle searches inside the wide frame and is never fence
 }
 
 TEST_CASE("fence: a steer a 3.9 ms stall carries past the window stops on the fence, the count exactly on its edge") {
-    // The backstop brake case, with a 3.9 ms stall after every tick: inside
-    // the lease, so the core renders each steer for the whole stall, and the
-    // wall bound only promised the edge within kTickDtCapS.
+    // The backstop brake case, with a 3.9 ms stall at the edge: inside the
+    // lease, so the core renders the steer for the whole stall, and the wall
+    // bound only promised the edge within kTickDtCapS.
     auto r = incidentRig();
     r->arb.setInputLimits(kIncVmax, 20.0f, 10'000'000.0f);
     REQUIRE(r->submit(MotionSource::Manual, kIncWinHi));
@@ -2341,18 +2341,26 @@ TEST_CASE("fence: a steer a 3.9 ms stall carries past the window stops on the fe
     REQUIRE(r->census().velocity_mm_s > 20.0f);
     r->arb.pause(true);
     int32_t peak = r->emitter.n;
+    int stalls = 0;
     for (int i = 0; i < 4000; ++i) {
         r->run(1000);
-        lateTick(*r, 3900);
+        // The stall lands with the steer still moving inside a tick of the
+        // edge: rendered 3.9 ms, it runs past what the wall bound budgeted.
+        if (stalls == 0 && steeredMmS(r->emitter) > 1.0 &&
+            r->arb.positionMm() + steeredMmS(r->emitter) * 2e-3 > kIncWinHi) {
+            lateTick(*r, 3900);
+            ++stalls;
+        }
         peak = std::max(peak, r->emitter.n);
     }
     const MotionCensus c = r->census();
     MESSAGE("fence hits ", r->emitter.fence_hits, ", peak count ", peak, ", fence ", r->emitter.fence_hi, ", rest ",
             c.position_mm, " mm");
+    REQUIRE(stalls == 1);
     CHECK(r->emitter.fence_hits > 0);
     CHECK(peak == r->emitter.fence_hi);
     CHECK(r->emitter.n == r->emitter.fence_hi);
-    CHECK(c.stalls == 4000);
+    CHECK(c.stalls == 1);
     CHECK(c.lease_lapses == 0);
     checkFence(*r, kIncWinLo, kIncWinHi);
 }
@@ -2414,8 +2422,17 @@ TEST_CASE("lease: a stall inside the drain resumes along the plan, never a rever
     const double v1 = steeredMmS(r->emitter);
     MESSAGE("held ", v0, " mm/s, first steer after the lapse ", v1, " mm/s");
     CHECK(r->census().lease_lapses == 1);
-    CHECK(v1 > 0.0);
-    CHECK(v1 <= kSteerCeiling);
+    // Parked until the planner re-plans from where the core stopped, then
+    // forward along the plan.
+    CHECK(v1 == 0.0);
+    double least = 0.0;
+    for (int k = 0; k < 20; ++k) {
+        r->run(1000);
+        least = std::min(least, steeredMmS(r->emitter));
+    }
+    CHECK(least == 0.0);
+    CHECK(steeredMmS(r->emitter) > 0.0);
+    CHECK(steeredMmS(r->emitter) <= kSteerCeiling);
 }
 
 TEST_CASE("lease: the core is unleased until the first tick, and an e-stop parks it as before") {
@@ -2699,12 +2716,12 @@ TEST_CASE("strip: filled once, it steers the next 5 ms as the single-threaded pa
     }
     for (int i = 0; i < 5; ++i) {
         CAPTURE(i);
-        CHECK(std::fabs(one[i]) > 1.0);
+        if (i < 3) CHECK(std::fabs(one[i]) > 1.0);   // before the knot
         CHECK(std::fabs(one[i] - two[i]) <= 1e-4);
     }
 }
 
-TEST_CASE("strip: a planner later than the strip holds its last entry, no feedforward, one stall counted") {
+TEST_CASE("strip: a planner later than the strip stops the steer on its tail, one stall counted, and the plan joins again") {
     auto r = movingRig(400.0f, 1'000'000, 100'000);
     REQUIRE(std::fabs(steeredMmS(r->emitter)) > 100.0);
     // The strip's whole length with the planner silent: the plan renders.
@@ -2714,16 +2731,21 @@ TEST_CASE("strip: a planner later than the strip holds its last entry, no feedfo
     }
     CHECK(std::fabs(steeredMmS(r->emitter)) > 100.0);
     CHECK(r->arb.plannerStalls() == 0);
-    // Past its end the last entry holds: what is left is the kick back to it.
+    // Past its end the tail brakes: never more than one tick of the input
+    // accel per tick (the old hold stepped to the kick in one).
+    double was = steeredMmS(r->emitter);
     for (int k = 0; k < 3; ++k) {
         elapse(*r);
         steerOnly(*r);
+        const double v = steeredMmS(r->emitter);
         CAPTURE(k);
-        CHECK(std::fabs(steeredMmS(r->emitter)) <= kKickMax + 1.0);
+        CHECK(std::fabs(v) > 100.0);
+        CHECK(std::fabs(v - was) <= kKickMax + 1.0);
+        was = v;
     }
     CHECK(r->arb.plannerStalls() == 1);
     CHECK(r->census().stalls == 0);   // the steer itself was never late
-    // The planner back: the plan renders again, nothing more counted.
+    // The planner back: the plan joins the tail through a connector, counted.
     for (int k = 0; k < 20; ++k) {
         elapse(*r);
         planOnly(*r);
@@ -2731,6 +2753,8 @@ TEST_CASE("strip: a planner later than the strip holds its last entry, no feedfo
     }
     CHECK(std::fabs(steeredMmS(r->emitter)) > 100.0);
     CHECK(r->arb.plannerStalls() == 1);
+    CHECK(r->arb.latePlans() == 1);
+    CHECK(r->arb.plansRefused() == 0);
 }
 
 TEST_CASE("strip: a reset re-anchors the next steer, never a burst (frame move, e-stop, power)") {
@@ -2806,7 +2830,7 @@ TEST_CASE("strip: a reset re-anchors the next steer, never a burst (frame move, 
     }
 }
 
-TEST_CASE("strip: a plan published after the steer passed its reaction horizon lands as a residual, counted") {
+TEST_CASE("strip: a plan published after the steer passed its reaction horizon joins through a connector, counted") {
     auto r = movingRig(200.0f, 200'000, 0);
     const uint64_t t_a = g_now_us;
     r->run(100'000);
@@ -2831,8 +2855,8 @@ TEST_CASE("strip: a plan published after the steer passed its reaction horizon l
     const double v = steeredMmS(r->emitter);
     MESSAGE("steered ", v_prev, " then ", v, " mm/s at the new plan; late plans ", r->arb.latePlans());
     CHECK(r->arb.latePlans() == 1);
-    // One tick of the plan's own accel and the kick: never the gap over 1 ms.
-    CHECK(std::fabs(v - v_prev) <= double(DEFAULT_ACCEL_MM_S2) * 1e-3 + kKickMax + 1.0);
+    // One tick of the input accel at most: never the gap over 1 ms.
+    CHECK(std::fabs(v - v_prev) <= double(DEFAULT_ACCEL_MM_S2) * 1e-3 + 1.0);
     r->run(400'000);
     CHECK(r->census().position_mm == doctest::Approx(300.0f).epsilon(0.001));
 }
@@ -3010,13 +3034,13 @@ TEST_CASE("window moved mid-stream by a fifth of the rail: the plan re-targets i
     CHECK(c.position_mm == doctest::Approx(end_mm).epsilon(1e-3));
 }
 
-TEST_CASE("window moved mid-stream with the steer ahead of the planner: parked while the flag is up, then steered from the plan, never a burst") {
+TEST_CASE("window moved mid-stream with the steer ahead of the planner: steered from the strip it holds, never a held tick, never a burst") {
     auto r = movingRig(400.0f, 1'000'000, 100'000);
     REQUIRE(std::fabs(steeredMmS(r->emitter)) > 100.0);
     r->arb.setWindow(100.0f, 500.0f, 500.0f);
     elapse(*r);
     steerOnly(*r);
-    CHECK(r->emitter.q8 == 0);
+    CHECK(r->emitter.q8 != 0);
     planOnly(*r);
     CHECK(r->arb.engine().pending() > 0);   // re-targeted, not reset
     double worst = 0.0, last = 0.0;
@@ -3105,7 +3129,7 @@ TEST_CASE("window dragged mid-stream, writes landed inside planner ticks: every 
         if (s.n > 0) {
             ++strips;
             for (size_t i = 1; i < s.n; ++i) inner = std::max(inner, std::fabs(s.p_mm[i] - s.p_mm[i - 1]));
-            if (prev.n > 0 && (s.gen == prev.gen || s.continuous) && s.t0_us >= prev.t0_us) {
+            if (prev.n > 0 && s.gen == prev.gen && s.t0_us >= prev.t0_us) {
                 const uint64_t k = (s.t0_us - prev.t0_us) / valence::kMotionTickUs;
                 if (k < prev.n) handoff = std::max(handoff, std::fabs(s.p_mm[0] - prev.p_mm[k]));
             }
@@ -3860,7 +3884,7 @@ TEST_CASE("oscillator: a window edge drawn into the swing narrows it about the r
     CHECK(back.hi == doctest::Approx(255.0).epsilon(2e-4));
 }
 
-TEST_CASE("oscillator: PAUSE cuts it at once and the kick returns the carriage; resume restarts it at the trough; ESTOP and disable stop it") {
+TEST_CASE("oscillator: PAUSE fades it out through the strip's connector; resume restarts it at the trough; ESTOP and disable stop it") {
     auto r = restRig(250.0f);
     r->arb.setOscillator(oscOn(8.0f, 5.0f));
     r->run(700'000);
@@ -3870,8 +3894,12 @@ TEST_CASE("oscillator: PAUSE cuts it at once and the kick returns the carriage; 
     MotionCensus c = r->census();
     CHECK_FALSE(c.osc_active);
     CHECK(c.osc_amplitude == 0.0f);
+    // The strip carries the fade, inside every ceiling, and ends at the rest.
     auto s = r->arb.publishedStrip();
-    for (const float p : s.p_mm) CHECK(p == doctest::Approx(250.0f).epsilon(1e-6));
+    CHECK(s.p_mm.back() == doctest::Approx(250.0f).epsilon(1e-6));
+    const GridPeaks fade = gridPeaks(std::vector<float>(s.p_mm.begin(), s.p_mm.end()));
+    CHECK(fade.a <= DEFAULT_ACCEL_MM_S2 * 1.02 + kFdA);
+    CHECK(fade.j <= DEFAULT_INPUT_MAX_JERK_MM_S3 * 1.02 + kFdJ);
     CHECK(r->arb.latePlans() == 0);   // the cut is not a late plan
     r->run(300'000);
     CHECK(r->arb.positionMm() == doctest::Approx(250.0f).epsilon(2e-4));
@@ -4072,4 +4100,260 @@ TEST_CASE("popAnomaly: each anomaly is counted as it leaves, its target in the f
     CHECK(r->census().anom[a.kind] >= 1);
     r->arb.drainAnomalies();
     CHECK_FALSE(r->arb.popAnomaly(a));
+}
+
+// ---- the brake tail and the handover (bd val-cy1g, val-xfy2) ------------------
+// What the drive receives is the steered velocity, one word per tick: its
+// change per tick is the acceleration the LP core renders and the change of
+// that the jerk. Every case below holds both to the set the plan renders
+// under, through the event that used to step it.
+
+namespace {
+
+struct SteerKin {
+    std::vector<double> v;
+    void take(const TestEmitter& e) { v.push_back(steeredMmS(e)); }
+    double vMax() const {
+        double m = 0.0;
+        for (const double x : v) m = std::max(m, std::fabs(x));
+        return m;
+    }
+    double aMax() const {
+        double m = 0.0;
+        for (size_t i = 1; i < v.size(); ++i) m = std::max(m, std::fabs(v[i] - v[i - 1]) / 1e-3);
+        return m;
+    }
+    double jMax() const {
+        double m = 0.0;
+        for (size_t i = 2; i < v.size(); ++i) m = std::max(m, std::fabs(v[i] - 2.0 * v[i - 1] + v[i - 2]) / 1e-6);
+        return m;
+    }
+};
+
+// The ceilings with the float rounding of a strip position near 500 mm in
+// the tick's differences (TestEmitter's steering word adds less).
+void checkKin(const SteerKin& k, double vmax, double amax, double jmax) {
+    MESSAGE("peaks: ", k.vMax(), " mm/s, ", k.aMax(), " mm/s^2, ", k.jMax(), " mm/s^3 over ", k.v.size(), " ticks");
+    CHECK(k.vMax() <= vmax * 1.01 + 1.0);
+    CHECK(k.aMax() <= amax * 1.05 + 100.0);
+    CHECK(k.jMax() <= jmax * 1.05 + 2e5);
+}
+
+constexpr double kInV = DEFAULT_MAX_SPEED_MM_S;
+constexpr double kInA = DEFAULT_ACCEL_MM_S2;
+constexpr double kInJ = DEFAULT_INPUT_MAX_JERK_MM_S3;
+
+}  // namespace
+
+TEST_CASE("brake tail: a planner silent past the strip's end mid-stroke stops inside every ceiling, and the next plan joins without a burst") {
+    auto r = movingRig(400.0f, 1'000'000, 300'000);
+    REQUIRE(std::fabs(steeredMmS(r->emitter)) > 200.0);
+    SteerKin stop;
+    stop.take(r->emitter);
+    for (int k = 0; k < 400; ++k) {
+        elapse(*r);
+        steerOnly(*r);
+        stop.take(r->emitter);
+    }
+    CHECK(r->arb.plannerStalls() == 1);
+    CHECK(stop.v.back() == 0.0);
+    checkKin(stop, kInV, kInA, kInJ);
+    const float rest = r->arb.positionMm();
+    MESSAGE("stopped at ", rest, " mm");
+    CHECK(rest >= 0.0f);
+    CHECK(rest <= 500.0f);
+    // The planner back: whatever it publishes joins from the rest.
+    SteerKin back;
+    back.v = {0.0, 0.0};
+    for (int k = 0; k < 1500; ++k) {
+        elapse(*r);
+        planOnly(*r);
+        steerOnly(*r);
+        back.take(r->emitter);
+    }
+    checkKin(back, kInV, kInA, kInJ);
+    // The plan ran on 400 ms while the carriage stopped: no connector catches
+    // it inside the set, so it is refused and the machine rests where the
+    // tail put it, the engine with it.
+    const MotionCensus c = r->census();
+    CHECK_FALSE(c.busy);
+    CHECK(c.plan_mm == doctest::Approx(c.position_mm).epsilon(1e-4));
+    CHECK(c.position_mm == doctest::Approx(rest).epsilon(1e-4));
+    CHECK(c.planner_stalls == 1);
+    CHECK(c.plans_refused == 1);
+    CHECK(c.late_plans == 0);
+    // The next intent plans from that rest.
+    REQUIRE(r->submit(MotionSource::Stream, 300.0f));
+    SteerKin next;
+    next.v = {0.0, 0.0};
+    for (int k = 0; k < 1500; ++k) {
+        r->run(1000);
+        next.take(r->emitter);
+    }
+    checkKin(next, kInV, kInA, kInJ);
+    CHECK(r->census().position_mm == doctest::Approx(300.0f).epsilon(1e-4));
+}
+
+TEST_CASE("handover: a plan landing after the steer passed its reaction horizon joins inside every ceiling, counted") {
+    auto r = movingRig(100.0f, 400'000, 0);
+    const uint64_t t_a = g_now_us;
+    r->run(200'000);
+    MotionIntent next;
+    next.source = MotionSource::Stream;
+    next.target_mm = 200.0f;
+    next.duration_us = 400'000;
+    next.anchor_us = t_a + 400'000;
+    REQUIRE(r->arb.accept(next, g_now_us));
+    SteerKin k;
+    k.take(r->emitter);
+    // A 60 ms solve: the steer renders the strip it holds.
+    for (int i = 0; i < 60; ++i) {
+        elapse(*r);
+        steerOnly(*r);
+        k.take(r->emitter);
+    }
+    for (int i = 0; i < 1000; ++i) {
+        elapse(*r);
+        planOnly(*r);
+        steerOnly(*r);
+        k.take(r->emitter);
+    }
+    checkKin(k, kInV, kInA, kInJ);
+    CHECK(r->arb.latePlans() == 1);
+    CHECK(r->arb.plansRefused() == 0);
+    CHECK(r->census().position_mm == doctest::Approx(200.0f).epsilon(1e-4));
+}
+
+TEST_CASE("handover: a late reversal no connector joins inside the set is refused: the trajectory in flight stops, counted, and intents wait for its rest") {
+    // A soft input accel: turning 800 mm/s around takes longer than the
+    // strip while the new plan runs on, so nothing joins it.
+    constexpr double kSoftA = 5000.0;
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->arb.setInputLimits(1000.0f, float(kSoftA), 2e7f);
+    r->run(1000);
+    MotionIntent up;
+    up.source = MotionSource::Stream;
+    up.target_mm = 450.0f;
+    up.duration_us = 800'000;
+    REQUIRE(r->arb.accept(up, g_now_us));
+    r->run(400'000);
+    REQUIRE(steeredMmS(r->emitter) > 500.0);
+    // A bundle turning the stroke around at once, then a 60 ms solve.
+    MotionIntent back;
+    back.source = MotionSource::Stream;
+    back.target_mm = 50.0f;
+    back.duration_us = 400'000;
+    back.anchor_us = g_now_us;
+    back.supersede = true;
+    REQUIRE(r->arb.accept(back, g_now_us));
+    SteerKin k;
+    k.take(r->emitter);
+    for (int i = 0; i < 60; ++i) {
+        elapse(*r);
+        steerOnly(*r);
+        k.take(r->emitter);
+    }
+    elapse(*r);
+    planOnly(*r);
+    steerOnly(*r);
+    k.take(r->emitter);
+    CHECK(r->arb.plansRefused() == 1);
+    CHECK(r->arb.latePlans() == 0);
+    CHECK(r->census().busy);
+    // Nothing joins the stop while it runs.
+    CHECK_FALSE(r->submit(MotionSource::Stream, 100.0f));
+    for (int i = 0; i < 500; ++i) {
+        elapse(*r);
+        planOnly(*r);
+        steerOnly(*r);
+        k.take(r->emitter);
+    }
+    checkKin(k, 1000.0, kSoftA, 2e7);
+    CHECK(k.v.back() == 0.0);
+    const MotionCensus c = r->census();
+    CHECK_FALSE(c.busy);
+    CHECK(c.plan_mm == doctest::Approx(c.position_mm).epsilon(1e-4));
+    CHECK(c.position_mm <= 500.0f);
+    REQUIRE(r->submit(MotionSource::Stream, 100.0f));
+    r->run(2'000'000);
+    CHECK(r->census().position_mm == doctest::Approx(100.0f).epsilon(1e-4));
+}
+
+TEST_CASE("handover: a window write mid-stream is never a held tick; the steer follows the plan inside every ceiling") {
+    auto r = movingRig(400.0f, 1'000'000, 100'000);
+    REQUIRE(std::fabs(steeredMmS(r->emitter)) > 100.0);
+    SteerKin k;
+    k.take(r->emitter);
+    r->arb.setWindow(100.0f, 500.0f, 500.0f);
+    elapse(*r);
+    steerOnly(*r);   // the steer before the planner takes the write
+    k.take(r->emitter);
+    CHECK(r->emitter.q8 != 0);
+    for (int i = 0; i < 200; ++i) {
+        elapse(*r);
+        planOnly(*r);
+        steerOnly(*r);
+        k.take(r->emitter);
+    }
+    checkKin(k, kInV, kInA, kInJ);
+    CHECK(r->arb.engine().pending() > 0);   // re-targeted, not reset
+    CHECK(r->arb.latePlans() == 0);
+    CHECK(r->arb.plansRefused() == 0);
+}
+
+TEST_CASE("handover: PAUSE cuts the oscillation through a jerk-limited fade in the strip, never a gap") {
+    auto r = restRig(250.0f);
+    r->arb.setOscillator(oscOn(8.0f, 5.0f));
+    r->run(700'000);
+    REQUIRE(r->census().osc_active);
+    // Pause at the swing's fastest: rising through the rest.
+    float prev = r->arb.publishedStrip().p_mm[0];
+    for (int i = 0; i < 200; ++i) {
+        r->run(1000);
+        const float p = r->arb.publishedStrip().p_mm[0];
+        if (prev < 250.0f && p >= 250.0f) break;
+        prev = p;
+    }
+    SteerKin k;
+    k.take(r->emitter);
+    REQUIRE(std::fabs(steeredMmS(r->emitter)) > 150.0);
+    r->arb.pause(true);
+    for (int i = 0; i < 300; ++i) {
+        r->run(1000);
+        k.take(r->emitter);
+    }
+    checkKin(k, kInV, kInA, kInJ);
+    CHECK_FALSE(r->census().osc_active);
+    CHECK(r->arb.latePlans() == 0);   // a fade, never a late plan
+    CHECK(r->arb.plansRefused() == 0);
+    CHECK(r->arb.positionMm() == doctest::Approx(250.0f).epsilon(2e-4));
+}
+
+TEST_CASE("handover: after a lease lapse the steer resumes from the carriage's rest inside every ceiling, never at the plan's velocity") {
+    // The target short of the window's edge: the wall bound's own last
+    // ticks into an edge are the backstop's, not this case's.
+    constexpr float kTarget = kIncWinHi - 10.0f;
+    auto r = incidentRig();
+    MotionIntent seg;
+    seg.source = MotionSource::Stream;
+    seg.target_mm = kTarget;
+    seg.duration_us = 200'000;
+    REQUIRE(r->arb.accept(seg, g_now_us));
+    r->run(50'000);
+    REQUIRE(std::fabs(steeredMmS(r->emitter)) > 100.0);
+    lateTick(*r, 283'000);
+    REQUIRE(r->census().lease_lapses == 1);
+    // The core stopped itself (the last line, kept): from that rest on.
+    SteerKin k;
+    k.v = {0.0, 0.0};
+    k.take(r->emitter);
+    for (int i = 0; i < 3000; ++i) {
+        r->run(1000);
+        k.take(r->emitter);
+    }
+    checkKin(k, kIncVmax, kIncAmax, 10'000'000.0);
+    CHECK(r->arb.latePlans() >= 1);   // joined from the rest
+    CHECK(r->arb.plansRefused() == 0);
+    CHECK(r->arb.positionMm() == doctest::Approx(kTarget).epsilon(1e-4));
 }

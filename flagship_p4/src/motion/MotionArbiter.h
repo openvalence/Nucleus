@@ -25,10 +25,11 @@
 //   a copy of the pending knots and the solver's fixed arrays on its stack:
 //   KB-scale temporaries (T1, memory-budget.md T21).
 //   STEER-TASK: steerTick() owns the steer, renew() and fence() outside a
-//   home cycle, _p_cmd_mm and the backstop, stall and strip counters. It
-//   never touches the engine: the plan reaches it as the STRIP (PlanStrip),
-//   which planTick() publishes and steerTick() copies, each under the host's
-//   Lock.
+//   home cycle, _p_cmd_mm, the residual and the backstop, stall, strip and
+//   lapse counters. It never touches the engine and never reads the window:
+//   the plan reaches it as the STRIP (PlanStrip), with the frame and the
+//   limit set it was filled under, which planTick() publishes and steerTick()
+//   copies, each under the host's Lock.
 //   evaluate() is planTick() then steerTick() on one task: the host twin's
 //   and the native suites' entry.
 // - Every conversion between this interface and Kinetic²'s knots lives in
@@ -101,8 +102,8 @@ inline constexpr uint32_t kMinCyclesPerEdge = 40;
 // to live.
 inline constexpr uint32_t kIntentQueueDepth = 40;
 
-// The longest interval a steer's residual kick and velocity cap are priced
-// over: two sampler periods. A steer later than this is a STALL (steerTick()),
+// The longest interval a steer's residual and velocity cap are priced over:
+// two sampler periods. A steer later than this is a STALL (steerTick()),
 // counted and steered without the catch-up the elapsed time would ask for.
 // Also the wall bound's horizon: no steer carries the carriage past the
 // backstop's edge within this long.
@@ -124,8 +125,18 @@ static_assert(float(kLeaseUs) * 1e-6f > kTickDtCapS, "a lapse must be rarer than
 // THE STRIP (bd val-8rt): the plan's positions at kMotionTickUs spacing, this
 // many ahead of the planner's last tick, so a window solve up to that long on
 // the planner never leaves the steer without a plan. Past its end the steer
-// holds the last entry and counts a planner stall.
+// plays the strip's tail, a certified stop from its last state, and counts a
+// planner stall (bd val-cy1g).
 inline constexpr size_t kStripLen = 128;
+// THE HANDOVER (bd val-xfy2): a whole refill keeps the trajectory in flight
+// for this many ticks past the clock after its solve, the steer's next tick
+// with a tick to spare, and joins the new plan from its state there.
+inline constexpr size_t kHandoverTicks = 2;
+static_assert(kHandoverTicks >= 2 && kHandoverTicks + 3 < kStripLen,
+              "the join reads the trajectory in flight two ticks before it");
+// A stop the set's own decel would carry out of the frame brakes harder, up
+// to this multiple of its accel and jerk; past that the backstop holds.
+inline constexpr float kHardStopMax = 16.0f;
 
 // THE OSCILLATOR (RFC-103, bd val-dzf): Kinetic²'s stage, summed into the
 // strip, its fade 150 ticks at most. It reads the plan kOscLook ticks past the
@@ -348,9 +359,9 @@ public:
     // sample, then the strip's publish. dt_s: the interval since the previous
     // planTick().
     void planTick(uint64_t now_us, float dt_s);
-    // Steer task. The strip at now_us, clamped to the backstop's frame, as
-    // the feedforward and the residual kick; the fence, the steer and the
-    // lease. dt_s: the interval since the previous steerTick(); past
+    // Steer task. The strip at now_us (its tail past its end), clamped to
+    // the strip's backstop frame, as the feedforward and the residual; the
+    // fence, the steer and the lease. dt_s: the interval since the previous steerTick(); past
     // kTickDtCapS it is a stall. Steers nothing while a home cycle runs.
     void steerTick(uint64_t now_us, float dt_s);
     // One task, both halves in order: the host twin's and the tests' tick.
@@ -358,11 +369,14 @@ public:
         planTick(now_us, dt_s);
         steerTick(now_us, dt_s);
     }
-    // Steer task's counters, for host tests and logs, never a census field:
-    // ticks that ran past the strip's end (counted at onset), and new plans
-    // that landed more than a step off the strip the steer was rendering.
+    // The census's counters (snapshot()), read alone by host tests: runs past
+    // the strip's end (the steer's, counted at onset), plans joined through a
+    // connector, plans refused for a stop, and stops braked harder than the
+    // set to stay in the frame (the planner's).
     uint32_t plannerStalls() const { return _planner_stalls; }
     uint32_t latePlans() const { return _late_plans; }
+    uint32_t plansRefused() const { return _plans_refused; }
+    uint32_t hardStops() const { return _hard_stops; }
     // The engine's oldest anomaly, counted for the census as it leaves; false
     // when none is left.
     bool popAnomaly(MotionAnomaly& out);
@@ -528,24 +542,29 @@ private:
     uint64_t _seg_eng_us = 0;
     bool     _seg_through = false;
 
-    // THE STRIP: the plan's position at t0_us + i * kMotionTickUs, mm, for i
-    // in [0, n). n is 0 (steer nothing) or kStripLen. gen is the engine reset
-    // it follows: the steer re-anchors its feedforward at anchor_mm, the
-    // carriage's position at that reset, once per gen. plan moves with every
-    // whole refill (a submit, a brake, a reset, an expired strip); between
-    // refills the strip only advances.
+    // THE STRIP: the commanded position at t0_us + i * kMotionTickUs, mm,
+    // for i in [0, n): the plan, the oscillator and the connector summed. n
+    // is 0 (steer nothing) or kStripLen. gen is the engine reset it follows:
+    // the steer re-anchors its feedforward at anchor_mm, the carriage's
+    // position at that reset, once per gen. Consecutive strips of one gen are
+    // one continuous trajectory (handover()). replan is the steer's lapse
+    // request it answers (_replan_req).
     struct PlanStrip {
         uint64_t t0_us = 0;
         uint16_t n = 0;
         uint32_t gen = 0;
-        uint32_t plan = 0;
+        uint32_t replan = 0;
         float    anchor_mm = 0.0f;
-        // The gen follows a reseed (reseedEngine()): the plan runs on in mm,
-        // so the steer keeps its command and never re-anchors.
-        bool     continuous = false;
-        // This refill cut the oscillation (a PAUSE): the gap it leaves at
-        // now is the oscillator's, closed by the kick, never a late plan.
-        bool     cut = false;
+        // The backstop's frame and the limit set, mm, the strip was filled
+        // under: the steer's clamp, fence, cap and residual read these.
+        float    lo_mm = 0.0f;
+        float    hi_mm = 0.0f;
+        EngineLimits lim{};
+        // Past the last entry: a stop from its state, certified at the fill
+        // (certifiedStop()), absolute times, mm; tail_hard when it brakes
+        // harder than lim to stay in the frame.
+        kinetic2::Profile tail{};
+        bool     tail_hard = false;
         std::array<float, kStripLen> p_mm{};
     };
 
@@ -559,8 +578,8 @@ public:
         return s;
     }
     // Any task. True when the published strip holds the plan within a step
-    // from now_us through now_us + window_us (past its end the last entry
-    // holds), or no strip renders. One scan of at most window_us /
+    // from now_us through now_us + window_us (past its end its tail), or no
+    // strip renders. One scan of at most window_us /
     // kMotionTickUs + 1 entries under the strip lock, nothing copied. The
     // home cycle's seek producer never draws on the strip: ask the census.
     bool stillFor(uint64_t now_us, uint32_t window_us) const;
@@ -571,16 +590,42 @@ private:
     bool planStep(uint64_t now_us, float dt_s);
     // Refills or advances _strip and publishes it; an empty one when !live.
     void fillStrip(uint64_t now_us, bool live);
-    // The strip at t_us, interpolated between the two entries around it,
-    // into p_mm (clamped to the first or last entry outside it). False when
-    // t_us lies outside [t0_us, the last entry] or the strip is empty.
-    static bool stripAt(const PlanStrip& s, uint64_t t_us, float& p_mm);
-    // Writes the emitter's fence for the frame in force: the backstop's, or
-    // the home cycle's search while one runs. Before every nonzero steer.
-    void syncFence();
+    // A whole refill's join to the trajectory in flight (the strip last
+    // published, or the carriage at rest after a lapse): the new plan with
+    // the connector in flight when that holds the set across t0; else kept
+    // through kHandoverTicks and joined through a validated connector, or
+    // refused for a certified stop from it. s.p_mm holds the new plan on
+    // entry and on return; applyConnector() makes it the trajectory.
+    void handover(PlanStrip& s, bool from_rest, uint64_t now_us);
+    // The connector in flight at t over a plan at plan_mm there: before the
+    // handover the trajectory it kept, minus the plan; then its gap.
+    float connAt(uint64_t t, float plan_mm) const;
+    // Adds the connector in flight to s.p_mm (the plan and the oscillator).
+    void applyConnector(PlanStrip& s) const;
+    // A connector, or a refused plan's stop, still moves the trajectory at t
+    // toward the engine's rest: the engine is not the whole plan yet.
+    bool joining(uint64_t t) const { return _conn.n > 0 && t < _conn_end_us; }
+    // The fastest stop from s at at_us under lim, mm: never a reversal, at
+    // rest at its end, inside [lo, hi] widened to s.p. A stop that would
+    // leave it brakes harder, the least multiple of amax and jmax up to
+    // kHardStopMax that keeps it in, counted.
+    kinetic2::Profile certifiedStop(const kinetic2::State& s, uint64_t at_us, const EngineLimits& lim, float lo,
+                                    float hi, bool& hard);
+    // The limit set the plan in flight renders under, mm: the jog set's for
+    // a Manual plan and the RETURN, the input set's otherwise.
+    EngineLimits renderLimits() const;
+    // The strip's trajectory at t_us, mm: its first entry before t0_us, the
+    // two entries around t_us interpolated, and its tail past the last.
+    static float stripAt(const PlanStrip& s, uint64_t t_us);
+    // Writes the emitter's fence for the frame [lo_mm, hi_mm], or the home
+    // cycle's search while one runs. Before every nonzero steer.
+    void syncFence(float lo_mm, float hi_mm);
     // Forgets the plan and holds at `p_norm` from now_us. Every resetAt() goes
     // through here, so the Kinetic² boundary state resets with the engine.
-    void resetEngine(float p_norm, uint64_t now_us);
+    // rebase: the steer re-anchors at the carriage (a new gen) and the
+    // connector is dropped. Without it the trajectory in flight renders on
+    // and the engine joins it at rest (a refused plan's stop).
+    void resetEngine(float p_norm, uint64_t now_us, bool rebase = true);
     // The window moved under a plan in flight: the pending knots stay and the
     // plan's curve is restated in the new frame (bd val-17u), kept through
     // the reaction horizon or the next knot (bd val-4dt).
@@ -722,15 +767,15 @@ private:
     // The strip (PlanStrip). _strip, _strip_stale and _anchor_mm are the
     // planner's: the strip it advances, a plan change since its last refill,
     // and the position of the last engine reset. _strip_pub is the shared
-    // copy, touched only under _lock. _strip_gen counts engine resets
-    // (resetEngine(), planner the one writer): a published strip behind it is
-    // stale and steers nothing. The rest is the steer's: its copy of the
-    // strip, the gen and plan it last took, a tick it did not steer from the
-    // plan, a run past the strip's end in progress, and its two counters.
+    // copy, written only by the planner and only under _lock. _strip_gen
+    // counts engine resets that rebase (resetEngine(), planner the one
+    // writer): a published strip behind it is stale and steers nothing. The
+    // rest is the steer's: its copy of the strip, the gen it last took, a
+    // tick it did not steer from the plan, a run past the strip's end in
+    // progress, and its counter.
     PlanStrip _strip{};
     bool      _strip_stale = true;
     float     _anchor_mm = 0.0f;
-    bool      _strip_continuous = false;
     // The frame the engine's units were last set in (resetEngine(),
     // reseedEngine()): a reseed restates the plan out of it.
     float     _eng_lo = 0.0f;
@@ -738,21 +783,49 @@ private:
     PlanStrip _strip_pub{};
     // The plan the strip is cut from, mm, on the strip's grid from
     // kOscEdge ticks before t0 (fillStrip()), and the oscillator summed into
-    // it: its offset at t0, and a PAUSE's cut for the next refill to carry.
+    // it: its offset at t0.
     std::array<float, kPlanExt> _plan_ext{};
     MotionOscillator _osc{};
     float     _osc_head = 0.0f;
-    bool      _osc_cut = false;
     size_t    _plan_ahead = 0;   // entries from t0 the last refill read
     std::atomic<uint32_t> _strip_gen{0};
     PlanStrip _steer_strip{};
     uint32_t  _seen_gen = 0;
-    uint32_t  _seen_plan = 0;
     bool      _steer_gap = false;
     bool      _strip_starved = false;
     uint32_t  _planner_stalls = 0;
+    uint32_t  _hard_tails = 0;   // stalls whose tail brakes harder than the set
+    // The residual correction (steerTick()): its velocity and acceleration,
+    // and the previous feedforward, whose change is the plan's acceleration.
+    float     _res_v = 0.0f;
+    float     _res_a = 0.0f;
+    float     _ff_prev = 0.0f;
+    // A lapse's re-plan (bd val-xfy2): the steer counts its requests and
+    // parks until a strip answers the newest; the planner answers at its
+    // next fill (_replan_seen, PlanStrip::replan).
+    uint32_t  _replan_want = 0;
+    std::atomic<uint32_t> _replan_req{0};
+    uint32_t  _replan_seen = 0;
+
+    // THE CONNECTOR (handover(), planner task): the strip is the plan plus
+    // this. Before _conn_h_us the trajectory the steer was rendering
+    // (_conn_pre, from _conn_pre_t0 on the grid); from it to _conn_end_us the
+    // plan plus _conn, a gap closing to 0. A refused plan's stop is the same
+    // shape over the engine held at its rest; until _held_until_us every
+    // intent is refused.
+    kinetic2::Profile _conn{};
+    uint64_t  _conn_h_us = 0;
+    uint64_t  _conn_end_us = 0;
+    uint64_t  _conn_pre_t0 = 0;
+    std::array<float, kHandoverTicks> _conn_pre{};
+    uint64_t  _held_until_us = 0;
+    // The next handover follows a brake or a cut (brakeToRest()): a fade,
+    // never a late plan.
+    bool      _handover_quiet = false;
     uint32_t  _late_plans = 0;
     float     _late_plan_max_mm = 0.0f;   // the largest late-plan gap since boot
+    uint32_t  _plans_refused = 0;
+    uint32_t  _hard_stops = 0;
 
     // Kinetic² boundary state, planner task only. The newest knot the engine
     // holds (or the rest point after a reset, or a brake's end): a segment
@@ -772,9 +845,9 @@ private:
     // The hub released the stream (releaseRail(Stream)); the planner consumes it.
     std::atomic<bool> _stream_quiet{false};
     // The plan in flight was planned under the jog set (a Manual move, the
-    // RETURN): set by plan(), cleared once the engine is idle. Planner the
-    // writer, steerTick() the reader.
-    std::atomic<bool> _plan_manual{false};
+    // RETURN): set by plan(), cleared once the engine is idle. Planner task
+    // only; the steer reads the set from the strip (PlanStrip::lim).
+    bool _plan_manual = false;
     // Planner only: a jog that braked the motion in flight first, waiting for
     // that brake's end to take the jog set's cap; 0 when none.
     uint64_t _jog_after_us = 0;
@@ -842,15 +915,14 @@ private:
     float _in_a   = DEFAULT_ACCEL_MM_S2;
     float _in_j   = DEFAULT_INPUT_MAX_JERK_MM_S3;
     // Normalized ceiling overrides from 0x3120, 0 = derived. Written by
-    // applyTuning() on the planner, read by accept() and by steerTick() (one
-    // word each).
+    // applyTuning() on the planner, read on the planner.
     float _ovr_v = 0.0f;
     float _ovr_a = 0.0f;
     float _ovr_j = 0.0f;
 
     int32_t _origin   = 0;       // the emitter count that means 0.0 mm
-    // The plan position at the previous steer. Steer task; brakeToRest() on
-    // the planner reads it as one word.
+    // The commanded position at the previous steer. Steer task; brakeToRest()
+    // on the planner reads it as one word.
     float   _p_cmd_mm = 0.0f;
     // The fence as last written, emitter counts, by whichever task steers
     // (syncFence()). The LP core loads it open.
@@ -879,7 +951,7 @@ private:
     static constexpr uint8_t kRailFree   = 0xFF;
     static constexpr uint8_t kRailClosed = 0xFE;
     std::atomic<uint8_t> _rail_gen{kRailFree};
-    // Planner task only; steerTick() reads _rail_frame as one word.
+    // Planner task only.
     bool     _rail_frame  = false;
     bool     _returning   = false;
     // Where the last pause brought the machine to rest (the return target),
@@ -891,11 +963,11 @@ private:
     // The bench bypass has been logged this boot. Planner task only.
     bool     _bench_noted = false;
     // Set by setWindow()/forceHome() on any task and by takeWindow(),
-    // consumed by planTick(), read by steerTick(): the mm FRAME moved, the
-    // carriage did not.
+    // consumed by planTick(): the mm FRAME moved, the carriage did not.
     std::atomic<bool> _frame_moved{false};
     // Set by forceHome() before _frame_moved: the count re-origined, so the
-    // planner resets rather than reseeds.
+    // planner resets rather than reseeds, and the steer parks while it is up
+    // (the strip it holds is in the old origin's mm).
     std::atomic<bool> _origin_moved{false};
 
     // The home cycle. _homing is set by home() and cleared only by the
