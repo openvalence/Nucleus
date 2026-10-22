@@ -2,6 +2,23 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.63 (2026-10-22)
+
+### For users
+
+- **A late planner never stops the carriage dead.** When the planner falls behind while the machine moves, the carriage now comes to a smooth stop inside its speed, acceleration and jerk limits instead of stopping within one millisecond, and it never lunges to catch up when the planner is back.
+- **Late moves join smoothly or not at all.** A move that arrives too late to take over from where the machine is now blends in inside the limits. When no smooth blend exists the machine finishes a smooth stop, refuses new moves until it is there, and starts again from that rest. The status line counts both.
+- **No stutter on a window change mid-stroke**, and PAUSE fades a running oscillation out instead of snapping it.
+
+### Technical
+
+- **The strip's tail** (val-cy1g). Every published strip carries a stop past its last entry (`PlanStrip::tail`, a `kinetic2::Profile`): the fastest jerk-limited stop from the state the strip ends in (the plan, the oscillator and the connector summed, read off the grid as the steer renders it), under the set the plan renders under, certified at the fill (`certifiedStop()`): never a reversal, at rest at its end, inside the backstop frame, or braked harder to the edge up to `kHardStopMax` (16) times the set's accel and jerk and counted. Past the strip's end the steer plays it instead of holding the last entry.
+- **The handover** (val-xfy2). The steer's late-plan rebase and the residual kick that closed its gap are gone. A whole refill starts at the clock after the solve and is checked against the trajectory the steer was rendering (`handover()`): a plan on time joins as it is; otherwise the trajectory is kept 2 ticks and joined through a connector, the gap brought to rest by `Profile::point()` and summed with the plan under the set, half or a quarter of it, the first whose sum holds every ceiling and the frame on the 1 ms grid; else the plan is refused, the trajectory stops on a certified stop, the engine is reset at its rest without a new generation and `accept()` refuses intents until it is there. Paths that leaned on the kick: late plans, the recovery after the tail, the reseed on a window move (no held tick now: each strip carries its frame and limits, so the steer never reads the window and parks only for a re-origin), the PAUSE cut of the oscillator (a fade, uncounted), a lease lapse (the steer parks and the planner re-plans from the carriage at rest), and the RETURN and jog supersede (both through the handover).
+- **The residual** is measured against the previous command, which the feedforward trails by one tick by construction, not the plan now: the old kick saw that tick of travel as error and stayed on above about 5 mm/s. Deadband one step, at most one tick of the set's accel, reached under the accel the plan leaves free, changed by at most one tick of its jerk.
+- **Census and status line**: `planner_stalls`, `late_plans`, `plans_refused`, `hard_stops` (`pstalls= lateplans= refused= hardstops=`). Busy holds while a connector or a refused plan's stop still moves the trajectory, so idle gates (OTA, settings writes, home) wait for it.
+- Known edge: a move that ends exactly on the backstop's edge is still clipped in its last few ticks by the wall bound (val-1w8), which halves the velocity per tick over its last few ticks (val-1w8's 2-tick budget).
+- `kinetic_trace.json` re-recorded. Suite `test_motion_arbiter`: 6 new cases (strip exhaustion mid-stroke and its recovery, a late plan, a late reversal refused, a window write, a PAUSE cut, a lapse) hold the steered velocity's change per tick to the set's accel and its change to the jerk; the five without the new counters failed on 0.1.62's arbiter (velocity steps of 0.23 to 1.3 m/s per ms).
+
 ## 0.1.62 (2026-10-20)
 
 ### For users
