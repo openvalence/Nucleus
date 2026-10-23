@@ -15,14 +15,19 @@
 
 #include <esp_app_desc.h>
 #include <esp_attr.h>
+#include <esp_cache.h>
 #include <esp_heap_caps.h>
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "geiger/geiger.h"
 #include "hub/valence_config.h"
+#include "system/CrashRing.h"
 #include "system/ValenceHttp.h"
 #include "system/ValenceOta.h"
 
@@ -37,29 +42,26 @@ constexpr const char* kTag = "diag";
 // operator got to it is the failure this replaces.
 constexpr size_t kSlots = 16384;
 
-// ---- the RTC_NOINIT crash ring ----------------------------------------------
-// LP memory, uninitialized by the startup code on purpose, so it survives a
-// panic reset and is the ONLY evidence of a boot that ended badly. Small: the
-// last few Warn+ lines are what name a fault, and a deep ring here would eat
-// the LP RAM the emitter is reserved out of.
-constexpr size_t kCrumbs = 8;
-constexpr size_t kCrumbBytes = 60;
-constexpr uint32_t kCrashMagic = 0x4E554331u;   // "NUC1"
+// ---- the crash ring ----------------------------------------------------------
+// Two copies of CrashRing.h's ring, neither initialized by the startup code:
+// the ONLY evidence of a boot that ended badly. LP RAM is uncached and holds
+// across a panic, a task-watchdog reset and esp_restart(); whether either
+// copy holds across a reset of the RTC domain is unmeasured (bd val-a2ub), and
+// the boot line says which held. Both lost reads as a power cut. HP SRAM sits
+// behind the L1 cache: a write counts only once writeBackHp() pushed it out.
+RTC_NOINIT_ATTR crashring::Ring g_crash;
+__NOINIT_ATTR crashring::Ring g_crashHp;
 
-struct CrashRing {
-    uint32_t magic;
-    uint32_t bootSeq;
-    uint32_t head;
-    uint32_t count;
-    char crumb[kCrumbs][kCrumbBytes];
-    uint32_t magic2;
-};
+// Any task, or an ISR: a whole number of cache lines (alignas in CrashRing.h).
+void writeBackHp() { (void)esp_cache_msync(&g_crashHp, sizeof(g_crashHp), ESP_CACHE_MSYNC_FLAG_DIR_C2M); }
 
-RTC_NOINIT_ATTR CrashRing g_crash;
-
-bool crashRingValid() {
-    return g_crash.magic == kCrashMagic && g_crash.magic2 == ~kCrashMagic &&
-           g_crash.head < kCrumbs && g_crash.count <= kCrumbs;
+// esp_restart()'s shutdown hook, on the restarting task, so a library's own
+// restart (esp_hosted's on a transport failure) leaves its caller's name.
+void onRestart() {
+    char t[crashring::kLastBytes];
+    snprintf(t, sizeof(t), "esp_restart from task %s at %lu ms", pcTaskGetName(nullptr),
+             static_cast<unsigned long>(esp_timer_get_time() / 1000));
+    diagLastWords(t);
 }
 
 const char* resetName(esp_reset_reason_t r) {
@@ -97,16 +99,19 @@ struct Archive final : public geiger::ISink {
     }
 
     static void crumb(const geiger::Record& r) {
-        snprintf(g_crash.crumb[g_crash.head], kCrumbBytes, "%c %s %s",
-                 geiger::levelChar(r.level), r.tag, r.msg);
-        g_crash.head = (g_crash.head + 1) % kCrumbs;
-        if (g_crash.count < kCrumbs) ++g_crash.count;
+        char line[crashring::kCrumbBytes];
+        snprintf(line, sizeof(line), "%c %s %s", geiger::levelChar(r.level), r.tag, r.msg);
+        crashring::add(g_crash, line);
+        crashring::add(g_crashHp, line);
+        writeBackHp();
     }
 
     std::atomic<uint32_t> _write{0};
     uint32_t _bootSeq = 0;
     uint32_t _prevCount = 0;
-    char _prev[kCrumbs][kCrumbBytes] = {};
+    const char* _prevFrom = nullptr;   // the copy that survived, null for none
+    char _prev[crashring::kCrumbs][crashring::kCrumbBytes] = {};
+    char _prevLast[crashring::kLastBytes] = {};
     geiger::Record _ring[kSlots] = {};
 };
 
@@ -208,11 +213,14 @@ esp_err_t handleGet(httpd_req_t* req) {
              unsigned(sizeof(Archive)), unsigned(kSlots),
              static_cast<unsigned long>(oldest), static_cast<unsigned long>(w),
              static_cast<unsigned long>(seq), tag[0] ? tag : "*", drops);
-    if (g_ar->_prevCount > 0) {
-        out.emit("# the PREVIOUS boot left %lu breadcrumbs (RTC_NOINIT, survived the reset):\n",
-                 static_cast<unsigned long>(g_ar->_prevCount));
+    if (g_ar->_prevFrom == nullptr) {
+        out.emit("# no breadcrumbs survived the reset: the LP RAM and HP SRAM copies were both invalid\n");
+    } else {
+        out.emit("# the PREVIOUS boot left %lu breadcrumbs (%s, survived the reset):\n",
+                 static_cast<unsigned long>(g_ar->_prevCount), g_ar->_prevFrom);
         for (uint32_t i = 0; i < g_ar->_prevCount; ++i)
             out.emit("#   %s\n", g_ar->_prev[i]);
+        if (g_ar->_prevLast[0] != '\0') out.emit("#   last words: %s\n", g_ar->_prevLast);
     }
 
     bool lapped = false;
@@ -338,32 +346,29 @@ bool diagBegin() {
     }
     g_ar = new (mem) Archive();
 
-    // Adopt the previous boot's breadcrumbs, then re-arm the ring for this one.
-    if (crashRingValid()) {
-        g_ar->_bootSeq = g_crash.bootSeq + 1;
-        g_ar->_prevCount = g_crash.count;
-        for (uint32_t i = 0; i < g_crash.count; ++i) {
-            // Oldest first: head points at the next write, so the oldest of a
-            // full ring sits there and a partial ring starts at 0.
-            const uint32_t src = (g_crash.count == kCrumbs)
-                                     ? ((g_crash.head + i) % kCrumbs) : i;
-            std::memcpy(g_ar->_prev[i], g_crash.crumb[src], kCrumbBytes);
-        }
+    // Adopt the previous boot's breadcrumbs, then re-arm both copies for this one.
+    const bool lpValid = crashring::valid(g_crash);
+    const bool hpValid = crashring::valid(g_crashHp);
+    if (const crashring::Ring* prev = crashring::pick(g_crash, g_crashHp)) {
+        g_ar->_bootSeq = prev->bootSeq + 1;
+        g_ar->_prevCount = crashring::copyOut(*prev, g_ar->_prev);
+        std::memcpy(g_ar->_prevLast, prev->last, sizeof(g_ar->_prevLast));
+        g_ar->_prevFrom = (prev == &g_crash) ? "LP RAM" : "HP SRAM";
     } else {
         g_ar->_bootSeq = 1;
     }
-    g_crash.magic = kCrashMagic;
-    g_crash.magic2 = ~kCrashMagic;
-    g_crash.bootSeq = g_ar->_bootSeq;
-    g_crash.head = 0;
-    g_crash.count = 0;
+    crashring::arm(g_crash, g_ar->_bootSeq);
+    crashring::arm(g_crashHp, g_ar->_bootSeq);
+    writeBackHp();
+    if (esp_register_shutdown_handler(&onRestart) != ESP_OK)
+        GLOGW(kTag, "no restart hook: an esp_restart will not name its caller");
 
     geiger::logger().addSink(g_ar);
     g_espConsole.store(esp_log_set_vprintf(&espLogHook), std::memory_order_relaxed);
-    GLOGI(kTag, "archive %u B in PSRAM, %u slots; boot %lu after %s, %lu prior breadcrumbs",
+    GLOGI(kTag, "archive %u B in PSRAM, %u slots; boot %lu after %s, %lu prior breadcrumbs (LP RAM %s, HP SRAM %s)",
           unsigned(sizeof(Archive)), unsigned(kSlots),
           static_cast<unsigned long>(g_ar->_bootSeq), resetName(esp_reset_reason()),
-          static_cast<unsigned long>(g_ar->_prevCount));
+          static_cast<unsigned long>(g_ar->_prevCount), lpValid ? "held" : "lost", hpValid ? "held" : "lost");
     return true;
 }
 
@@ -383,4 +388,50 @@ bool diagAttachRoutes() {
 
 size_t diagArchiveBytes() { return g_ar ? sizeof(Archive) : 0; }
 
+void diagLastWords(const char* text) {
+    crashring::setLast(g_crash, text);
+    crashring::setLast(g_crashHp, text);
+    writeBackHp();
+}
+
 }  // namespace valence
+
+// ---- the task watchdog's last words ------------------------------------------
+// IDF's weak hook, run in the task watchdog's ISR after its console report and
+// before its panic: the starved tasks and what each core was running, kept in
+// the crash ring, since the report itself reaches only the serial console.
+// ISR context: no printf, no log, no allocation.
+
+namespace {
+
+struct Words {
+    char s[valence::crashring::kLastBytes] = {};
+    size_t n = 0;
+    bool caption = true;   // IDF's first message is its caption, skipped
+};
+
+void append(Words& w, const char* t) {
+    for (; t != nullptr && *t != '\0' && w.n + 1 < sizeof(w.s); ++t) w.s[w.n++] = (*t == '\n') ? ' ' : *t;
+}
+
+void onTwdtLine(void* opaque, const char* msg) {
+    auto& w = *static_cast<Words*>(opaque);
+    if (w.caption) {
+        w.caption = false;
+        return;
+    }
+    append(w, msg);
+}
+
+}  // namespace
+
+extern "C" void esp_task_wdt_isr_user_handler(void) {
+    Words w;
+    append(w, "TWDT starved:");
+    (void)esp_task_wdt_print_triggered_tasks(&onTwdtLine, &w, nullptr);
+    append(w, " | running ");
+    append(w, pcTaskGetName(xTaskGetCurrentTaskHandleForCore(0)));
+    append(w, " / ");
+    append(w, pcTaskGetName(xTaskGetCurrentTaskHandleForCore(1)));
+    valence::diagLastWords(w.s);
+}

@@ -135,7 +135,8 @@ a deep PSRAM archive read ONCE, after something goes wrong.
 
 - **Three rings, three jobs, and they do not merge.** A small
   severity-partitioned DISPLAY ring (a Debug flood can never bury an error), a
-  flat deep ARCHIVE, and a power-loss-surviving ring for post-panic forensics.
+  flat deep ARCHIVE, and a reset-surviving ring for post-reset forensics (a
+  power cut clears it).
   Every property of the display ring is a consequence of being small; scaling
   it instead of adding a second one means a multi-MB copy under a spinlock.
 - **The archive dies with its boot.** Its memory is re-allocated at startup.

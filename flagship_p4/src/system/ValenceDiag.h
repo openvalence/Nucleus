@@ -15,8 +15,9 @@
 //   every dump on purpose: a machine consumer parses it there and passes it
 //   back as ?from=.
 // - THE ARCHIVE DIES WITH ITS BOOT. PSRAM is re-allocated at diagBegin().
-//   Post-panic forensics is the RTC_NOINIT crash ring, whose last few Warn+
-//   breadcrumbs from the PREVIOUS boot head every dump.
+//   Post-reset forensics is the crash ring (CrashRing.h), an LP RAM copy and
+//   an HP SRAM copy whose last few distinct Warn+ breadcrumbs and last words
+//   from the PREVIOUS boot head every dump, with the copy that survived.
 // - Blocking the :80 task for a full dump is ACCEPTED. This is the instrument
 //   reached for when the machine is already unwell; it carries no heap floor
 //   and allocates nothing, so memory pressure cannot switch it off.
@@ -42,5 +43,11 @@ bool diagAttachRoutes();
 // Archive bytes actually allocated, 0 when diagBegin() failed. For the boot
 // banner.
 size_t diagArchiveBytes();
+
+// The boot's last words, into both crash ring copies: one line, kept until
+// the next boot reads it. Any task, or an ISR (the task watchdog's); a later
+// call overwrites an earlier one. Called only on the way down: the task
+// watchdog's hook and the esp_restart() hook, both in ValenceDiag.cpp.
+void diagLastWords(const char* text);
 
 }  // namespace valence

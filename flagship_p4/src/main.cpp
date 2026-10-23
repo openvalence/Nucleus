@@ -386,6 +386,8 @@ extern "C" void app_main() {
     // crystal. The LP clock is MEASURED and its home is
     // .claude/rules/motion-control.md; an instrument that lies is worse than one
     // that is absent.
+    // The RSSI RPC measured 151 ms; one past a second is the C6 struggling.
+    constexpr int64_t kRssiRpcSlowUs = 1000000;
     uint32_t n = 0;
     uint32_t lastTicks = 0;
     bool haveTicks = false;
@@ -415,11 +417,20 @@ extern "C" void app_main() {
         int rssi = 0;   // dBm, 0 = no reading
         if (wifi_ok && g_got_ip) {
             wifi_ap_record_t ap{};
-            if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            const int64_t rpc0 = esp_timer_get_time();
+            const esp_err_t rpc = esp_wifi_sta_get_ap_info(&ap);
+            if (rpc == ESP_OK) {
                 rssi = ap.rssi;
                 valence::hubSetLinkRssi(ap.rssi);
                 valence::stationSetLinkRssi(ap.rssi);
             }
+            // A crash-ring breadcrumb when the C6 stops answering. Constant text
+            // per cause, so a long outage holds one ring slot (CrashRing.h).
+            if (rpc != ESP_OK)
+                GLOGW_EVERY_MS(60000, "health", "RSSI read over esp_hosted failed: %s", esp_err_to_name(rpc));
+            else if (esp_timer_get_time() - rpc0 > kRssiRpcSlowUs)
+                GLOGW_EVERY_MS(60000, "health", "RSSI read over esp_hosted took over %lu ms",
+                               static_cast<unsigned long>(kRssiRpcSlowUs / 1000));
         }
         const unsigned int_free = unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         const unsigned int_max = unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));

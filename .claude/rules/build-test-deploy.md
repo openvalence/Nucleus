@@ -156,8 +156,13 @@ into `artifacts/` and prints the tail. The rules that make it an instrument
 rather than a log viewer live in `logging-leds.md`; the two worth knowing at
 the bench:
 
-- **It dies with its boot.** Post-panic forensics is the header's breadcrumb
-  block, which is RTC_NOINIT and survives the reset.
+- **It dies with its boot.** Post-reset forensics is the header's breadcrumb
+  block: the previous boot's last distinct Warn+ lines and its last words (a
+  task watchdog's starved tasks, or the task that called esp_restart), from
+  whichever copy held, LP RAM or HP SRAM (`system/CrashRing.h`). A power cut
+  clears both; on the bench a cold power-on reads `reset=other-wdt` with
+  nothing kept (bd val-2a8), so "no breadcrumbs survived" plus `other-wdt`
+  reads as a power cut until proven otherwise.
 - **The footer's `next=` is the resume cursor**, and `--from` takes it back.
 
 ## T10 -- a test runner misreports its own suite

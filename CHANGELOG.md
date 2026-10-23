@@ -2,6 +2,20 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.64 (2026-10-23)
+
+### For users
+
+- **A machine that restarts on its own says why.** After an unexpected restart, the diagnostics page now names what was stuck (the task the watchdog caught) or what asked for the restart, and keeps the warnings that led up to it instead of letting a once-a-minute reminder push them out. When nothing survived, it says so, which on the bench means the power was cut.
+
+### Technical
+
+- **The crash ring has two copies** (val-a2ub). `system/CrashRing.h` (hardware-free, suite `test_crash_ring`) is the ring; `ValenceDiag.cpp` keeps it in LP RAM (`RTC_NOINIT_ATTR`, uncached) and in HP SRAM (`__NOINIT_ATTR`, 640 B, written back from the L1 cache after every write), adopts the first valid one at boot and reports which held: `/diag` reads `(LP RAM, survived the reset)`, `(HP SRAM, ...)`, or `no breadcrumbs survived the reset`; the boot line reads `LP RAM held|lost, HP SRAM held|lost`. Layout magic `NUC1` -> `NUC2`: the first boot after this update reads no breadcrumbs.
+- **Last words.** IDF's `esp_task_wdt_isr_user_handler()` writes the starved tasks and what each core was running before the task watchdog's panic; an `esp_register_shutdown_handler()` hook writes the task that called `esp_restart()` and the uptime, which names esp_hosted's own restart on an SDIO transport failure (`CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE=y`). `/diag` prints it as `last words:`.
+- **The ring keeps distinct lines.** A Warn+ line already in the ring is not added again, so the self-check's once-a-minute `motor power held OFF` (Error) no longer evicts the lines that name a fault: an 8-crumb ring filled with it inside 8 minutes on the bench.
+- **The C6's silence is a breadcrumb.** The 5 s health loop logs `RSSI read over esp_hosted failed: <err>` or `took over 1000 ms` at Warn, at most once a minute.
+- Investigated, not changed: the 2026-10-22 bench reset (`boot=1 reset=other-wdt`, no breadcrumbs, the board dark for 33 to 47 minutes before it) matches the bench's known cold-power-on signature (val-2a8) and not any 0.1.63 code path; the MotionArbiter brake tail and handover hold no unbounded loop or long lock. Esp-IDF 5.5.4 maps every hardware watchdog reset the panic handler did not convert (MWDT, RTC WDT, super WDT) to `ESP_RST_WDT`.
+
 ## 0.1.63 (2026-10-22)
 
 ### For users
