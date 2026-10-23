@@ -145,6 +145,9 @@ write, 0x01 back, 0x00 506, 0x00 0) and revert on power cycle; a save needs
   plus one tick of input_accel) and then crawls at the kick cap
   (input_accel times 1 ms): 227 mm at 1500 mm/s took 1.1 s with input_speed
   1000. val-25a.
+  Since 0.1.63 (val-xfy2) the kick is deleted and the steer cap is the
+  strip's own set (`MotionArbiter.cpp` steerTick, `s.lim.vmax`); the bench
+  re-check stays on val-25a.
 
 ## The loaded ladder on the 60AIM40F
 

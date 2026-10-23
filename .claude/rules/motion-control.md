@@ -70,7 +70,9 @@ window is solved at the next sample, and the sampler evaluates it.
   and publishes THE STRIP, the commanded position in mm every
   `kMotionTickUs` for `kStripLen` (128) entries: the plan read with
   `kinetic2::Engine::peek()`, which returns bit for bit what the sampler
-  returns later, the oscillator and the connector (below) summed, with the
+  returns later (the same engine; a preview or the twin matches the board
+  only under the same calls and `react_us`, and the hub picks `react_us` per
+  submit from its measured solve and lead, `adaptiveReactUs`), the oscillator and the connector (below) summed, with the
   backstop frame and the limit set it was filled under, so the steer never
   reads the window. A plan change (a submit, a brake, a reset) refills it
   whole, from the clock after the tick's solve; a tick without one shifts it

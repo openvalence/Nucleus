@@ -27,6 +27,7 @@ socket, no clock and no thread. Two fronts drive it:
 | Arbiter: gates, window clamp, limit sets, feedforward, census | `flagship_p4/src/motion/MotionArbiter.cpp`, compiled verbatim | real |
 | Motion task plumbing | `src/SimMotion.cpp` | a ring on the one hub thread instead of FreeRTOS queues; census refreshed every pass, not at 100 Hz |
 | Emitter and position truth | `src/SimMotion.cpp` | ideal: renders the arbiter's steering word exactly, so `late`, `resteers`, `catchups` and `stack_free` read 0 |
+| Solve timing and the reaction horizon | the wasm clock is set once per 1 ms pass (`wasm/neutrino.cpp`), the exe reads the host's wall clock | not the board's: in wasm a solve takes 0 us, so `adaptiveReactUs` is max(`react_ms` floor, min(4 ms, lead / 2)) and late plans and the strip's tail fire only with `plan_delay_ms` set; the exe times solves on the PC. The same knots under the same `react_us` render the same bits; live re-plans differ in timing and origin from the board's |
 | Generators: classic (seven patterns) and advanced (the modulators), two rail sources (RFC-093), the brake | `flagship_p4/src/patterns/PatternEngine.cpp`, compiled verbatim | real |
 | Pattern task plumbing | `src/SimPattern.cpp` | ticked every pass on the one hub thread instead of its own FreeRTOS task |
 | Durable hub identity (WELCOME identity key 5, SPEC §6.3) | minted once like the board's `hub_iid` NVS key | persisted: `PREFIX.iid`, 8 bytes little-endian |
