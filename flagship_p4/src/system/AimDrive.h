@@ -36,7 +36,7 @@ namespace valence::aim {
 
 namespace reg {
 inline constexpr uint16_t modbus_enable     = 0x00;  // 1: Modbus owns the drive, pulse input ignored
-inline constexpr uint16_t output_enable     = 0x01;  // 0: drive output off
+inline constexpr uint16_t output_enable     = 0x01;  // 0: drive output off, 1: on (p. 11)
 inline constexpr uint16_t speed_limit       = 0x02;  // r/min, the position-mode ceiling
 inline constexpr uint16_t acceleration      = 0x03;  // (r/min)/s; 60000 and up: no internal ramp
 inline constexpr uint16_t field_weakening   = 0x04;  // internal
@@ -287,7 +287,7 @@ enum class ProbeOutcome : uint8_t {
                       // address, a temperature past the map's range
     lost,             // found, then silent or broken before the probe ended
     modbus_enabled,   // 0x00 nonzero: Modbus owns the drive, quadrature ignored
-    output_off,       // 0x01 not 1: the drive's output is disabled
+    output_off,       // 0x01 is 0: the drive's output is disabled
     not_quadrature,   // 0x19 not 2: A/B are not read as quadrature
     alarm_inverted,   // 0x07 odd: WR normally closed, DRV_ALM reads inverted
     ok,
@@ -334,7 +334,9 @@ constexpr ProbeOutcome judgeMap(Probe& p) {
         return ProbeOutcome::wrong_model;
     }
     if (p.modbusEnable != 0) return ProbeOutcome::modbus_enabled;
-    if (p.outputEnable != 1) return ProbeOutcome::output_off;
+    // Manual p. 11 defines 0 and 1. A 60AIM40F with Modbus off reads 7 (undocumented),
+    // so zero is the one value that means off.
+    if (p.outputEnable == 0) return ProbeOutcome::output_off;
     if (p.specialFunction != kQuadratureFollow) return ProbeOutcome::not_quadrature;
     if (wrNormallyClosed(p.positionKp)) return ProbeOutcome::alarm_inverted;
     return ProbeOutcome::ok;
