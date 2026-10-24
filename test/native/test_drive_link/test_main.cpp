@@ -634,6 +634,15 @@ TEST_CASE("link: each configuration the LP core cannot drive is named, and the p
     }
 }
 
+TEST_CASE("link: any nonzero output enable passes; the 60AIM40F reads 7 with Modbus off") {
+    for (const uint16_t v : {uint16_t(1), uint16_t(7)}) {
+        LinkRig rig;
+        rig.drive.regs[aim::reg::output_enable] = v;
+        rig.run(aim::kSettleMs + kProbeBudgetMs);
+        CHECK(rig.snap().probe.outcome == aim::ProbeOutcome::ok);
+    }
+}
+
 TEST_CASE("link: silence mid-probe is lost, naming the register") {
     LinkRig rig;
     rig.port.responder = [&rig](const Bytes& q) {
