@@ -67,11 +67,17 @@ static_assert(MotionTuning{}.smoothness == kinetic2::Config{}.smoothness &&
                   MotionTuning{}.react_us == kinetic2::Config{}.react_us,
               "MotionTuning's Kinetic² defaults are kinetic2::Config's");
 
+// The farthest a fence is placed from the origin: a count float holds exactly
+// (2^22 steps), so the walks below close within a step of the rounded count.
+constexpr float kFenceMaxMm = 4194304.0f * kMmPerStep;
+
 // The count from the origin at which positionMm() first reads at or past `mm`
 // outward: the least count reading at or above it (up), the greatest reading
 // at or below it (down). A fence there never cuts off a point the backstop
-// admits and never admits a whole step past one.
+// admits and never admits a whole step past one. Total: an infinite or
+// distant `mm` fences at kFenceMaxMm, NaN at the datum.
 int32_t fenceCount(float mm, bool up) {
+    mm = std::isnan(mm) ? 0.0f : std::clamp(mm, -kFenceMaxMm, kFenceMaxMm);
     int32_t c = int32_t(std::lround(mm * kStepsPerMm));
     if (up) {
         while (float(c) * kMmPerStep < mm) ++c;
@@ -219,7 +225,7 @@ ReturnStart MotionArbiter::returnToPause() {
 }
 
 void MotionArbiter::setWindow(float lo, float hi, float rail) {
-    if (!(std::isfinite(lo) && std::isfinite(hi) && std::isfinite(rail))) return;
+    if (!(std::isfinite(hi - lo) && std::isfinite(rail))) return;   // the span is a divisor (limitsFor)
     if (!(hi > lo)) return;
     // The flag before the post: raised after it, a planner that applied the
     // post in between would see the flag again and move the frame twice.
@@ -903,12 +909,17 @@ void MotionArbiter::setRailFrame(bool on, uint64_t now_us) {
     resetEngine(toNorm(positionMm()), now_us);
 }
 
+// Every ceiling set a stop is planned under comes through here, and
+// Profile::brake and ::point divide by it: a zero, NaN or infinite entry makes
+// a stop with no end, which joining() and _held_until_us wait out for good.
+// Such an entry takes the factory ceiling.
 EngineLimits MotionArbiter::limitsFor(bool manual) const {
     const float s = span();
+    auto finiteOr = [s](float norm, float factory_mm) { return std::isfinite(norm) && norm > 0.0f ? norm : factory_mm / s; };
     EngineLimits lim;
-    lim.vmax = manual ? _jog_v / s : inputVmaxMm() / s;
-    lim.amax = manual ? _jog_a / s : inputAmaxMm() / s;
-    lim.jmax = _ovr_j > 0.0f ? _ovr_j : _in_j / s;
+    lim.vmax = manual ? finiteOr(_jog_v / s, DEFAULT_JOG_MAX_SPEED_MM_S) : finiteOr(inputVmaxMm() / s, DEFAULT_MAX_SPEED_MM_S);
+    lim.amax = manual ? finiteOr(_jog_a / s, DEFAULT_JOG_ACCEL_MM_S2) : finiteOr(inputAmaxMm() / s, DEFAULT_ACCEL_MM_S2);
+    lim.jmax = finiteOr(_ovr_j > 0.0f ? _ovr_j : _in_j / s, DEFAULT_INPUT_MAX_JERK_MM_S3);
     return lim;
 }
 
