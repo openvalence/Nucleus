@@ -50,10 +50,11 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
   only "Building stage has failed" unless run with `-vvv`. Planner
   development opts out with `NUCLEUS_KINETIC_UNPINNED=1`: a loud warning, and
   the image's git label (`/diag` `git=`) reads `<sha>-kinetic-unpinned`.
-  Such an image is never flashed as a release. The CMake builds
-  (`sim/neutrino`, `tools/kinetic-wasm`) are not guarded; `canon_lint` is
-  their check. `../Valence` against `valence.pin` is not guarded: canon_lint's
-  pin-mismatch is its only check.
+  Such an image is never flashed as a release. The same script guards
+  `../Valence` with canon_lint's valence.pin rule: HEAD is `valence.pin` and
+  `lib/valence` is clean, opt-out `NUCLEUS_VALENCE_UNPINNED=1`, label
+  `<sha>-valence-unpinned`. The CMake builds (`sim/neutrino`,
+  `tools/kinetic-wasm`) are not guarded; `canon_lint` is their check.
 
 ## The bench
 

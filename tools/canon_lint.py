@@ -10,7 +10,8 @@ the output.
 Checks here: printf-outside-geiger, valence-purity, this-assign,
 new-log-macro, led-outside-flux, borrowed-member, sole-caller,
 static-in-critical, british-spelling (codespell plus the camelCase subword
-gap), the valence.pin rule with the frozen-artifact hash cross-check, and the
+gap), the valence.pin rule (../Valence HEAD is the pin and lib/valence is
+clean) with the frozen-artifact hash cross-check, and the
 kinetic.pin rule (../Kinetic HEAD is the pin and the paths Nucleus compiles
 from it are clean).
 
@@ -47,6 +48,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SIBLING = ROOT.parent / "Valence"
 PIN_FILE = ROOT / "valence.pin"
+VALENCE_CONSUMED_PATHS = ("lib/valence",)
 
 # ---------------------------------------------------------------- frozen (C-6)
 # The conformance artifacts live in the pinned SIBLING checkout. Byte-identical
@@ -411,10 +413,10 @@ def run_codespell_check():
 
 
 def run_pin_check():
-    """valence.pin RULE: FAIL if ../Valence is missing or its HEAD does not
-    match the pin; WARN (not fail) if the sibling working tree is dirty; FAIL
-    if the sibling's frozen conformance artifacts do not match our pinned
-    hashes (C-6)."""
+    """valence.pin RULE: FAIL if ../Valence is missing, its HEAD does not
+    match the pin, or the library Nucleus compiles from it is dirty; WARN (not
+    fail) on other dirt in the sibling; FAIL if the sibling's frozen
+    conformance artifacts do not match our pinned hashes (C-6)."""
     findings = []
     try:
         pinned = PIN_FILE.read_text(encoding="utf-8").splitlines()[0].strip()
@@ -436,10 +438,16 @@ def run_pin_check():
                          f"../Valence HEAD {head[:16]} != pinned {pinned[:16]} -- "
                          "bump valence.pin (and re-run the gauntlet) or check out the pinned sha"))
 
+    for line in subprocess.run(["git", "status", "--porcelain", "--untracked-files=no", "--",
+                                *VALENCE_CONSUMED_PATHS], cwd=SIBLING,
+                               capture_output=True, text=True).stdout.splitlines():
+        findings.append(("pin-dirty", "../Valence/" + line[3:], 0, line[:2],
+                         "uncommitted change in the library Nucleus compiles -- commit it in "
+                         "Valence first, then the pin moves"))
     dirty = subprocess.run(["git", "status", "--porcelain"], cwd=SIBLING,
                            capture_output=True, text=True).stdout.strip()
     if dirty:
-        print("WARN: ../Valence working tree is dirty (not a lint failure)")
+        print("WARN: ../Valence working tree is dirty (not a lint failure unless lib/valence)")
 
     for rel, want in FROZEN_SHA256_SIBLING.items():
         p = SIBLING / rel
