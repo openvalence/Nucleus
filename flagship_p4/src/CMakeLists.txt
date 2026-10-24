@@ -11,6 +11,19 @@
 # kinetic.pin at the Nucleus root and READ-ONLY from here: a change lands in
 # Kinetic first, then the pin moves. Nucleus plans with Kinetic²
 # (include/kinetic2), header-only: an include path is the whole of consuming it.
+# THE BOARD'S I/O HOSTS. Every door (ValenceMotorSwitch.h, ValenceEstopInput.h,
+# ValenceFan.h, ValencePdSource.h, ValenceDriveLink.h, ValenceHomeSense.h) has
+# one host per board, picked here: the Flagship's own, or on the barnacle
+# (CONFIG_NUCLEUS_BOARD_BARNACLE, BoardPins.h) the helper link's
+# (system/BarnacleLink.cpp) and the absent parts' (system/BarnacleBoard.cpp).
+# lib/barnacle_link is the link's frames, header-only, shared with the shim.
+if(CONFIG_NUCLEUS_BOARD_BARNACLE)
+    set(board_io_srcs "system/BarnacleLink.cpp" "system/BarnacleBoard.cpp")
+else()
+    set(board_io_srcs "system/ValenceMotorSwitch.cpp" "system/ValenceDriveLink.cpp"
+                      "system/ValenceEstopInput.cpp" "system/ValenceFan.cpp"
+                      "system/ValencePdSource.cpp" "system/ValenceHomeSense.cpp")
+endif()
 idf_component_register(SRCS "main.cpp"
                             "hub/ValenceHub.cpp" "hub/ValenceDevice.cpp"
                             "hub/ValenceWsPort.cpp" "hub/ValenceEstopDatagram.cpp"
@@ -22,19 +35,17 @@ idf_component_register(SRCS "main.cpp"
                             "system/ValenceHttp.cpp" "system/ValenceOta.cpp"
                             "system/ValenceDiag.cpp" "system/ValencePower.cpp"
                             "system/ValenceSelfCheck.cpp" "system/ValenceLogBridge.cpp"
-                            "system/ValenceMotorSwitch.cpp"
-                            "system/ValenceDriveLink.cpp"
-                            "system/ValenceBoardIo.cpp" "system/ValenceEstopInput.cpp"
+                            "system/ValenceBoardIo.cpp"
                             "system/ValenceGlow.cpp"
-                            "system/ValenceFan.cpp" "system/ValenceButtons.cpp"
+                            "system/ValenceButtons.cpp"
                             "system/ValenceAccessoryIo.cpp"
-                            "system/ValencePdSource.cpp"
-                            "system/ValenceHomeSense.cpp"
                             "system/ValenceTcpTally.cpp"
+                            ${board_io_srcs}
                        INCLUDE_DIRS "." "hub" "motion" "system"
                                     "../../lib/valence/include"
                                     "../../lib/geiger/include"
                                     "../../lib/flux/include"
+                                    "../../lib/barnacle_link/include"
                                     "../../../Kinetic/include"
                                     "../../lib/strokeengine_patterns/include"
                                     "patterns/arduino_compat"

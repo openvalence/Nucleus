@@ -12,6 +12,12 @@
 //   drive's logic rides the motor bus, so it can only be probed after the
 //   enable it would otherwise block (postEnable(), val-091.29). Its FAIL is
 //   reported, never adjudicated.
+// - ABSENT IS A BOARD PROFILE'S, NEVER A READING'S. A board with no part
+//   behind a check (the barnacle: no monitors, switch, E-stop input or
+//   Modbus, bd val-omh3) constructs its table with that check in
+//   absentAllowed, records it absent with the reason, and the gate passes it.
+//   Absent on any other check records as fail: a Flagship table (mask 0) can
+//   never pass a part by calling it absent.
 // - Order is the ruling's order and the report order. The first entry that
 //   did not pass is the one a one-line summary names.
 // - kNames are log text, not catalog strings: renaming one changes no etag.
@@ -36,7 +42,7 @@ namespace valence::selfcheck {
 
 // ---- the table's vocabulary -------------------------------------------------
 
-enum class Result : uint8_t { pending, pass, fail, skipped };
+enum class Result : uint8_t { pending, pass, fail, skipped, absent };
 
 // Declaration order IS run and report order.
 enum class Check : uint8_t {
@@ -61,6 +67,11 @@ enum class Check : uint8_t {
 inline constexpr size_t kCheckCount = size_t(Check::count_);
 inline constexpr size_t kReasonBytes = 72;
 
+// One bit per Check: the checks a board profile has no part for.
+using AbsentMask = uint32_t;
+static_assert(kCheckCount <= 32, "AbsentMask holds one bit per check");
+constexpr AbsentMask bitOf(Check c) { return AbsentMask(1) << unsigned(c); }
+
 inline constexpr std::array<const char*, kCheckCount> kNames = {
     "board-monitor", "rails", "power-monitor", "pd-source", "bus-window",
     "motor-rail-off", "switch-fault", "regen-clamp", "estop", "quadrature",
@@ -77,6 +88,7 @@ constexpr const char* resultName(Result r) {
         case Result::pass:    return "PASS";
         case Result::fail:    return "FAIL";
         case Result::skipped: return "SKIPPED";
+        case Result::absent:  return "ABSENT";
     }
     return "?";
 }
@@ -94,17 +106,26 @@ struct Entry {
 
 class Table {
 public:
+    // absentAllowed: the checks this board has no part for (file header).
+    explicit Table(AbsentMask absentAllowed = 0) : _absentAllowed(absentAllowed) {}
+
     // Re-recording a check overwrites it: the last reading is the truth.
     [[gnu::format(printf, 4, 5)]]
     void record(Check c, Result r, const char* fmt, ...) {
         if (size_t(c) >= kCheckCount) return;
         Entry& e = _entries[size_t(c)];
+        size_t at = 0;
+        if (r == Result::absent && (_absentAllowed & bitOf(c)) == 0) {
+            r = Result::fail;
+            const int p = std::snprintf(e.reason.data(), e.reason.size(), "absent on a board that fits it: ");
+            at = p > 0 ? size_t(p) : 0;
+        }
         e.result = r;
         va_list ap;
         va_start(ap, fmt);
-        const int n = std::vsnprintf(e.reason.data(), e.reason.size(), fmt, ap);
+        const int n = std::vsnprintf(e.reason.data() + at, e.reason.size() - at, fmt, ap);
         va_end(ap);
-        if (n < 0) e.reason[0] = '\0';
+        if (n < 0) e.reason[at] = '\0';
     }
 
     const Entry& entry(Check c) const {
@@ -114,8 +135,10 @@ public:
     // The first pre-enable entry that did not pass: the gate, and the name a
     // one-line summary gives.
     std::optional<Check> firstBlocking() const {
-        for (size_t i = 0; i < kCheckCount; ++i)
-            if (!postEnable(Check(i)) && _entries[i].result != Result::pass) return Check(i);
+        for (size_t i = 0; i < kCheckCount; ++i) {
+            const Result r = _entries[i].result;
+            if (!postEnable(Check(i)) && r != Result::pass && r != Result::absent) return Check(i);
+        }
         return std::nullopt;
     }
 
@@ -128,6 +151,7 @@ public:
     }
 
 private:
+    AbsentMask _absentAllowed;
     std::array<Entry, kCheckCount> _entries{};
 };
 

@@ -3,18 +3,30 @@
 // Constraints:
 // - BoardIo task only, except the two take functions. BSS: two gesture cores,
 //   two atomic bytes and the fallback's clock.
+// - An absent pad (BoardPins.h -1) is never configured and reads released.
+// - On the barnacle (CONFIG_NUCLEUS_BOARD_BARNACLE) PAIR is the R+D board's
+//   S2, read through the helper link (BarnacleLink.h). While the helper reads
+//   stale PAIR reads released and its core is re-seated, so a press the link
+//   lost mid-way completes no gesture, and the new core arms only on a
+//   release it sees (ButtonGesture.h).
 
 #include "system/ValenceButtons.h"
 
 #include <atomic>
 #include <cstdint>
+#include <new>
+#include <optional>
 
 #include <driver/gpio.h>
 #include <esp_system.h>
+#include <sdkconfig.h>
 
 #include "geiger/geiger.h"
 #include "motion/ValenceMotion.h"
 #include "system/BoardPins.h"
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+#include "system/BarnacleLink.h"
+#endif
 
 namespace valence {
 
@@ -38,8 +50,22 @@ std::atomic<uint8_t> g_pairParked{uint8_t(button::PairGesture::none)};
 bool g_holdParked = false;
 uint32_t g_holdParkedAtMs = 0;
 
+// Active low; an absent pad reads released.
+bool padPressed(int gpio) { return gpio >= 0 && gpio_get_level(static_cast<gpio_num_t>(gpio)) == 0; }
+
+// PAIR now; nullopt when it cannot be read.
+std::optional<bool> pairPressed() {
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+    return helperButtonPressed();
+#else
+    return padPressed(BOARD_GPIO_BTN_PAIR);
+#endif
+}
+
+bool g_pairUnread = false;   // the last sample could not read PAIR
+
 button::Gesture sample(Pad& p, uint32_t nowMs) {
-    const bool pressed = gpio_get_level(static_cast<gpio_num_t>(p.gpio)) == 0;
+    const bool pressed = padPressed(p.gpio);
     const button::Gesture g = p.core.sample(pressed, nowMs);
     if (g == button::Gesture::none) return g;
     if (g == button::Gesture::stuck)
@@ -52,8 +78,17 @@ button::Gesture sample(Pad& p, uint32_t nowMs) {
 }
 
 void samplePair(uint32_t nowMs) {
-    const bool pressed = gpio_get_level(static_cast<gpio_num_t>(BOARD_GPIO_BTN_PAIR)) == 0;
-    const button::PairGesture g = g_pairCore.sample(pressed, nowMs);
+    const std::optional<bool> now = pairPressed();
+    if (!now) {
+        if (!g_pairUnread) {
+            g_pairUnread = true;
+            g_pairCore.~PairButton();
+            new (&g_pairCore) button::PairButton();
+        }
+        return;
+    }
+    g_pairUnread = false;
+    const button::PairGesture g = g_pairCore.sample(*now, nowMs);
     if (g == button::PairGesture::none) return;
     if (g == button::PairGesture::stuck)
         GLOGW(kTag, "PAIR held past %lu s: stuck (shorted J13 or a jammed switch?)",
@@ -72,7 +107,9 @@ button::Gesture take(Pad& p) {
 
 void buttonsBegin() {
     gpio_config_t io{};
-    io.pin_bit_mask = (1ull << BOARD_GPIO_BTN_HOME) | (1ull << BOARD_GPIO_BTN_PAIR);
+    for (const int n : {BOARD_GPIO_BTN_HOME, BOARD_GPIO_BTN_PAIR})
+        if (n >= 0) io.pin_bit_mask |= 1ull << n;
+    if (io.pin_bit_mask == 0) return;
     io.mode = GPIO_MODE_INPUT;
     io.pull_up_en = GPIO_PULLUP_ENABLE;   // R1012 / its PAIR twin are fitted; this only covers a bare stamp
     io.pull_down_en = GPIO_PULLDOWN_DISABLE;

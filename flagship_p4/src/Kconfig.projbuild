@@ -10,6 +10,18 @@ config NUCLEUS_BENCH_QUAD_LP10_12
         marked absent under this option. Never on in a release build; the
         flagship_p4_bench env sets it through bench.sdkconfig.defaults.
 
+config NUCLEUS_BOARD_BARNACLE
+    bool "Board: the barnacle (Stamp-P4 on the OSSM R+D board rev 2.3)"
+    default n
+    help
+        nucleus-p4b. Quadrature A on LPG1 and B on LPG0 at drive strength 3,
+        TRIP on LPG8 as the home sense and the running stop, and the WROOM-32D
+        helper on a UART (TX G27, RX G26) for the button, motor current, motor
+        voltage and the status pixel. No Flagship monitors, motor switch,
+        E-stop input or Modbus link: the board I/O doors link the barnacle
+        hosts (system/BarnacleLink.h). The flagship_p4_barnacle env sets it
+        through barnacle.sdkconfig.defaults. Never on in a Flagship image.
+
 config NUCLEUS_DRIVE_LINK
     bool "RS485 Modbus link to the drive"
     default y

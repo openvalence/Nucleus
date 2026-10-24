@@ -91,6 +91,12 @@ int main(void)
     ulp_lp_core_gpio_init(PIN_B);
     ulp_lp_core_gpio_output_enable(PIN_A);
     ulp_lp_core_gpio_output_enable(PIN_B);
+#ifdef BOARD_QUAD_DRIVE_STRENGTH
+    // A board that drives the drive's opto inputs straight from these pads
+    // names its pad drive (BoardPins.h); the rest keep the reset default.
+    rtcio_ll_set_drive_capability(PIN_A, BOARD_QUAD_DRIVE_STRENGTH);
+    rtcio_ll_set_drive_capability(PIN_B, BOARD_QUAD_DRIVE_STRENGTH);
+#endif
     ulp_lp_core_gpio_set_level(PIN_A, 0);
     ulp_lp_core_gpio_set_level(PIN_B, 0);
 
