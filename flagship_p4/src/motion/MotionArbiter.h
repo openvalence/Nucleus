@@ -105,8 +105,9 @@ inline constexpr uint32_t kIntentQueueDepth = 40;
 // The longest interval a steer's residual and velocity cap are priced over:
 // two sampler periods. A steer later than this is a STALL (steerTick()),
 // counted and steered without the catch-up the elapsed time would ask for.
-// Also the wall bound's horizon: no steer carries the carriage past the
-// backstop's edge within this long.
+// Also the wall bound's horizon on a strip the wall could not keep in its
+// frame (PlanStrip::in_frame): no steer carries the carriage past the
+// backstop's edge within this long. On a strip it kept, one tick.
 inline constexpr float kTickDtCapS = 2.0f * float(kMotionTickUs) * 1e-6f;
 
 // THE LP LEASE (operator ruling 2026-10-06, bd val-fi5): steerTick() renews it
@@ -135,7 +136,8 @@ inline constexpr size_t kHandoverTicks = 2;
 static_assert(kHandoverTicks >= 2 && kHandoverTicks + 3 < kStripLen,
               "the join reads the trajectory in flight two ticks before it");
 // A stop the set's own decel would carry out of the frame brakes harder, up
-// to this multiple of its accel and jerk; past that the backstop holds.
+// to this multiple of its accel and jerk; past that the steer's clamp holds
+// (the last line). The tail's stop and the wall's alike.
 inline constexpr float kHardStopMax = 16.0f;
 
 // THE OSCILLATOR (RFC-103, bd val-dzf): Kinetic²'s stage, summed into the
@@ -565,6 +567,11 @@ private:
         // harder than lim to stay in the frame.
         kinetic2::Profile tail{};
         bool     tail_hard = false;
+        // Every entry and the tail stay in the frame (applyWall(), the
+        // tail's certification): the steer's wall bound is priced over one
+        // tick. False when no stop up to kHardStopMax kept them in: the last
+        // line, priced over kTickDtCapS.
+        bool     in_frame = true;
         std::array<float, kStripLen> p_mm{};
     };
 
@@ -606,11 +613,27 @@ private:
     // toward the engine's rest: the engine is not the whole plan yet.
     bool joining(uint64_t t) const { return _conn.n > 0 && t < _conn_end_us; }
     // The fastest stop from s at at_us under lim, mm: never a reversal, at
-    // rest at its end, inside [lo, hi] widened to s.p. A stop that would
-    // leave it brakes harder, the least multiple of amax and jmax up to
-    // kHardStopMax that keeps it in, counted.
+    // rest at its end, inside [lo, hi] widened to s.p and by slop. A stop
+    // that would leave it brakes harder, the least multiple of amax and jmax
+    // up to kHardStopMax that keeps it in, counted.
     kinetic2::Profile certifiedStop(const kinetic2::State& s, uint64_t at_us, const EngineLimits& lim, float lo,
-                                    float hi, bool& hard);
+                                    float hi, bool& hard, float slop = kMmPerStep);
+    // THE WALL (bd val-vj1j): where s.p_mm leaves the strip's frame by more
+    // than a step, it stops instead, at the edge: from the latest entry whose
+    // stop under s.lim rests in the frame, its jerk eased to rest on the
+    // edge, else harder from the first (certifiedStop(), counted). Kept from
+    // its commit until it rests and the plan is back in the frame
+    // (fillStrip()). Returns false when no stop up to kHardStopMax keeps the
+    // strip in.
+    bool applyWall(PlanStrip& s);
+    // The wall moves the trajectory at t toward its rest.
+    bool walling(uint64_t t) const { return _wall_on && t < _wall.end_us(); }
+    // Committed: no fill from t0_us on could start the wall earlier, and the
+    // steer may render it. It holds through every fill until its rest.
+    static constexpr size_t kWallFirst = 2;
+    bool wallCommitted(uint64_t t0_us) const {
+        return _wall_on && _wall_from_us <= t0_us + kWallFirst * kMotionTickUs;
+    }
     // The limit set the plan in flight renders under, mm: the jog set's for
     // a Manual plan and the RETURN, the input set's otherwise.
     EngineLimits renderLimits() const;
@@ -827,6 +850,17 @@ private:
     uint32_t  _plans_refused = 0;
     uint32_t  _hard_stops = 0;
 
+    // THE WALL (applyWall(), planner task): a stop to the frame's edge, mm,
+    // absolute times, rendered for every entry after _wall_from_us.
+    // Committed by wallCommitted(); until then each fill finds it again.
+    kinetic2::Profile _wall{};
+    uint64_t  _wall_from_us = 0;
+    bool      _wall_on = false;
+    bool      _wall_ok = true;        // it keeps the strip in the frame
+    bool      _wall_hard = false;
+    bool      _wall_counted = false;
+    uint32_t  _walls = 0;             // census backstops, counted at commit
+
     // Kinetic² boundary state, planner task only. The newest knot the engine
     // holds (or the rest point after a reset, or a brake's end): a segment
     // starting after it is a rest until its start, and a jog chains from it.
@@ -1025,8 +1059,9 @@ private:
     uint32_t _intents  = 0;
     uint32_t _rejected = 0;
     uint32_t _stalls    = 0;       // steers later than kTickDtCapS
-    uint32_t _backstops = 0;       // backstop engagements, counted at onset
-    bool     _backstop_on = false; // an engagement is in progress
+    uint32_t _clamps = 0;          // the last line: the steer held the demand
+                                   // at the edge, counted at onset
+    bool     _backstop_on = false; // a clamp is in progress
     uint32_t _lapses_seen = 0;     // the emitter's lapses() at the last steer
     uint32_t _lease_lapses = 0;    // lapses since begin()
     uint32_t _plan_us_last = 0;

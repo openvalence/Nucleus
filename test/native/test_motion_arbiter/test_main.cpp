@@ -2107,7 +2107,7 @@ TEST_CASE("backstop: a brake that runs past the window is held at its edge, flag
         worst = std::max(worst, r->arb.positionMm());
         if (i % 20 == 0) {
             const MotionCensus c = r->census();
-            plan_peak = std::max(plan_peak, c.plan_mm);
+            plan_peak = std::max(plan_peak, kIncWinLo + r->arb.planState(g_now_us).p * (kIncWinHi - kIncWinLo));
             if (c.plan_flags & valence::plan_flags::clamped) flagged = true;
         }
     }
@@ -2117,6 +2117,8 @@ TEST_CASE("backstop: a brake that runs past the window is held at its edge, flag
     CHECK(worst <= kIncWinHi + kStepTol);
     CHECK(c.position_mm == doctest::Approx(kIncWinHi).epsilon(0.0001));
     CHECK(c.backstops == 1);
+    CHECK(c.hard_stops == 1);   // the jog set could not stop it in the room
+    CHECK(c.wall_clamps == 0);
     CHECK(flagged);
     // The paused position is where the carriage rests, not where the plan does.
     CHECK(c.demand_mm == doctest::Approx(kIncWinHi));
@@ -2333,23 +2335,24 @@ TEST_CASE("fence: a home cycle searches inside the wide frame and is never fence
 }
 
 TEST_CASE("fence: a steer a 3.9 ms stall carries past the window stops on the fence, the count exactly on its edge") {
-    // The backstop brake case, with a 3.9 ms stall at the edge: inside the
-    // lease, so the core renders the steer for the whole stall, and the wall
-    // bound only promised the edge within kTickDtCapS.
+    // A segment that lands on the edge at the input set's 50 m/s^2, with a
+    // 3.9 ms stall in its stop: inside the lease, so the core renders the
+    // steer for the whole stall, and the wall bound only promised the edge
+    // within a tick.
     auto r = incidentRig();
-    r->arb.setInputLimits(kIncVmax, 20.0f, 10'000'000.0f);
-    REQUIRE(r->submit(MotionSource::Manual, kIncWinHi));
-    for (int i = 0; i < 5000 && r->arb.positionMm() < 145.0f; ++i) r->run(1000);
-    REQUIRE(r->census().velocity_mm_s > 20.0f);
-    r->arb.pause(true);
+    MotionIntent seg;
+    seg.source = MotionSource::Stream;
+    seg.target_mm = kIncWinHi;
+    seg.duration_us = 200'000;
+    REQUIRE(r->arb.accept(seg, g_now_us));
     int32_t peak = r->emitter.n;
     int stalls = 0;
     for (int i = 0; i < 4000; ++i) {
         r->run(1000);
-        // The stall lands with the steer still moving inside a tick of the
-        // edge: rendered 3.9 ms, it runs past what the wall bound budgeted.
+        // The stall lands with the steer still moving into the edge:
+        // rendered 3.9 ms, it runs past what the wall bound budgeted.
         if (stalls == 0 && steeredMmS(r->emitter) > 1.0 &&
-            r->arb.positionMm() + steeredMmS(r->emitter) * 2e-3 > kIncWinHi) {
+            r->arb.positionMm() + steeredMmS(r->emitter) * 3.9e-3 > kIncWinHi) {
             lateTick(*r, 3900);
             ++stalls;
         }
@@ -4478,4 +4481,217 @@ TEST_CASE("non-finite: a jog set or a tuning override that is zero, NaN or infin
         CHECK(r->emitter.nonfinite_steers == 0);
         CHECK(r->census().position_mm == doctest::Approx(400.0f).epsilon(1e-4));
     }
+}
+
+// ---- the wall (bd val-vj1j) ---------------------------------------------------
+// A plan that leaves the backstop's frame stops at its edge on a jerk-limited
+// stop in the strip, braked harder than the set only when the set cannot
+// stop in the room; the steer's clamp is the last line. No source moves the
+// carriage past the edge: the plan, a brake, a late plan, a jog, the
+// oscillator, the residual.
+
+TEST_CASE("wall: a move that lands exactly on the window's edge steers no jerk step in its last ticks") {
+    for (const bool lapse : {false, true}) {
+        CAPTURE(lapse);
+        auto r = incidentRig();
+        MotionIntent seg;
+        seg.source = MotionSource::Stream;
+        seg.target_mm = kIncWinHi;
+        seg.duration_us = 200'000;
+        REQUIRE(r->arb.accept(seg, g_now_us));
+        SteerKin k;
+        k.v = {0.0, 0.0};
+        if (lapse) {
+            r->run(50'000);
+            lateTick(*r, 283'000);
+            REQUIRE(r->census().lease_lapses == 1);
+            k.take(r->emitter);
+        }
+        float worst = 0.0f;
+        for (int i = 0; i < 1500; ++i) {
+            r->run(1000);
+            k.take(r->emitter);
+            worst = std::max(worst, r->arb.positionMm());
+        }
+        checkKin(k, kIncVmax, kIncAmax, 10'000'000.0);
+        const MotionCensus c = r->census();
+        CHECK(worst <= kIncWinHi + valence::kMmPerStep);
+        CHECK(c.position_mm == doctest::Approx(kIncWinHi).epsilon(1e-4));
+        CHECK(c.backstops == 0);
+        CHECK(c.wall_clamps == 0);
+        CHECK(c.hard_stops == 0);
+    }
+}
+
+TEST_CASE("wall: a jog to the window's edge lands on it inside the jog set, no clamp") {
+    auto r = incidentRig();
+    r->arb.setJogLimits(500.0f, kIncAmax);
+    REQUIRE(r->submit(MotionSource::Manual, kIncWinHi));
+    SteerKin k;
+    k.v = {0.0, 0.0};
+    float worst = 0.0f;
+    for (int i = 0; i < 2000; ++i) {
+        r->run(1000);
+        k.take(r->emitter);
+        worst = std::max(worst, r->arb.positionMm());
+    }
+    // The arrival's last ticks within the count's resolution: a carriage a
+    // fraction of a step ahead of the plan meets the edge a tick early, so
+    // the jerk holds to the set plus two steps over a tick cubed.
+    MESSAGE("peaks: ", k.vMax(), " mm/s, ", k.aMax(), " mm/s^2, ", k.jMax(), " mm/s^3");
+    CHECK(k.vMax() <= 500.0 * 1.01 + 1.0);
+    CHECK(k.aMax() <= double(kIncAmax) * 1.05 + 100.0);
+    CHECK(k.jMax() <= 10'000'000.0 * 1.05 + 2e5 + 2.0 * double(valence::kMmPerStep) / 1e-9);
+    const MotionCensus c = r->census();
+    CHECK(worst <= kIncWinHi + valence::kMmPerStep);
+    CHECK(c.position_mm == doctest::Approx(kIncWinHi).epsilon(1e-4));
+    CHECK(c.backstops == 0);
+    CHECK(c.wall_clamps == 0);
+}
+
+TEST_CASE("wall: a planner piece past the window (kin-pfbw) stops at the edge inside the set, never past it, and the next plan joins") {
+    auto r = incidentRig();
+    // No trim: a piece the ceilings or the window refuse renders at its
+    // least-over trim, the capped run's rendering (kin-pfbw).
+    valence::MotionTuning tu = valence::motionDefaultTuning();
+    tu.trim_max = 0.0f;
+    r->arb.applyTuning(tu);
+    MotionIntent seg;
+    seg.source = MotionSource::Stream;
+    seg.target_mm = kIncWinHi - 10.0f;
+    seg.duration_us = 100'000;
+    REQUIRE(r->arb.accept(seg, g_now_us));
+    // A knot 21 mm past the window that accept() never clamped: the engine
+    // renders the piece to it over the window.
+    kinetic2::Knot past;
+    past.t_us = g_now_us + 300'000;
+    past.p = 1.25f;
+    REQUIRE(r->arb.engine().submit(past, g_now_us));
+    const auto planMm = [&] { return kIncWinLo + r->arb.planState(g_now_us).p * (kIncWinHi - kIncWinLo); };
+    SteerKin k;
+    k.v = {0.0, 0.0};
+    float worst = 0.0f, plan_peak = 0.0f;
+    bool flagged = false;
+    for (int i = 0; i < 1500; ++i) {
+        r->run(1000);
+        k.take(r->emitter);
+        worst = std::max(worst, r->arb.positionMm());
+        plan_peak = std::max(plan_peak, planMm());
+        if (r->census().plan_flags & valence::plan_flags::clamped) flagged = true;
+    }
+    MESSAGE("plan peak ", plan_peak, " mm, carriage peak ", worst, " mm");
+    CHECK(plan_peak > kIncWinHi + 15.0f);   // the plan really left the window
+    checkKin(k, kIncVmax, kIncAmax, 10'000'000.0);
+    MotionCensus c = r->census();
+    CHECK(worst <= kIncWinHi + valence::kMmPerStep);
+    CHECK(c.position_mm == doctest::Approx(kIncWinHi).epsilon(1e-4));
+    CHECK(flagged);
+    CHECK(c.backstops == 1);
+    CHECK(c.wall_clamps == 0);
+    CHECK(c.hard_stops == 0);   // seen a strip ahead: the set stopped it
+    // The plan comes back in: it joins from the wall's rest, no burst.
+    REQUIRE(r->submit(MotionSource::Stream, 130.0f));
+    SteerKin back;
+    back.v = {0.0, 0.0};
+    for (int i = 0; i < 3000; ++i) {
+        r->run(1000);
+        back.take(r->emitter);
+        worst = std::max(worst, r->arb.positionMm());
+    }
+    checkKin(back, kIncVmax, kIncAmax, 10'000'000.0);
+    c = r->census();
+    CHECK(worst <= kIncWinHi + valence::kMmPerStep);
+    CHECK(c.position_mm == doctest::Approx(130.0f).epsilon(1e-4));
+    CHECK(c.wall_clamps == 0);
+}
+
+TEST_CASE("wall: a late plan into the window's edge joins and lands on it, never past, no clamp") {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->arb.setWindow(0.0f, 200.0f, 500.0f);
+    r->run(1000);
+    MotionIntent seg;
+    seg.source = MotionSource::Stream;
+    seg.target_mm = 150.0f;
+    seg.duration_us = 300'000;
+    REQUIRE(r->arb.accept(seg, g_now_us));
+    const uint64_t t_a = g_now_us;
+    r->run(150'000);
+    MotionIntent next;
+    next.source = MotionSource::Stream;
+    next.target_mm = 200.0f;
+    next.duration_us = 200'000;
+    next.anchor_us = t_a + 300'000;
+    REQUIRE(r->arb.accept(next, g_now_us));
+    SteerKin k;
+    k.take(r->emitter);
+    float worst = 0.0f;
+    // A 60 ms solve: the steer renders the strip it holds.
+    for (int i = 0; i < 60; ++i) {
+        elapse(*r);
+        steerOnly(*r);
+        k.take(r->emitter);
+    }
+    for (int i = 0; i < 1500; ++i) {
+        elapse(*r);
+        planOnly(*r);
+        steerOnly(*r);
+        k.take(r->emitter);
+        worst = std::max(worst, r->arb.positionMm());
+    }
+    checkKin(k, kInV, kInA, kInJ);
+    const MotionCensus c = r->census();
+    CHECK(c.late_plans == 1);
+    CHECK(worst <= 200.0f + valence::kMmPerStep);
+    CHECK(c.position_mm == doctest::Approx(200.0f).epsilon(1e-4));
+    CHECK(c.wall_clamps == 0);
+}
+
+TEST_CASE("wall: an oscillation whose trough touches the window's edge steers inside every ceiling, never past it") {
+    auto r = restRig(3.0f);
+    r->arb.setOscillator(oscOn(10.0f, 5.0f));   // narrowed to the 3 mm of room
+    SteerKin k;
+    k.v = {0.0, 0.0};
+    float worst = 1e9f;
+    for (int i = 0; i < 1500; ++i) {
+        r->run(1000);
+        k.take(r->emitter);
+        worst = std::min(worst, r->arb.positionMm());
+    }
+    const MotionCensus c = r->census();
+    CHECK(c.osc_amplitude > 2.5f);
+    checkKin(k, kInV, kInA, kInJ);
+    CHECK(worst >= -valence::kMmPerStep);
+    CHECK(c.wall_clamps == 0);
+}
+
+TEST_CASE("wall: a window edge drawn closer than any stop holds by the last line, counted, never past it") {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->arb.setInputLimits(1000.0f, 2000.0f, 10'000'000.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Stream, 100.0f));
+    r->run(2'000'000);
+    MotionIntent seg;
+    seg.source = MotionSource::Stream;
+    seg.target_mm = 450.0f;
+    seg.duration_us = 1'000'000;
+    REQUIRE(r->arb.accept(seg, g_now_us));
+    for (int i = 0; i < 2000 && steeredMmS(r->emitter) < 400.0; ++i) r->run(1000);
+    REQUIRE(steeredMmS(r->emitter) >= 400.0);
+    // 1 mm of room at 400 mm/s: sixteen times the set's 2 m/s^2 needs 2.5 mm.
+    const float edge = r->arb.positionMm() + 1.0f;
+    r->arb.setWindow(0.0f, edge, 500.0f);
+    float worst = 0.0f;
+    for (int i = 0; i < 2000; ++i) {
+        r->run(1000);
+        worst = std::max(worst, r->arb.positionMm());
+    }
+    const MotionCensus c = r->census();
+    MESSAGE("edge ", edge, " mm, carriage peak ", worst, " mm, clamps ", c.wall_clamps, ", hard stops ", c.hard_stops,
+            ", fence hits ", r->emitter.fence_hits);
+    CHECK(worst <= edge + valence::kMmPerStep);
+    CHECK(c.wall_clamps == 1);
+    CHECK(c.hard_stops >= 1);
+    CHECK(c.backstops >= 1);
 }
