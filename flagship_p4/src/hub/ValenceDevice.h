@@ -174,9 +174,13 @@ public:
     // double press approves the one pending configure ask and PAIR hold (5 s)
     // demotes every client to watch (Valence RFC-114 draft). While the ledger
     // holds entries but no configure owner, /uitoken vouches for nobody: a
-    // demoted browser must not mint its control back. The reboot is the composition's:
-    // takePendingPersist(), the GOODBYEs, the restart. Never clears.
+    // demoted browser must not mint its control back. PAIR held 10 s with
+    // motion idle and motor power off is the config-mode gesture (SPEC
+    // 13.4.1): rebootDue() with rebootIntoConfig(). The reboot is the
+    // composition's: takePendingPersist(), the GOODBYEs, the restart. Never
+    // clears.
     bool rebootDue() const { return _reboot == Reboot::due; }
+    bool rebootIntoConfig() const { return _rebootIntoConfig; }
     // Any task: the PAIR control's look, refreshed every tick().
     PairLook pairLook() const { return PairLook(_pairLook.load(std::memory_order_relaxed)); }
     // The kPersist* bits armed and not yet due, disarmed: a planned reboot
@@ -386,6 +390,7 @@ private:
     enum class Reboot : uint8_t { none, braking, due };
     Reboot _reboot = Reboot::none;
     uint32_t _rebootBrakeUntilMs = 0;
+    bool _rebootIntoConfig = false;
     // PAIR: a refused or demoting gesture's look and when it ends.
     PairLook _pairFlash = PairLook::quiet;
     uint32_t _pairFlashUntilMs = 0;

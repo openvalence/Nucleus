@@ -298,13 +298,32 @@ uint64_t loadOrMintInstanceId() {
     return id;
 }
 
-// A HOME hold (val-091.26), once the device has braked and latched ESTOP
-// (its power cut): every pending blob written now, the GOODBYEs, the restart.
-// Hub task, and its LAST act: the flush blocks on NVS and the delay lets the
-// GOODBYEs and the log line leave over the C6, which is acceptable here and
-// nowhere else because nothing on this task runs after it. Held writes of an
-// OTA in flight are written too: the transfer dies with the boot anyway.
-[[noreturn]] void rebootNow(uint32_t nowMs, const char* why) {
+// The one-shot word to the next boot (LinkMode.h Next), NVS "valence"/"next",
+// one byte. Absent reads as none.
+constexpr const char* kNvsNextKey = "next";
+
+void saveNext(linkmode::Next next) {
+    nvs_handle_t h;
+    if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) {
+        GLOGW(kTag, "next-boot flag not written: nvs_open failed");
+        return;
+    }
+    esp_err_t err = nvs_set_u8(h, kNvsNextKey, uint8_t(next));
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err != ESP_OK) GLOGW(kTag, "next-boot flag not written: %s", esp_err_to_name(err));
+}
+
+// A planned reboot: a HOME hold (val-091.26) once the device has braked and
+// latched ESTOP (its power cut), the config-mode gesture, or the hub's own
+// policy (SPEC 13.4.1). Every pending blob written now, `next` for the next
+// boot, the GOODBYEs, the restart. Hub task, and its LAST act: the flush
+// blocks on NVS and the delay lets the GOODBYEs and the log line leave over
+// the C6, which is acceptable here and nowhere else because nothing on this
+// task runs after it. Held writes of an OTA in flight are written too: the
+// transfer dies with the boot anyway.
+[[noreturn]] void rebootNow(uint32_t nowMs, const char* why, linkmode::Next next) {
+    if (next != linkmode::Next::none) saveNext(next);
     g_persistDue |= g_box->device.takePendingPersist();
     if (g_persistDue != 0) persistDue();
     if (g_box->trust.flush(g_box->hub->pairing(), g_nvs, nowMs) & kTrustLedgerFailed)
@@ -318,9 +337,30 @@ uint64_t loadOrMintInstanceId() {
     esp_restart();
 }
 
+// Live sessions (parked ones do not hold a boot), and whether a ready one
+// holds configure: the cable's does by H16 (SPEC 12.2). Hub task.
+struct SessionsNow {
+    bool any = false;
+    bool configure = false;
+};
+SessionsNow sessionsNow() {
+    SessionsNow n;
+    const uint32_t cable = g_box->serial.attached() ? g_box->serial.sessionId() : 0;
+    for (size_t i = 0;; ++i) {
+        const valence::HubSession* s = g_box->hub->sessionBySlot(i);
+        if (s == nullptr) break;
+        if (!s->occupied() || s->state == valence::HubSessionState::STALE) continue;
+        n.any = true;
+        if (s->ready && (s->role == AccessLevel::configure || (cable != 0 && s->session_id == cable)))
+            n.configure = true;
+    }
+    return n;
+}
+
 // SPEC 13.1, 13.4, 13.4.1: the advertisement (GATT in config mode only), the
-// presence term of the provisioning gate, the network look and config mode's
-// commit reboot, never while a motion source runs. Hub task.
+// presence term of the provisioning gate, the network look, and the policy and
+// commit reboots, none while a motion source runs or a join is in flight. Hub
+// task.
 void serviceLinkMode(uint32_t nowMs, bool motion) {
     linkmode::Policy& m = g_box->mode;
     const bool up = g_stationUp.load(std::memory_order_acquire);
@@ -339,8 +379,20 @@ void serviceLinkMode(uint32_t nowMs, bool motion) {
         GLOGW(kTag, "config mode: joined and saved, rebooting into normal mode in %lu ms",
               static_cast<unsigned long>(*in));
     }
-    if (g_configRebootAtMs != 0 && int32_t(nowMs - g_configRebootAtMs) >= 0 && !motion)
-        rebootNow(nowMs, "leaving config mode");
+    if (motion || g_box->desk->busy()) return;
+    if (g_configRebootAtMs != 0 && int32_t(nowMs - g_configRebootAtMs) >= 0)
+        rebootNow(nowMs, "leaving config mode", linkmode::Next::none);
+    if (g_configRebootAtMs != 0) return;
+    const SessionsNow s = sessionsNow();
+    switch (m.rebootWanted(s.any, s.configure, up)) {
+        case linkmode::Next::config_join_failed:
+            rebootNow(nowMs, "no network within the join window: into config mode",
+                      linkmode::Next::config_join_failed);
+        case linkmode::Next::skip_auto:
+            rebootNow(nowMs, "the saved network is back: out of config mode", linkmode::Next::skip_auto);
+        default:
+            break;
+    }
 }
 
 // This boot's catalog (SPEC 8.6: fixed per boot). Config mode serves the
@@ -439,7 +491,11 @@ void hubTask(void*) {
         // DURING an update does not survive it; one made before it does.
         g_persistDue |= g_box->device.tick(nowMs);
         phase.mark("device.tick");
-        if (g_box->device.rebootDue()) rebootNow(nowMs, "HOME hold");
+        if (g_box->device.rebootDue()) {
+            if (g_box->device.rebootIntoConfig())
+                rebootNow(nowMs, "config-mode gesture", linkmode::Next::config_gesture);
+            rebootNow(nowMs, "HOME hold", linkmode::Next::none);
+        }
         const bool ota = otaInFlight();
         if (g_persistDue != 0 && !ota) persistDue();
         phase.mark("persistDue");
@@ -486,6 +542,16 @@ uint32_t deviceFreeHeapBytes() { return uint32_t(heap_caps_get_free_size(MALLOC_
 valence::Hub* hub() { return (g_box && g_box->hub) ? &*g_box->hub : nullptr; }
 
 selfcheck::LedgerBoot hubLedgerBoot() { return g_ledgerBoot; }
+
+linkmode::Next hubTakeNext() {
+    nvs_handle_t h;
+    if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) return linkmode::Next::none;
+    uint8_t v = 0;
+    const bool had = nvs_get_u8(h, kNvsNextKey, &v) == ESP_OK;
+    if (had && nvs_erase_key(h, kNvsNextKey) == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+    return v <= uint8_t(linkmode::Next::skip_auto) ? linkmode::Next(v) : linkmode::Next::none;
+}
 
 void hubSetLinkRssi(int8_t rssi) {
     if (g_box) g_box->device.setLinkRssi(rssi);

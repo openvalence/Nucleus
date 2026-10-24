@@ -144,7 +144,8 @@ TEST_CASE("the millisecond clock wraps without a phantom gesture") {
     CHECK(g == Gesture::press);
 }
 
-// ---- PAIR: press, double press, demote hold (Valence RFC-114 draft) ----------
+// ---- PAIR: press, double press, demote hold (Valence RFC-114 draft), config
+// hold (SPEC 13.4.1) ------------------------------------------------------------
 
 namespace {
 
@@ -161,7 +162,7 @@ struct PairRig {
         for (uint32_t end = t + ms; t < end; t += kPollMs) {
             const PairGesture g = b.sample(level, t);
             if (g == PairGesture::none) continue;
-            if (g == PairGesture::hold) downAtHold = b.down();
+            if (g == PairGesture::hold || g == PairGesture::config) downAtHold = b.down();
             seen.push_back(g);
             at.push_back(t);
         }
@@ -219,14 +220,35 @@ TEST_CASE("PAIR: a second press just outside the window is two single presses") 
     CHECK(r.seen[1] == PairGesture::press);
 }
 
-TEST_CASE("PAIR: a 5 s hold fires while held, and its release fires nothing") {
+TEST_CASE("PAIR: a 5 s hold fires on its release, nothing while held") {
     auto r = armed();
     r.hold(true, btn::kDemoteHoldMs + 100);
+    CHECK(r.seen.empty());
+    r.hold(false, btn::kDoublePressMs + 100);
     REQUIRE(r.seen.size() == 1);
     CHECK(r.seen[0] == PairGesture::hold);
+    CHECK_FALSE(r.downAtHold);
+}
+
+TEST_CASE("PAIR: a 10 s hold is the config gesture, fired while held; no demote, and its release fires nothing") {
+    auto r = armed();
+    r.hold(true, btn::kConfigHoldMs - 100);
+    CHECK(r.seen.empty());
+    r.hold(true, 200);
+    REQUIRE(r.seen.size() == 1);
+    CHECK(r.seen[0] == PairGesture::config);
     CHECK(r.downAtHold);
+    r.hold(true, 2000);
     r.hold(false, btn::kDoublePressMs + 100);
     CHECK(r.seen.size() == 1);
+}
+
+TEST_CASE("PAIR: a 9.9 s hold is only the demote") {
+    auto r = armed();
+    r.hold(true, btn::kConfigHoldMs - 100);
+    r.hold(false, btn::kDoublePressMs + 100);
+    REQUIRE(r.seen.size() == 1);
+    CHECK(r.seen[0] == PairGesture::hold);
 }
 
 TEST_CASE("PAIR: a 4.9 s press is only a single press") {
@@ -265,11 +287,11 @@ TEST_CASE("PAIR: held through power-on fires no hold") {
     CHECK(r.seen.empty());
 }
 
-TEST_CASE("PAIR: a jammed button fires its hold once, then stuck on release") {
+TEST_CASE("PAIR: a jammed button fires its config hold once, then stuck on release") {
     auto r = armed();
     r.hold(true, btn::kStuckMs + 100);
     r.hold(false, 100);
     REQUIRE(r.seen.size() == 2);
-    CHECK(r.seen[0] == PairGesture::hold);
+    CHECK(r.seen[0] == PairGesture::config);
     CHECK(r.seen[1] == PairGesture::stuck);
 }

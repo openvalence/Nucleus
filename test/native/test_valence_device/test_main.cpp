@@ -3749,3 +3749,28 @@ TEST_CASE("VD-PROV-CAT-2: a hub over the provisioning catalog serves a session t
     }
     CHECK(r->client->state() == ClientSessionState::LIVE);
 }
+
+// ---- the config-mode gesture (SPEC 13.4.1, device-defined) --------------------------
+
+TEST_CASE("VD-CONFIG-1: PAIR held 10 s with motion idle and motor power off reboots into config mode") {
+    auto rig = std::make_unique<Rig>();
+    g_census.motor_on = g_census.power_gate = false;
+    pair(*rig, button::PairGesture::config);
+    CHECK(rig->device.rebootDue());
+    CHECK(rig->device.rebootIntoConfig());
+}
+
+TEST_CASE("VD-CONFIG-2: the config hold is refused with motor power on or motion running, and reboots nothing") {
+    auto rig = std::make_unique<Rig>();
+    g_census.motor_on = g_census.power_gate = true;
+    pair(*rig, button::PairGesture::config);
+    CHECK_FALSE(rig->device.rebootDue());
+    CHECK(rig->device.pairLook() == PairLook::refused);
+
+    g_census.motor_on = g_census.power_gate = false;
+    g_census.busy = true;
+    pair(*rig, button::PairGesture::config);
+    CHECK_FALSE(rig->device.rebootDue());
+    CHECK_FALSE(rig->device.rebootIntoConfig());
+    g_census.busy = false;
+}

@@ -49,6 +49,10 @@ inline constexpr uint32_t kHubTaskStackBytes = 16384;
 // config mode.
 bool hubBegin(linkmode::Boot route, bool autoEntry);
 
+// What the previous boot asked of this one, read once and cleared. app_main,
+// after nvs_flash_init() and before the radios start.
+linkmode::Next hubTakeNext();
+
 // The station holds an address (true) or lost it (false). main.cpp's WiFi
 // event handler, on the event loop task; the hub task reads it (LinkMode.h).
 void hubSetStationUp(bool up);

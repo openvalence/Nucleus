@@ -2240,6 +2240,24 @@ void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
                   unsigned(d.sessions));
             return;
         }
+        case button::PairGesture::config: {
+            // SPEC 13.4.1: never while a motion source runs; motor power off
+            // is this device's own bar for a deliberate gesture.
+            const MotionCensus mo = motionCensus();
+            if (motionRuns(mo) || mo.motor_on) {
+                _pairFlash = PairLook::refused;
+                _pairFlashUntilMs = nowMs + kPairFlashMs;
+                GLOGW(kTag, "PAIR hold %lu s: config mode refused: %s",
+                      static_cast<unsigned long>(button::kConfigHoldMs / 1000),
+                      motionRuns(mo) ? "motion running" : "motor power on");
+                return;
+            }
+            _reboot = Reboot::due;
+            _rebootIntoConfig = true;
+            GLOGW(kTag, "PAIR hold %lu s: rebooting into config mode (SPEC 13.4.1)",
+                  static_cast<unsigned long>(button::kConfigHoldMs / 1000));
+            return;
+        }
         case button::PairGesture::extra:
             GLOGW(kTag, "PAIR: 3 or more presses: no gesture");
             return;

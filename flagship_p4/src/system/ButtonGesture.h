@@ -38,10 +38,15 @@ static_assert(kDebounceMs < kHoldMs && kHoldMs < kStuckMs, "gesture windows out 
 // PAIR (Valence RFC-114 draft; both move to the registry's limits at landing).
 // A next press beginning within this long of a release continues the sequence.
 inline constexpr uint32_t kDoublePressMs = 600;
-// A press this long demotes every client, fired while still held.
+// A press at least this long, released before kConfigHoldMs, demotes every
+// client.
 inline constexpr uint32_t kDemoteHoldMs = 5000;
+// A press this long is the config-mode gesture (SPEC 13.4.1, device-defined),
+// fired while still held.
+inline constexpr uint32_t kConfigHoldMs = 10000;
 
-static_assert(kDebounceMs < kDoublePressMs && kDemoteHoldMs < kStuckMs, "PAIR windows out of order");
+static_assert(kDebounceMs < kDoublePressMs && kDemoteHoldMs < kConfigHoldMs && kConfigHoldMs < kStuckMs,
+              "PAIR windows out of order");
 
 enum class Gesture : uint8_t { none, press, hold, stuck };
 
@@ -105,18 +110,19 @@ private:
     uint32_t _downAtMs = 0;
 };
 
-// ---- PAIR: press, double press, demote hold ----------------------------------
+// ---- PAIR: press, double press, demote hold, config hold ----------------------
 // Constraints:
 // - A sequence of presses, each beginning within kDoublePressMs of the last
 //   release (measured between debounced edges), resolves kDoublePressMs after
 //   its last release: one press is `press`, two `double_press`, three or more
 //   `extra`, which binds nothing. A single press waits that long to know.
-// - `hold` fires WHILE HELD, at kDemoteHoldMs, and cancels the sequence it
-//   ends: no press of it, before or after, also counts. Its release fires
-//   nothing (`stuck` past kStuckMs, for the log). Shorter is a press.
+// - `hold` fires ON RELEASE after kDemoteHoldMs and before kConfigHoldMs;
+//   `config` fires WHILE HELD at kConfigHoldMs, and its release fires nothing
+//   (`stuck` past kStuckMs, for the log). Either cancels the sequence it ends:
+//   no press of it, before or after, also counts. Shorter is a press.
 // - Inherits Button's arming: held through power-on fires nothing.
 
-enum class PairGesture : uint8_t { none, press, double_press, hold, extra, stuck };
+enum class PairGesture : uint8_t { none, press, double_press, hold, extra, stuck, config };
 
 constexpr const char* pairGestureName(PairGesture g) {
     switch (g) {
@@ -125,6 +131,7 @@ constexpr const char* pairGestureName(PairGesture g) {
         case PairGesture::hold:         return "hold";
         case PairGesture::extra:        return "3+ presses";
         case PairGesture::stuck:        return "stuck";
+        case PairGesture::config:       return "config hold";
         default:                        return "none";
     }
 }
@@ -134,15 +141,22 @@ public:
     PairGesture sample(bool rawPressed, uint32_t nowMs) {
         const Gesture g = _core.sample(rawPressed, nowMs);
         if (_core.down()) {
-            if (_held || _core.heldMs(nowMs) < kDemoteHoldMs) return PairGesture::none;
+            _downMs = _core.heldMs(nowMs);
+            if (_held || _downMs < kConfigHoldMs) return PairGesture::none;
             _held = true;
             _presses = 0;
-            return PairGesture::hold;
+            return PairGesture::config;
         }
         if (g != Gesture::none) {   // a counted release
+            const uint32_t downMs = _downMs;
+            _downMs = 0;
             if (_held) {
                 _held = false;
                 return g == Gesture::stuck ? PairGesture::stuck : PairGesture::none;
+            }
+            if (downMs >= kDemoteHoldMs) {
+                _presses = 0;
+                return PairGesture::hold;
             }
             if (_presses < 3) ++_presses;
             _upAtMs = nowMs;
@@ -159,6 +173,7 @@ public:
 private:
     Button _core;
     uint32_t _upAtMs = 0;
+    uint32_t _downMs = 0;   // the press under way, as long as the last sample saw it
     uint8_t _presses = 0;
     bool _held = false;
 };

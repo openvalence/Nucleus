@@ -119,13 +119,18 @@ static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
     }
 }
 
-// `joinSaved` false: the station joins only for a wifi_join (LinkMode.h).
-static bool wifi_up(bool joinSaved) {
+static bool nvs_up() {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase(); err = nvs_flash_init();
     }
-    if (err != ESP_OK) { printf("nvs_flash_init: %s\n", esp_err_to_name(err)); return false; }
+    if (err != ESP_OK) printf("nvs_flash_init: %s\n", esp_err_to_name(err));
+    return err == ESP_OK;
+}
+
+// `joinSaved` false: the station joins only for a wifi_join (LinkMode.h).
+static bool wifi_up(bool joinSaved) {
+    esp_err_t err;
     if ((err = esp_netif_init()) != ESP_OK)                  { printf("esp_netif_init: %s\n", esp_err_to_name(err)); return false; }
     if ((err = esp_event_loop_create_default()) != ESP_OK)   { printf("event loop: %s\n", esp_err_to_name(err)); return false; }
     esp_netif_create_default_wifi_sta();
@@ -332,12 +337,14 @@ extern "C" void app_main() {
     // reads the pad, which arms only on a release, so the hold fires no
     // gesture there.
     valence::linkmode::BootFacts boot{};
+    const bool nvs_ok = nvs_up();
+    boot.next = nvs_ok ? valence::hubTakeNext() : valence::linkmode::Next::none;
     boot.pairHeld = pairHeldAtBoot();
     if (boot.pairHeld) printf("\n*** CONFIG MODE: PAIR held at boot ***\n");
     const bool gesture = valence::linkmode::decideBoot(boot) == valence::linkmode::Boot::config_gesture;
 
     printf("\n--- network: esp_hosted over SDIO to the C6 ---\n");
-    const bool wifi_ok = wifi_up(!gesture);
+    const bool wifi_ok = nvs_ok && wifi_up(!gesture);
     if (!wifi_ok) printf("--- network FAILED to start ---\n");
     boot.haveCredentials = g_have_credentials;
     const valence::linkmode::Boot route = valence::linkmode::decideBoot(boot);
@@ -361,7 +368,7 @@ extern "C" void app_main() {
     // failure must never take the bench firmware down with it. It is now the
     // ONLY source of motion intents on this board.
     printf("\n--- Valence hub ---\n");
-    const bool hub_ok = valence::hubBegin(route, true);
+    const bool hub_ok = valence::hubBegin(route, boot.next != valence::linkmode::Next::skip_auto);
     if (!hub_ok) printf("--- Valence hub FAILED to start ---\n");
 
     // The operator surface rides the :80 instance the hub's /uitoken already
