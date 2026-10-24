@@ -310,17 +310,22 @@ constexpr std::string_view kSsid = "HomeNet-5G";
 constexpr std::string_view kPass = "correct horse battery";
 constexpr uint32_t kIp = 0xC0A80132;   // 192.168.1.50
 
-// One serial binding on the hub plus its client. Two of these share a hub in
-// the both-bindings case.
+// One credential binding on the hub plus its client: the serial binding, or
+// a stand-in for BLE GATT (the same link port and framing, not the cable).
+// Two of these share a hub in the both-bindings case.
 struct Link {
     Wire wire{};
     HubEnd hubEnd{wire};
-    ValenceSerialPort port{};
+    ValenceSerialPort serial{};
+    CobsFramePipe gattPipe{};
+    ValenceLinkPort gatt{};
+    bool cable = true;
     ClientLink clientEnd{wire};
     XorShift32 rng;
     Ears ears{};
     std::optional<Client> client{};
     explicit Link(uint32_t seed) : rng(seed) {}
+    ValenceLinkPort& port() { return cable ? static_cast<ValenceLinkPort&>(serial) : gatt; }
 };
 
 // Heap, not stack: the catalog and the hub are tens of KB each.
@@ -335,7 +340,9 @@ struct Rig {
     std::optional<Provisioning> desk{};
     std::vector<std::unique_ptr<Link>> links;
 
-    explicit Rig(bool declare = true, int bindings = 1) {
+    // `cable`: the first link is the serial binding; every later one is a
+    // BLE GATT stand-in.
+    explicit Rig(bool declare = true, int bindings = 1, bool cable = true) {
         REQUIRE(buildTestCatalog(catalog, declare));
         hub.emplace(catalog, g_clock, hubRng, del);
         netDesk.emplace(nets);
@@ -343,7 +350,13 @@ struct Rig {
         for (int i = 0; i < bindings; ++i) {
             links.push_back(std::make_unique<Link>(uint32_t(100 + i)));
             Link& l = *links.back();
-            l.port.begin(*hub, l.hubEnd, &*desk);
+            l.cable = cable && i == 0;
+            if (l.cable) {
+                l.serial.begin(*hub, l.hubEnd, &*desk);
+            } else {
+                l.gattPipe.begin(l.hubEnd);
+                l.gatt.begin(*hub, l.gattPipe, &*desk, "ble", false);
+            }
             l.client.emplace(clientId(uint8_t(7 + i)), l.clientEnd, g_clock, l.rng, l.ears);
         }
     }
@@ -355,7 +368,7 @@ struct Rig {
         for (int r = 0; r < rounds; ++r) {
             g_clock.advanceUs(5000);
             const uint32_t ms = g_clock.nowUs() / 1000;
-            for (auto& l : links) l->port.loop(ms);
+            for (auto& l : links) l->port().loop(ms);
             hub->update(g_clock.nowUs());
             desk->tick();
             netDesk->tick(ms, false);
@@ -476,12 +489,12 @@ TEST_CASE("framing: a raw ESTOP inside junk is still found (SPEC 13.5)") {
 TEST_CASE("port: a session runs over the link and shrugs off console text") {
     auto rig = std::make_unique<Rig>();
     rig->live();
-    CHECK(rig->at().port.attached());
-    CHECK(rig->at().port.sessionId() == rig->client().sessionId());
+    CHECK(rig->at().port().attached());
+    CHECK(rig->at().port().sessionId() == rig->client().sessionId());
     for (auto x : bytesOf("I (99) boot: the console shares this pipe\r\n")) rig->at().wire.toClient.push_back(x);
     rig->step(40);
     CHECK(rig->client().state() == ClientSessionState::LIVE);
-    CHECK(rig->at().port.junkChunks() == 0);   // the hub never sees the client's console
+    CHECK(rig->at().serial.junkChunks() == 0);   // the hub never sees the client's console
 }
 
 TEST_CASE("port: two sessions back to back without a reboot (T3)") {
@@ -495,17 +508,17 @@ TEST_CASE("port: two sessions back to back without a reboot (T3)") {
     l.client.emplace(clientId(9), l.clientEnd, g_clock, l.rng, l.ears);
     rig->live();
     CHECK(rig->client().sessionId() != first);
-    CHECK(l.port.sessionId() == rig->client().sessionId());
+    CHECK(l.port().sessionId() == rig->client().sessionId());
 }
 
 TEST_CASE("port: a silent link is reaped, and the next frame attaches it again") {
     auto rig = std::make_unique<Rig>();
     rig->live();
     rig->step(int(ValenceSerialPort::kIdleReapMs / 5) + 20, /*clientsRun=*/false);
-    CHECK_FALSE(rig->at().port.attached());
-    CHECK(rig->at().port.sessionId() == 0);
+    CHECK_FALSE(rig->at().port().attached());
+    CHECK(rig->at().port().sessionId() == 0);
     rig->step(20);
-    CHECK(rig->at().port.attached());
+    CHECK(rig->at().port().attached());
 }
 
 TEST_CASE("port: an ESTOP latches even when every hub slot is taken (SPEC 6.3)") {
@@ -522,7 +535,7 @@ TEST_CASE("port: an ESTOP latches even when every hub slot is taken (SPEC 6.3)")
     encodeEstop(EstopFrame{1, 0, 1}, estop);
     for (auto x : serialOf(estop)) rig->at().wire.toHub.push_back(x);
     rig->step(2, /*clientsRun=*/false);
-    CHECK_FALSE(rig->at().port.attached());
+    CHECK_FALSE(rig->at().port().attached());
     CHECK(rig->del.estops == 1);
 }
 
@@ -573,8 +586,8 @@ TEST_CASE("desk: a session that has not declared its catalog is refused NOT_READ
     auto rig = std::make_unique<Rig>();
     REQUIRE(rig->client().connect());
     // WELCOME lands; the catalog transfer and CATALOG_READY have not.
-    for (int i = 0; i < 40 && rig->at().port.sessionId() == 0; ++i) rig->step(1, true);
-    REQUIRE(rig->at().port.sessionId() != 0);
+    for (int i = 0; i < 40 && rig->at().port().sessionId() == 0; ++i) rig->step(1, true);
+    REQUIRE(rig->at().port().sessionId() != 0);
     rig->at().clientEnd.write(rawJoin(40, kSsid, kPass));
     rig->step(2, /*clientsRun=*/false);
     rig->step(1);
@@ -583,8 +596,8 @@ TEST_CASE("desk: a session that has not declared its catalog is refused NOT_READ
     CHECK(rig->station.joins == 0);
 }
 
-TEST_CASE("desk: a watch session is refused ACCESS_DENIED") {
-    auto rig = std::make_unique<Rig>();
+TEST_CASE("desk: over BLE GATT a watch session is refused ACCESS_DENIED") {
+    auto rig = std::make_unique<Rig>(true, 1, /*cable=*/false);
     rig->live();
     rig->hub->openPresenceWindow();
     REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
@@ -594,10 +607,10 @@ TEST_CASE("desk: a watch session is refused ACCESS_DENIED") {
     CHECK(rig->station.joins == 0);
 }
 
-TEST_CASE("desk: the knock that granted configure closed the window, so the join waits for PAIR") {
+TEST_CASE("desk: over BLE GATT the knock that granted configure closed the window, so the join waits for PAIR") {
     // SPEC 13.9's gate read literally: no window open, and a configure token
     // now exists. A second PAIR press is what lets this session provision.
-    auto rig = std::make_unique<Rig>();
+    auto rig = std::make_unique<Rig>(true, 1, /*cable=*/false);
     rig->live();
     rig->configure();
     REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
@@ -753,8 +766,8 @@ TEST_CASE("desk: a store that cannot write yet holds the list in RAM and persist
     CHECK(rig->nets.persists == 1);
 }
 
-TEST_CASE("desk: on a credential binding the list ops answer at once; the live entry goes only with a window open") {
-    auto rig = std::make_unique<Rig>();
+TEST_CASE("desk: over BLE GATT the list ops answer at once; the live entry goes only with a window open") {
+    auto rig = std::make_unique<Rig>(true, 1, /*cable=*/false);
     rig->live();
     rig->configure();
     IntentValueMap save = wifiJoin("Second", "second passphrase", net::draft::op_net_save);
@@ -840,4 +853,109 @@ TEST_CASE("desk: a station that cannot start a join answers station down") {
     CHECK(rig->at().ears.nacks[0].code == NackCode::NETWORK_JOIN_FAILED);
     CHECK(rig->at().ears.nacks[0].detail == "station down");
     CHECK_FALSE(rig->desk->busy());
+}
+
+// ---- RFC-121: the cable, motion, config mode's live answer --------------------------
+
+namespace {
+// A claimed hub: one configure owner in the ledger, so no factory-fresh term.
+void claim(Rig& rig) {
+    std::array<std::byte, limits::instance_id_bytes> inst{};
+    inst[0] = std::byte{0x5A};
+    XorShift32 rng(77);
+    std::array<std::byte, limits::token_bytes> tok{};
+    REQUIRE(rig.hub->pairing().grant(inst, AccessLevel::configure, pairing_modes::push_to_pair, rng, tok) != nullptr);
+    REQUIRE(rig.hub->pairing().claimed());
+}
+}  // namespace
+
+TEST_CASE("cable: a watch session on a claimed hub joins with no window (SPEC 12.2, 13.9)") {
+    auto rig = std::make_unique<Rig>();
+    claim(*rig);
+    rig->live();
+    REQUIRE_FALSE(rig->hub->pairingWindowOpen());
+    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    CHECK(rig->at().ears.nacks.empty());
+    CHECK(rig->station.joins == 1);
+    rig->finish({true, kIp, JoinFailure::timeout});
+    CHECK(rig->at().ears.echoes.size() == 1);
+}
+
+TEST_CASE("cable: the live entry may be removed with no window; over BLE GATT it may not") {
+    for (const bool cable : {true, false}) {
+        auto rig = std::make_unique<Rig>(true, 1, cable);
+        claim(*rig);
+        rig->live();
+        rig->hub->openPresenceWindow();
+        rig->hub->setPresenceDefaultRole(AccessLevel::configure);
+        REQUIRE(rig->client().sendPairKnock());
+        rig->step();
+        REQUIRE(rig->at().ears.granted == AccessLevel::configure);   // the window closed with the grant
+        REQUIRE(rig->client().sendIntent(channels::provisioning,
+                                         wifiJoin("Second", "second passphrase", net::draft::op_net_save)));
+        rig->step();
+        REQUIRE(rig->netDesk->list().count() == 1);
+        rig->nets.live = rig->netDesk->list().id(0);
+        IntentValueMap remove{};
+        remove.count = 2;
+        remove.fields[0] = {1, IntentValue::ofU64(net::draft::op_net_remove)};
+        remove.fields[1] = {6, IntentValue::ofU64(0)};
+        REQUIRE(rig->client().sendIntent(channels::provisioning, remove));
+        rig->step();
+        CHECK(rig->netDesk->list().count() == (cable ? 0u : 1u));
+    }
+}
+
+TEST_CASE("desk: no wifi_join while a motion source runs: SOURCE_CONFLICT; the list ops still answer") {
+    auto rig = std::make_unique<Rig>();
+    rig->live();
+    rig->desk->setMotionRuns(true);
+    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    REQUIRE(rig->at().ears.nacks.size() == 1);
+    CHECK(rig->at().ears.nacks[0].code == NackCode::SOURCE_CONFLICT);
+    CHECK(rig->station.joins == 0);
+    REQUIRE(rig->client().sendIntent(channels::provisioning,
+                                     wifiJoin("Second", "second passphrase", net::draft::op_net_save)));
+    rig->step();
+    CHECK(rig->at().ears.echoes.size() == 1);
+
+    rig->desk->setMotionRuns(false);
+    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    CHECK(rig->station.joins == 1);
+}
+
+TEST_CASE("config mode: the join is answered live with reboot_in_ms, and the reboot is due once") {
+    auto rig = std::make_unique<Rig>();
+    rig->live();
+    rig->desk->setCommitReboot(1500);
+    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    CHECK_FALSE(rig->desk->takeCommitReboot().has_value());   // not before the answer
+    rig->finish({true, kIp, JoinFailure::timeout});
+    REQUIRE(rig->at().ears.echoes.size() == 1);
+    const IntentValueMap& a = rig->at().ears.echoes[0].second;
+    REQUIRE(a.count == 7);
+    CHECK(a.fields[6].key == uint8_t(CborKey::reboot_in_ms));
+    CHECK(a.fields[6].value.u64_val == 1500);
+    CHECK(rig->desk->takeCommitReboot() == std::optional<uint32_t>(1500));
+    CHECK_FALSE(rig->desk->takeCommitReboot().has_value());
+}
+
+TEST_CASE("config mode: a failed join answers NACK and reboots nothing; the session continues") {
+    auto rig = std::make_unique<Rig>();
+    rig->live();
+    rig->desk->setCommitReboot(1500);
+    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    rig->finish({false, 0, JoinFailure::not_found});
+    REQUIRE(rig->at().ears.nacks.size() == 1);
+    CHECK(rig->at().ears.nacks[0].code == NackCode::NETWORK_JOIN_FAILED);
+    CHECK_FALSE(rig->desk->takeCommitReboot().has_value());
+    CHECK(rig->client().state() == ClientSessionState::LIVE);
+    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, "another passphrase")));
+    rig->step();
+    CHECK(rig->station.joins == 2);
 }

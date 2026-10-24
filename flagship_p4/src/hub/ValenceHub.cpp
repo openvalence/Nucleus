@@ -235,7 +235,9 @@ std::atomic<bool> g_stationUp{false};
 std::atomic<uint8_t> g_netLook{uint8_t(linkmode::NetLook::joining)};
 // hubBegin()'s word, then hub task only: the WS listener runs.
 bool g_wsUp = false;
-// Config mode's commit reboot (SPEC 13.4.1 MAY): due at this hub-ms, 0 = none.
+// Config mode's commit reboot after a join's ECHO (SPEC 13.4.1, 13.9): due at
+// this hub-ms, 0 = none. The delay lets the ECHO leave first.
+constexpr uint32_t kCommitRebootMs = 1500;
 uint32_t g_configRebootAtMs = 0;
 TaskHandle_t g_hubTask = nullptr;
 uint32_t g_ticks = 0;
@@ -318,8 +320,8 @@ uint64_t loadOrMintInstanceId() {
 
 // SPEC 13.1, 13.4, 13.4.1: the advertisement (GATT in config mode only), the
 // presence term of the provisioning gate, the network look and config mode's
-// commit reboot. Hub task.
-void serviceLinkMode(uint32_t nowMs) {
+// commit reboot, never while a motion source runs. Hub task.
+void serviceLinkMode(uint32_t nowMs, bool motion) {
     linkmode::Policy& m = g_box->mode;
     const bool up = g_stationUp.load(std::memory_order_acquire);
     m.tick(up && g_wsUp && g_endpointIpv4 != 0, nowMs);
@@ -330,16 +332,15 @@ void serviceLinkMode(uint32_t nowMs) {
                             kWsPort);
     }
     g_netLook.store(uint8_t(m.look()), std::memory_order_relaxed);
-    // A join in config mode is the only way the station gets an address; once
-    // it persisted, leave the mode by rebooting into it (SPEC 13.4.1 MAY). The
-    // delay lets the ECHO leave first.
-    if (!m.configMode() || !up || g_box->desk->busy()) return;
-    if (g_configRebootAtMs == 0) {
-        g_configRebootAtMs = nowMs + 1500;
-        GLOGW(kTag, "config mode: joined and saved, rebooting into normal mode");
-    } else if (int32_t(nowMs - g_configRebootAtMs) >= 0) {
-        rebootNow(nowMs, "leaving config mode");
+    // A join answered live in config mode commits by rebooting once its ECHO
+    // left; a failed one answered NACK and reboots nothing (SPEC 13.9).
+    if (const std::optional<uint32_t> in = g_box->desk->takeCommitReboot()) {
+        g_configRebootAtMs = nowMs + std::max<uint32_t>(*in, 1);
+        GLOGW(kTag, "config mode: joined and saved, rebooting into normal mode in %lu ms",
+              static_cast<unsigned long>(*in));
     }
+    if (g_configRebootAtMs != 0 && int32_t(nowMs - g_configRebootAtMs) >= 0 && !motion)
+        rebootNow(nowMs, "leaving config mode");
 }
 
 // ---- tick phase watchdog -----------------------------------------------------
@@ -395,6 +396,9 @@ void hubTask(void*) {
 
         // Port first: it performs the deferred attach/detach and re-arms the
         // per-tick BLOB pacing budget that update() is about to spend.
+        // Read once: the desk's join gate and the saved list's scan gate.
+        const bool motion = motionRuns(motionCensus());
+        g_box->desk->setMotionRuns(motion);
         g_box->port.loop(nowMs);
         phase.mark("ws.loop");
         g_box->serial.loop(nowMs);
@@ -406,7 +410,7 @@ void hubTask(void*) {
         phase.mark("hub.update");
         // After update(): a join that finished answers on this same tick.
         g_box->desk->tick();
-        g_box->nets->tick(nowMs, motionRuns(motionCensus()));
+        g_box->nets->tick(nowMs, motion);
         phase.mark("desk.tick");
 
         // The device half: deferred latch clear, the motion plane's STATE, the
@@ -437,7 +441,7 @@ void hubTask(void*) {
             refreshEndpoint();
         }
         phase.mark("refreshEndpoint");
-        serviceLinkMode(nowMs);
+        serviceLinkMode(nowMs, motion);
         phase.mark("linkMode");
         // Here and nowhere else: a reply reads the hub's etag and window (T5).
         g_box->discovery.poll(*g_box->hub, nowMs);
@@ -640,9 +644,10 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
     g_box->device.bindNetworks(&*g_box->nets);
     g_box->desk.emplace(*g_box->hub, g_box->catalog.find(channels::provisioning), provisioningStation(),
                         *g_box->nets, kWsPort);
+    if (linkmode::isConfig(route)) g_box->desk->setCommitReboot(kCommitRebootMs);
     if (ISerialPipe* usb = usbSerialPipeBegin()) g_box->serial.begin(*g_box->hub, *usb, &*g_box->desk);
     g_blePipe = &ble::pipe();
-    g_box->blePort.begin(*g_box->hub, *g_blePipe, &*g_box->desk, "ble");
+    g_box->blePort.begin(*g_box->hub, *g_blePipe, &*g_box->desk, "ble", false);
     g_box->mode.boot(route, autoEntry, uint32_t(esp_timer_get_time() / 1000));
     GLOGW(kTag, "route: %s", linkmode::bootName(route));
 

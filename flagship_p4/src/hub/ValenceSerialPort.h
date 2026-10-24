@@ -209,7 +209,7 @@ public:
     // `desk` may be nullptr: then wifi_join reaches the hub like any intent.
     void begin(Hub& hub, ISerialPipe& pipe, Provisioning* desk) {
         _cobs.begin(pipe);
-        ValenceLinkPort::begin(hub, _cobs, desk, detail::kSerialTag);
+        ValenceLinkPort::begin(hub, _cobs, desk, detail::kSerialTag, true);
     }
     uint32_t junkChunks() const { return _cobs.junkChunks(); }
 
