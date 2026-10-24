@@ -50,6 +50,8 @@
 #include "valence/hub/hub.hpp"
 #include "valence/transport/inprocess_binding.hpp"
 #include "valence/util/byte_io.hpp"
+#include "valence/wire/catalog_codec.hpp"
+#include "valence/wire/catalog_etag.hpp"
 #include "valence/wire/estop_frame.hpp"
 
 #include "../../../flagship_p4/src/hub/ValenceDevice.cpp"
@@ -342,9 +344,10 @@ struct Rig {
         nets->attach(*hub);
         device.bindNetworks(&*nets);
         link.emplace(g_clock, hubRng);
-        // A 13th wish takes WELCOME past the link's default 250 B, and a 15th
-        // the HELLO; a WS frame has room for both.
-        if (motionHz > 0.0f || hubStatus || networks) link->profileA().mtu = link->profileB().mtu = 1024;
+        // A 13th wish takes WELCOME past the link's default 250 B (the
+        // library client adds 0x0001's to the 12 below), and a 15th the HELLO;
+        // a WS frame has room for both.
+        link->profileA().mtu = link->profileB().mtu = 1024;
         REQUIRE(hub->attachTransport(link->endpointA()));
         ClientIdentity id;
         id.instance_id.fill(std::byte{0});
@@ -3664,4 +3667,85 @@ TEST_CASE("VD-TIER-4: a control session asks configure, a PAIR double press gran
     CHECK_FALSE(a.nack.has_value());
     CHECK(a.echoed);
     CHECK(rig->device.config().jog_speed == doctest::Approx(60.0f));
+}
+
+// ---- the provisioning catalog (SPEC 13.4.1, RFC-121) ---------------------------------
+
+TEST_CASE("VD-PROV-CAT: config mode's catalog is exactly the members, byte for byte the full catalog's, with its own etag") {
+    auto full = std::make_unique<Catalog32>();
+    auto prov = std::make_unique<Catalog32>();
+    REQUIRE(buildValenceCatalog(*full, boardFeatures()));
+    REQUIRE(full->count > 0);
+    CHECK(full->entries[0].id == channels::catalog);   // declared, first by id
+    REQUIRE(buildProvisioningCatalog(*prov, *full));
+
+    const std::vector<uint16_t> want = {channels::catalog,          channels::safety,
+                                        channels::safety_intents,   channels::safety_events,
+                                        channels::provisioning,     net::draft::ch_networks,
+                                        net::draft::ch_network_names, net::draft::ch_visible_networks,
+                                        net::draft::ch_visible_networks_more};
+    REQUIRE(prov->count == want.size());
+    std::vector<std::byte> a(limits::catalog_max_entry_bytes), b(limits::catalog_max_entry_bytes);
+    for (size_t i = 0; i < want.size(); ++i) {
+        CAPTURE(want[i]);
+        const CatalogEntry& p = prov->entries[i];
+        CHECK(p.id == want[i]);
+        const CatalogEntry* f = full->find(p.id);
+        REQUIRE(f != nullptr);
+        CborWriter wf(a), wp(b);
+        detail::encodeEntry(wf, *full, *f);
+        detail::encodeEntry(wp, *prov, p);
+        REQUIRE(wf.size() != 0);
+        CHECK(wp.size() == wf.size());
+        CHECK(std::equal(a.begin(), a.begin() + wf.size(), b.begin()));
+    }
+    // No motion source, so no client starts motion in config mode.
+    for (uint16_t i = 0; i < prov->count; ++i) CHECK(prov->entries[i].cls != ChannelClass::STREAM);
+
+    std::vector<std::byte> scratch(Hub::catalogScratchCapacity());
+    const auto fullTag = catalogEtag(*full, scratch);
+    const auto provTag = catalogEtag(*prov, scratch);
+    CHECK(fullTag != provTag);
+    const size_t provBytes = encodeCatalog(*prov, scratch);
+    CHECK(provBytes > 0);
+    CHECK(provBytes < 4500);   // SPEC 13.4.1: about 2.8 KB, a short BLE download
+    MESSAGE("provisioning catalog: " << provBytes << " B");
+}
+
+// Heap, not stack: the hub and the client are hundreds of KB together.
+struct ProvRig {
+    Catalog32 full{};
+    Catalog32 prov{};
+    XorShift32 hubRng{17};
+    ValenceDevice device{};
+    std::optional<Hub> hub{};
+    std::optional<InProcessLink> link{};
+    XorShift32 clientRng{18};
+    RecordingClient del{};
+    std::optional<Client> client{};
+};
+
+TEST_CASE("VD-PROV-CAT-2: a hub over the provisioning catalog serves a session that downloads and adopts it") {
+    auto r = std::make_unique<ProvRig>();
+    REQUIRE(buildValenceCatalog(r->full, boardFeatures()));
+    REQUIRE(buildProvisioningCatalog(r->prov, r->full));
+    r->hub.emplace(r->prov, g_clock, r->hubRng, r->device);
+    r->device.attach(*r->hub, r->prov);
+    CHECK(r->hub->catalogEncodedBytes() > 0);
+    r->link.emplace(g_clock, r->hubRng);
+    REQUIRE(r->hub->attachTransport(r->link->endpointA()));
+    ClientIdentity id;
+    id.instance_id.fill(std::byte{0x33});
+    id.hasToken = false;
+    id.client_kind = "native-test";
+    id.client_name = "prov";
+    r->client.emplace(id, r->link->endpointB(), g_clock, r->clientRng, r->del);
+    REQUIRE(r->client->connect());
+    for (int i = 0; i < 2000 && r->client->state() != ClientSessionState::LIVE; ++i) {
+        g_clock.advanceUs(5000);
+        r->hub->update(g_clock.nowUs());
+        r->device.tick(uint32_t(g_clock.nowUs() / 1000));
+        r->client->update(g_clock.nowUs());
+    }
+    CHECK(r->client->state() == ClientSessionState::LIVE);
 }

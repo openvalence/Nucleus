@@ -47,6 +47,7 @@
 #include <utility>
 
 #include "valence/channel/catalog.hpp"
+#include "valence/channel/catalog_channel.hpp"
 #include "valence/channel/log_channel.hpp"
 #include "valence/channel/safety_events_channel.hpp"
 #include "valence/channel/settings_trial_channel.hpp"
@@ -393,6 +394,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     namespace roles = valence::field_roles;
 
     c.clear();
+
+    // ---- "catalog" -- STATE, watch, on-change (RFC-077, RFC-097) -------------
+    // The library's own builder, first by id. The provisioning catalog serves
+    // it too (SPEC 13.4.1).  [12 B]
+    if (!valence::addCatalogChannel(c)) return false;
 
     // ---- "safety" — STATE, critical, on-change ------------------------------
     // VERBATIM copy of conformance/mini_catalog.hpp's safety entry: the hub's
@@ -2658,6 +2664,26 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     if (feat.has_pattern) addPatternPresets();  // 0x5220 STORE·pattern, family 2 member 0
 
     return c.ok();
+}
+
+// SPEC §13.4.1 (RFC-121): the provisioning catalog's members. The optional
+// ones (0x0017-0x001A) are members iff the full catalog declares them.
+constexpr bool isProvisioningEntry(uint16_t id) {
+    return id == valence::channels::catalog || id == valence::channels::safety ||
+           id == valence::channels::safety_intents || id == valence::channels::safety_events ||
+           id == valence::channels::provisioning ||
+           (id >= valence::net::draft::ch_networks && id <= valence::net::draft::ch_visible_networks_more);
+}
+
+// Fills `out` with the provisioning catalog config mode serves: `full`'s
+// members in its order, each copied whole (Catalog32::addEntryFrom), so every
+// entry is byte-identical to the full catalog's and only membership, and so
+// the etag, differs. OUT-PARAM for the same reason as buildValenceCatalog().
+inline bool buildProvisioningCatalog(valence::Catalog32& out, const valence::Catalog32& full) {
+    out.clear();
+    for (uint16_t i = 0; i < full.count; ++i)
+        if (isProvisioningEntry(full.entries[i].id) && !out.addEntryFrom(full, full.entries[i])) return false;
+    return out.ok();
 }
 
 }  // namespace valence

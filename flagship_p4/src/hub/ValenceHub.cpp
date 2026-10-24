@@ -343,6 +343,21 @@ void serviceLinkMode(uint32_t nowMs, bool motion) {
         rebootNow(nowMs, "leaving config mode");
 }
 
+// This boot's catalog (SPEC 8.6: fixed per boot). Config mode serves the
+// provisioning catalog (SPEC 13.4.1), copied out of a full one built in PSRAM
+// for the copy and freed after it: the copy's labels are the builder's
+// literals, never the scratch's.
+bool buildBootCatalog(Catalog32& out, bool provisioning) {
+    if (!provisioning) return buildValenceCatalog(out, boardFeatures());
+    void* mem = heap_caps_malloc(sizeof(Catalog32), MALLOC_CAP_SPIRAM);
+    if (mem == nullptr) return false;
+    auto* full = new (mem) Catalog32();
+    const bool ok = buildValenceCatalog(*full, boardFeatures()) && buildProvisioningCatalog(out, *full);
+    full->~Catalog32();
+    heap_caps_free(mem);
+    return ok;
+}
+
 // ---- tick phase watchdog -----------------------------------------------------
 // Names what made a hub tick late: every session waits on this one task, so a
 // tick over kSlowTickUs is a stall for all of them (bd val-ni0).
@@ -518,7 +533,7 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
     g_box->minter.begin();
     g_box->device.bindTokenGate(&g_box->minter);
 
-    if (!buildValenceCatalog(g_box->catalog, boardFeatures())) {
+    if (!buildBootCatalog(g_box->catalog, linkmode::isConfig(route))) {
         GLOGE(kTag, "catalog build overflowed a Catalog32 pool");
         geiger::drainToSinks();
         return false;
