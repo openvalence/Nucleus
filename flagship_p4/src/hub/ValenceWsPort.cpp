@@ -242,6 +242,7 @@ valence::TransportProperties ValenceWsTransport::properties() const {
     p.ordered = true;    // TCP
     p.reliable = true;
     p.congestion = valence::CongestionSignal::QueueWatermark;
+    p.binding = valence::BindingKind::websocket;
     return p;
 }
 

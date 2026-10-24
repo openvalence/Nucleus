@@ -26,7 +26,7 @@
 //   scan_min_interval_ms, asks inside the interval coalescing into one, and
 //   the station keeps the link within scan_offchannel_max_ms of its home
 //   channel at a time;
-//   not joined (config mode, the offline BLE fallback between attempts): no
+//   not joined (config mode, a station between attempts): no
 //   link to protect, so a scan asked runs at once, and while a configure
 //   session is present the desk rescans every scan_offline_period_ms.
 // - A CONFIGURE SESSION IS PRESENT when one is ready at configure on any

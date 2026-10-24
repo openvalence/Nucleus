@@ -630,3 +630,29 @@ TEST_CASE("preset item: the digest rides every item and a flipped payload byte f
     std::array<std::byte, 64> tiny{};
     CHECK(st.encodeItem(4, "pattern.frayd", tiny) == 0);
 }
+
+TEST_CASE("config blob: v10 carries radios; a v9 blob migrates to on") {
+    std::array<std::byte, stored::kConfigBlobBytes> b{};
+    valence::StoredModes m;
+    m.radios = false;
+    REQUIRE(stored::encodeConfig(b, sampleConfig(), sampleTuning(), m, 12) == b.size());
+    StoredConfig c;
+    MotionTuning t;
+    valence::StoredModes got;
+    uint16_t gen = 0;
+    REQUIRE(stored::decodeConfig(b, kFactory, c, t, got, gen));
+    CHECK_FALSE(got.radios);
+    CHECK(got.datagram_estop);
+
+    std::array<std::byte, stored::kConfigV9Bytes> v9{};
+    std::memcpy(v9.data(), b.data(), v9.size());
+    v9[4] = std::byte{9};
+    REQUIRE(stored::decodeConfig(v9, kFactory, c, t, got, gen));
+    CHECK(got.radios);
+
+    // A bool: anything but 0 or 1 is rejected whole.
+    b[stored::kConfigV9Bytes] = std::byte{2};
+    const auto r = stored::decodeConfig(b, kFactory, c, t, got, gen);
+    REQUIRE_FALSE(r);
+    CHECK(r.error() == Reject::BadModes);
+}

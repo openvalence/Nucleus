@@ -19,7 +19,9 @@
 //   next update().
 // - wifi_join (0x000F) frames go to the provisioning desk, never the hub
 //   (ValenceProvisioning.h); every other frame passes through untouched. Only
-//   a binding that may carry credentials (SPEC §13.9) is built on this port.
+//   a binding that may carry credentials (SPEC §13.9) is built on this port,
+//   and `cable` says whether it is the serial binding (the desk's window term,
+//   ValenceProvisioning.h); the hub tiers it configure by its binding.
 // See: Valence SPEC.md §5.5, §6.3, §13.1, §13.4, §13.5, §13.9; transport.md T3, T5
 
 #include <array>
@@ -81,11 +83,12 @@ public:
 
     // `desk` may be nullptr: then wifi_join reaches the hub like any intent.
     // `tag` is a string literal naming the binding in the log.
-    void begin(Hub& hub, IFramePipe& pipe, Provisioning* desk, const char* tag) {
+    void begin(Hub& hub, IFramePipe& pipe, Provisioning* desk, const char* tag, bool cable) {
         _hub = &hub;
         _pipe = &pipe;
         _desk = desk;
         _tag = tag;
+        _cable = cable;
     }
 
     // Hub task, before Hub::update(): the deferred detach, the pipe's frames,
@@ -127,6 +130,7 @@ private:
     IFramePipe* _pipe = nullptr;
     Provisioning* _desk = nullptr;
     const char* _tag = "link";
+    bool _cable = false;
 
     std::array<FrameBuffer, kRxDepth> _rx{};
     uint8_t _rxHead = 0;
@@ -239,7 +243,7 @@ inline std::optional<FrameBuffer> ValenceLinkPort::read() {
         FrameBuffer& slot = _rx[_rxHead];
         _rxHead = uint8_t((_rxHead + 1) % kRxDepth);
         --_rxCount;
-        if (_desk != nullptr && _desk->offer(slot.bytes(), *this, _sessionId, _nowMs)) {
+        if (_desk != nullptr && _desk->offer(slot.bytes(), *this, _sessionId, _nowMs, _cable)) {
             // A wifi_join carries the passphrase: the slot does not keep it.
             std::memset(slot.writable().data(), 0, kFrameBufferCapacity);
             slot.setSize(0);

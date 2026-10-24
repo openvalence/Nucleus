@@ -69,13 +69,16 @@ static_assert([] {
 #error "catalog capacity flags missing: apply flagship_p4/valence_capacity.cmake to this build"
 #endif
 
+// RFC-121 (SPEC 8.1, 8.10): never room past catalog_max_entries or
+// catalog_max_bytes, whatever this build's pools and scratch could hold.
 CatalogHeadroom catalogHeadroom(const Catalog32& c, size_t encodedBytes) {
     CatalogHeadroom h;
-    h.entries = uint16_t(Catalog32::kEntryCapacity - c.count);
+    const size_t maxEntries = std::min<size_t>(Catalog32::kEntryCapacity, limits::catalog_max_entries);
+    h.entries = uint16_t(maxEntries - std::min<size_t>(c.count, maxEntries));
     h.layout  = uint16_t(Catalog32::kLayoutCapacity - c.layoutUsed);
     h.schema  = uint16_t(Catalog32::kSchemaCapacity - c.schemaUsed);
     h.safe    = uint16_t(Catalog32::kSafeCapacity - c.safeUsed);
-    const size_t floor = Hub::catalogScratchCapacity() * 4 / 5;
+    const size_t floor = std::min<size_t>(Hub::catalogScratchCapacity() * 4 / 5, limits::catalog_max_bytes);
     h.bytes = encodedBytes < floor ? uint32_t(floor - encodedBytes) : 0;
     const size_t fit = std::min({size_t(h.entries) / NUCLEUS_ACCESSORY_ENTRIES,
                                  size_t(h.layout) / NUCLEUS_ACCESSORY_LAYOUT_FIELDS,
@@ -476,13 +479,13 @@ void publishPower(Hub& hub, const PowerNow& p) {
     publishPacked(hub, ch::power, buf, n);
 }
 
-// Layout per ValenceCatalog.h's machine-modes entry: 13 B, plus home_style
+// Layout per ValenceCatalog.h's machine-modes entry: 14 B, plus home_style
 // only where has_drive put it in the catalog.
 void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, bool horizonOpen,
                          bool flipOpen) {
-    std::array<std::byte, 14> buf{};
+    std::array<std::byte, 15> buf{};
     const bool drive = boardFeatures().has_drive;
-    const size_t len = drive ? 14 : 13;
+    const size_t len = drive ? 15 : 14;
     size_t n = 0;
     packU8(buf, n, 0);   // blend_mode_reserved
     packU8(buf, n, 0);   // stream_speed_reserved
@@ -491,12 +494,14 @@ void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, 
     // its styles runs here. schedule_horizon drops while a segments grant is
     // live (applyModes()). flipped drops whenever applyModes() would refuse it
     // (flipOpen()). home_speed is accepted at all times; a cycle reads it at
-    // its start. datagram_estop is accepted at all times.
+    // its start. datagram_estop and radios are accepted at all times.
     const uint8_t horizonBit = drive ? 0x02 : 0x01;
     const uint8_t flipBit = uint8_t(horizonBit << 1);
     const uint8_t homeSpeedBit = uint8_t(flipBit << 1);
     const uint8_t datagramBit = uint8_t(homeSpeedBit << 1);
-    packU8(buf, n, uint8_t((horizonOpen ? horizonBit : 0) | (flipOpen ? flipBit : 0) | homeSpeedBit | datagramBit));
+    const uint8_t radiosBit = uint8_t(datagramBit << 1);
+    packU8(buf, n, uint8_t((horizonOpen ? horizonBit : 0) | (flipOpen ? flipBit : 0) | homeSpeedBit | datagramBit |
+                           radiosBit));
     packU8(buf, n, 2);   // motion_backend, read-only: quadrature, the LP-core emitter
     if (drive) packU8(buf, n, 0);   // home_style
     packU8(buf, n, m.horizon);      // schedule_horizon
@@ -504,6 +509,7 @@ void publishMachineModes(Hub& hub, const MotionTuning& t, const StoredModes& m, 
     packU8(buf, n, uint8_t(hub.trialMask(ch::machine_modes)));   // trial_mask (RFC-099)
     packF32(buf, n, t.home_speed);   // home_speed
     packU8(buf, n, m.datagram_estop ? 1 : 0);   // datagram_estop
+    packU8(buf, n, m.radios ? 1 : 0);           // radios
     publishPacked(hub, ch::machine_modes, std::span<const std::byte>(buf).first(len), n);
 }
 
@@ -755,6 +761,16 @@ void ValenceDevice::adoptMeasuredRail(float rail_mm) {
           double(rail_mm), double(_cfg.max_rail));
 }
 
+void ValenceDevice::enableRadios() {
+    if (_modes.radios) return;
+    _modes.radios = true;
+    _tuneDirty |= kCardModes;
+    _durableDirty = true;
+    _cfgDirty = true;   // the path that pays _cfgGenOwed
+    _cfgGenOwed = true;
+    GLOGW(kTag, "radios on again from the next boot: a network was joined in config mode");
+}
+
 void ValenceDevice::noteSetupWritten(uint8_t wrote) {
     if ((_modes.setup_written | wrote) == _modes.setup_written) return;
     const bool was = commissioned(_modes);
@@ -794,9 +810,9 @@ void ValenceDevice::noteTuning(const MotionTuning& next, bool& cfgChanged) {
 }
 
 // Keys 7 (schedule_horizon), 8 (flipped), 9 (home_speed, clamped to its
-// catalog bounds) and 10 (datagram_estop, RFC-053 item 3, pushed to the
-// datagram switch at once); the whole request is validated before anything
-// is applied. A horizon change is refused INTERLOCK while a segments grant is
+// catalog bounds), 10 (datagram_estop, RFC-053 item 3, pushed to the
+// datagram switch at once) and 11 (radios, RFC-121, read at the next boot);
+// the whole request is validated before anything is applied. A horizon change is refused INTERLOCK while a segments grant is
 // live: the grant advertised the old value for its life (SPEC 5.4), and the
 // library re-reads this one on every bundle.
 // Key 8 (flipped, RFC-088) is gated in the spec's order: SOURCE_CONFLICT while
@@ -807,17 +823,20 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
     const auto* f8 = findField(requested, 8);   // flipped
     const auto* f9 = findField(requested, 9);   // home_speed
     const auto* f10 = findField(requested, 10);   // datagram_estop
-    if (!f7 && !f8 && !f9 && !f10) return Ret::err(NackCode::INVALID_VALUE);
+    const auto* f11 = findField(requested, 11);   // radios
+    if (!f7 && !f8 && !f9 && !f10 && !f11) return Ret::err(NackCode::INVALID_VALUE);
     if (f7 && !numberOf(f7)) return refuseNotANumber(ch::modes_set, 7);
     if (f8 && !boolOf(f8)) return refuseNotANumber(ch::modes_set, 8);
     if (f9 && !numberOf(f9)) return refuseNotANumber(ch::modes_set, 9);
     if (f10 && !boolOf(f10)) return refuseNotANumber(ch::modes_set, 10);
+    if (f11 && !boolOf(f11)) return refuseNotANumber(ch::modes_set, 11);
     StoredModes nextModes = _modes;
     if (f7) nextModes.horizon = uint8_t(wholeIn(*numberOf(f7), 0.0f, float(kHorizonMs.size() - 1)));
     if (nextModes.horizon != _modes.horizon && publishGrantLive(ch::motion_segment))
         return Ret::err(NackCode::INTERLOCK);
     if (f8) nextModes.flipped = *boolOf(f8);
     if (f10) nextModes.datagram_estop = *boolOf(f10);
+    if (f11) nextModes.radios = *boolOf(f11);
     if (nextModes.flipped != _modes.flipped) {
         const MotionCensus c = motionCensus();
         if (railOwned()) return Ret::err(NackCode::SOURCE_CONFLICT);
@@ -833,6 +852,7 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
     if (f7) applied.fields[n++] = {7, IntentValue::ofU64(nextModes.horizon)};
     if (f8) applied.fields[n++] = {8, IntentValue::ofU64(nextModes.flipped ? 1 : 0)};
     if (f10) applied.fields[n++] = {10, IntentValue::ofU64(nextModes.datagram_estop ? 1 : 0)};
+    if (f11) applied.fields[n++] = {11, IntentValue::ofU64(nextModes.radios ? 1 : 0)};
     if (f9) {
         next.home_speed = clampf(*numberOf(f9), tuning_bounds::home_speed_min, tuning_bounds::home_speed_max);
         applied.fields[n++] = {9, IntentValue::ofF32(next.home_speed)};
@@ -849,6 +869,9 @@ Ret ValenceDevice::applyModes(const IntentValueMap& requested, bool& cfgChanged)
         estopDatagramSetEnabled(nextModes.datagram_estop);
         GLOGW(kTag, "ESTOP datagrams %s", nextModes.datagram_estop ? "latch" : "are ignored");
     }
+    if (nextModes.radios != _modes.radios)
+        GLOGW(kTag, "radios %s from the next boot%s", nextModes.radios ? "on" : "OFF",
+              nextModes.radios ? "" : ": USB serial only; a 10 s PAIR hold turns them back on");
     _modes = nextModes;
     // Same card, same publish and persist path as the tuning (tick()).
     if (modesChanged) _tuneDirty |= kCardModes;
@@ -2202,18 +2225,16 @@ void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
     switch (g) {
         case button::PairGesture::press: {
             using linkmode::PressAct;
-            const PressAct act = linkmode::singlePress(_offline, _configMode, _hub->pairing().claimed(),
-                                                       _hub->configureRequestsPending(), _lanSessions);
+            const PressAct act =
+                linkmode::singlePress(_route, _hub->pairing().claimed(), _hub->configureRequestsPending());
             if (act == PressAct::approve) {
-                approveAsk("PAIR press (offline, RFC-117)", nowMs);
+                approveAsk("PAIR press (config mode)", nowMs);
                 return;
             }
             if (act != PressAct::open_window) {
                 _pairFlash = PairLook::refused;
                 _pairFlashUntilMs = nowMs + kPairFlashMs;
-                GLOGW(kTag, "PAIR press (offline): nothing approved: %s",
-                      act == PressAct::refuse_lan ? "a network session is still held"
-                                                  : "no configure request pending");
+                GLOGW(kTag, "PAIR press (config mode): nothing approved: no configure request pending");
                 return;
             }
             _hub->openPresenceWindow();
@@ -2242,6 +2263,24 @@ void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
                   unsigned(d.sessions));
             return;
         }
+        case button::PairGesture::config: {
+            // SPEC 13.4.1: never while a motion source runs; motor power off
+            // is this device's own bar for a deliberate gesture.
+            const MotionCensus mo = motionCensus();
+            if (motionRuns(mo) || mo.motor_on) {
+                _pairFlash = PairLook::refused;
+                _pairFlashUntilMs = nowMs + kPairFlashMs;
+                GLOGW(kTag, "PAIR hold %lu s: config mode refused: %s",
+                      static_cast<unsigned long>(button::kConfigHoldMs / 1000),
+                      motionRuns(mo) ? "motion running" : "motor power on");
+                return;
+            }
+            _reboot = Reboot::due;
+            _rebootIntoConfig = true;
+            GLOGW(kTag, "PAIR hold %lu s: rebooting into config mode (SPEC 13.4.1)",
+                  static_cast<unsigned long>(button::kConfigHoldMs / 1000));
+            return;
+        }
         case button::PairGesture::extra:
             GLOGW(kTag, "PAIR: 3 or more presses: no gesture");
             return;
@@ -2250,7 +2289,7 @@ void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
     }
 }
 
-// RFC-114's double press, and RFC-117's single press offline: the one fresh
+// RFC-114's double press, and the single press in policy config mode: the one fresh
 // configure ask approved over its own session. The session is read before the
 // hub consumes the knock; the provisioning desk's gate term binds to it.
 void ValenceDevice::approveAsk(const char* gesture, uint32_t nowMs) {

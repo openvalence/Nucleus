@@ -24,6 +24,13 @@
 //   rate limiter, then NetworkDesk::gate() and the field checks. The last
 //   success ECHO answers a duplicate intent_id; a second join while one runs is
 //   BUSY. The list ops answer at once.
+// - THE CABLE IS CONFIGURE (SPEC §12.2, H16): the hub tiers the serial
+//   binding's session configure; a frame from it also passes the gate's
+//   window term.
+// - NO JOIN WHILE A MOTION SOURCE RUNS (SPEC §13.9): SOURCE_CONFLICT, from
+//   setMotionRuns(), which the hub task refreshes before the ports run.
+// - IN CONFIG MODE (setCommitReboot()) a join's ECHO carries reboot_in_ms and
+//   takeCommitReboot() says when to go; a failed join reboots nothing.
 // - TODO(val-9u0.22): moves behind the hub delegate once the library answers an
 //   intent later than applyIntent() returns and tells it the binding.
 // See: Valence SPEC.md §6.4, §8.8, §9.3, §12.3, §13.9; ValenceSerialPort.h
@@ -90,8 +97,8 @@ public:
     // A provisioning binding's inbound frame. True = this desk consumed it
     // (answered now, later, or deliberately not at all); false = hand it to
     // the hub unchanged. `sessionId` is the session the binding carries, 0
-    // for none yet.
-    bool offer(std::span<const std::byte> frame, ITransport& link, uint32_t sessionId, uint32_t nowMs);
+    // for none yet. `cable`: the serial binding.
+    bool offer(std::span<const std::byte> frame, ITransport& link, uint32_t sessionId, uint32_t nowMs, bool cable);
 
     // Once per hub tick: finishes a join, writes its answer, persists.
     void tick();
@@ -103,6 +110,19 @@ public:
     }
 
     bool busy() const { return _running; }
+
+    // Hub task, every tick before the ports: a motion source runs.
+    void setMotionRuns(bool runs) { _motionRuns = runs; }
+    // Config mode: a join commits by rebooting `ms` after its ECHO (0 = never).
+    void setCommitReboot(uint32_t ms) { _commitRebootMs = ms; }
+    // The radios-off route (LinkMode.h): no station, so wifi_join refuses.
+    void setRadiosOff(bool off) { _radiosOff = off; }
+    // The reboot a join's ECHO announced, in ms from now, exactly once.
+    std::optional<uint32_t> takeCommitReboot() {
+        if (!_commitDue) return std::nullopt;
+        _commitDue = false;
+        return _commitRebootMs;
+    }
 
     // Valence RFC-117 draft item 3: the session a presence gesture approved
     // may start ONE wifi_join within pairing_window_default_s; no other
@@ -126,7 +146,7 @@ private:
         std::optional<size_t> slot{};
     };
 
-    // {cfg_gen, intent_id, applied{<= 6}}, the SSID's 32 bytes included.
+    // {cfg_gen, intent_id, applied{<= 7}}, the SSID's 32 bytes included.
     static constexpr size_t kEchoBytes = 96;
 
     const HubSession* sessionById(uint32_t id) const;
@@ -152,6 +172,10 @@ private:
     bool _persistDue = false;
     uint32_t _presenceSession = 0;
     uint32_t _presenceAtMs = 0;
+    bool _motionRuns = false;
+    bool _radiosOff = false;
+    uint32_t _commitRebootMs = 0;
+    bool _commitDue = false;
 
     // The last success, for a duplicate intent_id (SPEC §9.3).
     uint32_t _echoSession = 0;
@@ -165,11 +189,12 @@ private:
 // The board station: it owns every join, boot and reconnect included.
 // stationBegin() loads the saved list (migrating a single stored network
 // into slot 0 on first boot), registers its event hooks and starts its task;
-// main.cpp wifi_up() calls it before esp_wifi_start(). false = no task, so no
-// joins.
+// main.cpp wifi_up() calls it before esp_wifi_start(). `joinSaved` false: it
+// joins only for a wifi_join (config mode by the gesture). false = no task,
+// so no joins.
 IStation& provisioningStation();
 INetStation& stationNets();
-bool stationBegin();
+bool stationBegin(bool joinSaved);
 // The list the station booted with, for the hub's NetworkDesk::adopt().
 // app_main only, after stationBegin().
 const net::SavedNetworks& stationBootList();
@@ -269,7 +294,7 @@ inline void Provisioning::echo(ITransport* link, uint32_t sessionId, uint16_t in
 }
 
 inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& link, uint32_t sessionId,
-                                uint32_t nowMs) {
+                                uint32_t nowMs, bool cable) {
     if (!_declared) return false;
     const std::optional<FrameHeader> h = decodeFrameHeader(frame);
     if (!h || h->type != uint8_t(FrameType::INTENT) || frame.size() != kHeaderBytes + size_t(h->len)) return false;
@@ -309,12 +334,20 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
     map.fields = in.value;
     const std::optional<uint8_t> op = NetworkDesk::opOf(map);
     // SPEC §13.9: an association window open now, an unused presence approval
-    // of this very session (RFC-117 draft), or a factory-fresh hub.
+    // of this very session, a factory-fresh hub, or the cable.
     const bool presence = _presenceSession != 0 && _presenceSession == sessionId &&
                           nowMs - _presenceAtMs < limits::pairing_window_default_s * 1000u;
-    const bool windowOrFresh = _hub.pairingWindowOpen() || presence || !_hub.pairing().claimed();
+    const bool windowOrFresh = cable || _hub.pairingWindowOpen() || presence || !_hub.pairing().claimed();
     if (const auto refusal = NetworkDesk::gate(op, Binding::credential, windowOrFresh)) {
         nack(link, refusal->code, in.intent_id, h->seq, refusal->detail);
+        return true;
+    }
+    if (op == provisioning_ops::wifi_join && _motionRuns) {
+        nack(link, NackCode::SOURCE_CONFLICT, in.intent_id, h->seq, "motion running");
+        return true;
+    }
+    if (op == provisioning_ops::wifi_join && _radiosOff) {
+        nack(link, NackCode::NETWORK_JOIN_FAILED, in.intent_id, h->seq, "radios off: hold PAIR 10 s for config mode");
         return true;
     }
     if (op != provisioning_ops::wifi_join) {
@@ -393,6 +426,11 @@ inline void Provisioning::tick() {
     applied.fields[4] = {net::kKeyWsPort, IntentValue::ofU64(_wsPort)};
     applied.fields[5] = {net::draft::key_slot, IntentValue::ofU64(slot)};
     applied.count = 6;
+    // SPEC §9.3 reboot-commit, config mode only (SPEC §13.4.1).
+    if (_commitRebootMs != 0) {
+        applied.fields[applied.count++] = {uint8_t(CborKey::reboot_in_ms), IntentValue::ofU64(_commitRebootMs)};
+        _commitDue = true;
+    }
     // Encoded before the wipe: the ECHO carries the SSID.
     echo(link, _attempt.sessionId, _attempt.intentId, applied);
     wipe();

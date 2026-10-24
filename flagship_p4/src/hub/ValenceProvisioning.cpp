@@ -26,8 +26,9 @@
 //   Station task goes back to the saved list at once.
 // See: Valence SPEC.md §13.9; RFC-QUEUE.md RFC-116; ValenceProvisioning.h,
 // NetworkDesk.h
-// - CONFIG MODE (SPEC 13.4.1) joins nothing from the saved list: the station
-//   is started but associates only when a wifi_join asks.
+// - CONFIG MODE BY THE GESTURE (SPEC 13.4.1) joins nothing from the saved
+//   list: the station is started but associates only when a wifi_join asks.
+//   Policy config mode retries the list as a normal boot does (LinkMode.h).
 // - A SCAN ON A LINK (RFC-118 item 3; associated, IP or not) keeps every
 //   off-channel visit under scan_offchannel_max_ms: kScanChannelMs per
 //   channel, then kScanHomeMs back on the home channel. With no association
@@ -144,7 +145,7 @@ bool saveBlob(const char* key, std::span<const uint8_t> bytes, bool eraseLegacy)
 
 class BoardStation final : public IStation, public INetStation {
 public:
-    bool begin();
+    bool begin(bool joinSaved);
     const net::SavedNetworks& bootList() const { return _mine; }
     void setLinkRssi(int8_t rssi) { _linkRssi.store(rssi, std::memory_order_relaxed); }
 
@@ -230,6 +231,7 @@ private:
     std::atomic<bool> _connecting{false};
     // Station task only (and app_main before the task starts).
     net::SavedNetworks _mine{};
+    bool _joinSaved = true;
     Credentials _joined{};
     uint32_t _handled = 0;
     wifi_ap_record_t* _records = nullptr;   // kScanRecords, PSRAM when it can
@@ -276,7 +278,8 @@ void BoardStation::load() {
     net::wipeBytes(&legacy, sizeof legacy);
 }
 
-bool BoardStation::begin() {
+bool BoardStation::begin(bool joinSaved) {
+    _joinSaved = joinSaved;
     load();
     _events = xEventGroupCreate();
     if (_events == nullptr) return false;
@@ -638,8 +641,7 @@ void BoardStation::run() {
             if (_out.joined) continue;
         }
         serviceScan();
-        if (!_started.load(std::memory_order_acquire) || _linkUp.load(std::memory_order_acquire) ||
-            hubConfigMode())
+        if (!_started.load(std::memory_order_acquire) || _linkUp.load(std::memory_order_acquire) || !_joinSaved)
             continue;
         if (joinSaved()) {
             backoffMs = kRetryMinMs;
@@ -655,8 +657,8 @@ void BoardStation::run() {
 IStation& provisioningStation() { return g_station; }
 INetStation& stationNets() { return g_station; }
 
-bool stationBegin() {
-    const bool ok = g_station.begin();
+bool stationBegin(bool joinSaved) {
+    const bool ok = g_station.begin(joinSaved);
     if (!ok) GLOGE(kTag, "Station task not started: no joins");
     return ok;
 }

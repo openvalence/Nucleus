@@ -86,6 +86,9 @@ struct StoredModes {
     // RFC-053 item 3: an ESTOP datagram latches (ValenceEstopDatagram.h).
     // Default on; a blob older than v9 takes it.
     bool    datagram_estop = true;
+    // RFC-121 (SPEC 13.1): the radios run from the next boot; off is the
+    // serial route (LinkMode.h). Default on; a blob older than v10 takes it.
+    bool    radios = true;
 
     bool operator==(const StoredModes&) const = default;
 };
@@ -122,7 +125,7 @@ inline constexpr float    home_speed_max    = ceiling::speed_max;
 namespace stored {
 
 inline constexpr uint32_t kConfigMagic   = 0x56434647u;  // "VCFG"
-inline constexpr uint8_t  kConfigVersion = 9;            // bump on ANY layout change
+inline constexpr uint8_t  kConfigVersion = 10;           // bump on ANY layout change
 // v1, the 40 B struct dump this codec replaced (u16 version), is retired:
 // refused, never migrated.
 inline constexpr uint8_t  kConfigOldestVersion = 2;
@@ -131,14 +134,15 @@ inline constexpr size_t   kConfigV2Bytes = 4 + 1 + 2 + 32 + 32 + 8 + 7;
 // v3 appends the schedule_horizon ordinal (u8), v4 the flip (u8, 0/1), v5
 // the setup_written mask (u8), v6 the home speed (f32, mm/s), v7 a retired
 // u8 and the reaction horizon (u32, us), v8 smoothness, handle_floor and
-// trim_max (3 x f32), v9 datagram_estop (u8, 0/1).
+// trim_max (3 x f32), v9 datagram_estop (u8, 0/1), v10 radios (u8, 0/1).
 inline constexpr size_t   kConfigV3Bytes = kConfigV2Bytes + 1;
 inline constexpr size_t   kConfigV4Bytes = kConfigV3Bytes + 1;
 inline constexpr size_t   kConfigV5Bytes = kConfigV4Bytes + 1;
 inline constexpr size_t   kConfigV6Bytes = kConfigV5Bytes + 4;
 inline constexpr size_t   kConfigV7Bytes = kConfigV6Bytes + 1 + 4;
 inline constexpr size_t   kConfigV8Bytes = kConfigV7Bytes + 3 * 4;
-inline constexpr size_t   kConfigBlobBytes = kConfigV8Bytes + 1;
+inline constexpr size_t   kConfigV9Bytes = kConfigV8Bytes + 1;
+inline constexpr size_t   kConfigBlobBytes = kConfigV9Bytes + 1;
 
 // 0 for a version this firmware cannot read.
 inline constexpr size_t configBytesFor(uint8_t version) {
@@ -149,7 +153,8 @@ inline constexpr size_t configBytesFor(uint8_t version) {
          : version == 6 ? kConfigV6Bytes
          : version == 7 ? kConfigV7Bytes
          : version == 8 ? kConfigV8Bytes
-         : version == 9 ? kConfigBlobBytes : 0;
+         : version == 9 ? kConfigV9Bytes
+         : version == 10 ? kConfigBlobBytes : 0;
 }
 
 static_assert([] {
@@ -254,6 +259,7 @@ inline size_t encodeConfig(std::span<std::byte> out, const StoredConfig& c,
     for (float v : {t.smoothness, t.handle_floor, t.trim_max})
         put(out, n, v);
     put(out, n, uint8_t(m.datagram_estop));
+    put(out, n, uint8_t(m.radios));
     return n;
 }
 
@@ -310,6 +316,11 @@ inline std::expected<void, ConfigReject> decodeConfig(std::span<const std::byte>
         const uint8_t d = get<uint8_t>(in, n);
         if (d > 1) return Err(ConfigReject::BadModes);
         m.datagram_estop = d != 0;
+    }
+    if (version >= 10) {
+        const uint8_t r = get<uint8_t>(in, n);
+        if (r > 1) return Err(ConfigReject::BadModes);
+        m.radios = r != 0;
     }
 
     if (!configValid(c)) return Err(ConfigReject::BadConfig);

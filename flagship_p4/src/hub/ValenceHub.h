@@ -22,6 +22,7 @@
 
 #include <cstdint>
 
+#include "LinkMode.h"
 #include "valence/hub/hub.hpp"
 
 namespace valence {
@@ -42,22 +43,26 @@ inline constexpr uint32_t kHubTaskStackBytes = 16384;
 
 // Brings up logging, the catalog, the hub and the hub task. Returns false if
 // any of that failed; the caller reports and carries on (the bench emitters
-// are independent of the hub). `configMode`: PAIR was held at boot (SPEC
-// §13.4.1): no WS listener, no discovery, BLE for the whole mode, the window
-// granting `configure`. `haveCredentials`: any network to try; none starts
-// BLE at once (LinkMode.h).
-bool hubBegin(bool configMode, bool haveCredentials);
+// are independent of the hub). `route`: this boot's (LinkMode.h
+// decideBoot()); config mode runs no WS listener and no discovery, and BLE
+// GATT only there. `autoEntry`: a missed boot-time join may reboot into
+// config mode.
+bool hubBegin(linkmode::Boot route, bool autoEntry);
 
-// SPEC §13.4.1 config mode, as hubBegin() was told; any task.
-bool hubConfigMode();
+// What the previous boot asked of this one, read once and cleared. app_main,
+// after nvs_flash_init() and before the radios start.
+linkmode::Next hubTakeNext();
+// The stored radios setting is off (StoredState.h), read straight from NVS
+// before the hub exists; a missing or rejected blob reads as on. app_main,
+// after nvs_flash_init().
+bool hubStoredRadiosOff();
 
 // The station holds an address (true) or lost it (false). main.cpp's WiFi
 // event handler, on the event loop task; the hub task reads it (LinkMode.h).
 void hubSetStationUp(bool up);
 
-// The status pixel's network look, any task: 0 none, 1 offline with BLE up
-// (RFC-117 draft), 2 config mode.
-uint8_t hubNetLook();
+// The status pixel's network look (linkmode::NetLook), any task.
+linkmode::NetLook hubNetLook();
 
 // The composed hub, or nullptr before hubBegin() succeeds. For the boot report
 // and the census line only -- never a door for another task to call into.

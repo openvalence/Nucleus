@@ -13,9 +13,12 @@
 // - NO LE SECURITY YET: SPEC §12.9's SHOULD for LE Secure Connections is not
 //   met; credentials cross this link in the clear (H4). Planned with the
 //   clients' bonding flow.
+// - THE SERVICE AND CONNECTIONS IN CONFIG MODE ONLY (SPEC §13.4): bringUp()
+//   without `gatt` registers no Valence service and advertises scannable and
+//   non-connectable, at kQuietAdvMs so the shared radio stays with the station.
 // - The advertisement (≤ 31 B): flags, the 128-bit service UUID, the name cut
-//   to fit. The scan response: the full name and the RFC-072 record
-//   (company 0xFFFF little-endian + the ble_adv_flags byte).
+//   to fit. The scan response: the name cut to what the record leaves, and
+//   the RFC-072 record with its RFC-121 endpoint tail (scanRecord()).
 // See: src/hub/ValenceBle.h; Valence SPEC.md §13.4; esp_hosted docs/bluetooth_design.md
 
 #include "ValenceBle.h"
@@ -25,6 +28,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <string_view>
 
@@ -72,6 +77,8 @@ bool txPoolInit() {
 }
 // 31 B legacy advertisement: flags 3 + 128-bit UUID 18 + name header 2.
 constexpr size_t kAdvNameMax = 31 - 3 - 18 - 2;
+// Normal mode's advertising interval: discovery only, nothing connects.
+constexpr uint32_t kQuietAdvMs = 1000;
 
 // The registry's UUID text (ble_identity) as NimBLE's little-endian bytes.
 constexpr uint8_t hexNibble(char c) {
@@ -104,10 +111,13 @@ const char* g_name = "valence";
 
 std::atomic<bool> g_started{false};
 std::atomic<bool> g_ready{false};
+// bringUp()'s word, before the host task exists; then read-only.
+bool g_gatt = false;
 std::atomic<bool> g_wantAdv{false};
-std::atomic<uint8_t> g_advFlags{0};
+// The scan response as the hub task last asked for it: flags, ipv4, port.
+std::atomic<uint64_t> g_wantRsp{0};
 // Host task only.
-uint8_t g_appliedFlags = 0xFF;
+uint64_t g_appliedRsp = ~uint64_t(0);
 ble_npl_event g_applyEvent;
 // Host task only: the one write being copied out of its mbuf chain.
 std::array<std::byte, kFrameBufferCapacity> g_writeBuf{};
@@ -187,23 +197,27 @@ void advertise() {
         return;
     }
     ble_gap_adv_params p{};
-    p.conn_mode = BLE_GAP_CONN_MODE_UND;
+    p.conn_mode = g_gatt ? BLE_GAP_CONN_MODE_UND : BLE_GAP_CONN_MODE_NON;
     p.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    if (!g_gatt) p.itvl_min = p.itvl_max = BLE_GAP_ADV_ITVL_MS(kQuietAdvMs);
     rc = ble_gap_adv_start(g_ownAddrType, nullptr, BLE_HS_FOREVER, &p, onGap, nullptr);
     if (rc != 0 && rc != BLE_HS_EALREADY) GLOGW(kTag, "advertising failed to start: rc=%d", rc);
 }
 
-void setScanResponse(uint8_t flags) {
-    const uint16_t company = uint16_t(ble_identity::msd_company_id);
-    const uint8_t msd[3] = {uint8_t(company & 0xFF), uint8_t(company >> 8), flags};
+void setScanResponse(uint64_t want) {
+    std::array<uint8_t, kScanRecordMax> msd{};
+    const size_t n = scanRecord(uint8_t(want >> 48), uint32_t(want), uint16_t(want >> 32), msd);
+    // 31 B: the name's AD header 2, the record's AD header 2, the record.
+    const size_t nameMax = 31 - 2 - 2 - n;
+    const size_t nameLen = std::strlen(g_name);
     ble_hs_adv_fields rsp{};
     rsp.name = reinterpret_cast<const uint8_t*>(g_name);
-    rsp.name_len = uint8_t(std::strlen(g_name));
-    rsp.name_is_complete = 1;
-    rsp.mfg_data = msd;
-    rsp.mfg_data_len = sizeof(msd);
+    rsp.name_len = uint8_t(std::min(nameLen, nameMax));
+    rsp.name_is_complete = nameLen <= nameMax;
+    rsp.mfg_data = msd.data();
+    rsp.mfg_data_len = uint8_t(n);
     const int rc = ble_gap_adv_rsp_set_fields(&rsp);
-    if (rc == 0) g_appliedFlags = flags;
+    if (rc == 0) g_appliedRsp = want;
     else GLOGW(kTag, "scan response rejected: rc=%d", rc);
 }
 
@@ -216,8 +230,8 @@ void apply(ble_npl_event*) {
         if (conn != kNoConn) ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
         return;
     }
-    const uint8_t flags = g_advFlags.load(std::memory_order_relaxed);
-    if (flags != g_appliedFlags) setScanResponse(flags);
+    const uint64_t want = g_wantRsp.load(std::memory_order_relaxed);
+    if (want != g_appliedRsp) setScanResponse(want);
     if (conn == kNoConn && !ble_gap_adv_active()) advertise();
 }
 
@@ -255,7 +269,8 @@ void onSync() {
         return;
     }
     g_ready.store(true, std::memory_order_release);
-    GLOGW(kTag, "BLE GATT up (SPEC 13.4), name \"%s\"", g_name);
+    if (g_gatt) GLOGW(kTag, "BLE GATT up (SPEC 13.4), name \"%s\"", g_name);
+    else GLOGI(kTag, "BLE advertising only (SPEC 13.4), name \"%s\"", g_name);
     apply(nullptr);
 }
 
@@ -287,8 +302,8 @@ void upTask(void*) {
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_svc_gap_device_name_set(g_name);
-    int rc = ble_gatts_count_cfg(kServices);
-    if (rc == 0) rc = ble_gatts_add_svcs(kServices);
+    int rc = g_gatt ? ble_gatts_count_cfg(kServices) : 0;
+    if (rc == 0 && g_gatt) rc = ble_gatts_add_svcs(kServices);
     if (rc != 0) {
         GLOGE(kTag, "GATT service rejected: rc=%d: BLE stays off this boot", rc);
         vTaskDelete(nullptr);
@@ -308,19 +323,21 @@ BleFramePipe& pipe() {
     return g_pipe;
 }
 
-void bringUp(const char* hubName) {
+void bringUp(const char* hubName, bool gatt) {
     if (g_started.exchange(true)) return;
     g_name = hubName;
+    g_gatt = gatt;
     if (xTaskCreatePinnedToCore(upTask, "BleUp", kUpTaskStackBytes, nullptr, 2, nullptr, 0) != pdPASS)
         GLOGE(kTag, "BLE bring-up task create failed: BLE stays off this boot");
 }
 
 bool ready() { return g_ready.load(std::memory_order_acquire); }
 
-void setAdvertising(bool on, uint8_t advFlags) {
+void setAdvertising(bool on, uint8_t advFlags, uint32_t ipv4, uint16_t wsPort) {
+    const uint64_t rsp = uint64_t(advFlags) << 48 | uint64_t(wsPort) << 32 | ipv4;
     const bool onChanged = g_wantAdv.exchange(on) != on;
-    const bool flagsChanged = g_advFlags.exchange(advFlags, std::memory_order_relaxed) != advFlags;
-    if ((onChanged || flagsChanged) && ready()) ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &g_applyEvent);
+    const bool rspChanged = g_wantRsp.exchange(rsp, std::memory_order_relaxed) != rsp;
+    if ((onChanged || rspChanged) && ready()) ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &g_applyEvent);
 }
 
 }  // namespace valence::ble

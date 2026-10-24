@@ -29,6 +29,7 @@
 #include <string_view>
 
 #include "IngressDropTally.h"
+#include "LinkMode.h"
 #include "NetworkDesk.h"
 #include "StoredState.h"
 #include "ValenceCatalog.h"
@@ -141,6 +142,11 @@ public:
 
     const StoredConfig& config() const { return _cfg; }
 
+    // RFC-121: a join made in config mode turns the radios-off setting back
+    // on, so the boot it commits to has the network it just joined. Hub task,
+    // a hub-side config change (cfg_gen owed, persisted).
+    void enableRadios();
+
     // The stored config IS the arbiter's window and ceilings; this is the one
     // door between them (C-1).
     void pushConfigToMotion() const;
@@ -173,9 +179,13 @@ public:
     // double press approves the one pending configure ask and PAIR hold (5 s)
     // demotes every client to watch (Valence RFC-114 draft). While the ledger
     // holds entries but no configure owner, /uitoken vouches for nobody: a
-    // demoted browser must not mint its control back. The reboot is the composition's:
-    // takePendingPersist(), the GOODBYEs, the restart. Never clears.
+    // demoted browser must not mint its control back. PAIR held 10 s with
+    // motion idle and motor power off is the config-mode gesture (SPEC
+    // 13.4.1): rebootDue() with rebootIntoConfig(). The reboot is the
+    // composition's: takePendingPersist(), the GOODBYEs, the restart. Never
+    // clears.
     bool rebootDue() const { return _reboot == Reboot::due; }
+    bool rebootIntoConfig() const { return _rebootIntoConfig; }
     // Any task: the PAIR control's look, refreshed every tick().
     PairLook pairLook() const { return PairLook(_pairLook.load(std::memory_order_relaxed)); }
     // The kPersist* bits armed and not yet due, disarmed: a planned reboot
@@ -191,16 +201,12 @@ public:
     // owns the radio; never read on the hub task (see ValenceHub.h).
     void setLinkRssi(int8_t rssi) { _linkRssi.store(rssi, std::memory_order_relaxed); }
 
-    // What PAIR's single press means (LinkMode.h, Valence RFC-117 draft):
-    // offline it approves the one configure ask. `lanSessions` counts occupied
-    // sessions on a network binding, parked ones included. Hub task, each tick.
-    void setLinkMode(bool offline, bool configMode, size_t lanSessions) {
-        _offline = offline;
-        _configMode = configMode;
-        _lanSessions = lanSessions;
-    }
+    // This boot's route (LinkMode.h), which says what PAIR's single press
+    // means: in policy config mode it approves the one configure ask. Once,
+    // before the first tick.
+    void setRoute(linkmode::Boot b) { _route = b; }
     // The session a presence gesture approved since the last take, 0 = none.
-    // Hub task: the provisioning desk's gate term (RFC-117 item 3).
+    // Hub task: the provisioning desk's gate term (SPEC 13.9).
     uint32_t takePresenceApproval() {
         const uint32_t s = _presenceSession;
         _presenceSession = 0;
@@ -389,15 +395,14 @@ private:
     enum class Reboot : uint8_t { none, braking, due };
     Reboot _reboot = Reboot::none;
     uint32_t _rebootBrakeUntilMs = 0;
+    bool _rebootIntoConfig = false;
     // PAIR: a refused or demoting gesture's look and when it ends.
     PairLook _pairFlash = PairLook::quiet;
     uint32_t _pairFlashUntilMs = 0;
     std::atomic<uint8_t> _pairLook{uint8_t(PairLook::quiet)};
     void servicePair(button::PairGesture g, uint32_t nowMs);
     void approveAsk(const char* gesture, uint32_t nowMs);
-    bool _offline = false;
-    bool _configMode = false;
-    size_t _lanSessions = 0;
+    linkmode::Boot _route = linkmode::Boot::normal;
     uint32_t _presenceSession = 0;
 
     // The live pattern generator settings. This copy IS the setting (the

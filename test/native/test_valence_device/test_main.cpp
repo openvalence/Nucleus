@@ -50,6 +50,8 @@
 #include "valence/hub/hub.hpp"
 #include "valence/transport/inprocess_binding.hpp"
 #include "valence/util/byte_io.hpp"
+#include "valence/wire/catalog_codec.hpp"
+#include "valence/wire/catalog_etag.hpp"
 #include "valence/wire/estop_frame.hpp"
 
 #include "../../../flagship_p4/src/hub/ValenceDevice.cpp"
@@ -342,9 +344,10 @@ struct Rig {
         nets->attach(*hub);
         device.bindNetworks(&*nets);
         link.emplace(g_clock, hubRng);
-        // A 13th wish takes WELCOME past the link's default 250 B, and a 15th
-        // the HELLO; a WS frame has room for both.
-        if (motionHz > 0.0f || hubStatus || networks) link->profileA().mtu = link->profileB().mtu = 1024;
+        // A 13th wish takes WELCOME past the link's default 250 B (the
+        // library client adds 0x0001's to the 12 below), and a 15th the HELLO;
+        // a WS frame has room for both.
+        link->profileA().mtu = link->profileB().mtu = 1024;
         REQUIRE(hub->attachTransport(link->endpointA()));
         ClientIdentity id;
         id.instance_id.fill(std::byte{0});
@@ -2287,7 +2290,7 @@ TEST_CASE("VD-DGRAM: datagram_estop is configure tier, drives the datagram switc
     const auto modesByte = [&] {
         const auto it = rig->del.lastState.find(ch::machine_modes);
         REQUIRE(it != rig->del.lastState.end());
-        return it->second.back();
+        return it->second[it->second.size() - 2];   // radios follows it
     };
     CHECK(modesByte() == std::byte{1});
 
@@ -2906,14 +2909,15 @@ TEST_CASE("VD-PAIR-9: after a demote the hub stays claimed: a press grants contr
     CHECK(*rig->del.granted == AccessLevel::control);
 }
 
-// ---- PAIR offline (Valence RFC-117 draft) -----------------------------------
-// The hub glue calls setLinkMode() every tick (ValenceHub.cpp serviceLinkMode);
-// the rig sets it once. Offline is LinkMode.h's word: no WS listener.
+// ---- PAIR in policy config mode (SPEC 12.3, 13.4.1) ------------------------
+// The hub glue sets the route once (ValenceHub.cpp hubBegin); so does the rig.
 
-TEST_CASE("VD-OFFLINE-1: offline, a single press approves the one configure ask, on its session, and names it for the gate") {
+using linkmode::Boot;
+
+TEST_CASE("VD-ROUTE-1: in policy config mode a single press approves the one configure ask, on its session, and names it for the gate") {
     auto rig = std::make_unique<Rig>();
     seedConfigureOwner(*rig);
-    rig->device.setLinkMode(true, false, 0);
+    rig->device.setRoute(Boot::config_policy);
     REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
     rig->step();
     REQUIRE(rig->device.pairLook() == PairLook::request);
@@ -2926,10 +2930,10 @@ TEST_CASE("VD-OFFLINE-1: offline, a single press approves the one configure ask,
     CHECK_FALSE(rig->hub->presenceWindowOpen());       // approving opens no window
 }
 
-TEST_CASE("VD-OFFLINE-2: offline, two configure asks: a single press approves neither") {
+TEST_CASE("VD-ROUTE-2: in policy config mode, two configure asks: a single press approves neither") {
     auto rig = std::make_unique<Rig>();
     seedConfigureOwner(*rig);
-    rig->device.setLinkMode(true, false, 0);
+    rig->device.setRoute(Boot::config_policy);
     Peer rival(*rig, 9);
     REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
     REQUIRE(rival.client->sendPairKnock(AccessLevel::configure));
@@ -2942,28 +2946,16 @@ TEST_CASE("VD-OFFLINE-2: offline, two configure asks: a single press approves ne
     CHECK(rig->device.takePresenceApproval() == 0);
 }
 
-TEST_CASE("VD-OFFLINE-3: offline with a network session still held, the single press approves nothing") {
+TEST_CASE("VD-ROUTE-3: in policy config mode, claimed, no ask: a press opens no window; in gesture config mode it does, granting configure") {
     auto rig = std::make_unique<Rig>();
     seedConfigureOwner(*rig);
-    rig->device.setLinkMode(true, false, 1);
-    REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
-    rig->step();
-    pair(*rig, button::PairGesture::press);
-    rig->step();
-    CHECK_FALSE(rig->del.granted.has_value());
-    CHECK(rig->device.pairLook() == PairLook::refused);
-}
-
-TEST_CASE("VD-OFFLINE-4: offline, claimed, no ask: a press opens no window; in config mode it does, granting configure") {
-    auto rig = std::make_unique<Rig>();
-    seedConfigureOwner(*rig);
-    rig->device.setLinkMode(true, false, 0);
+    rig->device.setRoute(Boot::config_policy);
     pair(*rig, button::PairGesture::press);
     CHECK_FALSE(rig->hub->presenceWindowOpen());
     CHECK(rig->device.pairLook() == PairLook::refused);
 
-    rig->hub->setPresenceDefaultRole(AccessLevel::configure);   // config mode's window (ValenceHub.cpp)
-    rig->device.setLinkMode(true, true, 0);
+    rig->hub->setPresenceDefaultRole(AccessLevel::configure);   // the gesture entry's window (ValenceHub.cpp)
+    rig->device.setRoute(Boot::config_gesture);
     pair(*rig, button::PairGesture::press);
     CHECK(rig->hub->presenceWindowOpen());
     REQUIRE(rig->client->sendPairKnock());
@@ -2972,17 +2964,19 @@ TEST_CASE("VD-OFFLINE-4: offline, claimed, no ask: a press opens no window; in c
     CHECK(*rig->del.granted == AccessLevel::configure);
 }
 
-TEST_CASE("VD-OFFLINE-5: online, the single press is RFC-114's: a window granting control, the ask untouched") {
-    auto rig = std::make_unique<Rig>();
-    seedConfigureOwner(*rig);
-    rig->device.setLinkMode(false, false, 0);
-    REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
-    rig->step();
-    pair(*rig, button::PairGesture::press);
-    rig->step();
-    CHECK_FALSE(rig->del.granted.has_value());   // a configure ask outranks a control window
-    CHECK(rig->hub->presenceWindowOpen());
-    CHECK(rig->device.takePresenceApproval() == 0);
+TEST_CASE("VD-ROUTE-4: outside policy config mode the single press is RFC-114's: a window granting control, the ask untouched") {
+    for (const Boot b : {Boot::normal, Boot::radios_off}) {
+        auto rig = std::make_unique<Rig>();
+        seedConfigureOwner(*rig);
+        rig->device.setRoute(b);
+        REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
+        rig->step();
+        pair(*rig, button::PairGesture::press);
+        rig->step();
+        CHECK_FALSE(rig->del.granted.has_value());   // a configure ask outranks a control window
+        CHECK(rig->hub->presenceWindowOpen());
+        CHECK(rig->device.takePresenceApproval() == 0);
+    }
 }
 
 TEST_CASE("VD-PAIR-10: a ledger with entries but no configure owner (as after a reboot) vouches nobody above watch") {
@@ -3673,4 +3667,158 @@ TEST_CASE("VD-TIER-4: a control session asks configure, a PAIR double press gran
     CHECK_FALSE(a.nack.has_value());
     CHECK(a.echoed);
     CHECK(rig->device.config().jog_speed == doctest::Approx(60.0f));
+}
+
+// ---- the provisioning catalog (SPEC 13.4.1, RFC-121) ---------------------------------
+
+TEST_CASE("VD-PROV-CAT: config mode's catalog is exactly the members, byte for byte the full catalog's, with its own etag") {
+    auto full = std::make_unique<Catalog32>();
+    auto prov = std::make_unique<Catalog32>();
+    REQUIRE(buildValenceCatalog(*full, boardFeatures()));
+    REQUIRE(full->count > 0);
+    CHECK(full->entries[0].id == channels::catalog);   // declared, first by id
+    REQUIRE(buildProvisioningCatalog(*prov, *full));
+
+    const std::vector<uint16_t> want = {channels::catalog,          channels::safety,
+                                        channels::safety_intents,   channels::safety_events,
+                                        channels::provisioning,     net::draft::ch_networks,
+                                        net::draft::ch_network_names, net::draft::ch_visible_networks,
+                                        net::draft::ch_visible_networks_more};
+    REQUIRE(prov->count == want.size());
+    std::vector<std::byte> a(limits::catalog_max_entry_bytes), b(limits::catalog_max_entry_bytes);
+    for (size_t i = 0; i < want.size(); ++i) {
+        CAPTURE(want[i]);
+        const CatalogEntry& p = prov->entries[i];
+        CHECK(p.id == want[i]);
+        const CatalogEntry* f = full->find(p.id);
+        REQUIRE(f != nullptr);
+        CborWriter wf(a), wp(b);
+        detail::encodeEntry(wf, *full, *f);
+        detail::encodeEntry(wp, *prov, p);
+        REQUIRE(wf.size() != 0);
+        CHECK(wp.size() == wf.size());
+        CHECK(std::equal(a.begin(), a.begin() + wf.size(), b.begin()));
+    }
+    // No motion source, so no client starts motion in config mode.
+    for (uint16_t i = 0; i < prov->count; ++i) CHECK(prov->entries[i].cls != ChannelClass::STREAM);
+
+    std::vector<std::byte> scratch(Hub::catalogScratchCapacity());
+    const auto fullTag = catalogEtag(*full, scratch);
+    const auto provTag = catalogEtag(*prov, scratch);
+    CHECK(fullTag != provTag);
+    const size_t provBytes = encodeCatalog(*prov, scratch);
+    CHECK(provBytes > 0);
+    CHECK(provBytes < 4500);   // SPEC 13.4.1: about 2.8 KB, a short BLE download
+    MESSAGE("provisioning catalog: " << provBytes << " B");
+}
+
+// Heap, not stack: the hub and the client are hundreds of KB together.
+struct ProvRig {
+    Catalog32 full{};
+    Catalog32 prov{};
+    XorShift32 hubRng{17};
+    ValenceDevice device{};
+    std::optional<Hub> hub{};
+    std::optional<InProcessLink> link{};
+    XorShift32 clientRng{18};
+    RecordingClient del{};
+    std::optional<Client> client{};
+};
+
+TEST_CASE("VD-PROV-CAT-2: a hub over the provisioning catalog serves a session that downloads and adopts it") {
+    auto r = std::make_unique<ProvRig>();
+    REQUIRE(buildValenceCatalog(r->full, boardFeatures()));
+    REQUIRE(buildProvisioningCatalog(r->prov, r->full));
+    r->hub.emplace(r->prov, g_clock, r->hubRng, r->device);
+    r->device.attach(*r->hub, r->prov);
+    CHECK(r->hub->catalogEncodedBytes() > 0);
+    r->link.emplace(g_clock, r->hubRng);
+    REQUIRE(r->hub->attachTransport(r->link->endpointA()));
+    ClientIdentity id;
+    id.instance_id.fill(std::byte{0x33});
+    id.hasToken = false;
+    id.client_kind = "native-test";
+    id.client_name = "prov";
+    r->client.emplace(id, r->link->endpointB(), g_clock, r->clientRng, r->del);
+    REQUIRE(r->client->connect());
+    for (int i = 0; i < 2000 && r->client->state() != ClientSessionState::LIVE; ++i) {
+        g_clock.advanceUs(5000);
+        r->hub->update(g_clock.nowUs());
+        r->device.tick(uint32_t(g_clock.nowUs() / 1000));
+        r->client->update(g_clock.nowUs());
+    }
+    CHECK(r->client->state() == ClientSessionState::LIVE);
+}
+
+// ---- the config-mode gesture (SPEC 13.4.1, device-defined) --------------------------
+
+TEST_CASE("VD-CONFIG-1: PAIR held 10 s with motion idle and motor power off reboots into config mode") {
+    auto rig = std::make_unique<Rig>();
+    g_census.motor_on = g_census.power_gate = false;
+    pair(*rig, button::PairGesture::config);
+    CHECK(rig->device.rebootDue());
+    CHECK(rig->device.rebootIntoConfig());
+}
+
+TEST_CASE("VD-CONFIG-2: the config hold is refused with motor power on or motion running, and reboots nothing") {
+    auto rig = std::make_unique<Rig>();
+    g_census.motor_on = g_census.power_gate = true;
+    pair(*rig, button::PairGesture::config);
+    CHECK_FALSE(rig->device.rebootDue());
+    CHECK(rig->device.pairLook() == PairLook::refused);
+
+    g_census.motor_on = g_census.power_gate = false;
+    g_census.busy = true;
+    pair(*rig, button::PairGesture::config);
+    CHECK_FALSE(rig->device.rebootDue());
+    CHECK_FALSE(rig->device.rebootIntoConfig());
+    g_census.busy = false;
+}
+
+// ---- the radios setting (RFC-121, SPEC 13.1) -------------------------------------
+
+TEST_CASE("VD-RADIOS: radios is configure tier, the tail byte of 0x1030, stored, and a config-mode join turns it back on") {
+    {
+        auto rig = std::make_unique<Rig>();
+        REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(11, IntentValue::ofU64(0))).has_value());
+        rig->step();
+        REQUIRE(rig->del.nacks.size() == 1);
+        CHECK(rig->del.nacks[0].code == NackCode::ACCESS_DENIED);
+    }
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
+    const auto radiosByte = [&] {
+        const auto it = rig->del.lastState.find(ch::machine_modes);
+        REQUIRE(it != rig->del.lastState.end());
+        return it->second.back();
+    };
+    CHECK(radiosByte() == std::byte{1});
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(11, IntentValue::ofU64(0))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(rig->del.lastEcho.count == 1);
+    CHECK(rig->del.lastEcho.fields[0].key == 11);
+    CHECK(rig->del.lastEcho.fields[0].value.u64_val == 0);
+    rig->step(200);
+    CHECK(radiosByte() == std::byte{0});
+
+    std::array<std::byte, stored::kConfigBlobBytes> blob{};
+    REQUIRE(rig->device.encodeConfigBlob(blob, 3) == blob.size());
+    CHECK(blob[stored::kConfigV9Bytes] == std::byte{0});
+
+    const uint16_t gen = rig->hub->cfgGen();
+    rig->device.enableRadios();
+    rig->step(200);
+    CHECK(radiosByte() == std::byte{1});
+    CHECK(rig->hub->cfgGen() != gen);   // a hub-side change moves cfg_gen
+    REQUIRE(rig->device.encodeConfigBlob(blob, 3) == blob.size());
+    CHECK(blob[stored::kConfigV9Bytes] == std::byte{1});
+}
+
+TEST_CASE("VD-HEADROOM: accessory room never passes catalog_max_entries or catalog_max_bytes (RFC-121)") {
+    auto cat = std::make_unique<Catalog32>();
+    REQUIRE(buildValenceCatalog(*cat, boardFeatures()));
+    const CatalogHeadroom h = catalogHeadroom(*cat, 31000);
+    CHECK(size_t(cat->count) + h.entries <= limits::catalog_max_entries);
+    CHECK(31000u + h.bytes <= limits::catalog_max_bytes);
+    CHECK(catalogHeadroom(*cat, limits::catalog_max_bytes).bytes == 0);
 }

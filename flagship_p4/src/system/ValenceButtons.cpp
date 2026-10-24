@@ -60,7 +60,7 @@ void samplePair(uint32_t nowMs) {
               static_cast<unsigned long>(button::kStuckMs / 1000));
     else
         GLOGW(kTag, "PAIR %s at the board", button::pairGestureName(g));
-    // A stuck release binds nothing: its hold was parked at kDemoteHoldMs.
+    // A stuck release binds nothing: its config hold was parked at kConfigHoldMs.
     if (g != button::PairGesture::stuck) g_pairParked.store(uint8_t(g), std::memory_order_release);
 }
 

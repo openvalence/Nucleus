@@ -47,6 +47,7 @@
 #include <utility>
 
 #include "valence/channel/catalog.hpp"
+#include "valence/channel/catalog_channel.hpp"
 #include "valence/channel/log_channel.hpp"
 #include "valence/channel/safety_events_channel.hpp"
 #include "valence/channel/settings_trial_channel.hpp"
@@ -225,6 +226,7 @@ inline constexpr std::string_view ceilings         = "Tuning / Ceilings";
 inline constexpr std::string_view replanning       = "Tuning / Re-planning";
 inline constexpr std::string_view pattern_presets  = "Pattern library";
 inline constexpr std::string_view safety           = "Tuning / Safety";
+inline constexpr std::string_view radios           = "Tuning / Radios";
 }  // namespace card
 
 // RFC-096: true when a group string has no section, or its first '/' sits in
@@ -393,6 +395,11 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     namespace roles = valence::field_roles;
 
     c.clear();
+
+    // ---- "catalog" -- STATE, watch, on-change (RFC-077, RFC-097) -------------
+    // The library's own builder, first by id. The provisioning catalog serves
+    // it too (SPEC 13.4.1).  [12 B]
+    if (!valence::addCatalogChannel(c)) return false;
 
     // ---- "safety" — STATE, critical, on-change ------------------------------
     // VERBATIM copy of conformance/mini_catalog.hpp's safety entry: the hub's
@@ -1482,8 +1489,8 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // category rather than more fields on 0x0081 (see ch::machine_modes for
     // the enabled_mask arithmetic that makes the split structural).
     //
-    // Layout [13 B, 14 B with has_drive]: u8 enums the catalog names, then
-    // the f32 home_speed and the u8 datagram_estop appended at the tail, so a
+    // Layout [14 B, 15 B with has_drive]: u8 enums the catalog names, then
+    // the f32 home_speed and the u8s datagram_estop and radios appended at the tail, so a
     // generic client renders them without knowing this device exists.
     // ValenceDevice.cpp's publishMachineModes() packs the same bytes.
     auto addMachineModes = [&]() {
@@ -1509,21 +1516,21 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // Bit i gates the i-th setting-annotated field, same rule as 0x0081.
     // No reserved byte and not motion_backend carries a setting_key, so
     // home_style (where it exists) is bit 0, then schedule_horizon, flipped,
-    // home_speed and datagram_estop.
+    // home_speed, datagram_estop and radios.
     if (feat.has_drive) {
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
                             .desc = "Settings the machine accepts right now",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
-                           {"home_style", "schedule_horizon", "flipped", "home_speed", "datagram_estop"});
+                           {"home_style", "schedule_horizon", "flipped", "home_speed", "datagram_estop", "radios"});
     } else {
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
                             .desc = "Settings the machine accepts right now",
                             .role = roles::meta_enabled_mask,
                             .hasRank = true, .rank = valence::ui_ranks::detail},
-                           {"schedule_horizon", "flipped", "home_speed", "datagram_estop"});
+                           {"schedule_horizon", "flipped", "home_speed", "datagram_estop", "radios"});
     }
     // Which path actually drives the motor. READ-ONLY: the backend is what is
     // soldered, so there is no choice for a setting to make.
@@ -1573,19 +1580,20 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                      {"off", "on"});
     // RFC-099, append-only: bits as enabled_mask's. home_speed and
     // datagram_estop take trials; the horizon and the flip are gated on live
-    // state and refuse one (ValenceDevice::trialBaseline()).
+    // state and refuse one, and radios acts only at the next boot
+    // (ValenceDevice::trialBaseline()).
     if (feat.has_drive) {
     c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Settings on trial, not stored yet",
                         .role = roles::meta_trial_pending,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
-                       {"home_style", "schedule_horizon", "flipped", "home_speed", "datagram_estop"});
+                       {"home_style", "schedule_horizon", "flipped", "home_speed", "datagram_estop", "radios"});
     } else {
     c.addBitfieldField({.name = "trial_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Settings on trial, not stored yet",
                         .role = roles::meta_trial_pending,
                         .hasRank = true, .rank = valence::ui_ranks::detail},
-                       {"schedule_horizon", "flipped", "home_speed", "datagram_estop"});
+                       {"schedule_horizon", "flipped", "home_speed", "datagram_estop", "radios"});
     }
     // The home cycle's approach speed (MotionArbiter.h, homing): the re-touch
     // runs at a quarter of it, and the arbiter holds it to jog_speed. Applied
@@ -1608,6 +1616,17 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .group = card::safety,
                       .desc = "E-stop from any device on the network",
                       .settingKey = 10, .hasSettingKey = true,
+                      .hasRank = true, .rank = valence::ui_ranks::advanced},
+                     {"off", "on"});
+    // RFC-121 (SPEC 13.1): WiFi and BLE from the next boot. Off is the
+    // serial route: one client on the USB cable, no config mode; the PAIR
+    // config hold turns them back on (LinkMode.h). configure tier (modes-set
+    // key 11). Stored. Append-only, after datagram_estop.
+    c.addSelectField({.name = "radios", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .dflt = SettingDefault::ofInt(1),
+                      .group = card::radios,
+                      .desc = "WiFi and BLE from the next boot; off: USB only",
+                      .settingKey = 11, .hasSettingKey = true,
                       .hasRank = true, .rank = valence::ui_ranks::advanced},
                      {"off", "on"});
     };
@@ -2336,7 +2355,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                 .defaultPriority = Priority::normal});
     // KEY 1 IS DELIBERATELY UNUSED. It held "blend_mode"; see the field
     // comment on machine-modes' `blend_mode_reserved`. ValenceDevice::
-    // applyModes reads only keys 7, 8, 9 and 10, and refuses a request
+    // applyModes reads only keys 7 to 11, and refuses a request
     // carrying none of them with NACK(INVALID_VALUE).
     //
     // KEY 2 IS ALSO DELIBERATELY UNUSED. It briefly held "transport" (the WS/
@@ -2372,6 +2391,9 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasMin = true, .hasMax = true, .min = ceiling::home_speed_min, .max = ceiling::speed_max,
                       .access = AccessLevel::configure, .hasAccess = true});
     c.addSchemaField({.key = 10, .name = "datagram_estop", .type = CborFieldType::uint_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                      .access = AccessLevel::configure, .hasAccess = true});
+    c.addSchemaField({.key = 11, .name = "radios", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .access = AccessLevel::configure, .hasAccess = true});
     };
@@ -2658,6 +2680,26 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     if (feat.has_pattern) addPatternPresets();  // 0x5220 STORE·pattern, family 2 member 0
 
     return c.ok();
+}
+
+// SPEC §13.4.1 (RFC-121): the provisioning catalog's members. The optional
+// ones (0x0017-0x001A) are members iff the full catalog declares them.
+constexpr bool isProvisioningEntry(uint16_t id) {
+    return id == valence::channels::catalog || id == valence::channels::safety ||
+           id == valence::channels::safety_intents || id == valence::channels::safety_events ||
+           id == valence::channels::provisioning ||
+           (id >= valence::net::draft::ch_networks && id <= valence::net::draft::ch_visible_networks_more);
+}
+
+// Fills `out` with the provisioning catalog config mode serves: `full`'s
+// members in its order, each copied whole (Catalog32::addEntryFrom), so every
+// entry is byte-identical to the full catalog's and only membership, and so
+// the etag, differs. OUT-PARAM for the same reason as buildValenceCatalog().
+inline bool buildProvisioningCatalog(valence::Catalog32& out, const valence::Catalog32& full) {
+    out.clear();
+    for (uint16_t i = 0; i < full.count; ++i)
+        if (isProvisioningEntry(full.entries[i].id) && !out.addEntryFrom(full, full.entries[i])) return false;
+    return out.ok();
 }
 
 }  // namespace valence
