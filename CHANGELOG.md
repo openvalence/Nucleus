@@ -2,6 +2,18 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.65 (2026-10-23)
+
+### For users
+
+- **Busy scripts plan faster.** The motion planner works out a dense run of moves in about half the time it took before, so a script with many short strokes keeps its schedule more easily. A few dense passages render slightly differently, still inside every limit.
+
+### Technical
+
+- `kinetic.pin` -> `9b0117e` (Kinetic main: the emitRun week, kin-f0yr, and the render() look-ahead test fix, kin-jr8r). The solver memoizes each piece's judge in the axis Workspace (`JudgeMemo`, 20.6 KB per axis), builds each knot's piece once a pass, judges a start-corrected piece at its exact peaks (`overCorrected`, which moves `KINETIC2_FINGERPRINT` to `0xb43b8ddce5ab576b`), and gives a cascade's predecessors its share in one pass (worst 64 corpus windows: 949 passes to 311, host solve time 44% of before). kin-jr8r touched the suite only: the oscillator plans were short of `render()`'s look-ahead; the firmware's plan buffer (`kPlanExt`) was already sized to it.
+- **The build refuses an unpinned planner.** `tools/kinetic_guard.py`, a pre-script of every `flagship_p4*` env and `env:native`, fails the build unless `../Kinetic` is at `kinetic.pin` with the paths Nucleus compiles clean (canon_lint's rule). `NUCLEUS_KINETIC_UNPINNED=1` builds anyway for planner development, warns, and stamps the git label `-kinetic-unpinned` (`/diag` `git=`). The 0.1.63 bench image had compiled whatever branch sat in `../Kinetic` (`.claude/rules/build-test-deploy.md`).
+- `test/fixtures/kinetic_trace.json` re-recorded against the pinned Kinetic: the committed one had been recorded against an unpinned branch (299 lines move). `kinetic.wasm` reproduces it bit for bit; the Neutrino wasm check passes unchanged.
+
 ## 0.1.64 (2026-10-23)
 
 ### For users
