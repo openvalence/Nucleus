@@ -129,7 +129,10 @@ static bool nvs_up() {
 }
 
 // `joinSaved` false: the station joins only for a wifi_join (LinkMode.h).
-static bool wifi_up(bool joinSaved) {
+// `radios` false (the radios-off route): the C6 is connected, so the self
+// check still sees it, and the saved list is loaded, but WiFi never starts
+// and BLE never comes up.
+static bool wifi_up(bool joinSaved, bool radios) {
     esp_err_t err;
     if ((err = esp_netif_init()) != ESP_OK)                  { printf("esp_netif_init: %s\n", esp_err_to_name(err)); return false; }
     if ((err = esp_event_loop_create_default()) != ESP_OK)   { printf("event loop: %s\n", esp_err_to_name(err)); return false; }
@@ -150,6 +153,16 @@ static bool wifi_up(bool joinSaved) {
     printf("C6 slave firmware: rc=%d version %u.%u.%u\n", rc, unsigned(ver.major1), unsigned(ver.minor1), unsigned(ver.patch1));
     g_hosted_ok = (rc == 0);
 
+    // The saved list (RFC-116) and the task that joins from it, before the
+    // start whose STA_START event wakes that task. No SSID is ever printed.
+    if (!valence::stationBegin(joinSaved)) return false;
+    printf("saved networks: %u\n", unsigned(valence::stationBootList().count()));
+    g_have_credentials = valence::stationBootList().count() > 0;
+    if (!radios) {
+        printf("radios OFF (stored setting): USB serial only\n");
+        return true;
+    }
+
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     err = esp_wifi_init(&cfg);
     printf("esp_wifi_init (remoted to the C6): %s at %.0f ms\n",
@@ -159,11 +172,6 @@ static bool wifi_up(bool joinSaved) {
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event, nullptr);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event, nullptr);
 
-    // The saved list (RFC-116) and the task that joins from it, before the
-    // start whose STA_START event wakes that task. No SSID is ever printed.
-    if (!valence::stationBegin(joinSaved)) return false;
-    printf("saved networks: %u\n", unsigned(valence::stationBootList().count()));
-    g_have_credentials = valence::stationBootList().count() > 0;
     if ((err = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK)        { printf("set_mode: %s\n", esp_err_to_name(err)); return false; }
     if ((err = esp_wifi_start()) != ESP_OK)                        { printf("wifi_start: %s\n", esp_err_to_name(err)); return false; }
 
@@ -342,9 +350,10 @@ extern "C" void app_main() {
     boot.pairHeld = pairHeldAtBoot();
     if (boot.pairHeld) printf("\n*** CONFIG MODE: PAIR held at boot ***\n");
     const bool gesture = valence::linkmode::decideBoot(boot) == valence::linkmode::Boot::config_gesture;
+    boot.radiosOff = !gesture && nvs_ok && valence::hubStoredRadiosOff();
 
     printf("\n--- network: esp_hosted over SDIO to the C6 ---\n");
-    const bool wifi_ok = nvs_ok && wifi_up(!gesture);
+    const bool wifi_ok = nvs_ok && wifi_up(!gesture, !boot.radiosOff);
     if (!wifi_ok) printf("--- network FAILED to start ---\n");
     boot.haveCredentials = g_have_credentials;
     const valence::linkmode::Boot route = valence::linkmode::decideBoot(boot);
@@ -417,7 +426,9 @@ extern "C" void app_main() {
         // observations is the cheap liveness proof, and it lands one interval
         // later than the task watchdog's own window -- so a hung hub resets
         // first and the bootloader restores its pair.
-        if (hub_ok && g_got_ip && haveTicks && census.ticks > lastTicks)
+        // The radios-off route never has an address; ticking is its proof.
+        if (hub_ok && (g_got_ip || route == valence::linkmode::Boot::radios_off) && haveTicks &&
+            census.ticks > lastTicks)
             valence::otaMarkAppValid();
         lastTicks = census.ticks;
         haveTicks = true;

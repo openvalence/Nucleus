@@ -52,6 +52,10 @@ bool hubBegin(linkmode::Boot route, bool autoEntry);
 // What the previous boot asked of this one, read once and cleared. app_main,
 // after nvs_flash_init() and before the radios start.
 linkmode::Next hubTakeNext();
+// The stored radios setting is off (StoredState.h), read straight from NVS
+// before the hub exists; a missing or rejected blob reads as on. app_main,
+// after nvs_flash_init().
+bool hubStoredRadiosOff();
 
 // The station holds an address (true) or lost it (false). main.cpp's WiFi
 // event handler, on the event loop task; the hub task reads it (LinkMode.h).

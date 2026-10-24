@@ -2290,7 +2290,7 @@ TEST_CASE("VD-DGRAM: datagram_estop is configure tier, drives the datagram switc
     const auto modesByte = [&] {
         const auto it = rig->del.lastState.find(ch::machine_modes);
         REQUIRE(it != rig->del.lastState.end());
-        return it->second.back();
+        return it->second[it->second.size() - 2];   // radios follows it
     };
     CHECK(modesByte() == std::byte{1});
 
@@ -3773,4 +3773,43 @@ TEST_CASE("VD-CONFIG-2: the config hold is refused with motor power on or motion
     CHECK_FALSE(rig->device.rebootDue());
     CHECK_FALSE(rig->device.rebootIntoConfig());
     g_census.busy = false;
+}
+
+// ---- the radios setting (RFC-121, SPEC 13.1) -------------------------------------
+
+TEST_CASE("VD-RADIOS: radios is configure tier, the tail byte of 0x1030, stored, and a config-mode join turns it back on") {
+    {
+        auto rig = std::make_unique<Rig>();
+        REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(11, IntentValue::ofU64(0))).has_value());
+        rig->step();
+        REQUIRE(rig->del.nacks.size() == 1);
+        CHECK(rig->del.nacks[0].code == NackCode::ACCESS_DENIED);
+    }
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
+    const auto radiosByte = [&] {
+        const auto it = rig->del.lastState.find(ch::machine_modes);
+        REQUIRE(it != rig->del.lastState.end());
+        return it->second.back();
+    };
+    CHECK(radiosByte() == std::byte{1});
+    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(11, IntentValue::ofU64(0))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(rig->del.lastEcho.count == 1);
+    CHECK(rig->del.lastEcho.fields[0].key == 11);
+    CHECK(rig->del.lastEcho.fields[0].value.u64_val == 0);
+    rig->step(200);
+    CHECK(radiosByte() == std::byte{0});
+
+    std::array<std::byte, stored::kConfigBlobBytes> blob{};
+    REQUIRE(rig->device.encodeConfigBlob(blob, 3) == blob.size());
+    CHECK(blob[stored::kConfigV9Bytes] == std::byte{0});
+
+    const uint16_t gen = rig->hub->cfgGen();
+    rig->device.enableRadios();
+    rig->step(200);
+    CHECK(radiosByte() == std::byte{1});
+    CHECK(rig->hub->cfgGen() != gen);   // a hub-side change moves cfg_gen
+    REQUIRE(rig->device.encodeConfigBlob(blob, 3) == blob.size());
+    CHECK(blob[stored::kConfigV9Bytes] == std::byte{1});
 }

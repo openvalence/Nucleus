@@ -142,6 +142,11 @@ public:
 
     const StoredConfig& config() const { return _cfg; }
 
+    // RFC-121: a join made in config mode turns the radios-off setting back
+    // on, so the boot it commits to has the network it just joined. Hub task,
+    // a hub-side config change (cfg_gen owed, persisted).
+    void enableRadios();
+
     // The stored config IS the arbiter's window and ceilings; this is the one
     // door between them (C-1).
     void pushConfigToMotion() const;

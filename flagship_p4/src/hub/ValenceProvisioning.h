@@ -115,6 +115,8 @@ public:
     void setMotionRuns(bool runs) { _motionRuns = runs; }
     // Config mode: a join commits by rebooting `ms` after its ECHO (0 = never).
     void setCommitReboot(uint32_t ms) { _commitRebootMs = ms; }
+    // The radios-off route (LinkMode.h): no station, so wifi_join refuses.
+    void setRadiosOff(bool off) { _radiosOff = off; }
     // The reboot a join's ECHO announced, in ms from now, exactly once.
     std::optional<uint32_t> takeCommitReboot() {
         if (!_commitDue) return std::nullopt;
@@ -171,6 +173,7 @@ private:
     uint32_t _presenceSession = 0;
     uint32_t _presenceAtMs = 0;
     bool _motionRuns = false;
+    bool _radiosOff = false;
     uint32_t _commitRebootMs = 0;
     bool _commitDue = false;
 
@@ -341,6 +344,10 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
     }
     if (op == provisioning_ops::wifi_join && _motionRuns) {
         nack(link, NackCode::SOURCE_CONFLICT, in.intent_id, h->seq, "motion running");
+        return true;
+    }
+    if (op == provisioning_ops::wifi_join && _radiosOff) {
+        nack(link, NackCode::NETWORK_JOIN_FAILED, in.intent_id, h->seq, "radios off: hold PAIR 10 s for config mode");
         return true;
     }
     if (op != provisioning_ops::wifi_join) {

@@ -375,6 +375,7 @@ void serviceLinkMode(uint32_t nowMs, bool motion) {
     // A join answered live in config mode commits by rebooting once its ECHO
     // left; a failed one answered NACK and reboots nothing (SPEC 13.9).
     if (const std::optional<uint32_t> in = g_box->desk->takeCommitReboot()) {
+        g_box->device.enableRadios();
         g_configRebootAtMs = nowMs + std::max<uint32_t>(*in, 1);
         GLOGW(kTag, "config mode: joined and saved, rebooting into normal mode in %lu ms",
               static_cast<unsigned long>(*in));
@@ -542,6 +543,16 @@ uint32_t deviceFreeHeapBytes() { return uint32_t(heap_caps_get_free_size(MALLOC_
 valence::Hub* hub() { return (g_box && g_box->hub) ? &*g_box->hub : nullptr; }
 
 selfcheck::LedgerBoot hubLedgerBoot() { return g_ledgerBoot; }
+
+bool hubStoredRadiosOff() {
+    std::array<std::byte, stored::kConfigBlobBytes> buf{};
+    const std::span<const std::byte> blob = loadBlob(kNvsCfgKey, buf);
+    StoredConfig c;
+    MotionTuning t = motionDefaultTuning();
+    StoredModes m;
+    uint16_t gen = 0;
+    return !blob.empty() && stored::decodeConfig(blob, t, c, t, m, gen) && !m.radios;
+}
 
 linkmode::Next hubTakeNext() {
     nvs_handle_t h;
@@ -726,6 +737,7 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
     g_box->desk.emplace(*g_box->hub, g_box->catalog.find(channels::provisioning), provisioningStation(),
                         *g_box->nets, kWsPort);
     if (linkmode::isConfig(route)) g_box->desk->setCommitReboot(kCommitRebootMs);
+    g_box->desk->setRadiosOff(route == linkmode::Boot::radios_off);
     if (ISerialPipe* usb = usbSerialPipeBegin()) g_box->serial.begin(*g_box->hub, *usb, &*g_box->desk);
     g_blePipe = &ble::pipe();
     g_box->blePort.begin(*g_box->hub, *g_blePipe, &*g_box->desk, "ble", false);

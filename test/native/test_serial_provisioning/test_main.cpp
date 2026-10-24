@@ -959,3 +959,19 @@ TEST_CASE("config mode: a failed join answers NACK and reboots nothing; the sess
     rig->step();
     CHECK(rig->station.joins == 2);
 }
+
+TEST_CASE("radios off: wifi_join is refused before the station; the list ops still answer") {
+    auto rig = std::make_unique<Rig>();
+    rig->live();
+    rig->desk->setRadiosOff(true);
+    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    REQUIRE(rig->at().ears.nacks.size() == 1);
+    CHECK(rig->at().ears.nacks[0].code == NackCode::NETWORK_JOIN_FAILED);
+    CHECK(rig->at().ears.nacks[0].detail.find("radios off") == 0);
+    CHECK(rig->station.joins == 0);
+    REQUIRE(rig->client().sendIntent(channels::provisioning,
+                                     wifiJoin("Second", "second passphrase", net::draft::op_net_save)));
+    rig->step();
+    CHECK(rig->at().ears.echoes.size() == 1);
+}
