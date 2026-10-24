@@ -265,7 +265,10 @@ void persistDue() {
 // gets no hint; every later WELCOME-shaped message picks up the real value.
 // Polled on the hub task because setEndpoint() is a Hub call and the hub is
 // single-task.
+// SPEC 13.4.1: with no WS listener (config mode) both stay 0 even when the
+// station holds an address.
 void refreshEndpoint() {
+    if (!g_wsUp) return;
     esp_netif_t* nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (nif == nullptr) return;
     esp_netif_ip_info_t ip{};
