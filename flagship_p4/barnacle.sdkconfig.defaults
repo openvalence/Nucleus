@@ -1,0 +1,6 @@
+# Kconfig overlay for the flagship_p4_barnacle env (platformio.ini), listed
+# after sdkconfig.defaults in its SDKCONFIG_DEFAULTS: nucleus-p4b, the Stamp-P4
+# on the OSSM R+D board (src/Kconfig.projbuild NUCLEUS_BOARD_BARNACLE). The R+D
+# board has no Modbus link to the drive.
+CONFIG_NUCLEUS_BOARD_BARNACLE=y
+# CONFIG_NUCLEUS_DRIVE_LINK is not set

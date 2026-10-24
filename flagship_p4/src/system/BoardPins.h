@@ -19,18 +19,30 @@
 //   onto a strap: G35 BOOT, G36 mode select, G37 ROM log, G38 download sample.
 // - A TODO(hw-kzr) pin is from the SPEC's provisional map ("swap freely at
 //   layout") and has not been re-ruled; it may still move.
+// - CONFIG_NUCLEUS_BOARD_BARNACLE is nucleus-p4b, the Stamp-P4 on the OSSM
+//   R+D board (bd val-omh3): its pins are the BARNACLE section at the end,
+//   and every Flagship pin they collide with reads -1 (absent) there. The
+//   Flagship-only parts behind the other pins are not linked into that image
+//   (src/CMakeLists.txt), so those numbers go unused.
 // See: docs/board-map.md (net names, parts, firmness, what firmware does with
 // each pin), ../Hardware/flagship/SPEC.md
 
 #pragma once
-#include "sdkconfig.h"   // CONFIG_NUCLEUS_BENCH_QUAD_LP10_12 reaches the LP build too
+#include "sdkconfig.h"   // CONFIG_NUCLEUS_BENCH_QUAD_LP10_12 and _BOARD_BARNACLE reach the LP build too
+
+#if defined(CONFIG_NUCLEUS_BENCH_QUAD_LP10_12) && defined(CONFIG_NUCLEUS_BOARD_BARNACLE)
+#error "the duct-tape bench quadrature and the barnacle are two boards: pick one"
+#endif
 
 // ---- motion: quadrature to the drive, LP core only --------------------------
 // Through the always-enabled 74AHCT125 gates 1-2 (U10) to J4 MOTION, tapped
 // before the buffer on TP601/TP604.
-#ifdef CONFIG_NUCLEUS_BENCH_QUAD_LP10_12
+#if defined(CONFIG_NUCLEUS_BENCH_QUAD_LP10_12)
 #define BOARD_GPIO_QUAD_A 10  // LPG10: duct-tape bench only (Kconfig); takes ACC_IO2
 #define BOARD_GPIO_QUAD_B 12  // LPG12: duct-tape bench only (Kconfig); takes ACC_IO1
+#elif defined(CONFIG_NUCLEUS_BOARD_BARNACLE)
+#define BOARD_GPIO_QUAD_A 1   // LPG1, Stamp pad 9 to the drive's PUL+; takes ACC_IO5
+#define BOARD_GPIO_QUAD_B 0   // LPG0, Stamp pad 11 to DIR+; takes PD_INT. No 32 kHz crystal fitted
 #else
 #define BOARD_GPIO_QUAD_A 3   // LPG3
 #define BOARD_GPIO_QUAD_B 5   // LPG5
@@ -100,16 +112,28 @@
 #define BOARD_GPIO_ESTOP_BYP 29
 
 // ---- buttons, status LED, debug ---------------------------------------------
+// -1 on the barnacle: S2 on the R+D board is PAIR through the helper link, and
+// the status pixel is the helper's WS2813 (BarnacleLink.h).
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+#define BOARD_GPIO_BTN_HOME -1
+#define BOARD_GPIO_BTN_PAIR -1
+#define BOARD_GPIO_LED_DATA -1
+#else
 #define BOARD_GPIO_BTN_HOME 49   // TODO(hw-kzr): provisional. Active low.
 #define BOARD_GPIO_BTN_PAIR 52   // active low
 // Through 74AHCT125 gate 3 to the GRBW status pixel (32 bits per pixel), whose
 // DOUT continues to J12 NEOPIXEL OUT. R601 10k holds it low through boot.
 #define BOARD_GPIO_LED_DATA 26   // USB1.1 D-, free while OTG is off
+#endif
 // U0TX: the ROM boot log appears here on EVERY reset.
 #define BOARD_GPIO_DBG      37
 
 // ---- fan and thermistor -----------------------------------------------------
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+#define BOARD_GPIO_FAN_PWM  -1   // absent: G27 is the helper link's TX on the barnacle
+#else
 #define BOARD_GPIO_FAN_PWM  27   // HIGH = fan on; USB1.1 D+, free with OTG off
+#endif
 #define BOARD_GPIO_FAN_TACH 38   // open collector, 10k pull-up
 #define BOARD_GPIO_THERM    16   // TODO(hw-kzr): provisional. ADC1, J7 NTC
 
@@ -132,8 +156,36 @@
 #define BOARD_GPIO_ACC_IO1     12   // LPG12, J15
 #define BOARD_GPIO_ACC_IO2     10   // LPG10, J15
 #endif
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+#define BOARD_GPIO_ACC_IO3     -1   // absent: LPG8 is TRIP on the barnacle
+#define BOARD_GPIO_ACC_IO4      7   // LPG7, J15
+#define BOARD_GPIO_ACC_IO5     -1   // absent: LPG1 is QUAD_A on the barnacle
+#define BOARD_GPIO_PD_INT      -1   // absent: LPG0 is QUAD_B on the barnacle
+#else
 #define BOARD_GPIO_ACC_IO3      8   // LPG8, J15
 #define BOARD_GPIO_ACC_IO4      7   // LPG7, J15
 #define BOARD_GPIO_ACC_IO5      1   // LPG1, J15
 #define BOARD_GPIO_PD_INT       0   // LPG0, J16 pogo; J15.12 is no-connect
+#endif
 
+// ---- barnacle: the Stamp-P4 on the OSSM R+D board ---------------------------
+// Stamp pads 7 to 19 carry a 7-pin XH header; J8 is the R+D board's servo
+// header (openvalence.github.io guides/barnacle, the point-to-point table).
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+// The LP core's pad drive for QUAD_A and QUAD_B, 0..3: 3 sources 40 mA and
+// sinks 28 mA into the drive's opto inputs with no buffer between.
+#define BOARD_QUAD_DRIVE_STRENGTH 3
+// Pad 7 from J8 pin 7, Q4's open collector from WROOM IO27. ACTIVE LOW, the
+// P4's internal pull-up its only high: a helper resetting or booting leaves
+// it high (not tripped), a hung one with IO27 high holds it low.
+#define BOARD_GPIO_TRIP      8    // LPG8
+// The helper link, 115200 8N1. TX (pad 17) drives J8 pin 2 into WROOM IO13
+// (10k pull-up on the R+D board); RX (pad 19) is J8 pin 9, Q5's open
+// collector from WROOM IO14, the P4's internal pull-up its only high. USB1.1
+// D+/D- on the P4, free while OTG is off.
+#define BOARD_GPIO_LINK_TX   27
+#define BOARD_GPIO_LINK_RX   26
+// The HP UART behind them (BarnacleLink.cpp). UART1 is the RS485 port on the
+// Flagship, which this board does not have. Never UART0.
+#define BOARD_UART_LINK      1
+#endif

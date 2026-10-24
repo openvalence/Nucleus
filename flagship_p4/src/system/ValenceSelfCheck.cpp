@@ -1,5 +1,11 @@
 // ValenceSelfCheck -- implementation. See ValenceSelfCheck.h for ownership and
 // the never-high rule, SelfCheck.h for the gate.
+// Constraints:
+// - On the barnacle (CONFIG_NUCLEUS_BOARD_BARNACLE) the Flagship's parts are
+//   not on the board: their rows record ABSENT under the barnacle's mask, with
+//   what stands in for each, and only the helper (the power-monitor row), the
+//   LP emitter, the C6, NVS, the ledger and the catalog gate the motion gate.
+//   No pin is driven: there is no switch to hold off.
 
 #include "system/ValenceSelfCheck.h"
 
@@ -11,6 +17,7 @@
 #include <driver/gpio.h>
 #include <esp_err.h>
 #include <nvs.h>
+#include <sdkconfig.h>
 
 #include "geiger/geiger.h"
 #include "hub/ValenceHub.h"
@@ -22,6 +29,9 @@
 #include "system/ValenceMotorSwitch.h"
 #include "system/ValencePdSource.h"
 #include "system/ValencePower.h"
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+#include "system/BarnacleLink.h"
+#endif
 
 namespace valence {
 
@@ -34,8 +44,23 @@ constexpr const char* kTag = "selfcheck";
 
 constexpr gpio_num_t pin(int n) { return static_cast<gpio_num_t>(n); }
 
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+constexpr bool kBarnacle = true;
+// Every Flagship part the R+D board does not carry. The power monitor is not
+// here: the helper is that row on this board.
+constexpr selfcheck::AbsentMask kBoardAbsent =
+    selfcheck::bitOf(Check::board_monitor) | selfcheck::bitOf(Check::rails) |
+    selfcheck::bitOf(Check::pd_source) | selfcheck::bitOf(Check::bus_window) |
+    selfcheck::bitOf(Check::motor_rail_off) | selfcheck::bitOf(Check::switch_fault) |
+    selfcheck::bitOf(Check::regen_clamp) | selfcheck::bitOf(Check::estop) |
+    selfcheck::bitOf(Check::drive_link);
+#else
+constexpr bool kBarnacle = false;
+constexpr selfcheck::AbsentMask kBoardAbsent = 0;
+#endif
+
 // BSS, ~1 KB, app_main's alone.
-selfcheck::Table g_table;
+selfcheck::Table g_table{kBoardAbsent};
 bool g_ran = false;
 // The drive-link outcome the table last recorded.
 aim::ProbeOutcome g_driveOutcome = aim::ProbeOutcome::pending;
@@ -190,10 +215,29 @@ void checkCatalog() {
                    unsigned(h->catalogEncodedBytes()));
 }
 
+// The barnacle's rows for the parts it does not have, and the helper's.
+void recordBarnacleBoard() {
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+    g_table.record(Check::board_monitor, Verdict::absent, "no board monitor on the R+D board");
+    g_table.record(Check::rails, Verdict::absent, "no rail monitor on the R+D board");
+    std::array<char, selfcheck::kReasonBytes> helper{};
+    const bool helperOk = describeHelper(helperReading(), helper);
+    g_table.record(Check::power_monitor, helperOk ? Verdict::pass : Verdict::fail, "%s", helper.data());
+    g_table.record(Check::pd_source, Verdict::absent, "DC input on J10, no PD source");
+    g_table.record(Check::bus_window, Verdict::absent, "no bus monitor: J2 volts are the helper's");
+    g_table.record(Check::motor_rail_off, Verdict::absent, "no motor switch: the E-stop breaks the supply");
+    g_table.record(Check::switch_fault, Verdict::absent, "no motor switch on the R+D board");
+    g_table.record(Check::regen_clamp, Verdict::absent, "no regen clamp: the drive's own");
+    g_table.record(Check::estop, Verdict::absent, "hardware E-stop in the servo supply, no input");
+#endif
+}
+
 // The post-enable row (SelfCheck.h): pending at boot, then the verdict of the
 // probe motor power lets the drive answer.
 void recordDriveLink(const DriveLinkStatus& s) {
-    if (!s.built) {
+    if (kBarnacle) {
+        g_table.record(Check::drive_link, Verdict::absent, "no Modbus link: the drive is set up over its own RS485");
+    } else if (!s.built) {
         g_table.record(Check::drive_link, Verdict::skipped,
                        "Modbus link not in this build (CONFIG_NUCLEUS_DRIVE_LINK)");
     } else if (!s.uart) {
@@ -212,7 +256,8 @@ void logEntry(Check c) {
     const char* r = selfcheck::resultName(e.result);
     switch (e.result) {
         case Verdict::fail:    GLOGE(kTag, "%-14s %s: %s", n, r, e.reason.data()); break;
-        case Verdict::pass:    GLOGI(kTag, "%-14s %s: %s", n, r, e.reason.data()); break;
+        case Verdict::pass:
+        case Verdict::absent:  GLOGI(kTag, "%-14s %s: %s", n, r, e.reason.data()); break;
         case Verdict::skipped:
         case Verdict::pending: GLOGW(kTag, "%-14s %s: %s", n, r, e.reason.data()); break;
     }
@@ -220,7 +265,10 @@ void logEntry(Check c) {
 
 void logSummary() {
     const SelfCheckSummary s = selfCheckSummary();
-    if (s.allowed) {
+    if (s.allowed && kBarnacle) {
+        GLOGI(kTag, "motion gate OPEN: every check this board has passed, %u absent on the R+D board",
+              unsigned(g_table.count(Verdict::absent)));
+    } else if (s.allowed) {
         GLOGI(kTag, "motor power ALLOWED: every pre-enable check passed, the enable sequence runs");
     } else if (s.failed > 0) {
         GLOGE(kTag, "motor power held OFF: %u failed, %u skipped; first: %s",
@@ -236,6 +284,7 @@ void logSummary() {
 // ---- public surface ------------------------------------------------------------
 
 void selfCheckHoldMotorOff() {
+    if (kBarnacle) return;   // no switch, no ESTOP_BYP: nothing to hold
     // Level first, then direction: the pad never drives high, not even for
     // the instant between enabling the output and writing it.
     constexpr int kHeldLow[] = {BOARD_GPIO_MOTOR_EN, BOARD_GPIO_PRECHARGE_EN,
@@ -264,12 +313,16 @@ bool selfCheckRun(const SelfCheckFacts& facts) {
 
     // The monitor's read fills board-monitor, rails, bus-window and
     // regen-clamp; table order is still the report order.
-    checkBoardMonitor(selfcheck::busWindowFor(pdSource));
-    checkPowerMonitor(reading);
-    selfcheck::judgePdSource(g_table, pdSource);
-    checkMotorRailOff(reading);
-    checkSwitchFault();
-    checkEStop();
+    if (kBarnacle) {
+        recordBarnacleBoard();
+    } else {
+        checkBoardMonitor(selfcheck::busWindowFor(pdSource));
+        checkPowerMonitor(reading);
+        selfcheck::judgePdSource(g_table, pdSource);
+        checkMotorRailOff(reading);
+        checkSwitchFault();
+        checkEStop();
+    }
     if (facts.lpEdges > 0) {
         g_table.record(Check::quadrature, Verdict::pass,
                        "LP core rendered %lu edges; index (ZO) not wired",

@@ -199,3 +199,16 @@ val-091.69].
 | Private | Board monitor U12 | 0x2C, not ruled | `SV_I2C_ADDR` in `system/Supervisor.h`; must stay outside 0x40-0x4F (val-091.19) |
 | Qwiic (LPG11/LPG9) | PD controller TPS26750 on the daughterboard | 0x21 | SPEC 2026-09-30 rev A row (ADCIN1 = ADCIN2 = GND); identified by MODE 'APP ' (SLVUCR7 4.1), `system/PdSource.h` |
 | Qwiic | user accessories | any free address | n/a |
+
+## Another board: the barnacle (nucleus-p4b)
+
+A Stamp-P4 wired onto the OSSM R+D reference board, rev 2.3, with the R+D
+board's WROOM-32D kept as an I/O helper (bd val-omh3, WIP, not bench-verified).
+Not a Flagship row: its pins are the barnacle section of
+`flagship_p4/src/system/BoardPins.h`, built by env `flagship_p4_barnacle`.
+Quadrature on LPG1/LPG0, TRIP on LPG8 (the home sense and the running stop),
+the helper link on G27/G26 (`system/BarnacleLink.h`, frames in
+`lib/barnacle_link`), and no motor switch, monitors, E-stop input or Modbus
+(`system/BarnacleBoard.cpp`; those self-check rows read ABSENT). The helper
+firmware is `barnacle_shim/`. Wiring, power and the J8 pinout:
+openvalence.github.io `guides/barnacle`.

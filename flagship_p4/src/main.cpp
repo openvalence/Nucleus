@@ -11,6 +11,9 @@
 //   the C6. Pins and bus live in sdkconfig.defaults. The saved networks and
 //   every join, reconnects included, are the Station task's
 //   (hub/ValenceProvisioning.cpp); secrets.h only seeds slot 0 on first boot.
+// - On the barnacle (CONFIG_NUCLEUS_BOARD_BARNACLE) PAIR is S2 on the R+D
+//   board, read through the helper link, and the Flagship's private power
+//   bus is not probed: the R+D board has no part on it.
 // See: docs/flagship-board.md section 8, bd val-091
 
 #include <atomic>
@@ -49,6 +52,9 @@
 #include "system/ValenceMotorSwitch.h"
 #include "system/ValencePower.h"
 #include "system/ValenceSelfCheck.h"
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+#include "system/BarnacleLink.h"
+#endif
 #include "ulp_main.h"
 
 // ---- LP core emitter steering ---------------------------------------------------
@@ -194,6 +200,9 @@ static bool wifi_up(bool joinSaved, bool radios) {
 
 // PAIR (active low, BoardPins.h) read low on every one of 5 samples over 40 ms.
 static bool pairHeldAtBoot() {
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+    return valence::barnaclePairHeldAtBoot();
+#else
     gpio_config_t io{};
     io.pin_bit_mask = 1ULL << BOARD_GPIO_BTN_PAIR;
     io.mode = GPIO_MODE_INPUT;
@@ -204,6 +213,7 @@ static bool pairHeldAtBoot() {
         if (gpio_get_level(gpio_num_t(BOARD_GPIO_BTN_PAIR)) != 0) return false;
     }
     return true;
+#endif
 }
 
 // ---- LP core -----------------------------------------------------------------
@@ -319,7 +329,9 @@ extern "C" void app_main() {
 
     // The motor current monitor, before motion: its latched ALERT can hold the
     // motor switch open. Non-fatal; a bare stamp has no part fitted.
+#ifndef CONFIG_NUCLEUS_BOARD_BARNACLE
     valence::powerBegin();
+#endif
 
     // The motor switch's host, state off, BEFORE the self-check: the table's
     // motor-rail entries read its state, and the switch needs the power

@@ -122,11 +122,42 @@ TEST_CASE("an out-of-range check is ignored, never written past the table") {
     CHECK(t.motorPowerAllowed());
 }
 
+TEST_CASE("absent: a board's mask passes the gate, absent outside it records as fail") {
+    const sc::AbsentMask mask = sc::bitOf(Check::board_monitor) | sc::bitOf(Check::estop);
+    Table t{mask};
+    passAll(t);
+    t.record(Check::board_monitor, Result::absent, "no monitor on this board");
+    t.record(Check::estop, Result::absent, "hardware E-stop");
+    CHECK(t.entry(Check::board_monitor).result == Result::absent);
+    CHECK(t.motorPowerAllowed());
+    CHECK(t.count(Result::absent) == 2);
+    t.record(Check::rails, Result::absent, "not in the mask");
+    CHECK(t.entry(Check::rails).result == Result::fail);
+    CHECK(std::string(t.entry(Check::rails).reason.data()) == "absent on a board that fits it: not in the mask");
+    CHECK_FALSE(t.motorPowerAllowed());
+    CHECK(t.firstBlocking() == Check::rails);
+}
+
+TEST_CASE("absent on a Flagship table (mask 0) never passes a part") {
+    Table t;
+    passAll(t);
+    for (size_t i = 0; i < sc::kCheckCount; ++i) {
+        if (sc::postEnable(Check(i))) continue;
+        Table u;
+        passAll(u);
+        u.record(Check(i), Result::absent, "x");
+        CHECK(u.entry(Check(i)).result == Result::fail);
+        CHECK_FALSE(u.motorPowerAllowed());
+    }
+    CHECK(t.motorPowerAllowed());
+}
+
 TEST_CASE("result names") {
     CHECK(std::string(sc::resultName(Result::pass)) == "PASS");
     CHECK(std::string(sc::resultName(Result::fail)) == "FAIL");
     CHECK(std::string(sc::resultName(Result::skipped)) == "SKIPPED");
     CHECK(std::string(sc::resultName(Result::pending)) == "PENDING");
+    CHECK(std::string(sc::resultName(Result::absent)) == "ABSENT");
 }
 
 // ---- board monitor judges (Supervisor.h blocks) -----------------------------

@@ -26,6 +26,10 @@
 //   pass for a release in /diag or at ota.py's --expect, and it compiles in
 //   the X-OTA-Token bench override that skips the PAIR double press
 //   (ValenceOta.h). A bench image must never ship. Nothing else may read it.
+// - The barnacle board (CONFIG_NUCLEUS_BOARD_BARNACLE, env
+//   flagship_p4_barnacle) suffixes FIRMWARE_VERSION with "-barnacle", so its
+//   image is never taken for a Flagship one at ota.py's --expect. Host
+//   builds have no sdkconfig.h and read as the Flagship.
 // See: .claude/rules/governance.md (C-1), ValenceCatalog.h, MotionArbiter.h
 // (the gate), bd val-091.58
 
@@ -33,9 +37,15 @@
 #define NUCLEUS_BENCH_NO_MOTOR 0
 #endif
 
+#if __has_include("sdkconfig.h")
+#include "sdkconfig.h"
+#endif
+
 #define FIRMWARE_MAJOR_MINOR "0.1"
 #if NUCLEUS_BENCH_NO_MOTOR
 #define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".65-p4hub-bench"
+#elif defined(CONFIG_NUCLEUS_BOARD_BARNACLE)
+#define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".65-p4hub-barnacle"
 #else
 #define FIRMWARE_VERSION FIRMWARE_MAJOR_MINOR ".65-p4hub"
 #endif

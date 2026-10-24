@@ -8,6 +8,11 @@
 //   internal heap once, at glowBegin().
 // - The frame buffer is rewritten only after rmt_tx_wait_all_done() says the
 //   last frame left: the encoder reads it during the transmission.
+// - On the barnacle (CONFIG_NUCLEUS_BOARD_BARNACLE) the status pixel is the
+//   R+D board's WS2813, an RGB pixel on the helper: the frame goes out as the
+//   helper link's color word (helperSetRgb(), BarnacleLink.h) and no RMT
+//   channel exists. The helper link is the grammar's Link system there: cyan,
+//   Degraded while the helper reads stale.
 
 #include "system/ValenceGlow.h"
 
@@ -19,6 +24,7 @@
 
 #include <driver/gpio.h>
 #include <driver/rmt_tx.h>
+#include <sdkconfig.h>
 
 #include "flux/flux_core.hpp"
 #include "geiger/geiger.h"
@@ -27,6 +33,9 @@
 #include "motion/ValenceMotion.h"
 #include "system/BoardPins.h"
 #include "system/StatusLook.h"
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+#include "system/BarnacleLink.h"
+#endif
 #include "system/ValenceMotorSwitch.h"
 #include "system/ValenceOta.h"
 
@@ -61,6 +70,23 @@ constexpr uint16_t kT1Low = 3;
 
 // ---- the pixel --------------------------------------------------------------
 
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+// The helper's RGB pixel: the gamma'd color handed to the link every frame,
+// sent with the next command. The helper caps it again before its LED.
+class HelperRgbOutput final : public flux::IGlowOutput {
+public:
+    bool begin() { return true; }
+    size_t pixelCount() const override { return 1; }
+    void set(size_t, flux::Rgb c) override { _pending = c; }
+    void show() override {
+        helperSetRgb(flux::gamma8(_pending.r), flux::gamma8(_pending.g), flux::gamma8(_pending.b));
+    }
+
+private:
+    flux::Rgb _pending{};
+};
+using PixelOutput = HelperRgbOutput;
+#else
 // One GRBW pixel on an RMT channel. White comes from the W die: the gray part
 // of the color moves there, so white is one LED, not three.
 class RmtGrbwOutput final : public flux::IGlowOutput {
@@ -119,7 +145,10 @@ private:
     bool _ok = false;
 };
 
-RmtGrbwOutput g_pixel;
+using PixelOutput = RmtGrbwOutput;
+#endif
+
+PixelOutput g_pixel;
 flux::GlowEngine g_engine(g_pixel);
 
 flux::HeartbeatSource* g_hubBeat = nullptr;
@@ -191,10 +220,14 @@ bool glowBegin() {
     g_engine.setBrightness(kBrightness);
     g_engine.requireReady(uint8_t(1u << uint8_t(flux::System::Motion)));
     show(look::MachineState::boot);
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+    GLOGI(kTag, "status pixel is the helper's WS2813 over the link, brightness %u/255", unsigned(kBrightness));
+#else
     if (ok) GLOGI(kTag, "status pixel on G%d: GRBW, brightness %u/255", BOARD_GPIO_LED_DATA,
                   unsigned(kBrightness));
     else    GLOGE(kTag, "status pixel RMT channel on G%d failed: the LED stays dark",
                   BOARD_GPIO_LED_DATA);
+#endif
     return ok;
 }
 
@@ -221,6 +254,9 @@ void glowService(uint32_t nowMs) {
                                             : net == NetLook::joining ? flux::Status::Working
                                             : net == NetLook::lost    ? flux::Status::Degraded
                                                                       : flux::Status::Nominal);
+#ifdef CONFIG_NUCLEUS_BOARD_BARNACLE
+        g_engine.set(flux::System::Link, helperReading().fresh ? flux::Status::Nominal : flux::Status::Degraded);
+#endif
         const look::MachineState s = look::stateFor(gatherFacts());
         if (s != g_state) {
             GLOGD(kTag, "%s -> %s", stateName(g_state), stateName(s));

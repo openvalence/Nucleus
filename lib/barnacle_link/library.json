@@ -1,0 +1,14 @@
+{
+  "name": "BarnacleLink",
+  "version": "0.1.0",
+  "description": "The barnacle helper link: COBS frames with a CRC-16 between a Stamp-P4 running Nucleus and the OSSM R+D board's WROOM-32D, and the helper's trip detector. Header-only and hardware-free.",
+  "keywords": ["cobs", "crc16", "uart", "esp32", "barnacle"],
+  "license": "Apache-2.0",
+  "frameworks": "*",
+  "platforms": "*",
+  "headers": "barnacle_link/barnacle_link.hpp",
+  "build": {
+    "includeDir": "include",
+    "flags": ["-std=gnu++2b"]
+  }
+}
