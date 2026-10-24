@@ -126,8 +126,12 @@ struct MotionCensus {
                                    // (MotionArbiter.h): each steered without
                                    // a catch-up burst
     uint32_t backstops      = 0;   // position backstop engagements: the plan
-                                   // left the active frame and the demand was
-                                   // held at its edge (MotionArbiter.cpp)
+                                   // left the active frame and the wall
+                                   // stopped it at its edge (MotionArbiter.cpp
+                                   // applyWall())
+    uint32_t wall_clamps    = 0;   // the backstop's last line: no stop kept
+                                   // the plan in, the steer held the demand
+                                   // at the edge
     uint32_t lease_lapses   = 0;   // the LP core stopped itself on a lease no
                                    // tick renewed for kLeaseUs (MotionArbiter.h)
     uint32_t planner_stalls = 0;   // runs past the strip's end: the steer

@@ -461,7 +461,7 @@ extern "C" void app_main() {
                "lp=%s  edges=%lu late=%lu catchup=%lu  wifi=%s rssi=%d drops=%lu ip=%s  "
                "hub=%s sess=%lu+%lup socks=%lu/%lu ws=%lu/%lu stream_late=%lu  "
                "mot=%s pos=%.3fmm steps=%+ld resid=%+ld intents=%lu/%lu stack=%lu "
-               "faults=%lu stalls=%lu backstops=%lu lapses=%lu fence=%lu pstalls=%lu lateplans=%lu refused=%lu "
+               "faults=%lu stalls=%lu backstops=%lu clamps=%lu lapses=%lu fence=%lu pstalls=%lu lateplans=%lu refused=%lu "
                "hardstops=%lu  selfcheck=%s:%u/%u %s  msw=%s  drv=%s alm=%u rdy=%u  "
                "therm=%.1fC fan=%.0f%%/%.0frpm\n",
                static_cast<unsigned long>(n * 5),
@@ -491,6 +491,7 @@ extern "C" void app_main() {
                static_cast<unsigned long>(mo.emitter_faults),
                static_cast<unsigned long>(mo.stalls),
                static_cast<unsigned long>(mo.backstops),
+               static_cast<unsigned long>(mo.wall_clamps),
                static_cast<unsigned long>(mo.lease_lapses),
                static_cast<unsigned long>(mo.fence_hits),
                static_cast<unsigned long>(mo.planner_stalls),

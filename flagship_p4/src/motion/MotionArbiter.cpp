@@ -104,6 +104,19 @@ kinetic2::State gridState(float p2, float p1, float p0) {
     return s;
 }
 
+// The fastest stop from s under k times lim's accel and kj times its jerk.
+// Profile::brake stops along the velocity, or the acceleration from rest; a
+// stop that turns back (float residue at a vanishing speed) is braked from
+// the velocity alone, which cannot.
+kinetic2::Profile stopUnder(const kinetic2::State& s, uint64_t at_us, EngineLimits l, float k, float kj) {
+    l.amax *= k;
+    l.jmax *= kj;
+    const float sgn = s.v != 0.0f ? (s.v > 0.0f ? 1.0f : -1.0f) : (s.a > 0.0f ? 1.0f : -1.0f);
+    kinetic2::Profile pr = kinetic2::Profile::brake(s, at_us, l);
+    if (sgn * (pr.end().p - s.p) < 0.0f) pr = kinetic2::Profile::brake(kinetic2::State{s.p, s.v, 0.0f}, at_us, l);
+    return pr;
+}
+
 }  // namespace
 
 HomeSense& noHomeSense() { return g_absent_sense; }
@@ -530,6 +543,7 @@ void MotionArbiter::resetEngine(float p_norm, uint64_t now_us, bool rebase) {
     // The oscillation stops with the plan it rode.
     _osc.reset();
     _osc_head = 0.0f;
+    _wall_on = false;
     _strip_stale = true;
     if (rebase) {
         // The steer re-anchors its feedforward here and steers nothing from a
@@ -1093,7 +1107,7 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // Busy while the engine plans motion or the connector still moves the
     // trajectory toward its rest.
     const kinetic2::State st = sampleEngine(now_us);
-    const bool busy = _engine.isBusy(now_us) || joining(now_us);
+    const bool busy = _engine.isBusy(now_us) || joining(now_us) || walling(now_us);
     _plan_read = readPlan(st, now_us);
     _plan_busy = busy;
     // The jog set's ceiling holds until the plan planned under it has ended.
@@ -1136,6 +1150,7 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
     bool refilled = false;
     if (!live) {
         s.n = 0;
+        _wall_on = false;
         _osc.reset();
         _osc_head = 0.0f;
     } else if (from_rest || _strip_stale || s.n == 0 || (now_us >= s.t0_us && now_us - s.t0_us >= kSpanUs) ||
@@ -1196,7 +1211,19 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
         }
         _osc_head = osc[0];
         for (size_t i = 0; i < kStripLen; ++i) s.p_mm[i] = plan[i] + osc[i];
-        if (refilled) {
+        // THE WALL owns the trajectory from the tick the steer may render it
+        // (applyWall()): a plan change waits, and at the wall's rest with the
+        // plan back in the frame the handover joins it from there. After a
+        // lapse the carriage stands where the LP core stopped it instead.
+        if (from_rest) _wall_on = false;
+        bool release = false;
+        if (wallCommitted(s.t0_us) && s.t0_us >= _wall.end_us() &&
+            s.p_mm[0] >= backstopLo() - kMmPerStep && s.p_mm[0] <= backstopHi() + kMmPerStep) {
+            _wall_on = false;
+            release = true;
+        }
+        const bool walled = wallCommitted(s.t0_us);
+        if ((refilled && !walled) || release) {
             handover(s, from_rest, now_us);
             if (joining(now_us)) _plan_busy = true;   // the census reads the join at once
         }
@@ -1204,13 +1231,24 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
         s.lo_mm = backstopLo();
         s.hi_mm = backstopHi();
         s.lim = renderLimits();
+        const bool kept = applyWall(s);
         // THE TAIL (bd val-cy1g): the stop the steer plays past the last
         // entry while the planner is late, from the state the strip ends in
-        // as the steer renders it (the plan, the oscillator and the
-        // connector), certified here so the steer never computes one.
+        // as the steer renders it (the plan, the oscillator, the connector
+        // and the wall), certified here so the steer never computes one. A
+        // wall's tail is the wall.
         const size_t n = s.n;
-        s.tail = certifiedStop(gridState(s.p_mm[n - 3], s.p_mm[n - 2], s.p_mm[n - 1]),
-                               s.t0_us + uint64_t(n - 1) * kMotionTickUs, s.lim, s.lo_mm, s.hi_mm, s.tail_hard);
+        bool tail_in = true;
+        if (_wall_on) {
+            s.tail = _wall;
+            s.tail_hard = false;
+        } else {
+            s.tail = certifiedStop(gridState(s.p_mm[n - 3], s.p_mm[n - 2], s.p_mm[n - 1]),
+                                   s.t0_us + uint64_t(n - 1) * kMotionTickUs, s.lim, s.lo_mm, s.hi_mm, s.tail_hard);
+            const float e = s.tail.end().p, p = s.p_mm[n - 1];
+            tail_in = e >= std::fmin(s.lo_mm, p) - kMmPerStep && e <= std::fmax(s.hi_mm, p) + kMmPerStep;
+        }
+        s.in_frame = kept && tail_in;
     }
     if (from_rest) _replan_seen = replan;
     s.replan = _replan_seen;
@@ -1380,23 +1418,81 @@ void MotionArbiter::applyConnector(PlanStrip& s) const {
     }
 }
 
+bool MotionArbiter::applyWall(PlanStrip& s) {
+    const int n = int(s.n);
+    auto tAt = [&](int k) { return uint64_t(int64_t(s.t0_us) + int64_t(k) * int64_t(kMotionTickUs)); };
+    if (wallCommitted(s.t0_us)) {
+        if (!_wall_counted) {
+            _wall_counted = true;
+            ++_walls;
+            if (_wall_hard) ++_hard_stops;
+            GLOGW_EVERY_MS(1000, kTag, "WALL: the plan leaves the frame; stopping at %.2f mm%s", double(_wall.end().p),
+                           _wall_hard ? ", braked harder than the set" : "");
+        }
+        for (int k = 0; k < n; ++k)
+            if (tAt(k) > _wall_from_us) s.p_mm[size_t(k)] = _wall.at(tAt(k)).p;
+        return _wall_ok;
+    }
+    _wall_on = false;
+    // The frame widens only to the trajectory in flight, as the steer's does.
+    const float* x = s.p_mm.data();
+    const float lo = std::fmin(s.lo_mm, x[0]);
+    const float hi = std::fmax(s.hi_mm, x[0]);
+    auto in = [&](float p) { return p >= lo - kMmPerStep && p <= hi + kMmPerStep; };
+    int out = 0;
+    while (out < n && in(x[out])) ++out;
+    if (out == n) return true;
+    // The latest entry whose stop under the set rests in the frame: the
+    // plan runs untouched up to it. None: the hardest stop needed, from the
+    // first entry with two before it on the strip's own grid. Cost: one
+    // closed-form brake per entry scanned back from the exit, every fill
+    // until the wall commits; bisect the scan if the planner's tick shows it.
+    constexpr int kFirst = int(kWallFirst);
+    kinetic2::Profile pr;
+    bool hard = false;
+    auto rests = [&](const kinetic2::Profile& p) { return p.end().p >= lo && p.end().p <= hi; };
+    int b = out - 1;
+    for (; b >= kFirst; --b) {
+        pr = stopUnder(gridState(x[b - 2], x[b - 1], x[b]), tAt(b), s.lim, 1.0f, 1.0f);
+        if (rests(pr)) break;
+    }
+    if (b >= kFirst) {
+        // At the edge, not a tick short of it: the least share of the set's
+        // jerk whose stop from b still rests in the frame, by bisection. The
+        // set's accel stays, so the stop starts from the plan's own.
+        const kinetic2::State st = gridState(x[b - 2], x[b - 1], x[b]);
+        float k_in = 1.0f, k_out = 1.0f / kHardStopMax;
+        if (rests(stopUnder(st, tAt(b), s.lim, 1.0f, k_out))) {
+            k_in = k_out;
+        } else {
+            for (int i = 0; i < 12; ++i) {
+                const float mid = 0.5f * (k_in + k_out);
+                if (rests(stopUnder(st, tAt(b), s.lim, 1.0f, mid))) k_in = mid;
+                else k_out = mid;
+            }
+        }
+        pr = stopUnder(st, tAt(b), s.lim, 1.0f, k_in);
+    } else {
+        b = kFirst;
+        pr = certifiedStop(gridState(x[b - 2], x[b - 1], x[b]), tAt(b), s.lim, lo, hi, hard, 0.0f);
+    }
+    const float e = pr.end().p;
+    _wall = pr;
+    _wall_from_us = tAt(b);
+    _wall_on = true;
+    _wall_hard = hard;
+    _wall_counted = false;
+    _wall_ok = out > b && e >= std::fmin(lo, x[b]) - kMmPerStep && e <= std::fmax(hi, x[b]) + kMmPerStep;
+    for (int k = b + 1; k < n; ++k) s.p_mm[size_t(k)] = pr.at(tAt(k)).p;
+    return _wall_ok;
+}
+
 kinetic2::Profile MotionArbiter::certifiedStop(const kinetic2::State& s, uint64_t at_us, const EngineLimits& lim,
-                                               float lo, float hi, bool& hard) {
+                                               float lo, float hi, bool& hard, float slop) {
     hard = false;
-    const float flo = std::fmin(lo, s.p) - kMmPerStep;
-    const float fhi = std::fmax(hi, s.p) + kMmPerStep;
-    // Profile::brake stops along the velocity, or the acceleration from rest;
-    // a stop that turns back (float residue at a vanishing speed) is braked
-    // from the velocity alone, which cannot.
-    const float sgn = s.v != 0.0f ? (s.v > 0.0f ? 1.0f : -1.0f) : (s.a > 0.0f ? 1.0f : -1.0f);
-    auto stop = [&](float k) {
-        EngineLimits l = lim;
-        l.amax *= k;
-        l.jmax *= k;
-        kinetic2::Profile pr = kinetic2::Profile::brake(s, at_us, l);
-        if (sgn * (pr.end().p - s.p) < 0.0f) pr = kinetic2::Profile::brake(kinetic2::State{s.p, s.v, 0.0f}, at_us, l);
-        return pr;
-    };
+    const float flo = std::fmin(lo, s.p) - slop;
+    const float fhi = std::fmax(hi, s.p) + slop;
+    auto stop = [&](float k) { return stopUnder(s, at_us, lim, k, k); };
     auto inside = [&](const kinetic2::Profile& pr) {
         const float e = pr.end().p;
         return e >= flo && e <= fhi;
@@ -1404,7 +1500,8 @@ kinetic2::Profile MotionArbiter::certifiedStop(const kinetic2::State& s, uint64_
     kinetic2::Profile pr = stop(1.0f);
     if (inside(pr)) return pr;
     // Harder, to the edge: the least multiple of the set's accel and jerk
-    // that stops inside, by bisection; past kHardStopMax the backstop holds.
+    // that stops inside, by bisection; past kHardStopMax the steer's clamp
+    // holds.
     hard = true;
     float k_in = kHardStopMax, k_out = 1.0f;
     if (!inside(stop(k_in))) return stop(k_in);
@@ -1548,8 +1645,9 @@ void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
 
     // THE POSITION BACKSTOP (operator ruling 2026-10-06, bd val-1w8). The
     // demand never leaves the backstop's frame (the strip's lo_mm..hi_mm),
-    // whatever the plan does: a curve that bulges, a brake that is not aware
-    // of the window, a frame gone stale. The frame widens only to the previous
+    // whatever the plan does. The strip's wall (applyWall()) already stops a
+    // plan that leaves it, jerk-limited; this clamp is the last line, for a
+    // stop no kHardStopMax kept in. The frame widens only to the previous
     // demand, so a carriage left outside it is never pulled in by the clamp,
     // only by a plan. A home cycle never reaches here (the gate above): the
     // seek has to reach the stops. The LP core's fence is the second line, and
@@ -1567,8 +1665,9 @@ void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
         // that lands ON the edge reads a float's rounding past it every time.
         if (!_backstop_on && std::fabs(raw - p_plan_mm) > kMmPerStep) {
             _backstop_on = true;
-            ++_backstops;
-            GLOGW_EVERY_MS(1000, kTag, "BACKSTOP: plan at %.2f mm held at %.2f mm", double(raw), double(p_plan_mm));
+            ++_clamps;
+            GLOGW_EVERY_MS(1000, kTag, "BACKSTOP CLAMP: plan at %.2f mm held at %.2f mm", double(raw),
+                           double(p_plan_mm));
         }
     } else {
         _backstop_on = false;
@@ -1633,12 +1732,16 @@ void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
 
     // THE WALL BOUND. The emitter renders v open loop until the next steer, so
     // v may carry the carriage, from position truth, at most to the backstop's
-    // edge within kTickDtCapS and never further outside it. Exact for any tick
-    // up to kTickDtCapS late; past it the LP core's fence holds the count in
-    // the frame, and its lease stops the steer kLeaseUs after the last tick.
+    // edge within one tick and never further outside it, on a strip whose
+    // wall keeps it in the frame: its stop at the edge is jerk-limited to
+    // rest, and a later tick the LP core's fence holds. On a strip it could
+    // not keep in (the last line), within kTickDtCapS: exact for any tick up
+    // to kTickDtCapS late. Past either the fence holds the count in the
+    // frame, and the lease stops the steer kLeaseUs after the last tick.
     const float pos = positionMm();
-    const float v_hi = std::fmax((hi - pos) / kTickDtCapS, 0.0f);
-    const float v_lo = std::fmin((lo - pos) / kTickDtCapS, 0.0f);
+    const float wall_s = s.in_frame ? float(kMotionTickUs) * 1e-6f : kTickDtCapS;
+    const float v_hi = std::fmax((hi - pos) / wall_s, 0.0f);
+    const float v_lo = std::fmin((lo - pos) / wall_s, 0.0f);
     if (v > v_hi) v = v_hi;
     if (v < v_lo) v = v_lo;
 
@@ -2012,7 +2115,8 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.intents        = _intents;
     c.rejected       = _rejected;
     c.stalls         = _stalls;
-    c.backstops      = _backstops;
+    c.backstops      = _walls;
+    c.wall_clamps    = _clamps;
     c.lease_lapses   = _lease_lapses;
     c.planner_stalls = _planner_stalls;
     c.late_plans     = _late_plans;
@@ -2048,7 +2152,7 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     // A SETTLE brake is the engine's own plan, never a bent command; the
     // backstop holding the demand at the frame's edge is one, whatever runs.
     c.plan_flags = c.busy && s.mode != uint8_t(PlanStyle::settle) ? s.flags : 0;
-    if (_backstop_on) c.plan_flags |= plan_flags::clamped;
+    if (_backstop_on || _wall_on) c.plan_flags |= plan_flags::clamped;
     // RFC-103: the ceilings or the window cut the oscillation below its ask.
     if (_osc.shaped()) c.plan_flags |= plan_flags::clamped;
     c.osc_active     = _osc.active();

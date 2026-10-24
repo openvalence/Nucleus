@@ -209,24 +209,41 @@ window is solved at the next sample, and the sampler evaluates it.
   are bounded (EndVelClamped). Exceptions are never instantiated; a
   non-finite knot is refused at `submit()`.
 - **The position backstop (operator ruling 2026-10-06, bd val-1w8): no plan
-  moves the carriage out of its frame.** The brakes (PAUSE, a generator's
-  stop, a starved timeline) are profiles the referee never scores, so
-  `MotionArbiter::steerTick()` clamps the rendered demand on every tick to the
-  backstop's frame: the configured window held inside the rail, or the
-  asserted rail while the engine plans in the rail frame (override's jog and
-  its return). A home cycle's seek producer never reaches it. The frame
-  widens only to the previous demand, so a carriage left outside it is moved
-  back by a plan, never by the clamp. Into a held edge the feedforward
-  carries the distance to the edge and nothing past it, and every steer is
-  bounded from position truth so it carries the carriage at most to the edge
-  within `kTickDtCapS`. A held plan is a hard stop at the edge: a brake that
-  would have overrun the window ends there abruptly. The census counts
-  engagements (`backstops`, a plan more than one step past, at onset) and
-  sets plan.flags `clamped` while one holds
-  [verified 2026-10-06 -- test_motion_arbiter, a PAUSE brake planned 65 mm
-  past the window held at its edge]. This clamp is the FIRST line; the LP
-  core's fence (below) is the second, and the only one an HP stall cannot
-  skip.
+  moves the carriage out of its frame.** The frame is the configured window
+  held inside the rail, or the asserted rail while the engine plans in the
+  rail frame (override's jog and its return); a home cycle's seek producer
+  never reaches it. The brakes (PAUSE, a generator's stop, a starved
+  timeline) are profiles the referee never scores, and a capped run renders
+  pieces past the window (Kinetic kin-pfbw), so the backstop holds whatever
+  the plan does. **THE WALL (operator ruling 2026-10-23, bd val-vj1j)**: at
+  every fill, where the strip (the plan, the oscillator and the connector)
+  leaves the frame by more than a step, `MotionArbiter::applyWall()` stops it
+  instead, at the edge: from the latest entry whose fastest jerk-limited stop
+  under the set rests in the frame, its jerk eased so it rests on the edge
+  rather than a tick short; when no entry has one, harder from the first,
+  up to `kHardStopMax` times the set's accel and jerk (`certifiedStop()`,
+  census `hard_stops`). The wall owns the trajectory from the tick the steer
+  may render it to its rest; a plan change waits, and once it rests with the
+  plan back in the frame the handover joins the plan from there. The census
+  counts engagements (`backstops`, at commit), plan.flags `clamped` holds
+  while one does. **THE LAST LINE**: `steerTick()` clamps the rendered
+  demand on every tick to the frame, widened only to the previous demand, so
+  a carriage left outside it is moved back by a plan, never by the clamp;
+  into a held edge the feedforward carries the distance to the edge and
+  nothing past it. It engages only where no stop kept the strip in (census
+  `wall_clamps`, a plan more than one step past, at onset; `clamps=` on the
+  status line). Every steer is bounded from position truth so it carries the
+  carriage at most to the edge within one tick on a strip the wall kept in
+  (`PlanStrip::in_frame`), within `kTickDtCapS` on one it could not; a later
+  tick than that the fence holds [verified 2026-10-23 -- test_motion_arbiter:
+  a move landing on the edge after a lapse steers jerk 1.00e7 against a
+  1e7 mm/s^3 set (2.40e7 with the 2-tick bound's halving); a piece planned
+  21 mm past the window stops on the edge at 40,604 mm/s^2 and 8.3e6
+  mm/s^3 against 50,000 and 1e7 (90,287 and 9.0e7 held by the clamp); a
+  PAUSE brake planned 81 mm past it stops on the edge, braked harder; an
+  edge drawn 1 mm ahead at 400 mm/s holds by the clamp, counted]. The wall
+  and the clamp are the FIRST line; the LP core's fence (below) is the
+  second, and the only one an HP stall cannot skip.
 - **A late tick is a stall, never a burst (bd val-1w8).** Every steer is
   priced over at most `kTickDtCapS`, two `kMotionTickUs`, so none exceeds the
   vmax of the set the plan in flight was planned under (the jog set's for a
@@ -237,7 +254,8 @@ window is solved at the next sample, and the sampler evaluates it.
   (a flash write with the cache off; never the window solve, which runs on
   the planner) carries the carriage that steer for at most `kLeaseUs`, then
   the LP core stops it (the lease, below), and never past the frame's edge
-  (the fence). The next tick counts the lapse (census `lease_lapses`,
+  (the fence): a stall in the last ticks of a stop at the edge meets the
+  fence. The next tick counts the lapse (census `lease_lapses`,
   `lapses=` on the status line), parks, and asks the planner to re-plan
   from the carriage at rest (the handover from rest), steering again only
   from the strip that answers; it never re-anchors `_p_cmd_mm` to the count:
@@ -327,7 +345,9 @@ per sample, decoded in numpy; board `val-091.3`].
   the lease holds the core still until the first write
   [verified 2026-10-06 -- test_motion_arbiter, a steer a 3.9 ms stall
   carries past the window stops with the count exactly on the fence, 13
-  edges withheld; the rig without the fence ran 13 steps past].
+  edges withheld; the rig without the fence ran 13 steps past; 2026-10-23,
+  the stall in the last ticks of a 50 m/s^2 stop on the edge: the count on
+  the fence, 1 edge withheld].
 - **The lease: `g_lease`, renewed by any change.** `steerTick()` renews it on
   every tick; while a home cycle runs, the planner renews it after each seek
   step instead. When it has not moved for
