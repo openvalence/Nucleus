@@ -165,11 +165,12 @@ private:
 // The board station: it owns every join, boot and reconnect included.
 // stationBegin() loads the saved list (migrating a single stored network
 // into slot 0 on first boot), registers its event hooks and starts its task;
-// main.cpp wifi_up() calls it before esp_wifi_start(). false = no task, so no
-// joins.
+// main.cpp wifi_up() calls it before esp_wifi_start(). `joinSaved` false: it
+// joins only for a wifi_join (config mode by the gesture). false = no task,
+// so no joins.
 IStation& provisioningStation();
 INetStation& stationNets();
-bool stationBegin();
+bool stationBegin(bool joinSaved);
 // The list the station booted with, for the hub's NetworkDesk::adopt().
 // app_main only, after stationBegin().
 const net::SavedNetworks& stationBootList();

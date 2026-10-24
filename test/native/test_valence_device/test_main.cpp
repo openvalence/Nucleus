@@ -2906,14 +2906,15 @@ TEST_CASE("VD-PAIR-9: after a demote the hub stays claimed: a press grants contr
     CHECK(*rig->del.granted == AccessLevel::control);
 }
 
-// ---- PAIR offline (Valence RFC-117 draft) -----------------------------------
-// The hub glue calls setLinkMode() every tick (ValenceHub.cpp serviceLinkMode);
-// the rig sets it once. Offline is LinkMode.h's word: no WS listener.
+// ---- PAIR in policy config mode (SPEC 12.3, 13.4.1) ------------------------
+// The hub glue sets the route once (ValenceHub.cpp hubBegin); so does the rig.
 
-TEST_CASE("VD-OFFLINE-1: offline, a single press approves the one configure ask, on its session, and names it for the gate") {
+using linkmode::Boot;
+
+TEST_CASE("VD-ROUTE-1: in policy config mode a single press approves the one configure ask, on its session, and names it for the gate") {
     auto rig = std::make_unique<Rig>();
     seedConfigureOwner(*rig);
-    rig->device.setLinkMode(true, false, 0);
+    rig->device.setRoute(Boot::config_policy);
     REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
     rig->step();
     REQUIRE(rig->device.pairLook() == PairLook::request);
@@ -2926,10 +2927,10 @@ TEST_CASE("VD-OFFLINE-1: offline, a single press approves the one configure ask,
     CHECK_FALSE(rig->hub->presenceWindowOpen());       // approving opens no window
 }
 
-TEST_CASE("VD-OFFLINE-2: offline, two configure asks: a single press approves neither") {
+TEST_CASE("VD-ROUTE-2: in policy config mode, two configure asks: a single press approves neither") {
     auto rig = std::make_unique<Rig>();
     seedConfigureOwner(*rig);
-    rig->device.setLinkMode(true, false, 0);
+    rig->device.setRoute(Boot::config_policy);
     Peer rival(*rig, 9);
     REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
     REQUIRE(rival.client->sendPairKnock(AccessLevel::configure));
@@ -2942,28 +2943,16 @@ TEST_CASE("VD-OFFLINE-2: offline, two configure asks: a single press approves ne
     CHECK(rig->device.takePresenceApproval() == 0);
 }
 
-TEST_CASE("VD-OFFLINE-3: offline with a network session still held, the single press approves nothing") {
+TEST_CASE("VD-ROUTE-3: in policy config mode, claimed, no ask: a press opens no window; in gesture config mode it does, granting configure") {
     auto rig = std::make_unique<Rig>();
     seedConfigureOwner(*rig);
-    rig->device.setLinkMode(true, false, 1);
-    REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
-    rig->step();
-    pair(*rig, button::PairGesture::press);
-    rig->step();
-    CHECK_FALSE(rig->del.granted.has_value());
-    CHECK(rig->device.pairLook() == PairLook::refused);
-}
-
-TEST_CASE("VD-OFFLINE-4: offline, claimed, no ask: a press opens no window; in config mode it does, granting configure") {
-    auto rig = std::make_unique<Rig>();
-    seedConfigureOwner(*rig);
-    rig->device.setLinkMode(true, false, 0);
+    rig->device.setRoute(Boot::config_policy);
     pair(*rig, button::PairGesture::press);
     CHECK_FALSE(rig->hub->presenceWindowOpen());
     CHECK(rig->device.pairLook() == PairLook::refused);
 
-    rig->hub->setPresenceDefaultRole(AccessLevel::configure);   // config mode's window (ValenceHub.cpp)
-    rig->device.setLinkMode(true, true, 0);
+    rig->hub->setPresenceDefaultRole(AccessLevel::configure);   // the gesture entry's window (ValenceHub.cpp)
+    rig->device.setRoute(Boot::config_gesture);
     pair(*rig, button::PairGesture::press);
     CHECK(rig->hub->presenceWindowOpen());
     REQUIRE(rig->client->sendPairKnock());
@@ -2972,17 +2961,19 @@ TEST_CASE("VD-OFFLINE-4: offline, claimed, no ask: a press opens no window; in c
     CHECK(*rig->del.granted == AccessLevel::configure);
 }
 
-TEST_CASE("VD-OFFLINE-5: online, the single press is RFC-114's: a window granting control, the ask untouched") {
-    auto rig = std::make_unique<Rig>();
-    seedConfigureOwner(*rig);
-    rig->device.setLinkMode(false, false, 0);
-    REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
-    rig->step();
-    pair(*rig, button::PairGesture::press);
-    rig->step();
-    CHECK_FALSE(rig->del.granted.has_value());   // a configure ask outranks a control window
-    CHECK(rig->hub->presenceWindowOpen());
-    CHECK(rig->device.takePresenceApproval() == 0);
+TEST_CASE("VD-ROUTE-4: outside policy config mode the single press is RFC-114's: a window granting control, the ask untouched") {
+    for (const Boot b : {Boot::normal, Boot::radios_off}) {
+        auto rig = std::make_unique<Rig>();
+        seedConfigureOwner(*rig);
+        rig->device.setRoute(b);
+        REQUIRE(rig->client->sendPairKnock(AccessLevel::configure));
+        rig->step();
+        pair(*rig, button::PairGesture::press);
+        rig->step();
+        CHECK_FALSE(rig->del.granted.has_value());   // a configure ask outranks a control window
+        CHECK(rig->hub->presenceWindowOpen());
+        CHECK(rig->device.takePresenceApproval() == 0);
+    }
 }
 
 TEST_CASE("VD-PAIR-10: a ledger with entries but no configure owner (as after a reboot) vouches nobody above watch") {

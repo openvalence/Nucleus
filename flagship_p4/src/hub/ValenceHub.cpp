@@ -212,7 +212,7 @@ struct HubBox {
     // The serial binding's rings and scratch, ~8 KB; hub task only, nothing
     // ISR-reachable (the driver's rings are its own, internal).
     ValenceSerialPort serial{};
-    // SPEC 13.4 BLE GATT: the port over ble::pipe(), and when it runs
+    // SPEC 13.4 BLE GATT: the port over ble::pipe(), and this boot's route
     // (LinkMode.h). Hub task only; the pipe's cross-task half is its own.
     ValenceLinkPort blePort{};
     linkmode::Policy mode{};
@@ -230,17 +230,17 @@ struct HubBox {
 
 HubBox* g_box = nullptr;
 BleFramePipe* g_blePipe = nullptr;
-// hubBegin()'s word, then read-only.
-bool g_configMode = false;
 // The event loop task writes it, the hub task reads it.
 std::atomic<bool> g_stationUp{false};
-std::atomic<uint8_t> g_netLook{0};
+std::atomic<uint8_t> g_netLook{uint8_t(linkmode::NetLook::joining)};
+// hubBegin()'s word, then hub task only: the WS listener runs.
+bool g_wsUp = false;
 // Config mode's commit reboot (SPEC 13.4.1 MAY): due at this hub-ms, 0 = none.
 uint32_t g_configRebootAtMs = 0;
 TaskHandle_t g_hubTask = nullptr;
 uint32_t g_ticks = 0;
 uint32_t g_lastEndpointMs = 0;
-uint32_t g_endpointIpv4 = 0;
+uint32_t g_endpointIpv4 = 0;   // esp_netif's network order; 0 = no address
 // kPersist* bits tick() reported due that no write has landed for yet. Hub
 // task only.
 uint8_t g_persistDue = 0;
@@ -316,36 +316,24 @@ uint64_t loadOrMintInstanceId() {
     esp_restart();
 }
 
-// Sessions occupying a slot that no provisioning binding carries now: live
-// WS sessions and parked ones of any binding (RFC-117 item 2 refuses the
-// offline single press while one exists). Hub task.
-size_t lanSessions() {
-    size_t n = 0;
-    for (size_t i = 0;; ++i) {
-        const valence::HubSession* s = g_box->hub->sessionBySlot(i);
-        if (s == nullptr) break;
-        if (s->occupied()) ++n;
-    }
-    n -= std::min<size_t>(n, size_t(g_box->serial.attached()) + size_t(g_box->blePort.attached()));
-    return n;
-}
-
-// SPEC 13.4.1 and Valence RFC-117 draft: BLE when the policy wants it, the
-// advertisement's flags, the single press's meaning, the presence term of the
-// provisioning gate, and config mode's commit reboot. Hub task.
+// SPEC 13.1, 13.4, 13.4.1: the advertisement (GATT in config mode only), the
+// presence term of the provisioning gate, the network look and config mode's
+// commit reboot. Hub task.
 void serviceLinkMode(uint32_t nowMs) {
     linkmode::Policy& m = g_box->mode;
     const bool up = g_stationUp.load(std::memory_order_acquire);
-    m.tick(!g_configMode && up, g_box->blePort.attached(), nowMs);
-    g_box->device.setLinkMode(m.offline(), m.configMode(), lanSessions());
+    m.tick(up && g_wsUp && g_endpointIpv4 != 0, nowMs);
     if (const uint32_t s = g_box->device.takePresenceApproval()) g_box->desk->presenceApproved(s, nowMs);
-    if (m.bleWanted()) ble::bringUp(VALENCE_HUB_NAME);
-    ble::setAdvertising(m.bleWanted(), m.advFlags(g_box->hub->pairingWindowOpen()));
-    g_netLook.store(m.configMode() ? 2 : (m.bleWanted() && m.offline()) ? 1 : 0, std::memory_order_relaxed);
+    if (m.advertising()) {
+        ble::bringUp(VALENCE_HUB_NAME, m.configMode());
+        ble::setAdvertising(true, m.advFlags(g_box->hub->pairingWindowOpen()), __builtin_bswap32(g_endpointIpv4),
+                            kWsPort);
+    }
+    g_netLook.store(uint8_t(m.look()), std::memory_order_relaxed);
     // A join in config mode is the only way the station gets an address; once
     // it persisted, leave the mode by rebooting into it (SPEC 13.4.1 MAY). The
     // delay lets the ECHO leave first.
-    if (!g_configMode || !up || g_box->desk->busy()) return;
+    if (!m.configMode() || !up || g_box->desk->busy()) return;
     if (g_configRebootAtMs == 0) {
         g_configRebootAtMs = nowMs + 1500;
         GLOGW(kTag, "config mode: joined and saved, rebooting into normal mode");
@@ -506,12 +494,10 @@ HubCensus hubCensus() {
 
 uint8_t hubPairLook() { return g_box ? uint8_t(g_box->device.pairLook()) : 0; }
 
-bool hubConfigMode() { return g_configMode; }
 void hubSetStationUp(bool up) { g_stationUp.store(up, std::memory_order_release); }
-uint8_t hubNetLook() { return g_netLook.load(std::memory_order_relaxed); }
+linkmode::NetLook hubNetLook() { return linkmode::NetLook(g_netLook.load(std::memory_order_relaxed)); }
 
-bool hubBegin(bool configMode, bool haveCredentials) {
-    g_configMode = configMode;
+bool hubBegin(linkmode::Boot route, bool autoEntry) {
     geiger::logBegin();
 
     // PSRAM, via placement-new (T2). The catalog alone is ~22 KB of pooled
@@ -579,6 +565,7 @@ bool hubBegin(bool configMode, bool haveCredentials) {
     // so an ESTOP is a category 0 stop that loses home.
     g_box->hub->setEstopCutsPower(true);
     g_box->hub->setHubInstanceId(loadOrMintInstanceId());
+    g_box->device.setRoute(route);
     refreshEndpoint();
 
     // EVERY advertised STATE gets its truthful at-rest value before the first
@@ -604,14 +591,20 @@ bool hubBegin(bool configMode, bool haveCredentials) {
                     "the power-cycle gesture opens pairing");
     else GLOGI(kTag, "trust ledger: %u paired%s", unsigned(tb.paired), tb.ledgerLoaded ? "" : " (none stored)");
     if (!tb.counterSaved) GLOGW(kTag, "pairing gesture counter not saved: this boot does not count");
-    if (configMode) {
-        // SPEC 12.3 config-mode exception: the window's grant is configure
-        // whether or not configure tokens exist; the press re-opens it.
+    if (route == linkmode::Boot::config_gesture) {
+        // SPEC 12.3 config-mode exception, the gesture entry only: the
+        // window's grant is configure whether or not configure tokens exist;
+        // the press re-opens it.
         g_box->hub->setPresenceDefaultRole(AccessLevel::configure);
         g_box->hub->openPresenceWindow();
-        GLOGW(kTag, "CONFIG MODE (PAIR held at boot, SPEC 13.4.1): BLE + USB serial, no WiFi association, "
-                    "no WebSocket; pairing open %lu s, the first knock gets configure",
+        GLOGW(kTag, "CONFIG MODE (gesture, SPEC 13.4.1): BLE + USB serial, no WebSocket; "
+                    "pairing open %lu s, the first knock gets configure",
               static_cast<unsigned long>(limits::pairing_window_default_s));
+    } else if (route == linkmode::Boot::config_policy && !tb.claimable) {
+        // SPEC 12.3: policy config mode opens no window at boot; a PAIR press
+        // approves the one configure ask instead.
+        GLOGW(kTag, "CONFIG MODE (policy, SPEC 13.4.1): BLE + USB serial, no WebSocket; "
+                    "a PAIR press approves one configure request");
     } else if (tb.openWindow()) {
         g_box->hub->openPresenceWindow();
         if (tb.claimable)
@@ -650,24 +643,26 @@ bool hubBegin(bool configMode, bool haveCredentials) {
     if (ISerialPipe* usb = usbSerialPipeBegin()) g_box->serial.begin(*g_box->hub, *usb, &*g_box->desk);
     g_blePipe = &ble::pipe();
     g_box->blePort.begin(*g_box->hub, *g_blePipe, &*g_box->desk, "ble");
-    g_box->mode.boot(configMode, haveCredentials, uint32_t(esp_timer_get_time() / 1000));
+    g_box->mode.boot(route, autoEntry, uint32_t(esp_timer_get_time() / 1000));
+    GLOGW(kTag, "route: %s", linkmode::bootName(route));
 
     tcpTallyWatch(kWsPort);
-    if (configMode) {
-        // SPEC 13.4.1: no WebSocket listener and no discovery in config mode.
-    } else if (!g_box->port.begin(&*g_box->hub, kWsPort)) {
+    // SPEC 13.1, 13.4.1: no WebSocket listener and no discovery in config
+    // mode or without radios.
+    const bool ws = route == linkmode::Boot::normal;
+    if (ws && !g_box->port.begin(&*g_box->hub, kWsPort)) {
         GLOGE(kTag, "WS port failed to start on :%u", unsigned(kWsPort));
         geiger::drainToSinks();
         return false;
     }
+    g_wsUp = ws;
     // Non-fatal: a hub with no /uitoken still serves every watch-tier client
     // and every paired one. Losing the mint costs the browser onramp, not the
     // machine.
     if (!g_box->minter.attachRoutes()) GLOGW(kTag, "/uitoken unavailable");
     // Non-fatal: a typed address always works (SPEC 13.7). After the WS port,
     // so no reply names an endpoint that is not listening.
-    if (!configMode)
-        g_box->discovery.begin(uint16_t(udp_discovery::port), VALENCE_HUB_NAME, FIRMWARE_MAJOR_MINOR, kWsPort);
+    if (ws) g_box->discovery.begin(uint16_t(udp_discovery::port), VALENCE_HUB_NAME, FIRMWARE_MAJOR_MINOR, kWsPort);
 
     // Stack: internal by construction (plain xTaskCreatePinnedToCore). The size
     // and the measurement that set it live on kHubTaskStackBytes in ValenceHub.h.

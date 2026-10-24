@@ -2202,18 +2202,16 @@ void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
     switch (g) {
         case button::PairGesture::press: {
             using linkmode::PressAct;
-            const PressAct act = linkmode::singlePress(_offline, _configMode, _hub->pairing().claimed(),
-                                                       _hub->configureRequestsPending(), _lanSessions);
+            const PressAct act =
+                linkmode::singlePress(_route, _hub->pairing().claimed(), _hub->configureRequestsPending());
             if (act == PressAct::approve) {
-                approveAsk("PAIR press (offline, RFC-117)", nowMs);
+                approveAsk("PAIR press (config mode)", nowMs);
                 return;
             }
             if (act != PressAct::open_window) {
                 _pairFlash = PairLook::refused;
                 _pairFlashUntilMs = nowMs + kPairFlashMs;
-                GLOGW(kTag, "PAIR press (offline): nothing approved: %s",
-                      act == PressAct::refuse_lan ? "a network session is still held"
-                                                  : "no configure request pending");
+                GLOGW(kTag, "PAIR press (config mode): nothing approved: no configure request pending");
                 return;
             }
             _hub->openPresenceWindow();
@@ -2250,7 +2248,7 @@ void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
     }
 }
 
-// RFC-114's double press, and RFC-117's single press offline: the one fresh
+// RFC-114's double press, and the single press in policy config mode: the one fresh
 // configure ask approved over its own session. The session is read before the
 // hub consumes the knock; the provisioning desk's gate term binds to it.
 void ValenceDevice::approveAsk(const char* gesture, uint32_t nowMs) {

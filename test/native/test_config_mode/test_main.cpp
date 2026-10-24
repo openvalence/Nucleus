@@ -1,14 +1,17 @@
-// test_config_mode -- native doctest suite for config mode, the offline BLE
-// fallback, the single press, and the BLE GATT pipe
+// test_config_mode -- native doctest suite for the boot routes (SPEC 13.1),
+// config mode (13.4.1), the advertisement and its endpoint tail (13.4), the
+// policy reboots, the single press, and the BLE GATT pipe
 // Constraints:
-// - Hardware-free: LinkMode.h and ValenceBle.h's pipe, with a synthetic clock
-//   and a fake notifier. NimBLE, esp_hosted and the C6 are bench work.
+// - Hardware-free: LinkMode.h and ValenceBle.h's pipe and record, with a
+//   synthetic clock and a fake notifier. NimBLE, esp_hosted and the C6 are
+//   bench work.
 // See: flagship_p4/src/hub/LinkMode.h, ValenceBle.h; Valence SPEC §5.6,
-// §13.4, §13.4.1; RFC-114, RFC-117 drafts
+// §12.3, §13.1, §13.4, §13.4.1
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -19,6 +22,10 @@
 #include "../../../flagship_p4/src/hub/ValenceBle.h"
 
 using namespace valence;
+using linkmode::Boot;
+using linkmode::BootFacts;
+using linkmode::NetLook;
+using linkmode::Next;
 using linkmode::Policy;
 using linkmode::PressAct;
 
@@ -29,8 +36,8 @@ constexpr uint8_t kWs = ble_adv_flags::ws_available;
 constexpr uint8_t kConfig = ble_adv_flags::config_mode;
 
 // Steps the policy every 5 ms for `ms`.
-void run(Policy& p, uint32_t& t, uint32_t ms, bool online, bool bleAttached) {
-    for (uint32_t end = t + ms; t < end; t += 5) p.tick(online, bleAttached, t);
+void run(Policy& p, uint32_t& t, uint32_t ms, bool online) {
+    for (uint32_t end = t + ms; t < end; t += 5) p.tick(online, t);
 }
 
 class FakeNotifier final : public IBleNotifier {
@@ -62,99 +69,179 @@ std::vector<std::byte> frame(FrameType type, size_t payload, uint8_t fill = 0x5A
 
 }  // namespace
 
-// ---- the policy -------------------------------------------------------------
+// ---- the route ---------------------------------------------------------------
 
-TEST_CASE("config mode: BLE from boot for the whole mode, config_mode set, never ws_available") {
-    Policy p;
-    uint32_t t = 0;
-    p.boot(true, true, t);
-    CHECK(p.configMode());
-    CHECK(p.bleWanted());
-    CHECK(p.offline());
-    CHECK(p.advFlags(true) == (kWindow | kConfig));
-    run(p, t, 600000, true, false);   // even an address does not end the mode
-    CHECK(p.bleWanted());
-    CHECK(p.advFlags(false) == kConfig);
+Boot decide(Next next, bool held, bool radiosOff, bool creds) {
+    BootFacts f;
+    f.next = next;
+    f.pairHeld = held;
+    f.radiosOff = radiosOff;
+    f.haveCredentials = creds;
+    return linkmode::decideBoot(f);
 }
 
-TEST_CASE("a healthy hub never starts BLE") {
-    Policy p;
-    uint32_t t = 0;
-    p.boot(false, true, t);
-    run(p, t, 10000, false, false);   // joining
-    CHECK_FALSE(p.bleWanted());
-    run(p, t, 3600000, true, false);
-    CHECK_FALSE(p.bleWanted());
-    CHECK_FALSE(p.offline());
-    CHECK(p.advFlags(false) == kWs);
+TEST_CASE("route: credentials and nothing asked boot normal") {
+    CHECK(decide(Next::none, false, false, true) == Boot::normal);
 }
 
-TEST_CASE("no credentials: BLE at once") {
+TEST_CASE("route: the gesture, held at boot or made while running, enters config mode, radios off or not") {
+    CHECK(decide(Next::none, true, false, true) == Boot::config_gesture);
+    CHECK(decide(Next::config_gesture, false, false, true) == Boot::config_gesture);
+    CHECK(decide(Next::config_gesture, false, true, false) == Boot::config_gesture);
+    CHECK(decide(Next::skip_auto, true, true, true) == Boot::config_gesture);
+}
+
+TEST_CASE("route: the radios-off setting is the serial route, with no automatic config mode") {
+    CHECK(decide(Next::none, false, true, true) == Boot::radios_off);
+    CHECK(decide(Next::none, false, true, false) == Boot::radios_off);
+    CHECK(decide(Next::config_join_failed, false, true, true) == Boot::radios_off);
+}
+
+TEST_CASE("route: no credentials, or a missed boot-time join, enter config mode by policy") {
+    CHECK(decide(Next::none, false, false, false) == Boot::config_policy);
+    CHECK(decide(Next::config_join_failed, false, false, true) == Boot::config_policy);
+}
+
+TEST_CASE("route: the boot after a reboot out of policy config mode skips the automatic entry") {
+    CHECK(decide(Next::skip_auto, false, false, true) == Boot::normal);
+    CHECK(decide(Next::skip_auto, false, false, false) == Boot::normal);
+}
+
+// ---- the advertisement and the look ----------------------------------------------
+
+TEST_CASE("config mode: config_mode set for the whole mode, never ws_available") {
+    for (const Boot b : {Boot::config_gesture, Boot::config_policy}) {
+        Policy p;
+        uint32_t t = 0;
+        p.boot(b, true, t);
+        CHECK(p.configMode());
+        CHECK(p.advertising());
+        CHECK(p.advFlags(true) == (kWindow | kConfig));
+        run(p, t, 600000, true);   // even an address does not end the mode
+        CHECK(p.advFlags(false) == kConfig);
+        CHECK(p.look() == NetLook::config);
+    }
+}
+
+TEST_CASE("normal mode: advertises, ws_available only while online, never config_mode") {
     Policy p;
-    p.boot(false, false, 0);
-    CHECK(p.bleWanted());
+    uint32_t t = 0;
+    p.boot(Boot::normal, true, t);
+    CHECK_FALSE(p.configMode());
+    CHECK(p.advertising());
     CHECK(p.advFlags(false) == 0);
-}
-
-TEST_CASE("offline 30 s continuously starts BLE; a short drop does not") {
-    Policy p;
-    uint32_t t = 0;
-    p.boot(false, true, t);
-    run(p, t, 5000, true, false);
-    run(p, t, 20000, false, false);   // a 20 s drop
-    run(p, t, 1000, true, false);
-    run(p, t, linkmode::kOfflineBleAfterMs - 100, false, false);
-    CHECK_FALSE(p.bleWanted());
-    run(p, t, 200, false, false);
-    CHECK(p.bleWanted());
-    CHECK(p.offline());
-}
-
-TEST_CASE("BLE stops online only with no BLE session, after the dwell") {
-    Policy p;
-    uint32_t t = 0;
-    p.boot(false, false, t);
-    REQUIRE(p.bleWanted());
-    run(p, t, 10000, true, false);   // back online at once: the dwell holds BLE up
-    CHECK(p.bleWanted());
-    run(p, t, linkmode::kBleDwellMs, true, true);   // a BLE session is attached
-    CHECK(p.bleWanted());
-    run(p, t, 5, true, false);   // it migrated to WS
-    CHECK_FALSE(p.bleWanted());
+    CHECK(p.look() == NetLook::joining);
+    run(p, t, 1000, true);
     CHECK(p.advFlags(false) == kWs);
+    CHECK(p.advFlags(true) == (kWs | kWindow));
+    CHECK(p.look() == NetLook::online);
+    run(p, t, 1000, false);
+    CHECK(p.advFlags(false) == 0);
+    CHECK(p.look() == NetLook::lost);
 }
 
-TEST_CASE("a hub that comes back by itself stops BLE after the dwell") {
+TEST_CASE("radios off: nothing advertised, nothing online") {
     Policy p;
     uint32_t t = 0;
-    p.boot(false, true, t);
-    run(p, t, linkmode::kOfflineBleAfterMs + 10, false, false);
-    REQUIRE(p.bleWanted());
-    run(p, t, linkmode::kBleDwellMs + 10, true, false);
-    CHECK_FALSE(p.bleWanted());
+    p.boot(Boot::radios_off, true, t);
+    CHECK_FALSE(p.advertising());
+    CHECK_FALSE(p.configMode());
+    run(p, t, 1000, true);
+    CHECK_FALSE(p.wsAvailable());
+    CHECK(p.look() == NetLook::radios_off);
 }
 
-// ---- the single press -------------------------------------------------------
+// ---- the policy reboots (SPEC 13.4.1, device-defined) ------------------------------
 
-TEST_CASE("online, a press opens the window (RFC-114 item 4), asks or not") {
-    CHECK(linkmode::singlePress(false, false, true, 0, 0) == PressAct::open_window);
-    CHECK(linkmode::singlePress(false, false, true, 1, 3) == PressAct::open_window);
+TEST_CASE("normal: a boot-time join that misses the window wants config mode; no sooner") {
+    Policy p;
+    uint32_t t = 0;
+    p.boot(Boot::normal, true, t);
+    run(p, t, linkmode::kJoinWindowMs - 10, false);
+    CHECK(p.rebootWanted(false, false, false) == Next::none);
+    run(p, t, 20, false);
+    CHECK(p.rebootWanted(false, false, false) == Next::config_join_failed);
 }
 
-TEST_CASE("offline, a press approves the configure ask; several are the hub's refusal") {
-    CHECK(linkmode::singlePress(true, false, true, 1, 0) == PressAct::approve);
-    CHECK(linkmode::singlePress(true, false, true, 2, 0) == PressAct::approve);   // hub answers several_pending
-    CHECK(linkmode::singlePress(true, true, true, 1, 0) == PressAct::approve);
+TEST_CASE("normal: an attached session holds the boot; once online, never") {
+    Policy p;
+    uint32_t t = 0;
+    p.boot(Boot::normal, true, t);
+    run(p, t, linkmode::kJoinWindowMs + 10, false);
+    CHECK(p.rebootWanted(true, false, false) == Next::none);
+
+    Policy q;
+    t = 0;
+    q.boot(Boot::normal, true, t);
+    run(q, t, 1000, true);
+    run(q, t, linkmode::kJoinWindowMs * 2, false);   // lost after it was up
+    CHECK(q.rebootWanted(false, false, false) == Next::none);
 }
 
-TEST_CASE("offline, a LAN session left (parked included) refuses the press") {
-    CHECK(linkmode::singlePress(true, false, true, 1, 1) == PressAct::refuse_lan);
+TEST_CASE("normal: the boot after a reboot out (no automatic entry) never reboots for a slow join") {
+    Policy p;
+    uint32_t t = 0;
+    p.boot(Boot::normal, false, t);
+    run(p, t, linkmode::kJoinWindowMs * 3, false);
+    CHECK(p.rebootWanted(false, false, false) == Next::none);
 }
 
-TEST_CASE("offline with no ask: config mode or unclaimed opens the window; claimed opens nothing") {
-    CHECK(linkmode::singlePress(true, true, true, 0, 0) == PressAct::open_window);
-    CHECK(linkmode::singlePress(true, false, false, 0, 0) == PressAct::open_window);
-    CHECK(linkmode::singlePress(true, false, true, 0, 0) == PressAct::nothing);
+TEST_CASE("policy config mode: an address with no configure session reboots out, skipping the next entry") {
+    Policy p;
+    uint32_t t = 0;
+    p.boot(Boot::config_policy, true, t);
+    run(p, t, 1000, false);
+    CHECK(p.rebootWanted(false, false, false) == Next::none);
+    CHECK(p.rebootWanted(false, true, true) == Next::none);        // a configure session holds it
+    CHECK(p.rebootWanted(true, false, true) == Next::skip_auto);   // a lesser one does not
+}
+
+TEST_CASE("gesture config mode and radios off: no policy reboot") {
+    for (const Boot b : {Boot::config_gesture, Boot::radios_off}) {
+        Policy p;
+        uint32_t t = 0;
+        p.boot(b, true, t);
+        run(p, t, linkmode::kJoinWindowMs * 2, false);
+        CHECK(p.rebootWanted(false, false, true) == Next::none);
+        CHECK(p.rebootWanted(false, false, false) == Next::none);
+    }
+}
+
+// ---- the single press ----------------------------------------------------------
+
+TEST_CASE("outside policy config mode a press opens the window (RFC-114 item 4), asks or not") {
+    for (const Boot b : {Boot::normal, Boot::radios_off, Boot::config_gesture}) {
+        CHECK(linkmode::singlePress(b, true, 0) == PressAct::open_window);
+        CHECK(linkmode::singlePress(b, true, 1) == PressAct::open_window);
+    }
+}
+
+TEST_CASE("policy config mode: a press approves the configure ask; several are the hub's refusal") {
+    CHECK(linkmode::singlePress(Boot::config_policy, true, 1) == PressAct::approve);
+    CHECK(linkmode::singlePress(Boot::config_policy, true, 2) == PressAct::approve);   // hub answers several_pending
+}
+
+TEST_CASE("policy config mode with no ask: unclaimed opens the window; claimed opens nothing") {
+    CHECK(linkmode::singlePress(Boot::config_policy, false, 0) == PressAct::open_window);
+    CHECK(linkmode::singlePress(Boot::config_policy, true, 0) == PressAct::nothing);
+}
+
+// ---- the scan response record (SPEC 13.4, RFC-072, RFC-121) --------------------------
+
+TEST_CASE("record: company id, flags, and the endpoint tail only while ws_available") {
+    std::array<uint8_t, kScanRecordMax> r{};
+    REQUIRE(scanRecord(kWs | kWindow, 0xC0A801E5, 80, r) == 9);   // the SPEC's own example
+    const std::array<uint8_t, 9> want{0xFF, 0xFF, uint8_t(kWs | kWindow), 0xC0, 0xA8, 0x01, 0xE5, 0x50, 0x00};
+    CHECK(r == want);
+    REQUIRE(scanRecord(kWs, 0xC0A80132, 82, r) == 9);
+    CHECK(r[7] == 82);
+    CHECK(r[8] == 0);
+
+    std::array<uint8_t, kScanRecordMax> c{};
+    CHECK(scanRecord(kConfig, 0xC0A801E5, 80, c) == 3);   // config mode: never the endpoint
+    CHECK(c[2] == kConfig);
+    CHECK(scanRecord(kWs, 0, 80, c) == 3);   // nothing to advertise
+    CHECK(scanRecord(kWs, 0xC0A801E5, 0, c) == 3);
 }
 
 // ---- the BLE pipe -----------------------------------------------------------

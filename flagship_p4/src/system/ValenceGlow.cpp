@@ -211,12 +211,16 @@ void glowService(uint32_t nowMs) {
     if (nowMs - g_lastFactsMs >= kFactsMs) {
         g_lastFactsMs = nowMs;
         g_engine.set(flux::System::Session, sessionStatusFor(PairLook(hubPairLook())));
-        // Network: config mode waits on the operator (solid blue); offline with
-        // BLE up is running but wrong (slow blue blink). SPEC 13.4.1, RFC-117.
-        const uint8_t net = hubNetLook();
-        g_engine.set(flux::System::Network, net == 2   ? flux::Status::Latched
-                                            : net == 1 ? flux::Status::Degraded
-                                                       : flux::Status::Nominal);
+        // Network (device-defined, RFC-121): config mode waits on the operator
+        // (solid), the boot-time join works (fast breathe), a lost network is
+        // running but wrong (slow blink); online and the radios-off route are
+        // background.
+        using linkmode::NetLook;
+        const NetLook net = hubNetLook();
+        g_engine.set(flux::System::Network, net == NetLook::config    ? flux::Status::Latched
+                                            : net == NetLook::joining ? flux::Status::Working
+                                            : net == NetLook::lost    ? flux::Status::Degraded
+                                                                      : flux::Status::Nominal);
         const look::MachineState s = look::stateFor(gatherFacts());
         if (s != g_state) {
             GLOGD(kTag, "%s -> %s", stateName(g_state), stateName(s));

@@ -64,8 +64,6 @@ extern const uint8_t ulp_main_bin_end[]   asm("_binary_ulp_main_bin_end");
 // ---- network -------------------------------------------------------------------
 
 static volatile bool g_got_ip = false;
-// SPEC 13.4.1: PAIR held at boot. Written once in app_main before wifi_up().
-static bool g_config_mode = false;
 // Any network to try at boot: provisioned or compiled in (LinkMode.h).
 static bool g_have_credentials = false;
 static bool g_hosted_ok = false;   // the C6 answered over SDIO; app_main only
@@ -121,7 +119,8 @@ static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
     }
 }
 
-static bool wifi_up() {
+// `joinSaved` false: the station joins only for a wifi_join (LinkMode.h).
+static bool wifi_up(bool joinSaved) {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase(); err = nvs_flash_init();
@@ -157,7 +156,7 @@ static bool wifi_up() {
 
     // The saved list (RFC-116) and the task that joins from it, before the
     // start whose STA_START event wakes that task. No SSID is ever printed.
-    if (!valence::stationBegin()) return false;
+    if (!valence::stationBegin(joinSaved)) return false;
     printf("saved networks: %u\n", unsigned(valence::stationBootList().count()));
     g_have_credentials = valence::stationBootList().count() > 0;
     if ((err = esp_wifi_set_mode(WIFI_MODE_STA)) != ESP_OK)        { printf("set_mode: %s\n", esp_err_to_name(err)); return false; }
@@ -328,15 +327,20 @@ extern "C" void app_main() {
     if (lp_ok) report_lp();
     else       printf("\n--- LP core FAILED to start ---\n");
 
-    // SPEC 13.4.1: PAIR held at boot (held through the second above) enters
-    // config mode for this boot. Sampled before BoardIo's button task reads
-    // the pad, which arms only on a release, so the hold fires no gesture.
-    g_config_mode = pairHeldAtBoot();
-    if (g_config_mode) printf("\n*** CONFIG MODE: PAIR held at boot ***\n");
+    // SPEC 13.4.1: PAIR held at boot (held through the second above) is the
+    // config-mode gesture for this boot. Sampled before BoardIo's button task
+    // reads the pad, which arms only on a release, so the hold fires no
+    // gesture there.
+    valence::linkmode::BootFacts boot{};
+    boot.pairHeld = pairHeldAtBoot();
+    if (boot.pairHeld) printf("\n*** CONFIG MODE: PAIR held at boot ***\n");
+    const bool gesture = valence::linkmode::decideBoot(boot) == valence::linkmode::Boot::config_gesture;
 
     printf("\n--- network: esp_hosted over SDIO to the C6 ---\n");
-    const bool wifi_ok = wifi_up();
+    const bool wifi_ok = wifi_up(!gesture);
     if (!wifi_ok) printf("--- network FAILED to start ---\n");
+    boot.haveCredentials = g_have_credentials;
+    const valence::linkmode::Boot route = valence::linkmode::decideBoot(boot);
 
     // The motion path. It TAKES OVER the LP emitter's steering words from
     // start_lp_core()'s constant-rate liveness value and parks it; from here
@@ -357,7 +361,7 @@ extern "C" void app_main() {
     // failure must never take the bench firmware down with it. It is now the
     // ONLY source of motion intents on this board.
     printf("\n--- Valence hub ---\n");
-    const bool hub_ok = valence::hubBegin(g_config_mode, g_have_credentials);
+    const bool hub_ok = valence::hubBegin(route, true);
     if (!hub_ok) printf("--- Valence hub FAILED to start ---\n");
 
     // The operator surface rides the :80 instance the hub's /uitoken already

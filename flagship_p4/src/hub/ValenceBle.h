@@ -14,7 +14,8 @@
 //   the port detaches the old session on the change (ValenceLinkPort.h).
 // - The board half (ValenceBle.cpp) brings the controller up over esp_hosted
 //   VHCI on its own task: those are RPCs to the C6, never run on the hub
-//   task. It is started only when LinkMode wants BLE (Valence RFC-117 draft).
+//   task. The GATT service and connections exist in config mode only (SPEC
+//   §13.4); normal mode advertises scannable and non-connectable.
 // See: Valence SPEC.md §5.6, §13.1, §13.4, §13.4.1; ValenceLinkPort.h, LinkMode.h
 
 #include <algorithm>
@@ -247,6 +248,28 @@ private:
     uint32_t _fragEpoch = 0;   // the link the queued fragments belong to
 };
 
+// ---- the scan response record ----------------------------------------------------
+
+// SPEC §13.4 (RFC-072, its tail by RFC-121): the Manufacturer Specific Data
+// body after its AD length and type: company_id u16le and the flags byte, then,
+// only while ws_available, ipv4 in network order and ws_port u16le. `ipv4` is
+// WELCOME key 47's packing (192.168.1.229 is 0xC0A801E5). Returns 3 or 9.
+inline constexpr size_t kScanRecordMax = 9;
+inline size_t scanRecord(uint8_t flags, uint32_t ipv4, uint16_t wsPort, std::span<uint8_t, kScanRecordMax> out) {
+    const uint16_t company = uint16_t(ble_identity::msd_company_id);
+    out[0] = uint8_t(company & 0xFF);
+    out[1] = uint8_t(company >> 8);
+    out[2] = flags;
+    if (!(flags & ble_adv_flags::ws_available) || ipv4 == 0 || wsPort == 0) return 3;
+    out[3] = uint8_t(ipv4 >> 24);
+    out[4] = uint8_t(ipv4 >> 16);
+    out[5] = uint8_t(ipv4 >> 8);
+    out[6] = uint8_t(ipv4);
+    out[7] = uint8_t(wsPort & 0xFF);
+    out[8] = uint8_t(wsPort >> 8);
+    return kScanRecordMax;
+}
+
 // ---- board functions (ValenceBle.cpp; not built natively) -----------------------
 
 namespace ble {
@@ -255,13 +278,15 @@ namespace ble {
 BleFramePipe& pipe();
 
 // Starts the bring-up task once: the C6's controller over esp_hosted, the
-// NimBLE host, the service. Any task; returns at once. Later calls are no-ops.
-void bringUp(const char* hubName);
-// The controller and the host are up and the service is registered.
+// NimBLE host and, with `gatt` (config mode only), the Valence service. Any
+// task; returns at once. Later calls are no-ops.
+void bringUp(const char* hubName, bool gatt);
+// The controller and the host are up.
 bool ready();
-// Advertising on or off, and the scan response's flags byte (SPEC §13.4).
-// Hub task; applied by the host task. Off also ends a connected link.
-void setAdvertising(bool on, uint8_t advFlags);
+// Advertising on or off and the scan response (SPEC §13.4): connectable with
+// `gatt`, else scannable and non-connectable. Hub task; applied by the host
+// task. Off also ends a connected link.
+void setAdvertising(bool on, uint8_t advFlags, uint32_t ipv4, uint16_t wsPort);
 
 }  // namespace ble
 
