@@ -2,6 +2,34 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.66 (2026-10-24)
+
+### For users
+
+- **Setting up the network has its own mode.** Hold PAIR for 10 seconds while the machine is idle with motor power off and it restarts into config mode: Bluetooth setup and the USB cable, no WiFi clients. It also starts there by itself when it has no saved network, or when it cannot join one within a minute of starting, and it restarts back into normal mode once a saved network answers. In normal mode Bluetooth only advertises where to find the machine on the network; it no longer accepts connections.
+- **The USB cable is always trusted.** A computer on the USB cable gets full settings access without pairing, and can add a WiFi network without a pairing window. Nothing joins a network while the machine moves.
+- **A radios-off setting.** Tuning / Radios turns off WiFi and Bluetooth from the next start; the machine then talks over the USB cable only. The config-mode hold turns them back on.
+- **A move that ends on the edge of the stroke window lands smoothly.** It used to be cut short in its last few milliseconds; now every source (scripts, jogs, the oscillator, a late plan) stops at the edge inside the motion limits.
+- **Bad tuning values can no longer freeze motion.** A zero, infinite or invalid limit falls back to the factory value instead of stalling the planner.
+- **The 60AIM40F drive passes its probe** with Modbus control off.
+- **Dense scripts plan faster and stay inside every limit** in the passages the planner could not finish before.
+- **A new board profile** for a Stamp-P4 on the OSSM R+D board with its ESP32 as an I/O helper (not tested on hardware yet).
+
+### Technical
+
+- `kinetic.pin` -> `bdccf73` (Kinetic main): the pass cap's stalled-share step and bounded fallback judge (kin-f0yr), corner-ramp starts that stop asking (kin-5g6c), HARD point moves from the first asking piece when the cap stops a run (kin-pfbw), the moving origin's least-legal quarter trim and lead-ramp share (kin-vlk3), the speed share held per knot and bounded legality judging (kin-l97f). `KINETIC2_FINGERPRINT` unchanged (`0xb43b8ddce5ab576b`).
+- `valence.pin` -> `a615ce0` (Valence main, RFC-121): the client's catalog reassembly block out of line with a 1 MiB default (val-qijf), the binding-aware tier and WELCOME identity `config_mode` (7), the JS client's 1 MiB budget and `identity.config_mode`.
+- **The build guard covers `../Valence`.** `tools/kinetic_guard.py` also runs canon_lint's valence.pin rule, which now fails on an uncommitted change under the sibling's `lib/valence` (`pin-dirty`). `NUCLEUS_VALENCE_UNPINNED=1` opts out and stamps the label `-valence-unpinned`.
+- **RFC-121 routes and config mode** (val-6058). `LinkMode.h` decides the boot route once: normal, radios off, or config mode by the gesture or by policy; the RFC-117 offline BLE fallback and its dwell are gone. BLE GATT runs in config mode only; normal mode advertises non-connectable with the endpoint tail (ipv4, ws_port) while the WebSocket is up. The gesture is PAIR held 10 s (`kConfigHoldMs`), accepted with motion idle and motor power off; the RFC-114 demote moves to the release of a 5 to 10 s hold. Policy: no credentials boots config mode; a normal boot with no address and no session after 60 s (`kJoinWindowMs`) reboots into it; policy config mode retries the saved list and reboots out once it has an address and no ready configure session is attached; the boot after skips the automatic entry (NVS `valence`/`next`). Every policy reboot sends GOODBYE REBOOTING and waits for idle motion and no join in flight.
+- **The provisioning catalog**: config mode serves 0x0001, the safety trio, 0x000F and the network channels, copied entry for entry from the machine catalog (9 entries, 2,950 B). The machine catalog declares 0x0001. Machine etag `d5895d9c2c5bd88d` -> `0d182b0609ae5411`.
+- **The cable is configure** through the library: `ValenceSerialPort` declares `BindingKind::serial`, `ValenceBle` `ble_gatt`, `ValenceWsPort` `websocket`; the hub tiers the serial session configure and grants a PAIR_REQ there at once (`pairing_mode` cable). `sessionsNow()` and the provisioning desk drop their own cable checks; the desk keeps the cable's window term. `hubBegin()` calls `setConfigMode()`. Neutrino's in-process link stays unspecified (ruling pending). wifi_join while a motion source runs is NACK SOURCE_CONFLICT; in config mode the join's ECHO carries `reboot_in_ms`.
+- **Radios setting**: machine-modes (0x1030) `radios`, modes-set (0x3030) key 11 at configure, config blob v10. WELCOME `ws_port` and `ipv4` stay 0 without a WebSocket listener. Accessory headroom is capped at `catalog_max_entries` and `catalog_max_bytes`.
+- **The wall** (val-vj1j, operator ruling 2026-10-23). `applyWall()` replaces a strip that leaves the backstop frame with a jerk-limited stop at its edge (else `certifiedStop()` up to `kHardStopMax` times the set, counted in `hard_stops`); the steer's clamp stays as the last line, counted as `wall_clamps` (status line `clamps=`). `.claude/rules/motion-control.md` describes the backstop.
+- **Non-finite inputs** (val-xrj0). `fenceCount()` clamps to 2^22 steps and reads NaN as the datum; `setWindow()` refuses a span that is not finite; `limitsFor()` gives a zero, NaN or infinite ceiling the factory value.
+- **AimDrive probe**: output enable (0x01) passes on any nonzero value; the 60AIM40F reads 7 with Modbus off.
+- **nucleus-p4b** (val-omh3.1 to .3): env `flagship_p4_barnacle` (`-p4hub-barnacle`, Kconfig `NUCLEUS_BOARD_BARNACLE`), the barnacle pin profile, `lib/barnacle_link` (COBS + CRC-16 frames, the trip detector), the helper link and home-sense doors in `system/BarnacleLink.cpp`, `SelfCheck` `Result::absent`, and the `barnacle_shim` project for the R+D board's WROOM-32D. Host-tested only (val-omh3.6 holds the bring-up).
+- `test/fixtures/kinetic_trace.json` re-recorded once against the pinned Kinetic, after all the merges.
+
 ## 0.1.65 (2026-10-23)
 
 ### For users
