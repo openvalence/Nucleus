@@ -79,6 +79,7 @@ public:
     int32_t count() const override { return n; }
     void steer(float v_mm_s) override {
         ++steers;
+        if (!std::isfinite(v_mm_s)) ++nonfinite_steers;
         const valence::SteerWord w = valence::steerWord(v_mm_s);
         q8 = w.step_q8;
         if (q8 != 0) fwd = w.forward;
@@ -146,6 +147,7 @@ public:
     double   phase = 0.0;
     int      parks = 0;
     int      steers = 0;
+    int      nonfinite_steers = 0;
     bool     frozen = false;   // steered, never rendering, no lease: a dead emitter
     std::function<void()> on_edge;
     int32_t  fence_lo = INT32_MIN;   // open until the arbiter writes it, as the core loads it
@@ -4356,4 +4358,124 @@ TEST_CASE("handover: after a lease lapse the steer resumes from the carriage's r
     CHECK(r->arb.latePlans() >= 1);   // joined from the rest
     CHECK(r->arb.plansRefused() == 0);
     CHECK(r->arb.positionMm() == doctest::Approx(kTarget).epsilon(1e-4));
+}
+
+using valence::fenceCount;   // the arbiter's own translation unit is included above
+using valence::kMmPerStep;
+
+TEST_CASE("non-finite: a fence count is total, and a window too wide to divide is refused") {
+    constexpr float inf = std::numeric_limits<float>::infinity();
+    constexpr float nan = std::numeric_limits<float>::quiet_NaN();
+    // 2^22 steps is the farthest a fence sits; the walks inside end within a step of it.
+    constexpr int32_t kFar = 4194304 + 2;
+    for (const bool up : {false, true}) {
+        for (const float mm : {inf, -inf, nan, 1e30f, -1e30f, 3e9f, -3e9f}) {
+            const int32_t c = fenceCount(mm, up);
+            CHECK(std::abs(c) <= kFar);
+        }
+        CHECK(fenceCount(inf, up) > 0);
+        CHECK(fenceCount(-inf, up) < 0);
+        CHECK(fenceCount(nan, up) == 0);
+    }
+    // In range it is the least (up) or greatest (down) count reading at or past mm.
+    for (const float mm : {0.0f, 0.7f, 100.0f, 499.99f, -12.3f}) {
+        const int32_t u = fenceCount(mm, true), d = fenceCount(mm, false);
+        CHECK(float(u) * kMmPerStep >= mm);
+        CHECK(float(u - 1) * kMmPerStep < mm);
+        CHECK(float(d) * kMmPerStep <= mm);
+        CHECK(float(d + 1) * kMmPerStep > mm);
+    }
+    // The public way in: a window of finite, absurd edges reaches the steer's
+    // fence and must neither hang the tick nor leave the fence open.
+    auto r = rig();
+    r->arb.setWindow(0.0f, 1e30f, 1e30f);
+    r->run(20'000);
+    CHECK(r->emitter.fence_hi < INT32_MAX);
+    CHECK(r->emitter.fence_hi > r->emitter.fence_lo);
+    // A span float cannot hold would zero every ceiling: refused, the window stays.
+    auto w = rig();
+    const float lo0 = w->arb.winMin(), hi0 = w->arb.winMax();
+    w->arb.setWindow(-3e38f, 3e38f, 100.0f);
+    w->run(5'000);
+    CHECK(w->arb.winMin() == lo0);
+    CHECK(w->arb.winMax() == hi0);
+}
+
+TEST_CASE("non-finite: a zero, NaN or infinite ceiling never leaves a stop without an end") {
+    constexpr float inf = std::numeric_limits<float>::infinity();
+    constexpr float nan = std::numeric_limits<float>::quiet_NaN();
+    struct Bad { float v, a, j; };
+    // The refused-plan case's late reversal, the set going bad under it: the
+    // stop it certifies must end, steer finite words, and release the intents.
+    for (const Bad b : {Bad{1000, 5000, 0}, Bad{1000, 5000, nan}, Bad{1000, 5000, inf}, Bad{1000, 0, 2e7f}, Bad{1000, nan, 2e7f},
+                        Bad{0, 5000, 2e7f}, Bad{nan, nan, nan}, Bad{inf, inf, inf}, Bad{-1, -1, -1}}) {
+        CAPTURE(b.v);
+        CAPTURE(b.a);
+        CAPTURE(b.j);
+        auto r = rig();
+        r->arb.forceHome(500.0f);
+        r->arb.setInputLimits(1000.0f, 5000.0f, 2e7f);
+        r->run(1000);
+        MotionIntent up;
+        up.source = MotionSource::Stream;
+        up.target_mm = 450.0f;
+        up.duration_us = 800'000;
+        REQUIRE(r->arb.accept(up, g_now_us));
+        r->run(400'000);
+        r->arb.setInputLimits(b.v, b.a, b.j);
+        MotionIntent back;
+        back.source = MotionSource::Stream;
+        back.target_mm = 50.0f;
+        back.duration_us = 400'000;
+        back.anchor_us = g_now_us;
+        back.supersede = true;
+        (void)r->arb.accept(back, g_now_us);
+        for (int i = 0; i < 60; ++i) {
+            elapse(*r);
+            steerOnly(*r);
+        }
+        for (int i = 0; i < 3000; ++i) {
+            elapse(*r);
+            planOnly(*r);
+            steerOnly(*r);
+        }
+        CHECK(r->emitter.nonfinite_steers == 0);
+        // The set repaired, the machine still takes intents: no stop outlives its motion.
+        r->arb.setInputLimits(1000.0f, 5000.0f, 2e7f);
+        r->run(5'000'000);
+        CHECK_FALSE(r->census().busy);
+        REQUIRE(r->submit(MotionSource::Stream, 100.0f));
+        r->run(3'000'000);
+        CHECK(r->census().position_mm == doctest::Approx(100.0f).epsilon(1e-4));
+        CHECK(r->emitter.nonfinite_steers == 0);
+    }
+}
+
+TEST_CASE("non-finite: a jog set or a tuning override that is zero, NaN or infinite plans on the factory ceiling") {
+    constexpr float inf = std::numeric_limits<float>::infinity();
+    constexpr float nan = std::numeric_limits<float>::quiet_NaN();
+    for (const float bad : {0.0f, nan, inf}) {
+        CAPTURE(bad);
+        auto r = rig();
+        r->arb.forceHome(500.0f);
+        r->arb.setJogLimits(bad, bad);
+        r->run(1000);
+        REQUIRE(r->submit(MotionSource::Manual, 50.0f));
+        r->run(moveUs(1'500'000));
+        CHECK(r->emitter.nonfinite_steers == 0);
+        CHECK(r->census().position_mm == doctest::Approx(50.0f).epsilon(1e-4));
+    }
+    for (const float bad : {nan, inf}) {
+        CAPTURE(bad);
+        auto r = rig();
+        r->arb.forceHome(500.0f);
+        valence::MotionTuning t = valence::motionDefaultTuning();
+        t.jmax_ovr = t.vmax_ovr = t.amax_ovr = bad;
+        r->arb.applyTuning(t);
+        r->run(1000);
+        REQUIRE(r->submit(MotionSource::Stream, 400.0f));
+        r->run(moveUs(1'500'000));
+        CHECK(r->emitter.nonfinite_steers == 0);
+        CHECK(r->census().position_mm == doctest::Approx(400.0f).epsilon(1e-4));
+    }
 }
