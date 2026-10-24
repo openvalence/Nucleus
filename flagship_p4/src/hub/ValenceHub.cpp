@@ -341,21 +341,19 @@ void saveNext(linkmode::Next next) {
 }
 
 // Live sessions (parked ones do not hold a boot), and whether a ready one
-// holds configure: the cable's does by H16 (SPEC 12.2). Hub task.
+// holds configure (the hub tiers the cable's configure, SPEC 12.2). Hub task.
 struct SessionsNow {
     bool any = false;
     bool configure = false;
 };
 SessionsNow sessionsNow() {
     SessionsNow n;
-    const uint32_t cable = g_box->serial.attached() ? g_box->serial.sessionId() : 0;
     for (size_t i = 0;; ++i) {
         const valence::HubSession* s = g_box->hub->sessionBySlot(i);
         if (s == nullptr) break;
         if (!s->occupied() || s->state == valence::HubSessionState::STALE) continue;
         n.any = true;
-        if (s->ready && (s->role == AccessLevel::configure || (cable != 0 && s->session_id == cable)))
-            n.configure = true;
+        if (s->ready && s->role == AccessLevel::configure) n.configure = true;
     }
     return n;
 }
@@ -663,6 +661,8 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
     // SPEC 11.2: ESTOP opens the motor switch on this board (motionEstop()),
     // so an ESTOP is a category 0 stop that loses home.
     g_box->hub->setEstopCutsPower(true);
+    // RFC-121: WELCOME identity says config mode; a boot mode, set before sessions.
+    g_box->hub->setConfigMode(linkmode::isConfig(route));
     g_box->hub->setHubInstanceId(loadOrMintInstanceId());
     g_box->device.setRoute(route);
     refreshEndpoint();

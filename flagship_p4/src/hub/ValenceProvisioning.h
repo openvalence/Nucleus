@@ -24,9 +24,9 @@
 //   rate limiter, then NetworkDesk::gate() and the field checks. The last
 //   success ECHO answers a duplicate intent_id; a second join while one runs is
 //   BUSY. The list ops answer at once.
-// - THE CABLE IS CONFIGURE (SPEC §12.2, H16): a frame from the serial binding
-//   passes the access check and the gate's window term whatever its session's
-//   role, here and only here until the hub tiers the binding itself.
+// - THE CABLE IS CONFIGURE (SPEC §12.2, H16): the hub tiers the serial
+//   binding's session configure; a frame from it also passes the gate's
+//   window term.
 // - NO JOIN WHILE A MOTION SOURCE RUNS (SPEC §13.9): SOURCE_CONFLICT, from
 //   setMotionRuns(), which the hub task refreshes before the ports run.
 // - IN CONFIG MODE (setCommitReboot()) a join's ECHO carries reboot_in_ms and
@@ -319,7 +319,7 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
     // A duplicate during the attempt joins it (SPEC §13.9): one answer, later.
     if (_running && _attempt.sessionId == sessionId && _attempt.intentId == in.intent_id) return true;
 
-    if (!cable && uint8_t(s->role) < uint8_t(_access)) {
+    if (uint8_t(s->role) < uint8_t(_access)) {
         nack(link, _access == AccessLevel::control ? NackCode::NOT_CONTROLLER : NackCode::ACCESS_DENIED,
              in.intent_id, h->seq);
         return true;

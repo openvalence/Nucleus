@@ -20,8 +20,8 @@
 // - wifi_join (0x000F) frames go to the provisioning desk, never the hub
 //   (ValenceProvisioning.h); every other frame passes through untouched. Only
 //   a binding that may carry credentials (SPEC §13.9) is built on this port,
-//   and `cable` says whether it is the serial binding (SPEC §12.2: configure
-//   without exception).
+//   and `cable` says whether it is the serial binding (the desk's window term,
+//   ValenceProvisioning.h); the hub tiers it configure by its binding.
 // See: Valence SPEC.md §5.5, §6.3, §13.1, §13.4, §13.5, §13.9; transport.md T3, T5
 
 #include <array>

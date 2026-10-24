@@ -211,6 +211,13 @@ public:
         _cobs.begin(pipe);
         ValenceLinkPort::begin(hub, _cobs, desk, detail::kSerialTag, true);
     }
+    // §12.2: the hub tiers the serial binding configure. Declared here, never
+    // on the COBS pipe, which other links may ride.
+    TransportProperties properties() const override {
+        TransportProperties p = ValenceLinkPort::properties();
+        p.binding = BindingKind::serial;
+        return p;
+    }
     uint32_t junkChunks() const { return _cobs.junkChunks(); }
 
 private:

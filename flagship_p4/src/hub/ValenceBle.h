@@ -174,6 +174,7 @@ public:
         p.ordered = true;    // §13.1 BLE GATT: notifications ordered
         p.reliable = false;  // §13.1: notify is unacknowledged
         p.congestion = CongestionSignal::NotifyQueueDepth;
+        p.binding = BindingKind::ble_gatt;
         return p;
     }
 
