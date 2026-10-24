@@ -30,6 +30,8 @@ tools/*
 # Canon mechanical floor (.claude/rules/governance.md SS5). Doctrine
 # enforcement is part of the repo, not a scratch script.
 !tools/canon_lint.py
+# the build's kinetic.pin guard (build-test-deploy.md): every pio build runs it
+!tools/kinetic_guard.py
 # the motion acceptance instrument; val-091.4/.8 stamps cite it
 !tools/lp_leg_capture.py
 !tools/lp_scope.py

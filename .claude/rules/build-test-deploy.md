@@ -40,6 +40,20 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
   path rebuilds `pio run -d flagship_p4 -e flagship_p4` and `pio test -e
   native`, which rewrites the one kinetic.wasm trace fixture
   `test/fixtures/kinetic_trace.json` (`tools/kinetic-wasm/README.md`).
+- **The Kinetic pin guard.** Every build compiles the sibling `../Kinetic`
+  checkout in place, so whatever branch sits there goes into the image (the
+  0.1.63 bench image carried unpinned planner code). `tools/kinetic_guard.py`,
+  a pre-script of every `flagship_p4*` env and of `env:native`, runs
+  canon_lint's kinetic.pin rule and FAILS the build unless `../Kinetic` HEAD
+  is `kinetic.pin` and its `include/`, `library.json` and
+  `tests/test_kinetic2.cpp` are clean. `pio run` prints why; `pio test` shows
+  only "Building stage has failed" unless run with `-vvv`. Planner
+  development opts out with `NUCLEUS_KINETIC_UNPINNED=1`: a loud warning, and
+  the image's git label (`/diag` `git=`) reads `<sha>-kinetic-unpinned`.
+  Such an image is never flashed as a release. The CMake builds
+  (`sim/neutrino`, `tools/kinetic-wasm`) are not guarded; `canon_lint` is
+  their check. `../Valence` against `valence.pin` is not guarded: canon_lint's
+  pin-mismatch is its only check.
 
 ## The bench
 

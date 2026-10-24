@@ -24,6 +24,7 @@ def git(*args):
 
 
 label = git("rev-parse", "--short", "HEAD") or "unknown"
+label += env.get("NUCLEUS_LABEL_SUFFIX", "")  # set by ../tools/kinetic_guard.py
 if git("status", "--porcelain", "--untracked-files=no", "--", ":/", ":(top,exclude).beads/issues.jsonl"):
     label += "-dirty"
 
