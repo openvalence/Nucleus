@@ -69,13 +69,16 @@ static_assert([] {
 #error "catalog capacity flags missing: apply flagship_p4/valence_capacity.cmake to this build"
 #endif
 
+// RFC-121 (SPEC 8.1, 8.10): never room past catalog_max_entries or
+// catalog_max_bytes, whatever this build's pools and scratch could hold.
 CatalogHeadroom catalogHeadroom(const Catalog32& c, size_t encodedBytes) {
     CatalogHeadroom h;
-    h.entries = uint16_t(Catalog32::kEntryCapacity - c.count);
+    const size_t maxEntries = std::min<size_t>(Catalog32::kEntryCapacity, limits::catalog_max_entries);
+    h.entries = uint16_t(maxEntries - std::min<size_t>(c.count, maxEntries));
     h.layout  = uint16_t(Catalog32::kLayoutCapacity - c.layoutUsed);
     h.schema  = uint16_t(Catalog32::kSchemaCapacity - c.schemaUsed);
     h.safe    = uint16_t(Catalog32::kSafeCapacity - c.safeUsed);
-    const size_t floor = Hub::catalogScratchCapacity() * 4 / 5;
+    const size_t floor = std::min<size_t>(Hub::catalogScratchCapacity() * 4 / 5, limits::catalog_max_bytes);
     h.bytes = encodedBytes < floor ? uint32_t(floor - encodedBytes) : 0;
     const size_t fit = std::min({size_t(h.entries) / NUCLEUS_ACCESSORY_ENTRIES,
                                  size_t(h.layout) / NUCLEUS_ACCESSORY_LAYOUT_FIELDS,

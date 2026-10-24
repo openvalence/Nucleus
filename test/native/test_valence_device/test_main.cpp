@@ -3813,3 +3813,12 @@ TEST_CASE("VD-RADIOS: radios is configure tier, the tail byte of 0x1030, stored,
     REQUIRE(rig->device.encodeConfigBlob(blob, 3) == blob.size());
     CHECK(blob[stored::kConfigV9Bytes] == std::byte{1});
 }
+
+TEST_CASE("VD-HEADROOM: accessory room never passes catalog_max_entries or catalog_max_bytes (RFC-121)") {
+    auto cat = std::make_unique<Catalog32>();
+    REQUIRE(buildValenceCatalog(*cat, boardFeatures()));
+    const CatalogHeadroom h = catalogHeadroom(*cat, 31000);
+    CHECK(size_t(cat->count) + h.entries <= limits::catalog_max_entries);
+    CHECK(31000u + h.bytes <= limits::catalog_max_bytes);
+    CHECK(catalogHeadroom(*cat, limits::catalog_max_bytes).bytes == 0);
+}
