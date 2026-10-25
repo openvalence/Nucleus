@@ -29,7 +29,8 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
   Kinetic²'s own suite compiled from `../Kinetic/tests/test_kinetic2.cpp` as
   `test_kinetic`), the
   shared motion core
-  (`flagship_p4/src/motion/MotionArbiter.*`, suite `test_motion_arbiter`) and
+  (`flagship_p4/src/motion/MotionArbiter.*`, suites `test_motion_arbiter` and,
+  for its ownership table, `test_arbiter_table`) and
   the pattern generator (`flagship_p4/src/patterns/`, suite
   `test_pattern_engine`) are the check a namespace rename or a gate change is
   gated on: `pio test -e native` from the root project, every suite under

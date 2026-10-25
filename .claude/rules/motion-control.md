@@ -61,6 +61,22 @@ margin off the low stop's datum, the rail ends a margin short of the high
 one, so a 300 mm stop-to-stop rail is a 290 mm usable rail, and the usable
 rail is what max_rail stores.
 
+**Who may feed the planner is ONE mode (bd val-5ozv.1).** `ArbMode` in
+`MotionArbiter.h`: Run, Paused, Jog, Returning, HomeQueued, the four seek
+phases, Unpowered, Estop, written by the planner task alone and moved only by
+the `(mode, event) -> (next, action)` rules there; the feed column
+(`kArbFeed`) is what `accept()` admits in each. The cross-task methods still
+post the SPEC 11 latches and requests as words, and the planner turns each into
+an event at the point it already applied it, so the table moved no work in
+time; the rail word stays one compare-and-swapped word (an e-stop racing a
+start), and the handover, the wall and a refused plan's hold stay the one
+trajectory, not modes. A cell with no rule is held, logged and counted (census
+`arb_illegal`); every change of mode logs one line and counts
+(`arb_transitions`) [verified 2026-10-24 -- test_arbiter_table: every cell
+against the audited grid, 62 of 62 legal cells reached at runtime, 13
+race-only; test_motion_arbiter unchanged and passing with every illegal cell
+aborting (MOTION_ARB_STRICT); kinetic_trace.json byte-identical].
+
 Event-driven, never clocked: an intent becomes knots at arrival, the pending
 window is solved at the next sample, and the sampler evaluates it.
 
