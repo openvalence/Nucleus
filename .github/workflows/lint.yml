@@ -1,0 +1,46 @@
+# canon_lint on every push to main and every pull request. An alarm, not a
+# gate: no branch protection reads it.
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canon-lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # canon_lint's pin rules read ../Valence and ../Kinetic: both are checked
+      # out beside Nucleus at the shas the pins name, so a pin naming an
+      # unpushed commit fails here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: Nucleus
+      - name: Read the pins
+        id: pin
+        run: |
+          echo "valence=$(head -n1 Nucleus/valence.pin | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+          echo "kinetic=$(head -n1 Nucleus/kinetic.pin | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: openvalence/Valence
+          ref: ${{ steps.pin.outputs.valence }}
+          path: Valence
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: openvalence/Kinetic
+          ref: ${{ steps.pin.outputs.kinetic }}
+          path: Kinetic
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.10'
+      # The Python and codespell the local lint runs; bump them together.
+      - run: python -m pip install codespell==2.4.3
+      - run: python tools/canon_lint.py
+        working-directory: Nucleus
