@@ -17,7 +17,11 @@ Nucleus build: the P4 image, neutrino-sim, kinetic-wasm and the native suites.
 
 Every intent becomes knots at one boundary (MotionArbiter.cpp, "the Kinetic²
 boundary"): a segment is a knot at its start plus its duration, a gap before
-its start a rest knot, and a segments bundle's first segment first replaces
+its start a rest knot (a start within `kSegmentSeamUs`, 16 ms, after a knot
+not at rest is a seam instead: no rest knot, the gap joins the new span, bd
+val-7t48 [verified 2026-10-26 -- test_motion_arbiter, an arcade stream at 1
+to 4 ms of stamp jitter: no hold, no piece over a ceiling, peak at most 1.12
+of the chord, 1.4 to 2.2 before]), and a segments bundle's first segment first replaces
 every knot queued at or after its start, the motion in flight handing off
 there (RFC-087 supersede, `Engine::truncateAfter`); a sample a knot at its arrival plus the grant's
 `schedule_latency_us` (`sampleLatencyUs()`); a jog or a return a knot at the

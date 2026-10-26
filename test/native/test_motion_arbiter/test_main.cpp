@@ -3602,6 +3602,156 @@ std::vector<size_t> crossings(const std::vector<float>& p, float mid, size_t fro
 
 }  // namespace
 
+// ---- a segment stream whose starts jitter by milliseconds (bd val-7t48) -------
+// Phosphor's arcade: 100 ms segments capped at 250 mm/s, each submitted 60 ms
+// ahead in its own bundle, end velocity free. The sender's hub clock moves each
+// bundle's stamp by up to J ms (the door's CLOCK exchange error, a stretched
+// timer), so a start lands up to 2J off the newest knot. Late by more than a
+// tick, the hub held at v = 0 there: 350 to 550 mm/s and a piece over the ceiling
+// at every hold.
+
+namespace {
+
+struct ArcadeRun {
+    float    peak_mm_s = 0.0f;
+    float    jerk_max = 0.0f;    // the plan's, second difference on the 1 ms grid
+    uint32_t over = 0;           // PieceOverCeiling added
+    uint32_t holds = 0;          // submits that queued a knot besides the segment's
+    float    rest_mm_s = 0.0f;   // the fastest plan speed in the long gap's middle half
+    float    chord_mm_s = 0.0f;  // the fastest chord between knots as the hub resolved them
+};
+
+// gap_at: the segment index the long rest precedes (-1: none); gap_us its length.
+ArcadeRun arcadeRun(int64_t jit_us, bool late_only, int gap_at = -1, uint64_t gap_us = 0) {
+    static constexpr float kChord[] = {100, 200, 250, 250, 250, 250, 150, 50, -50, -150, -250, -250, -250, -250, -200, -100};
+    constexpr int kSegs = 48;
+    constexpr uint64_t kSegUs = 100'000, kLeadUs = 60'000;
+    auto r = rig();
+    r->arb.forceHome(600.0f);
+    r->arb.setWindow(50.0f, 550.0f, 600.0f);
+    r->arb.setInputLimits(1200.0f, 100000.0f, 2e7f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 100.0f));
+    r->run(2'000'000);
+    r->arb.drainAnomalies();
+    const MotionCensus before = r->census();
+    uint32_t seed = 12345;
+    auto jitter = [&]() -> int64_t {
+        if (jit_us == 0) return 0;
+        seed = seed * 1103515245u + 12345u;
+        const int64_t u = int64_t(seed >> 8) % (2 * jit_us + 1);
+        return late_only ? u / 2 : u - jit_us;
+    };
+    ArcadeRun out;
+    float mm = 100.0f;
+    uint64_t knot_us = 0;
+    uint64_t start = g_now_us + kLeadUs + 10'000;   // authored, the sender's clock
+    uint64_t gap_from = 0, gap_to = 0;
+    float v1 = 0.0f, v2 = 0.0f;
+    int n = 0, ticks = 0;
+    const uint64_t end = start + kSegs * kSegUs + gap_us + 600'000;
+    while (g_now_us < end) {
+        while (n < kSegs) {
+            const bool gap = n == gap_at;
+            // A rest the sender means is scheduled as one: its segment is sent
+            // when the one before it would have been, gap_us early.
+            if (start > g_now_us + kLeadUs + (gap ? gap_us : 0)) break;
+            if (gap) {
+                gap_from = start;
+                start += gap_us;
+                gap_to = start;
+            }
+            mm += kChord[n % 16] * 0.1f;
+            MotionIntent in;
+            in.source = MotionSource::Stream;
+            in.target_mm = mm;
+            in.duration_us = uint32_t(kSegUs);
+            in.anchor_us = uint64_t(int64_t(start) + jitter());
+            // The jitter moved the knot: the chord the hub is asked is between
+            // the stamps it resolved, never the sender's intent.
+            const uint64_t at = in.anchor_us + kSegUs;
+            if (knot_us > 0 && !gap)
+                out.chord_mm_s = std::fmax(out.chord_mm_s, std::fabs(kChord[n % 16]) * 0.1f / (float(at - knot_us) * 1e-6f));
+            knot_us = at;
+            in.supersede = true;
+            in.expect_us = kQuietUs;
+            const size_t was = r->arb.engine().pending();
+            REQUIRE(r->arb.accept(in, g_now_us));
+            if (r->arb.engine().pending() > was + 1) ++out.holds;
+            start += kSegUs;
+            ++n;
+        }
+        r->run(1000);
+        const float v = r->census().velocity_mm_s;
+        out.peak_mm_s = std::fmax(out.peak_mm_s, std::fabs(v));
+        if (++ticks > 2) out.jerk_max = std::fmax(out.jerk_max, std::fabs(v - 2.0f * v1 + v2) * 1e6f);
+        v2 = v1;
+        v1 = v;
+        if (gap_to > 0 && g_now_us > gap_from + gap_us / 4 && g_now_us < gap_to - gap_us / 4)
+            out.rest_mm_s = std::fmax(out.rest_mm_s, std::fabs(v));
+    }
+    r->arb.drainAnomalies();
+    out.over = r->census().anom[size_t(kinetic2::AnomalyKind::PieceOverCeiling)] -
+               before.anom[size_t(kinetic2::AnomalyKind::PieceOverCeiling)];
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("val-7t48: an arcade stream whose starts jitter 1 to 4 ms renders as one trajectory: no hold, no piece over a ceiling") {
+    const ArcadeRun tiled = arcadeRun(0, false);
+    MESSAGE("tiled: peak ", tiled.peak_mm_s, " mm/s over a chord of ", tiled.chord_mm_s, ", jerk ", tiled.jerk_max,
+            ", over ", tiled.over);
+    REQUIRE(tiled.chord_mm_s == doctest::Approx(250.0f));
+    CHECK(tiled.holds == 0);
+    CHECK(tiled.over == 0);
+    for (const bool late_only : {true, false}) {
+        for (const int64_t j : {1000, 2000, 3000, 4000}) {
+            const ArcadeRun a = arcadeRun(j, late_only);
+            CAPTURE(late_only);
+            CAPTURE(j);
+            MESSAGE("jitter ", j, " us, late only ", late_only, ": peak ", a.peak_mm_s, " mm/s over a chord of ",
+                    a.chord_mm_s, ", jerk ", a.jerk_max, ", over ", a.over, ", holds ", a.holds);
+            CHECK(a.holds == 0);
+            CHECK(a.over == 0);
+            // A through point's curve, over the chords the jittered stamps ask:
+            // 1.06 of the chord tiled, up to 1.12 on these uneven spans. A
+            // v = 0 hold made both its spans rest-to-rest, 1.5 (SPEC 9.6).
+            CHECK(a.peak_mm_s <= a.chord_mm_s * 1.15f);
+            // Kinetic's corner ramps read up to 0.8% over jmax on the 1 ms grid.
+            CHECK(a.jerk_max <= 2e7f * 1.01f);
+        }
+    }
+}
+
+TEST_CASE("val-7t48: a start inside the seam after a knot at rest still waits for its start") {
+    auto r = rig();
+    r->arb.forceHome(400.0f);
+    r->run(1000);
+    MotionIntent in;
+    in.source = MotionSource::Stream;
+    in.target_mm = 50.0f;
+    in.duration_us = 200'000;
+    in.anchor_us = g_now_us + valence::kSegmentSeamUs / 2;
+    REQUIRE(r->arb.accept(in, g_now_us));
+    r->run(valence::kSegmentSeamUs / 2 - 2000);
+    CHECK(std::fabs(r->census().velocity_mm_s) < 1e-3f);
+    r->run(204'000);
+    CHECK(r->census().plan_mm == doctest::Approx(50.0f).epsilon(1e-4));
+}
+
+TEST_CASE("val-7t48: a gap the sender schedules still rests, jittered or not") {
+    for (const int64_t j : {0, 4000}) {
+        const ArcadeRun a = arcadeRun(j, false, 4, 300'000);   // mid-cruise, the knot passed at 250 mm/s
+        CAPTURE(j);
+        MESSAGE("long gap, jitter ", j, " us: fastest in the rest ", a.rest_mm_s, " mm/s, holds ", a.holds,
+                ", over ", a.over);
+        CHECK(a.holds == 1);
+        CHECK(a.rest_mm_s < 1.0f);
+        CHECK(a.over == 0);
+    }
+}
+
 TEST_CASE("oscillator: boots off; enabled at rest it swings the asked amplitude about the rest, and the strip carries it") {
     auto r = restRig(250.0f);
     CHECK_FALSE(r->census().osc_active);

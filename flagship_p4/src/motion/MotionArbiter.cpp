@@ -944,8 +944,8 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     if (in.duration_us > 0) {
         // A 0x2101 segment, or a generator's stroke: a knot at its start plus
         // its duration with the sender's end velocity. A start past the
-        // newest knot leaves a gap the sender meant as a rest, so the curve
-        // holds until the start.
+        // newest knot and past the seam (segmentContinues()) leaves a gap the
+        // sender meant as a rest, so the curve holds until the start.
         const uint64_t start = in.anchor_us > now_us ? in.anchor_us : now_us;
         // A start within a tick of the newest knot IS that knot: the sender
         // tiled its spans and two of its clock reads moved the stamp by
@@ -963,7 +963,9 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
             _k2_newest_p  = h.p;
             _k2_dirty = true;
         }
-        if (!tiles && start > _k2_newest_us) {
+        const kinetic2::Knot last = _engine.newest();
+        const bool seam = segmentContinues(start, _k2_newest_us, last.has_v && last.v == 0.0f);
+        if (!tiles && !seam && start > _k2_newest_us) {
             kinetic2::Knot hold;
             hold.t_us   = start;
             hold.p      = _k2_newest_p;

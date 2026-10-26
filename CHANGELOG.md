@@ -2,6 +2,17 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.72 (2026-10-26)
+
+### For users
+
+- **Streamed motion no longer jolts when the sender's timing wobbles.** A player sending short back-to-back moves (the arcade games, any app on a busy computer or a slow network) has its timing shift by a few milliseconds from move to move. The machine read each such shift as a request to stop for a moment, braked hard, then hurried to catch up: brief bursts up to twice the requested speed and a "piece over ceiling" entry in the Anomalies log at each one. Moves that follow each other within 16 ms now run as one continuous motion. A pause longer than that is still a pause; an app that wants a shorter one sends it as a hold (a move to the same position).
+
+### Technical
+
+- **The segment seam** (val-7t48). `MotionArbiter::submitKnots` inserted a v = 0 hold knot whenever a segment started more than `kMotionTickUs` after the newest knot (RFC-105 (hhh) set that one-tick tolerance). A start 1 to 4 ms late after a knot passed at speed made both spans rest-to-rest, 1.5x their chord. Now `segmentContinues()` (`MotionArbiter.h`): a start at most `kSegmentSeamUs` (16 ms) after a newest knot that is not at rest is that knot's scheduled successor (SPEC 9.6), with no hold knot; the segment's knot keeps its stamped end, so the gap lengthens its span and never speeds it. After a knot at rest (an authored end velocity 0, the reset point, a brake's end) or past the seam, the gap still holds until the start. The value covers a sender's hub-clock stamp error (Phosphor's door: up to 8 ms late on one CLOCK exchange, stepping either way when it adopts another). An early start keeps RFC-087's supersede hand-off. Wire unchanged.
+- **Tests.** `test_motion_arbiter`: an arcade stream (100 ms segments to 250 mm/s, 60 ms lead, end velocity free) at 1 to 4 ms of stamp jitter, late only and either way: no hold knot, no `PieceOverCeiling`, peak at most 1.15 of the chord the stamps ask (1.06 to 1.12 measured; 1.39 to 2.2 before, 4 to 6 pieces over a ceiling), jerk within 1% of the set. A 300 ms gap the sender schedules still rests (one hold, still in its middle half); a start inside the seam from rest waits for its start. `kinetic_trace.json` unchanged.
+
 ## 0.1.71 (2026-10-25)
 
 ### For users

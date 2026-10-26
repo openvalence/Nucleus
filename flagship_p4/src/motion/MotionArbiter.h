@@ -648,6 +648,23 @@ constexpr uint32_t adaptiveReactUs(float plan_us_avg, float lead_us_avg, uint32_
     return uint32_t(want < fl ? fl : want);
 }
 
+// The segment seam (bd val-7t48): a segment starting at most kSegmentSeamUs
+// past the newest knot is that knot's scheduled successor (SPEC 9.6), never a
+// rest, unless that knot is itself at rest. Its knot keeps the author's end, so
+// the gap joins its span: slower by the gap, never faster, no knot moved.
+// Past the seam, or after a knot at rest, the gap is a rest: the curve holds at
+// the newest knot until the start. Constraint: 16 ms covers the stamp error of
+// a sender's hub clock (Phosphor's door is up to 8 ms late on one CLOCK
+// exchange and steps when it adopts another, either way), so do not narrow it
+// toward the tick: a v = 0 hold 1 to 4 ms after a knot passed at 250 mm/s made
+// both spans rest-to-rest at 1.5x their chord, 350 to 550 mm/s and a piece over
+// the ceiling at every hold. A sender that means a shorter rest sends it as a
+// hold segment (SPEC 9.6). Story: motion-control.md, the Kinetic boundary.
+inline constexpr uint64_t kSegmentSeamUs = 16000;
+constexpr bool segmentContinues(uint64_t start_us, uint64_t newest_us, bool newest_rests) {
+    return !newest_rests && start_us > newest_us && start_us - newest_us <= kSegmentSeamUs;
+}
+
 class MotionArbiter {
 public:
     // The engine's clock, microseconds. Read only to time the window solve.
