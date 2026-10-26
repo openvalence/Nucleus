@@ -16,6 +16,7 @@
 //   bus is not probed: the R+D board has no part on it.
 // See: docs/flagship-board.md section 8, bd val-091
 
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -423,6 +424,8 @@ extern "C" void app_main() {
     uint32_t n = 0;
     uint32_t lastTicks = 0;
     bool haveTicks = false;
+    std::array<uint32_t, 6> lastArb{};
+    bool haveArb = false;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(5000));
         ++n;
@@ -480,6 +483,21 @@ extern "C" void app_main() {
         // reads healthy on free right up to the allocation that fails
         // (.claude/rules/memory-budget.md T21).
         const valence::MotionCensus mo = valence::motionCensus();
+        // The arbiter's census in the archive, logged at the first tick and on
+        // every change, not every 5 s; the printf line reaches the console only.
+        // Two lines: one would pass kMsgBytes (geiger_core.hpp).
+        const std::array<uint32_t, 6> arb{mo.arb_mode, mo.arb_transitions, mo.arb_illegal,
+                                          mo.window_edits, mo.window_held, mo.glides};
+        if (!haveArb || arb != lastArb) {
+            GLOGI("motion", "census arb_mode=%s arb_transitions=%lu arb_illegal=%lu",
+                  mo.arb_mode < valence::kArbModeNames.size() ? valence::kArbModeNames[mo.arb_mode] : "?",
+                  static_cast<unsigned long>(mo.arb_transitions), static_cast<unsigned long>(mo.arb_illegal));
+            GLOGI("motion", "census window_edits=%lu window_held=%lu glides=%lu glide_max_mm=%.2f",
+                  static_cast<unsigned long>(mo.window_edits), static_cast<unsigned long>(mo.window_held),
+                  static_cast<unsigned long>(mo.glides), double(mo.glide_max_mm));
+            lastArb = arb;
+            haveArb = true;
+        }
         note_stack(0, census.stackFree);
         note_stack(1, valence::motionSteerStackFree());
         note_stack(2, mo.stack_free);

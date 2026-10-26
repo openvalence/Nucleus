@@ -2,14 +2,18 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
-## 0.1.67 (2026-10-24)
+## 0.1.67 (2026-10-25)
 
 ### For users
 
-- **A false warning is gone from the start-up log.** Bluetooth advertising at every normal start no longer logs "Failed to persist local IRK". Nothing about Bluetooth behavior changes.
+- **Changing the stroke window while the carriage sits outside it no longer leaves it stranded.** If a new window leaves the carriage outside, the machine glides it back in at jog speed and holds it inside the new edge; anything sent meanwhile waits for the glide to finish. An edit during homing, an e-stop or with motor power off waits and applies when that ends.
+- **The start-up log shows one less false warning.** Bluetooth advertising at every normal start no longer logs "Failed to persist local IRK". Nothing about Bluetooth behavior changes.
 
 ### Technical
 
+- **The arbiter's ownership is one mode and a transition table** (val-5ozv.1, no behavior change). `ArbMode` (Run, Paused, Jog, Returning, HomeQueued, the four seek phases, Unpowered, Estop) replaces the planner's `_returning` and the HomePhase atomic; it is written by the planner task alone and moved only by the `(mode, event)` rules in `MotionArbiter.h` (11 modes by 25 events). `kArbFeed` is what `accept()` admits in each mode. Every change logs one `MODE:` line (a burst of 8 per second, the rest counted); a cell with no rule is held, logged and counted. `env:native` defines `MOTION_ARB_STRICT`, so a suite reaching an illegal cell aborts. New suite `test_arbiter_table`.
+- **Window edits per mode and the glide** (val-5ozv.2, operator ruling 2026-10-25). `WindowEdit` (setWindow()) and `Reorigin` (force_home) are separate events. Run reframes (knots re-target as window shares, a jog in flight keeps its mm target); Paused, Jog and Returning recheck; a home cycle, ESTOP and power loss defer until they end, a completed cycle's measured rail kept over the post's. A homed carriage the edit leaves outside, with nothing in flight carrying it in, glides in: `Profile::converge` into the jog set, then `Profile::point` to rest inside the window; intents wait for its end. `.claude/rules/motion-control.md` holds both.
+- **Census**: `arb_mode`, `arb_transitions`, `arb_illegal`, `window_edits`, `window_held`, `glides`, `glide_max_mm`. `/diag` carries them as two `motion` `census` lines, logged at boot and on every change.
 - **`CONFIG_BT_NIMBLE_HS_PVCY=n`** (val-64ir). The NimBLE host generated a local IRK at sync and tried to store it; with `SECURITY_ENABLE=n` the store write is compiled out (it needs `BLE_SM_SC`) and returns `BLE_HS_ENOTSUP` (rc=8). Nothing uses the IRK: there is no pairing, bonding or resolvable private address, and the advertisement and GATT sessions use the public address. Re-enable privacy together with security and `NVS_PERSIST` if pairing ever lands.
 
 ## 0.1.66 (2026-10-24)
