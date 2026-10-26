@@ -257,7 +257,7 @@ static_assert([] {
 namespace anom_body {
 inline constexpr uint8_t kind   = 1;  // kinetic2::AnomalyKind, mirrors event_kind; labels live in event_kinds
 inline constexpr uint8_t seq    = 2;  // engine's rolling event id (wraps)
-inline constexpr uint8_t target = 3;  // the command target that provoked it, 0..1 normalized
+inline constexpr uint8_t target = 3;  // the command target that provoked it, mm in the client frame
 // Key 4 is retired (a unitless per-kind scalar): never reused.
 inline constexpr uint8_t t_ms   = 5;  // hub time at record, ms since boot (SPEC 7.2's EVENT time)
 // One key per meaning, each sent only by the kinds it names.
@@ -1448,13 +1448,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .group = card::anomalies, .desc = "Anomaly kind, same as the event kind"});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",
                       .group = card::anomalies, .desc = "Rolling event id, wraps"});
-    // 0x1100's telemetry.target precedes this one in catalog order and keeps
-    // the catalog-wide binding (SPEC 8.8 role cardinality).
+    // Roles on an EVENT body bind within their own entry (RFC-122): this
+    // telemetry.target never competes with 0x1100's. mm in the client frame,
+    // so an old event keeps its place after the window moves.
     c.addSchemaField({.key = anom_body::target, .name = "target", .type = CborFieldType::f32_t,
-                      .unit = "norm", .group = card::anomalies,
-                      .desc = "Commanded position, 0 to 1 across the window",
+                      .unit = "mm", .group = card::anomalies,
+                      .desc = "Commanded position of the knot",
                       .role = roles::telemetry_target,
-                      .hasUnitId = true, .unitId = valence::unit_ids::normalized});
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
     // ms since boot: SPEC 7.2's EVENT time, the frame timestamp's own clock.
     c.addSchemaField({.key = anom_body::t_ms, .name = "t_ms", .type = CborFieldType::uint_t, .unit = "ms",
                       .group = card::anomalies, .desc = "Hub time of the event, ms since boot",

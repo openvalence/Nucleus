@@ -1741,9 +1741,9 @@ TEST_CASE("VD-HOME-9: a max_rail write holds the window inside it; a window writ
 // planner hands over goes out as one EVENT, under the hub's cap.
 TEST_CASE("VD-ANOM-1: each planner anomaly is one 0x4100 event, kind and body per the schema, capped") {
     auto rig = std::make_unique<Rig>();
-    g_anomalies.push_back({3, 10, 0x100001234ull, 0.25f, 0.5f});   // knot_trimmed
-    g_anomalies.push_back({6, 11, 0x100001240ull, 0.75f, 1.25f});  // piece_over_ceiling
-    g_anomalies.push_back({1, 12, 0x100001250ull, 0.5f, 12.0f});   // settle
+    g_anomalies.push_back({3, 10, 0x100001234ull, 62.5f, 0.5f});   // knot_trimmed
+    g_anomalies.push_back({6, 11, 0x100001240ull, 187.5f, 1.25f});  // piece_over_ceiling
+    g_anomalies.push_back({1, 12, 0x100001250ull, 125.0f, 12.0f});   // settle
     rig->step();
     CHECK(g_anomalies.empty());
     REQUIRE(rig->del.anomalyEvents.size() == 3);
@@ -1756,7 +1756,7 @@ TEST_CASE("VD-ANOM-1: each planner anomaly is one 0x4100 event, kind and body pe
     for (uint32_t i = 0; i < e.body_count; ++i) body[e.body[i].key] = e.body[i].value;
     CHECK(body[anom_body::kind].u64_val == 6);
     CHECK(body[anom_body::seq].u64_val == 11);
-    CHECK(body[anom_body::target].f32_val == 0.75f);
+    CHECK(body[anom_body::target].f32_val == 187.5f);   // mm, as the arbiter hands it over
     CHECK(body[anom_body::ceiling_ratio].f32_val == 1.25f);
     CHECK(body[anom_body::t_ms].u64_val == 0x100001240ull / 1000);   // ms since boot, past 2^32 us
     CHECK(rig->del.anomalyEvents[0].event_kind == 3);
@@ -1788,7 +1788,7 @@ TEST_CASE("VD-ANOM-2: each kind's detail rides its own declared field, nothing e
     for (const SchemaField& f : rig->catalog.schemaFields(*entry)) schema[f.key] = f;
     CHECK(schema.count(4) == 0);   // the retired unitless detail
     CHECK(schema[anom_body::target].role == valence::field_roles::telemetry_target);
-    CHECK(schema[anom_body::target].unitId == valence::unit_ids::normalized);
+    CHECK(schema[anom_body::target].unitId == valence::unit_ids::mm);   // RFC-122: mm, not window units
     CHECK(schema[anom_body::t_ms].unitId == valence::unit_ids::ms);
     CHECK(schema[anom_body::kept].unitId == valence::unit_ids::percent);
     CHECK(schema[anom_body::ceiling_ratio].unit == "x");
@@ -1810,7 +1810,7 @@ TEST_CASE("VD-ANOM-2: each kind's detail rides its own declared field, nothing e
     for (size_t i = 0; i < std::size(cases); ++i) {
         const Case& c = cases[i];
         CAPTURE(i);
-        g_anomalies.push_back({c.kind, 0, 5'000'000, 0.5f, c.detail});
+        g_anomalies.push_back({c.kind, 0, 5'000'000, 140.25f, c.detail});
         rig->step(1000);   // one at a time, under the cap
         REQUIRE(rig->del.anomalyEvents.size() == i + 1);
         const EventMsg& e = rig->del.anomalyEvents[i];
@@ -1819,7 +1819,7 @@ TEST_CASE("VD-ANOM-2: each kind's detail rides its own declared field, nothing e
         for (uint32_t k = 0; k < e.body_count; ++k) body[e.body[k].key] = e.body[k].value;
         CHECK(body.count(anom_body::kind) == 1);
         CHECK(body.count(anom_body::seq) == 1);
-        CHECK(body.count(anom_body::target) == 1);
+        CHECK(body[anom_body::target].f32_val == 140.25f);
         CHECK(body[anom_body::t_ms].u64_val == 5000);
         CHECK(e.body_count == (c.key < 0 ? 4u : 5u));
         for (const auto& [k, f] : schema) CHECK(body.count(k) <= 1);

@@ -4101,10 +4101,12 @@ TEST_CASE("generators in a narrow window: every half-stroke renders whole at the
 }
 
 // bd val-ku3: an anomaly leaves the engine once, counted for 0x1111 and handed
-// on for 0x4100 with its target in the client frame.
+// on for 0x4100 with its target in the client frame, mm (RFC-122): a window
+// off the rail's ends proves it is never window units.
 TEST_CASE("popAnomaly: each anomaly is counted as it leaves, its target in the flipped client's frame") {
     auto r = rig();
     r->arb.forceHome(500.0f);
+    r->arb.setWindow(50.0f, 450.0f, 500.0f);
     r->run(1000);
     r->arb.setFlipped(true);
     r->run(1000);
@@ -4116,7 +4118,7 @@ TEST_CASE("popAnomaly: each anomaly is counted as it leaves, its target in the f
     MotionAnomaly a;
     REQUIRE(r->arb.popAnomaly(a));
     CHECK(a.kind == uint8_t(kinetic2::AnomalyKind::KnotTrimmed));
-    CHECK(a.target == doctest::Approx(100.0f / 500.0f));   // 0.8 in the engine's physical frame
+    CHECK(a.target == doctest::Approx(100.0f));   // client mm: 400 mm in the engine's physical frame
     CHECK(r->census().anomalies == before + 1);
     CHECK(r->census().anom[a.kind] >= 1);
     r->arb.drainAnomalies();
