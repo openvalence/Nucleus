@@ -45,15 +45,20 @@ lie. Per-board build entry points live in each `flagship_<chip>/platformio.ini`
   checkout in place, so whatever branch sits there goes into the image (the
   0.1.63 bench image carried unpinned planner code). `tools/kinetic_guard.py`,
   a pre-script of every `flagship_p4*` env and of `env:native`, runs
-  canon_lint's kinetic.pin rule and FAILS the build unless `../Kinetic` HEAD
-  is `kinetic.pin` and its `include/`, `library.json` and
-  `tests/test_kinetic2.cpp` are clean. `pio run` prints why; `pio test` shows
+  canon_lint's kinetic.pin rule and FAILS the build unless its consumed
+  paths (`include/`, `library.json`, `tests/test_kinetic2.cpp`) are clean and
+  identical between `kinetic.pin` and `../Kinetic` HEAD. A HEAD that moved
+  only outside them passes with one `INFO: ... consumed paths identical` line
+  (operator ruling 2026-10-25: the guard stops unpinned code, docs commits
+  never block a build). `pio run` prints why; `pio test` shows
   only "Building stage has failed" unless run with `-vvv`. Planner
   development opts out with `NUCLEUS_KINETIC_UNPINNED=1`: a loud warning, and
   the image's git label (`/diag` `git=`) reads `<sha>-kinetic-unpinned`.
   Such an image is never flashed as a release. The same script guards
-  `../Valence` with canon_lint's valence.pin rule: HEAD is `valence.pin` and
-  `lib/valence` is clean, opt-out `NUCLEUS_VALENCE_UNPINNED=1`, label
+  `../Valence` with canon_lint's valence.pin rule the same way over
+  `VALENCE_CONSUMED_PATHS` (`lib/valence`, its generated headers included,
+  and `hub/bench` for Neutrino; `spec/` and `clients/js` are not compiled),
+  opt-out `NUCLEUS_VALENCE_UNPINNED=1`, label
   `<sha>-valence-unpinned`. The CMake builds (`sim/neutrino`,
   `tools/kinetic-wasm`) are not guarded; `canon_lint` is their check.
 

@@ -48,7 +48,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SIBLING = ROOT.parent / "Valence"
 PIN_FILE = ROOT / "valence.pin"
-VALENCE_CONSUMED_PATHS = ("lib/valence",)
+# The Valence paths a Nucleus build compiles: lib/valence (firmware, env:native,
+# Neutrino; its generated headers live under include/valence/generated, so
+# spec/registry/registry.yaml is never read here) and hub/bench (src and the
+# IXWebSocket patch, Neutrino's native and wasm builds). Not listed: clients/js,
+# which only the wasm check.mjs imports at run time, and spec/ (docs and the
+# RFC queue). A HEAD past the pin passes when these are identical and clean.
+VALENCE_CONSUMED_PATHS = ("lib/valence", "hub/bench")
 
 # ---------------------------------------------------------------- frozen (C-6)
 # The conformance artifacts live in the pinned SIBLING checkout. Byte-identical
@@ -412,9 +418,27 @@ def run_codespell_check():
     return findings
 
 
+def pin_head_findings(rule, sibling, pinned, head, paths, fix):
+    """HEAD == pin, or HEAD past the pin with every consumed path identical
+    between the two (one info line, no finding). Anything else is one finding."""
+    if head == pinned:
+        return []
+    r = subprocess.run(["git", "-C", str(sibling), "diff", "--name-only", pinned, head, "--", *paths],
+                       capture_output=True, text=True)
+    if r.returncode == 0 and not r.stdout.strip():
+        print(f"INFO: {sibling.name} pin {pinned[:12]}, HEAD {head[:12]}: consumed paths identical "
+              f"({', '.join(paths)})")
+        return []
+    why = (f"the pin is not a commit in ../{sibling.name}" if r.returncode != 0 else
+           f"consumed paths differ: {', '.join(r.stdout.split()[:4])}"
+           + (" ..." if len(r.stdout.split()) > 4 else ""))
+    return [(rule, sibling.name.lower() + ".pin", 0, head[:16],
+             f"../{sibling.name} HEAD {head[:16]} != pinned {pinned[:16]} and {why} -- {fix}")]
+
+
 def run_pin_check():
-    """valence.pin RULE: FAIL if ../Valence is missing, its HEAD does not
-    match the pin, or the library Nucleus compiles from it is dirty; WARN (not
+    """valence.pin RULE: FAIL if ../Valence is missing, its HEAD is not the
+    pin and a consumed path differs between them, or a consumed path is dirty; WARN (not
     fail) on other dirt in the sibling; FAIL if the sibling's frozen
     conformance artifacts do not match our pinned hashes (C-6)."""
     findings = []
@@ -433,10 +457,8 @@ def run_pin_check():
         return [("pin-sibling-not-git", "../Valence", 0, "",
                  "sibling exists but `git rev-parse HEAD` failed there")]
     head = r.stdout.strip()
-    if head != pinned:
-        findings.append(("pin-mismatch", "valence.pin", 0, head[:16],
-                         f"../Valence HEAD {head[:16]} != pinned {pinned[:16]} -- "
-                         "bump valence.pin (and re-run the gauntlet) or check out the pinned sha"))
+    findings = pin_head_findings("pin-mismatch", SIBLING, pinned, head, VALENCE_CONSUMED_PATHS,
+                                 "bump valence.pin (and re-run the gauntlet) or check out the pinned sha")
 
     for line in subprocess.run(["git", "status", "--porcelain", "--untracked-files=no", "--",
                                 *VALENCE_CONSUMED_PATHS], cwd=SIBLING,
@@ -464,7 +486,8 @@ def run_pin_check():
 
 def run_kinetic_pin_check():
     """kinetic.pin RULE: FAIL if the pin is missing, ../Kinetic is missing, its
-    HEAD is not the pin, or a path Nucleus compiles from it is dirty. Bumping
+    HEAD is not the pin and a consumed path differs between them, or a consumed
+    path is dirty. Bumping
     the pin is operator-only."""
     try:
         pinned = KINETIC_PIN_FILE.read_text(encoding="utf-8").splitlines()[0].strip()
@@ -480,11 +503,8 @@ def run_kinetic_pin_check():
         return [("kinetic-sibling-missing", "../Kinetic", 0, "",
                  "no Kinetic git checkout beside this repo -- clone Kinetic alongside Nucleus")]
     head = r.stdout.strip()
-    findings = []
-    if head != pinned:
-        findings.append(("kinetic-pin-mismatch", "kinetic.pin", 0, head[:16],
-                         f"../Kinetic HEAD {head[:16]} != pinned {pinned[:16]} -- "
-                         "the operator bumps kinetic.pin, or check out the pinned sha"))
+    findings = pin_head_findings("kinetic-pin-mismatch", KINETIC_SIBLING, pinned, head, KINETIC_CONSUMED_PATHS,
+                                 "the operator bumps kinetic.pin, or check out the pinned sha")
     for line in git("status", "--porcelain", "--untracked-files=no", "--", *KINETIC_CONSUMED_PATHS).stdout.splitlines():
         findings.append(("kinetic-pin-dirty", "../Kinetic/" + line[3:], 0, line[:2],
                          "uncommitted change in a path Nucleus compiles -- commit it in "
