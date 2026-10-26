@@ -1037,7 +1037,7 @@ void MotionArbiter::noteArrival(uint64_t start_us, uint64_t now_us) {
     if (c.n > 0 && now_us - c.since_us >= ArriveCensus::kWindowUs) {
         GLOGI(kTag, "STREAM ARRIVALS: %lu segments in %lu ms, start lead min %ld ms, <0 %lu <10 %lu <20 %lu <40 %lu "
                     "<60 %lu >=60 %lu, longest gap %lu ms",
-              static_cast<unsigned long>(c.n), static_cast<unsigned long>((now_us - c.since_us) / 1000),
+              static_cast<unsigned long>(c.n), static_cast<unsigned long>((c.last_us - c.since_us) / 1000),
               static_cast<long>(c.min_ms), static_cast<unsigned long>(c.bins[0]), static_cast<unsigned long>(c.bins[1]),
               static_cast<unsigned long>(c.bins[2]), static_cast<unsigned long>(c.bins[3]),
               static_cast<unsigned long>(c.bins[4]), static_cast<unsigned long>(c.bins[5]),
