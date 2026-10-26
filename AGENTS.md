@@ -1,11 +1,33 @@
 # Agent Instructions
 
+This file is documentation, not policy: the Canon and the repo's rules files rule; a contradiction here is a defect here.
+
+| What | Where |
+|---|---|
+| The Canon (C-1..C-12, the Canon Flag, the amendment ritual) | `.claude/rules/governance.md`, its one home for every repo in this family |
+| `.claude/rules/architecture.md` | architecture constraints: hardware-agnostic modules, core performance and safety, naming, the tool surface |
+| `.claude/rules/build-test-deploy.md` | building, testing and deployment |
+| `.claude/rules/cpp-safety.md` | memory safety and lifetime |
+| `.claude/rules/cpp-style.md` | C++ style, the mechanized form of C-12 |
+| `.claude/rules/logging-leds.md` | Geiger logging and Flux LEDs |
+| `.claude/rules/memory-budget.md` | memory discipline |
+| `.claude/rules/motion-control.md` | motion control constraints |
+| `.claude/rules/navigation.md` | code navigation: discovery, then ground truth |
+| `.claude/rules/repo-layout.md` | where files go |
+| `.claude/rules/serena.md` | Serena and clangd navigation upkeep |
+| `.claude/rules/subsystem-map.md` | where things already are |
+| `.claude/rules/transport.md` | transport and the Valence boundary |
+| Lint (zero findings is the bar) | `python tools/canon_lint.py` (Python 3.10 with codespell) |
+| Board | `bd`, prefix `val-` |
+| Formulas (workspace-root `.beads/formulas`, poured from inside this repo) | `kinetic-change` (a Kinetic change; it ends at the operator's `kinetic.pin` bump here), `rfc-lifecycle` (any wire change, drafted in Valence) |
+| Wire truth | `../Valence`, pinned by `valence.pin`; read-only from here, changes are RFCs |
+
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
 > **Architecture in one line:** Issues live in a local Dolt database
 > (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
 > git-compatible protocol), stored under `refs/dolt/data` on your git
-> remote — separate from `refs/heads/*` where your code lives.
+> remote, separate from `refs/heads/*` where your code lives.
 > `.beads/issues.jsonl` is a passive export, not the wire protocol.
 >
 > See [SYNC_CONCEPTS.md](https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md)
