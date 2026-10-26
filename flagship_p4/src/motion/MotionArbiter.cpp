@@ -12,9 +12,22 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 #include "geiger/geiger.h"
 #include "valence/generated/registry_constants.hpp"
+
+// Every event the ownership table is asked for (MotionArbiter.h ArbMode),
+// legal or not. A native build defines MOTION_ARB_STRICT, so a suite that
+// reaches a cell with no rule fails; the board and the host twin only report
+// it. test_arbiter_table defines its own, to record each cell it reaches.
+#if !defined(MOTION_ARB_OBSERVE)
+#if defined(MOTION_ARB_STRICT)
+#define MOTION_ARB_OBSERVE(from, ev, legal) ((legal) ? (void)0 : std::abort())
+#else
+#define MOTION_ARB_OBSERVE(from, ev, legal) ((void)(from), (void)(ev), (void)(legal))
+#endif
+#endif
 
 namespace valence {
 namespace {
@@ -136,6 +149,84 @@ SteerWord steerWord(float v_mm_s) {
     w.step_q8 = static_cast<uint32_t>(cyc * 256.0f + 0.5f);
     w.forward = !(v_mm_s < 0.0f);
     return w;
+}
+
+// ---- the ownership table ----------------------------------------------------
+// Planner task only (MotionArbiter.h ArbMode): accept() and planStep().
+
+ArbMode MotionArbiter::layer() const {
+    if (_override.load()) return ArbMode::Jog;
+    return _paused.load() ? ArbMode::Paused : ArbMode::Run;
+}
+
+ArbAct MotionArbiter::apply(ArbEvent ev, const char* cause, uint64_t now_us) {
+    const ArbMode from = _mode.load();
+    const ArbCell c = arbCell(from, ev);
+    MOTION_ARB_OBSERVE(from, ev, c.act != ArbAct::illegal);
+    if (c.act == ArbAct::illegal) {
+        ++_arb_illegal;
+        GLOGE_EVERY_MS(1000, kTag, "MODE: %s in %s has no rule (%s), held", kArbEventNames[size_t(ev)],
+                       kArbModeNames[size_t(from)], cause);
+        return ArbAct::illegal;
+    }
+    const ArbMode to = c.layer ? layer() : c.next;
+    if (to == from) return c.act;
+    _mode.store(to);
+    ++_arb_transitions;
+    // A burst of kArbLogBurst lines per window; past it the changes are
+    // counted, and the next line logged says how many.
+    if (now_us - _arb_log_from_us >= kArbLogWindowUs) {
+        _arb_log_from_us = now_us;
+        _arb_log_n = 0;
+    }
+    if (_arb_log_n >= kArbLogBurst) {
+        ++_arb_log_lost;
+        return c.act;
+    }
+    ++_arb_log_n;
+    if (_arb_log_lost != 0) {
+        GLOGI(kTag, "MODE: %s -%s-> %s (%s; %lu changes before it unlogged)", kArbModeNames[size_t(from)],
+              kArbEventNames[size_t(ev)], kArbModeNames[size_t(to)], cause, static_cast<unsigned long>(_arb_log_lost));
+        _arb_log_lost = 0;
+    } else {
+        GLOGI(kTag, "MODE: %s -%s-> %s (%s)", kArbModeNames[size_t(from)], kArbEventNames[size_t(ev)],
+              kArbModeNames[size_t(to)], cause);
+    }
+    return c.act;
+}
+
+ArbMode MotionArbiter::syncLatches(uint64_t now_us) {
+    // One read of each word, so the answer and the events agree.
+    const bool estop = _estop;
+    const bool gate = powerGateOpen();
+    if (!estop && mode() == ArbMode::Estop) apply(ArbEvent::EstopOff, "ESTOP released", now_us);
+    if (gate && mode() == ArbMode::Unpowered) apply(ArbEvent::PowerOn, "motor power on", now_us);
+    // The layer. A cycle owns the rail until it ends; a RETURN reads it as
+    // the jog it came from, so override gone under it has no rule.
+    const ArbMode m = mode();
+    if (m == ArbMode::Run || m == ArbMode::Paused || m == ArbMode::Jog || m == ArbMode::Returning) {
+        const ArbMode at = m == ArbMode::Returning ? ArbMode::Jog : m;
+        const ArbMode want = layer();
+        if (want != at) {
+            const ArbEvent ev = want == ArbMode::Run   ? ArbEvent::Resume
+                              : want == ArbMode::Jog   ? ArbEvent::Override
+                              : at == ArbMode::Run     ? ArbEvent::Pause
+                                                       : ArbEvent::OverrideOff;
+            apply(ev, "the SPEC 11.1 latches", now_us);
+        }
+    }
+    // A home request: home() sets the word first and clears it again only
+    // when the sense refuses; every other end is the planner's homeEnd().
+    const ArbMode h = mode();
+    if (_homing.load()) {
+        if (h == ArbMode::Run || h == ArbMode::Paused || h == ArbMode::Jog)
+            apply(ArbEvent::HomeRequest, "home requested", now_us);
+    } else if (h == ArbMode::HomeQueued) {
+        apply(ArbEvent::HomeCancel, "the home sense refused", now_us);
+    }
+    if (estop) return ArbMode::Estop;
+    if (!gate) return ArbMode::Unpowered;
+    return mode();
 }
 
 // ---- cross-task -------------------------------------------------------------
@@ -384,33 +475,53 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
         in.target_mm    = _rail - in.target_mm;
         in.end_vel_mm_s = -in.end_vel_mm_s;
     }
-    // E-stop is the one gate no source bypasses.
-    if (_estop) {
-        ++_rejected;
-        GLOGW_EVERY_MS(1000, kTag, "REJECT: e-stop");
-        return false;
-    }
-    // A home cycle owns the rail from its request to its end.
-    if (_homing.load()) {
-        ++_rejected;
-        GLOGW_EVERY_MS(1000, kTag, "REJECT: homing");
-        return false;
-    }
-    // Neither does motor power: a plan rendered into an unpowered drive moves
-    // position truth and not the carriage. The bench profile renders it
-    // anyway, on purpose: a devkit has no drive to desync.
+    // WHO MAY FEED (MotionArbiter.h kArbFeed): the mode the posted latches
+    // put the planner in, read once. E-stop is the one gate no source
+    // bypasses; a home cycle owns the rail from its request to its end; motor
+    // power off refuses every intent, the jog included, because a plan
+    // rendered into an unpowered drive moves position truth and not the
+    // carriage (the bench profile renders it anyway: a devkit has no drive to
+    // desync); PAUSE suspends every source (SPEC 11.1) but the operator's jog
+    // under override, and that one too while the return runs.
+    const ArbMode m = syncLatches(now_us);
+    // The bench bypass logs at the first intent the gate would have refused.
     // ONE load of the switch's word, and the profile tested as the constexpr
-    // it is: a second load could see power arrive in between and log a bench
-    // bypass on a release image, and the release image compiles no bypass.
-    if (!_powered.load()) {
-        if constexpr (!kBenchNoMotor) {
-            ++_rejected;
-            GLOGW_EVERY_MS(1000, kTag, "REJECT: motor power off");
-            return false;
-        } else if (!_bench_noted) {
+    // it is: the release image compiles no bypass and no line.
+    if constexpr (kBenchNoMotor) {
+        if (m != ArbMode::Estop && m != ArbMode::HomeQueued && !arbSeeking(m) && !_bench_noted &&
+            !_powered.load()) {
             _bench_noted = true;
             GLOGW(kTag, "BENCH: motor power gate bypassed");
         }
+    }
+    // A source past the table's columns gates as Stream, as every source but
+    // Manual and the two generators always has.
+    const size_t src = size_t(in.source) < kArbFeed[0].size() ? size_t(in.source) : size_t(MotionSource::Stream);
+    const ArbFeed feed = kArbFeed[size_t(m)][src];
+    switch (feed) {
+        case ArbFeed::estop:
+            ++_rejected;
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: e-stop");
+            return false;
+        case ArbFeed::homing:
+            ++_rejected;
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: homing");
+            return false;
+        case ArbFeed::unpowered:
+            ++_rejected;
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: motor power off");
+            return false;
+        case ArbFeed::paused:
+            ++_rejected;
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: paused");
+            return false;
+        case ArbFeed::returning:
+            ++_rejected;
+            GLOGW_EVERY_MS(1000, kTag, "REJECT: returning to the paused position");
+            return false;
+        case ArbFeed::feed:
+        case ArbFeed::jog:
+            break;
     }
     // A refused plan's stop (handover()) renders to its end: nothing joins it.
     if (now_us < _held_until_us) {
@@ -418,22 +529,11 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
         GLOGW_EVERY_MS(1000, kTag, "REJECT: a late plan's stop is braking to rest");
         return false;
     }
-    // PAUSE suspends every source (SPEC 11.1). Under override the operator's
-    // jog is the one motion accepted, except while the return runs.
-    const bool jog = in.source == MotionSource::Manual && _override.load();
-    if (_paused.load() && !jog) {
-        ++_rejected;
-        GLOGW_EVERY_MS(1000, kTag, "REJECT: paused");
-        return false;
-    }
-    if (jog && _returning) {
-        ++_rejected;
-        GLOGW_EVERY_MS(1000, kTag, "REJECT: returning to the paused position");
-        return false;
-    }
+    const bool jog = feed == ArbFeed::jog;
     // The pause brake the owning task has not run yet runs FIRST: it records
     // the paused position, and run after the jog it would brake the jog.
-    if (jog && _brake_req.exchange(false)) brakeToRest(now_us);
+    if (jog && _brake_req.exchange(false) && apply(ArbEvent::Brake, "PAUSE", now_us) == ArbAct::brake)
+        brakeToRest(now_us);
     // The jog plans in the rail frame, entered only at rest: a frame change
     // under a moving plan would be a discontinuity.
     if (jog && !_rail_frame) {
@@ -1001,12 +1101,14 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // and in accept(), so every strip is built in one frame (bd val-8es).
     takeWindow();
     takeOscillator();
+    // EstopOn: from any mode, a RETURN with it (estop() dropped override).
     if (_estop) {
         _brake_req.store(false);   // park already stopped it
-        _returning = false;        // estop() dropped override with it
         // The steer parks too while the latch holds: the same store twice.
         _emitter.park();
-        if (_homing.load()) homeEnd("ESTOP", now_us);
+        // A cycle, or a request that raced the latch, ends first.
+        if (_homing.load()) homeEnd(ArbEvent::EstopOn, "ESTOP", now_us);
+        else if (mode() != ArbMode::Estop) apply(ArbEvent::EstopOn, "ESTOP latched", now_us);
         // ONCE per latch, and on the task that owns the engine: without it the
         // abandoned plan keeps reading busy and canClearEstop() -- which asks
         // exactly that -- would never let the latch drop (SPEC 11.2).
@@ -1017,15 +1119,16 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
         return false;
     }
 
-    // Unpowered: parked, and the abandoned plan reset ONCE per loss on this
+    // PowerOff: parked, and the abandoned plan reset ONCE per loss on this
     // task, for the same reason as the e-stop branch above. A pause landing
     // here brakes nothing, but its rest point is still recorded: the parked
     // carriage is where a `return` goes back to (returnToPause()).
-    if (!powerGateOpen()) {
-        if (_brake_req.exchange(false)) _pause_pos_mm.store(positionMm());
-        _returning = false;
+    if (syncLatches(now_us) == ArbMode::Unpowered) {
+        if (_homing.load()) homeEnd(ArbEvent::PowerOff, "motor power off", now_us);
+        else if (mode() != ArbMode::Unpowered) apply(ArbEvent::PowerOff, "motor power lost", now_us);
+        if (_brake_req.exchange(false) && apply(ArbEvent::Brake, "PAUSE", now_us) == ArbAct::record)
+            _pause_pos_mm.store(positionMm());
         _emitter.park();
-        if (_homing.load()) homeEnd("motor power off", now_us);
         if (!_power_settled.exchange(true)) resetEngine(toNorm(positionMm()), now_us);
         return false;
     }
@@ -1057,7 +1160,9 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
         if (reset) _strip_gen.fetch_add(1);
         _frame_moved = false;
         _origin_moved = false;
-        if (homing) homeEnd("the travel window changed", now_us);
+        if (homing) homeEnd(ArbEvent::WindowEdit, "the travel window changed", now_us);
+        else apply(ArbEvent::WindowEdit, origin_moved ? "force_home re-origined the count" : "the travel window changed",
+                   now_us);
         if (reset) {
             resetEngine(toNorm(positionMm()), now_us);
             return false;
@@ -1065,9 +1170,13 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
         reseedEngine(now_us);
     }
 
-    // A pause ends a cycle, which parks: a seek has no brake to run.
-    if (_home_abort.exchange(false) && _homing.load()) homeEnd("paused", now_us);
-    if (_brake_req.exchange(false)) brakeToRest(now_us);
+    // A pause ends a cycle, which parks: a seek has no brake to run. The
+    // latches are read again first, so a request posted this tick is queued.
+    if (_home_abort.exchange(false)) {
+        syncLatches(now_us);
+        if (_homing.load()) homeEnd(ArbEvent::HomeAbort, "paused", now_us);
+    }
+    if (_brake_req.exchange(false) && apply(ArbEvent::Brake, "PAUSE", now_us) == ArbAct::brake) brakeToRest(now_us);
     // The stream's quiet release: nothing more is coming. An expectation
     // already rendered into a pending knot is fixed at its solve, so the
     // window re-solves without it and the newest knot lands at rest instead
@@ -1078,26 +1187,37 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     }
     // While a cycle runs the seek producer is the emitter's one steerer and
     // renews its lease here; the steer stands aside (steerTick()).
-    if (_home_req.exchange(false)) homeStart(now_us);
-    if (_home != HomePhase::idle) {
+    if (_home_req.exchange(false)) {
+        syncLatches(now_us);   // home() set the word before the request
+        homeStart(now_us);
+    }
+    if (seeking()) {
         homeStep(now_us, dt_s);
-        if (_home != HomePhase::idle) _emitter.renew();
+        if (seeking()) _emitter.renew();
         return false;
     }
 
     // RETURN (SPEC 11.1): an ordinary Manual plan at the jog set, planned here
     // because the engine is this task's. The rail clamp still applies. A
-    // refused plan's stop runs first: the request waits for its rest.
+    // refused plan's stop runs first: the request waits for its rest. A mode
+    // with no rule for it plans nothing.
     if (now_us >= _held_until_us && _return_req.exchange(false) && _override.load()) {
-        MotionIntent back;
-        back.source = MotionSource::Manual;
-        float target = _pause_pos_mm.load();
-        if (target < 0.0f) target = 0.0f;
-        if (target > _rail) target = _rail;
-        back.target_mm = target;
-        _returning = plan(target, back, limitsFor(true), now_us);
-        if (!_returning) GLOGW(kTag, "RETURN: plan failed, override held");
-        else GLOGI(kTag, "RETURN: to the paused position %.2f mm", double(target));
+        syncLatches(now_us);
+        if (arbCell(mode(), ArbEvent::Return).act == ArbAct::illegal) {
+            apply(ArbEvent::Return, "RETURN requested", now_us);
+        } else {
+            MotionIntent back;
+            back.source = MotionSource::Manual;
+            float target = _pause_pos_mm.load();
+            if (target < 0.0f) target = 0.0f;
+            if (target > _rail) target = _rail;
+            back.target_mm = target;
+            const bool planned = plan(target, back, limitsFor(true), now_us);
+            apply(planned ? ArbEvent::Return : ArbEvent::ReturnFailed,
+                  planned ? "RETURN requested" : "the return's plan was refused", now_us);
+            if (!planned) GLOGW(kTag, "RETURN: plan failed, override held");
+            else GLOGI(kTag, "RETURN: to the paused position %.2f mm", double(target));
+        }
     }
 
     // The one side-effecting sample per tick: it solves the window after a
@@ -1120,8 +1240,8 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     }
 
     // Arrival ends the return: override drops, plain PAUSE stays.
-    if (_returning && !busy) {
-        _returning = false;
+    if (mode() == ArbMode::Returning && !busy) {
+        apply(ArbEvent::ReturnArrived, "at the paused position", now_us);
         _override.store(false);
         _returns.fetch_add(1);
         GLOGI(kTag, "RETURN: arrived, override off, PAUSE holds");
@@ -1612,7 +1732,7 @@ void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
     }
     // A home cycle's seek producer steers, fences and renews on the planner:
     // two producers never steer in one tick.
-    if (_home != HomePhase::idle) {
+    if (seeking()) {
         _steer_gap = true;
         return;
     }
@@ -1755,10 +1875,10 @@ void MotionArbiter::syncFence(float lo_mm, float hi_mm) {
     // two search margins (MotionArbiter.h, homing), in the frame of its last
     // relabel; otherwise the backstop's frame. The emitter orders the two
     // stores.
-    const bool seeking = _home != HomePhase::idle;
+    const bool seek = seeking();
     const float reach = kHomeSafetyMarginMm + 2.0f * kHomeSearchMarginMm;
-    const int32_t lo = _origin + fenceCount(seeking ? -reach : lo_mm, false);
-    const int32_t hi = _origin + fenceCount(seeking ? _max_rail + reach : hi_mm, true);
+    const int32_t lo = _origin + fenceCount(seek ? -reach : lo_mm, false);
+    const int32_t hi = _origin + fenceCount(seek ? _max_rail + reach : hi_mm, true);
     if (lo == _fence_lo && hi == _fence_hi) return;
     _emitter.fence(lo, hi);
     _fence_lo = lo;
@@ -1783,8 +1903,8 @@ void MotionArbiter::homeOrigin(int32_t count, float at_mm, uint64_t now_us) {
     resetEngine(toNorm(positionMm()), now_us);
 }
 
-void MotionArbiter::homeLeg(HomePhase phase, float end_mm, float v_mm_s, uint64_t now_us) {
-    _home = phase;
+void MotionArbiter::homeLeg(ArbEvent ev, float end_mm, float v_mm_s, uint64_t now_us) {
+    apply(ev, _home_leg == 0 ? "the home end" : "the far end", now_us);
     _leg_end = _origin + int32_t(std::lround(end_mm * kStepsPerMm));
     _leg_dir = _leg_end >= _emitter.count() ? 1 : -1;
     _leg_v = v_mm_s;
@@ -1825,17 +1945,20 @@ bool MotionArbiter::homeDrive(uint64_t now_us, float dt_s) {
     return false;
 }
 
-void MotionArbiter::homeSeek(bool touch, bool armed, uint64_t now_us) {
+void MotionArbiter::homeSeek(bool touch, bool armed, ArbEvent ev, uint64_t now_us) {
     _sense_armed = armed;
     const float end = touch ? homeAway(_home_leg, _home_at_mm, -kHomeSearchMarginMm) : homePast(_home_leg);
-    homeLeg(touch ? HomePhase::touch : HomePhase::approach, end, touch ? _touch_v : _home_v, now_us);
+    homeLeg(ev, end, touch ? _touch_v : _home_v, now_us);
     if (armed) _seek.store(kSeekArmed);
 }
 
 void MotionArbiter::homeStart(uint64_t now_us) {
     if (!_homing.load()) return;   // ended between the request and this tick
     _home_leg = 0;
-    if (_engine.isBusy(now_us) || joining(now_us)) return homeEnd("the machine is moving", now_us);
+    if (_engine.isBusy(now_us) || joining(now_us)) return homeEnd(ArbEvent::HomeMoving, "the machine is moving", now_us);
+    // Nothing of the cycle runs in a mode with no rule for its start.
+    if (arbCell(mode(), ArbEvent::HomeStart).act == ArbAct::illegal)
+        return homeEnd(ArbEvent::HomeStart, "no cycle starts in this mode", now_us);
     _home_flip = _flipped.load();
     // The position reference is replaced from here: a cycle that does not
     // finish leaves the machine unhomed, never homed at a stale origin.
@@ -1850,15 +1973,15 @@ void MotionArbiter::homeStart(uint64_t now_us) {
     GLOGI(kTag, "HOME: approaching the home end at %.1f mm/s (re-touch %.1f mm/s), searching %.0f mm",
           double(_home_v), double(_touch_v),
           double(_max_rail + 2.0f * (kHomeSafetyMarginMm + kHomeSearchMarginMm)));
-    homeSeek(false, true, now_us);   // home() probed the line LOW
+    homeSeek(false, true, ArbEvent::HomeStart, now_us);   // home() probed the line LOW
 }
 
 void MotionArbiter::homeStep(uint64_t now_us, float dt_s) {
-    if (now_us >= _home_deadline_us) return homeEnd("timed out", now_us);
-    switch (_home) {
-        case HomePhase::approach:
-        case HomePhase::touch: {
-            const bool touch = _home == HomePhase::touch;
+    if (now_us >= _home_deadline_us) return homeEnd(ArbEvent::HomeFail, "timed out", now_us);
+    switch (mode()) {
+        case ArbMode::HomeApproach:
+        case ArbMode::HomeTouch: {
+            const bool touch = mode() == ArbMode::HomeTouch;
             const uint32_t s = _seek.load(std::memory_order_acquire);
             // The interrupt is between its park and its latch: parked, and
             // read on the next tick.
@@ -1886,27 +2009,30 @@ void MotionArbiter::homeStep(uint64_t now_us, float dt_s) {
                 _seek.store(kSeekArmed);
             }
             if (homeDrive(now_us, dt_s))
-                return homeEnd(touch ? "no stall on the slow re-touch" : "no stall across max_rail", now_us);
+                return homeEnd(ArbEvent::HomeFail, touch ? "no stall on the slow re-touch" : "no stall across max_rail",
+                               now_us);
             return;
         }
-        case HomePhase::clear:
+        case ArbMode::HomeClear:
             // The level at rest decides.
             if (!homeDrive(now_us, dt_s)) return;
-            if (_sense->high()) return homeEnd("still on the stop after the backoff (lower home_speed)", now_us);
-            return homeSeek(true, true, now_us);
-        case HomePhase::finish:
+            if (_sense->high())
+                return homeEnd(ArbEvent::HomeFail, "still on the stop after the backoff (lower home_speed)", now_us);
+            return homeSeek(true, true, ArbEvent::HomeCleared, now_us);
+        case ArbMode::HomeFinish:
             if (!homeDrive(now_us, dt_s)) return;
             if (_sense->high())
-                return homeEnd("still on the far stop after the final backoff (lower home_speed)", now_us);
+                return homeEnd(ArbEvent::HomeFail, "still on the far stop after the final backoff (lower home_speed)",
+                               now_us);
             _homed = true;
             _max_rail = _rail;
             _home_rail_mm = _rail;
             ++_homes;
-            homeEnd(nullptr, now_us);
+            homeEnd(ArbEvent::HomeDone, nullptr, now_us);
             GLOGI(kTag, "HOME: homed, rail %.2f mm between the %.1f mm safety margins", double(_rail),
                   double(kHomeSafetyMarginMm));
             return;
-        case HomePhase::idle:
+        default:
             return;
     }
 }
@@ -1920,7 +2046,7 @@ void MotionArbiter::homeContact(bool touch, int32_t hit, uint64_t now_us) {
         // stall is only read: the home datum keeps its label.
         if (_home_leg == 0) homeOrigin(hit, homeStopAt(0), now_us);
         _home_at_mm = float(hit - _origin) * kMmPerStep;
-        return homeLeg(HomePhase::clear, homeAway(_home_leg, _home_at_mm, kHomeSafetyMarginMm), _home_v, now_us);
+        return homeLeg(ArbEvent::HomeContact, homeAway(_home_leg, _home_at_mm, kHomeSafetyMarginMm), _home_v, now_us);
     }
     // The contact came kHomeSenseLatencyUs of re-touch travel before the
     // sense did: the datum is moved back along the leg by it.
@@ -1930,7 +2056,7 @@ void MotionArbiter::homeContact(bool touch, int32_t hit, uint64_t now_us) {
     homeOrigin(_home_datum[0], homeStopAt(0), now_us);
     _home_leg = 1;
     GLOGI(kTag, "HOME: home datum taken, approaching the far end");
-    homeSeek(false, false, now_us);   // still pressed on the home stop
+    homeSeek(false, false, ArbEvent::HomeDatum, now_us);   // still pressed on the home stop
 }
 
 void MotionArbiter::homeMeasure(uint64_t now_us) {
@@ -1938,16 +2064,16 @@ void MotionArbiter::homeMeasure(uint64_t now_us) {
     const float stops = float(steps < 0 ? -steps : steps) * kMmPerStep;
     const float len = stops - 2.0f * kHomeSafetyMarginMm;
     if (!(len >= MIN_RAIL_MM))
-        return homeEnd("the usable rail between the safety margins is under the rail floor", now_us);
+        return homeEnd(ArbEvent::HomeFail, "the usable rail between the safety margins is under the rail floor", now_us);
     // The physical frame: 0 a safety margin off the low end's datum, the rail
     // the usable length. A completed cycle makes it max_rail too; the hub
     // stores it and pushes it back (setWindow()).
     _rail = len;
     homeOrigin(_home_flip ? _home_datum[1] : _home_datum[0], -kHomeSafetyMarginMm, now_us);
-    homeLeg(HomePhase::finish, _home_flip ? 0.0f : len, _home_v, now_us);
+    homeLeg(ArbEvent::HomeMeasured, _home_flip ? 0.0f : len, _home_v, now_us);
 }
 
-void MotionArbiter::homeEnd(const char* why, uint64_t now_us) {
+void MotionArbiter::homeEnd(ArbEvent ev, const char* why, uint64_t now_us) {
     _seek.store(kSeekIdle);
     if (why != nullptr) {
         ++_home_fails;
@@ -1958,13 +2084,13 @@ void MotionArbiter::homeEnd(const char* why, uint64_t now_us) {
     // A cycle that ran stops where it is and the planner starts again from
     // the count, as after an e-stop. One refused at its start never steered:
     // whatever moves is the planner's own and is left alone.
-    if (_home != HomePhase::idle) {
+    if (seeking()) {
         _emitter.park();
         _seek_v = 0.0f;
         resetEngine(toNorm(positionMm()), now_us);
     }
     // After the reset: the steer stands aside until its strip is published.
-    _home = HomePhase::idle;
+    apply(ev, why != nullptr ? why : "homed", now_us);
     _home_req.store(false);
     _homing.store(false);
 }
@@ -2091,8 +2217,8 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     // While a cycle runs the seek producer is the plan: its steered velocity,
     // the count as the plan position, and its leg's end as the target. The
     // engine only holds at the cycle's last re-anchor.
-    const bool seeking = _home != HomePhase::idle;
-    const float vel_mm_s = seeking ? _seek_v : s.vel * s_mm;
+    const bool seek = seeking();
+    const float vel_mm_s = seek ? _seek_v : s.vel * s_mm;
     if (std::fabs(vel_mm_s) > _peak_mm_s) _peak_mm_s = std::fabs(vel_mm_s);
 
     MotionCensus c{};
@@ -2102,8 +2228,8 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     // The strip's head, the plan with the oscillation and the connector
     // summed in: what the steer is following, so the residual stays a
     // tracking error.
-    c.plan_mm        = seeking ? c.position_mm : _strip.n != 0 ? _strip.p_mm[0] : toMm(s.pos) + _osc_head;
-    c.target_mm      = seeking ? float(_leg_end - _origin) * kMmPerStep : toMm(s.target);
+    c.plan_mm        = seek ? c.position_mm : _strip.n != 0 ? _strip.p_mm[0] : toMm(s.pos) + _osc_head;
+    c.target_mm      = seek ? float(_leg_end - _origin) * kMmPerStep : toMm(s.target);
     c.velocity_mm_s  = vel_mm_s;
     c.residual_steps = static_cast<int32_t>(std::lround((c.plan_mm - c.position_mm) * kStepsPerMm));
     c.win_min        = _win_min;
@@ -2128,7 +2254,7 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.power_gate     = powerGateOpen();
     c.paused         = _paused.load();
     c.override_mode  = _override.load();
-    c.returning      = _returning;
+    c.returning      = mode() == ArbMode::Returning;
     c.returns        = _returns.load();
     c.homing         = _homing.load();
     c.homes          = _homes;
@@ -2136,7 +2262,10 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.home_fails     = _home_fails;
     c.home_fail_leg  = _home_fail_leg;
     c.home_fail_why  = _home_fail_why;
-    c.busy           = seeking || _plan_busy;
+    c.busy           = seek || _plan_busy;
+    c.arb_mode       = uint8_t(mode());
+    c.arb_transitions = _arb_transitions;
+    c.arb_illegal    = _arb_illegal;
     c.mode           = s.mode;
     c.plan_kind      = s.plan_kind;
     c.plan_start     = s.start;

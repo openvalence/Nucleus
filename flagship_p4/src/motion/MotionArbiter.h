@@ -37,7 +37,8 @@
 // - CROSS-TASK methods (estop, pause, override, returnToPause, acquireRail,
 //   releaseRail, setEstopCutsPower, setMotorPowered, setCommissioned, the limit and window setters,
 //   setOscillator, forceHome, home, noteStream) never touch the engine.
-//   They write flags and scalars the owning tasks read on their next pass;
+//   They write flags and scalars the owning tasks read on their next pass,
+//   which the planner applies as events of the ownership table (ArbMode);
 //   setWindow() and setOscillator() post requests the planner applies
 //   (takeWindow(), takeOscillator());
 //   estop() and a power loss also park the emitter on the CALLING task,
@@ -254,6 +255,253 @@ static_assert(homeTouchMmS(DEFAULT_HOME_SPEED_MM_S) * float(kHomeSenseLatencyUs)
               "the re-touch's overrun past contact must stay inside half the safety margin");
 static_assert(kHomeSearchMarginMm > kHomeSafetyMarginMm,
               "a re-touch must reach past the stall it backed off from");
+
+// ---- the ownership table ----------------------------------------------------
+// Who may feed the planner: ONE mode, written by the planner task alone, moved
+// only by the rules below, (mode, event) -> (next, action) (bd val-5ozv.1).
+// The cross-task methods post the SPEC 11 latches and their requests as words,
+// exactly as before; the planner turns each into an event at the point of
+// planStep() or accept() that applies it, so the table moves no work in time.
+// - A cell no rule names is ILLEGAL: apply() holds the mode, logs it, counts it
+//   (census arb_illegal), and a native build (MOTION_ARB_STRICT) aborts. The
+//   board only reports: a detector never adjudicates (memory-budget.md).
+// - Every change of mode logs one line (from, event, to, cause) and counts
+//   (census arb_transitions); past kArbLogBurst lines in kArbLogWindowUs the
+//   lines are counted, and the next one logged says how many.
+// - The generator rail word (_rail_gen) is not a mode: it stays one word
+//   compare-and-swapped on the calling task, so an e-stop racing a start never
+//   leaves the gate open with no holder. Run feeds a generator while it admits.
+// - The handover, the connector, the wall and a refused plan's hold are the
+//   ONE trajectory, not modes: accept() refuses during the hold in any mode.
+enum class ArbMode : uint8_t {
+    Run,           // no latch: Stream and Manual feed; a generator as the rail word admits
+    Paused,        // PAUSE: nothing feeds
+    Jog,           // PAUSE and override: the operator's Manual alone, in the rail frame
+    Returning,     // PAUSE and override, the RETURN plan in flight: nothing feeds
+    HomeQueued,    // home() posted, the cycle not started: nothing feeds
+    HomeApproach,  // the seek producer owns the emitter (homing, above), one mode per leg kind
+    HomeClear,
+    HomeTouch,
+    HomeFinish,
+    Unpowered,     // the power gate shut: nothing renders. Boots here
+    Estop,         // ESTOP latched
+};
+inline constexpr size_t kArbModes = size_t(ArbMode::Estop) + 1;
+
+enum class ArbEvent : uint8_t {
+    EstopOn,        // the ESTOP latch seen set (planStep())
+    EstopOff,       // seen released; the release latched PAUSE first
+    PowerOff,       // the power gate seen shut (planStep())
+    PowerOn,        // seen open
+    Pause,          // the PAUSE latch seen set
+    Resume,         // seen clear
+    Override,       // the override latch seen set
+    OverrideOff,    // seen clear under PAUSE: an unpowered RETURN arrived
+    Brake,          // the pause brake request taken
+    HomeRequest,    // home() posted a request
+    HomeCancel,     // home() withdrew it: the sense refused
+    HomeAbort,      // pause() ended the request or the cycle
+    HomeStart,      // the request taken at rest: the home approach
+    HomeMoving,     // the request taken in motion: refused
+    HomeContact,    // an approach's stall confirmed: the backoff
+    HomeCleared,    // a backoff on its count, the line LOW: the re-touch
+    HomeDatum,      // the home end's re-touch stall: the far approach
+    HomeMeasured,   // the far end's re-touch stall: the final backoff
+    HomeDone,       // the final backoff on its count, the line LOW: homed
+    HomeFail,       // a leg ended without its stall, a stop still pressed, a short rail, a timeout
+    WindowEdit,     // a frame move taken (setWindow(), forceHome())
+    Return,         // a RETURN request taken, its plan accepted
+    ReturnFailed,   // taken, its plan refused
+    ReturnArrived,  // the RETURN plan at rest
+};
+inline constexpr size_t kArbEvents = size_t(ArbEvent::ReturnArrived) + 1;
+
+// What the code at the event's point does. The table names it; that code is
+// the action, so a cell and its call site never disagree on what runs.
+enum class ArbAct : uint8_t {
+    illegal,     // no rule: held, logged, counted
+    none,        // the mode alone moves
+    settle,      // the engine reset at the carriage once per latch or loss; a cycle ends first
+    brake,       // brakeToRest(): to rest at the input decel, the paused position recorded
+    record,      // the paused position recorded at the parked carriage, nothing braked
+    queue,       // every intent refused until the request ends
+    refuse,      // the request dropped, nothing steered
+    start,       // re-origined at the far datum's label, the approach steered
+    leg,         // the next leg steered
+    endCycle,    // parked, the engine reset at the count, the request dropped
+    homed,       // the rail measured, homed, the engine reset at the count
+    reframe,     // the engine reset or reseeded in the new frame (planStep())
+    planReturn,  // a jog-set plan to the paused position
+    arrive,      // override dropped, the return counted
+};
+
+// layer: the next mode is the one the SPEC 11.1 latches name (layer() in the
+// arbiter: Jog under override, else Paused under PAUSE, else Run).
+struct ArbCell {
+    ArbMode next  = ArbMode::Run;
+    ArbAct  act   = ArbAct::illegal;
+    bool    layer = false;
+};
+struct ArbRule {
+    ArbMode  from;
+    ArbEvent ev;
+    ArbCell  cell;
+};
+
+namespace arb {
+using M = ArbMode;
+using E = ArbEvent;
+using A = ArbAct;
+constexpr ArbCell to(M next, A act) { return ArbCell{next, act, false}; }
+constexpr ArbCell toLayer(A act) { return ArbCell{M::Run, act, true}; }
+
+// THE RULES. Every legal cell, one line each; whatever is not here is illegal.
+// "race" marks a cell only a post landing between two of the planner's reads
+// of one tick reaches; it does what the code did before the table.
+inline constexpr ArbRule kRules[] = {
+    // The ESTOP latch: from everywhere. From Estop itself, a home request
+    // that raced the latch is refused.
+    {M::Run, E::EstopOn, to(M::Estop, A::settle)},
+    {M::Paused, E::EstopOn, to(M::Estop, A::settle)},
+    {M::Jog, E::EstopOn, to(M::Estop, A::settle)},
+    {M::Returning, E::EstopOn, to(M::Estop, A::settle)},
+    {M::HomeQueued, E::EstopOn, to(M::Estop, A::settle)},
+    {M::HomeApproach, E::EstopOn, to(M::Estop, A::settle)},
+    {M::HomeClear, E::EstopOn, to(M::Estop, A::settle)},
+    {M::HomeTouch, E::EstopOn, to(M::Estop, A::settle)},
+    {M::HomeFinish, E::EstopOn, to(M::Estop, A::settle)},
+    {M::Unpowered, E::EstopOn, to(M::Estop, A::settle)},
+    {M::Estop, E::EstopOn, to(M::Estop, A::refuse)},
+    {M::Estop, E::EstopOff, to(M::Paused, A::none)},
+    // The power gate: from everywhere but Estop, whose branch runs first.
+    // From Unpowered itself, a home request that raced the loss is refused.
+    {M::Run, E::PowerOff, to(M::Unpowered, A::settle)},
+    {M::Paused, E::PowerOff, to(M::Unpowered, A::settle)},
+    {M::Jog, E::PowerOff, to(M::Unpowered, A::settle)},
+    {M::Returning, E::PowerOff, to(M::Unpowered, A::settle)},
+    {M::HomeQueued, E::PowerOff, to(M::Unpowered, A::settle)},
+    {M::HomeApproach, E::PowerOff, to(M::Unpowered, A::settle)},
+    {M::HomeClear, E::PowerOff, to(M::Unpowered, A::settle)},
+    {M::HomeTouch, E::PowerOff, to(M::Unpowered, A::settle)},
+    {M::HomeFinish, E::PowerOff, to(M::Unpowered, A::settle)},
+    {M::Unpowered, E::PowerOff, to(M::Unpowered, A::refuse)},
+    {M::Unpowered, E::PowerOn, toLayer(A::none)},
+    // The SPEC 11.1 layer. A cycle owns the rail until it ends and a RETURN
+    // until it arrives, so neither reads the layer meanwhile; pause() ends a
+    // cycle by HomeAbort. Resume is refused by the hub under override.
+    {M::Run, E::Pause, to(M::Paused, A::none)},
+    {M::Run, E::Override, to(M::Jog, A::none)},
+    {M::Paused, E::Override, to(M::Jog, A::none)},
+    {M::Paused, E::Resume, to(M::Run, A::none)},
+    {M::Jog, E::OverrideOff, to(M::Paused, A::none)},
+    // The pause brake. Only pause() and forceHome() under PAUSE post it, so in
+    // Run it is a PAUSE the layer has not read yet (race).
+    {M::Run, E::Brake, to(M::Paused, A::brake)},
+    {M::Paused, E::Brake, to(M::Paused, A::brake)},
+    {M::Jog, E::Brake, to(M::Jog, A::brake)},
+    {M::Returning, E::Brake, to(M::Returning, A::brake)},
+    {M::HomeQueued, E::Brake, to(M::HomeQueued, A::brake)},     // race: before its HomeAbort
+    {M::HomeApproach, E::Brake, to(M::HomeApproach, A::brake)}, // race: before its HomeAbort
+    {M::HomeClear, E::Brake, to(M::HomeClear, A::brake)},       // race
+    {M::HomeTouch, E::Brake, to(M::HomeTouch, A::brake)},       // race
+    {M::HomeFinish, E::Brake, to(M::HomeFinish, A::brake)},     // race
+    {M::Unpowered, E::Brake, to(M::Unpowered, A::record)},
+    // Home op 1. The request queues from the layer; a RETURN in flight reads
+    // it at its arrival.
+    {M::Run, E::HomeRequest, to(M::HomeQueued, A::queue)},
+    {M::Paused, E::HomeRequest, to(M::HomeQueued, A::queue)},
+    {M::Jog, E::HomeRequest, to(M::HomeQueued, A::queue)},   // race: an override after the request
+    {M::HomeQueued, E::HomeCancel, toLayer(A::none)},
+    {M::HomeQueued, E::HomeAbort, toLayer(A::refuse)},
+    {M::HomeApproach, E::HomeAbort, toLayer(A::endCycle)},
+    {M::HomeClear, E::HomeAbort, toLayer(A::endCycle)},
+    {M::HomeTouch, E::HomeAbort, toLayer(A::endCycle)},
+    {M::HomeFinish, E::HomeAbort, toLayer(A::endCycle)},
+    {M::Returning, E::HomeAbort, to(M::Returning, A::refuse)},   // race: after HomeQueued's Return
+    {M::HomeQueued, E::HomeStart, to(M::HomeApproach, A::start)},
+    {M::HomeQueued, E::HomeMoving, toLayer(A::refuse)},
+    {M::HomeApproach, E::HomeContact, to(M::HomeClear, A::leg)},
+    {M::HomeClear, E::HomeCleared, to(M::HomeTouch, A::leg)},
+    {M::HomeTouch, E::HomeDatum, to(M::HomeApproach, A::leg)},
+    {M::HomeTouch, E::HomeMeasured, to(M::HomeFinish, A::leg)},
+    {M::HomeFinish, E::HomeDone, toLayer(A::homed)},
+    {M::HomeApproach, E::HomeFail, toLayer(A::endCycle)},
+    {M::HomeClear, E::HomeFail, toLayer(A::endCycle)},
+    {M::HomeTouch, E::HomeFail, toLayer(A::endCycle)},
+    {M::HomeFinish, E::HomeFail, toLayer(A::endCycle)},
+    // A frame move: the motion layer's outside a cycle, the end of one inside.
+    {M::Run, E::WindowEdit, to(M::Run, A::reframe)},
+    {M::Paused, E::WindowEdit, to(M::Paused, A::reframe)},
+    {M::Jog, E::WindowEdit, to(M::Jog, A::reframe)},
+    {M::Returning, E::WindowEdit, to(M::Returning, A::reframe)},
+    {M::HomeQueued, E::WindowEdit, toLayer(A::refuse)},
+    {M::HomeApproach, E::WindowEdit, toLayer(A::endCycle)},
+    {M::HomeClear, E::WindowEdit, toLayer(A::endCycle)},
+    {M::HomeTouch, E::WindowEdit, toLayer(A::endCycle)},
+    {M::HomeFinish, E::WindowEdit, toLayer(A::endCycle)},
+    // SPEC 11.1 RETURN. A second request re-plans; a refused plan hands the
+    // rail back to the jog.
+    {M::Jog, E::Return, to(M::Returning, A::planReturn)},
+    {M::Returning, E::Return, to(M::Returning, A::planReturn)},
+    {M::HomeQueued, E::Return, to(M::Returning, A::planReturn)},   // race: override and return mid-tick
+    {M::Jog, E::ReturnFailed, to(M::Jog, A::planReturn)},
+    {M::Returning, E::ReturnFailed, to(M::Jog, A::planReturn)},
+    {M::HomeQueued, E::ReturnFailed, to(M::HomeQueued, A::planReturn)},   // race
+    {M::Returning, E::ReturnArrived, to(M::Paused, A::arrive)},
+};
+
+constexpr bool rulesUnique() {
+    for (size_t i = 0; i < std::size(kRules); ++i)
+        for (size_t j = i + 1; j < std::size(kRules); ++j)
+            if (kRules[i].from == kRules[j].from && kRules[i].ev == kRules[j].ev) return false;
+    return true;
+}
+static_assert(rulesUnique(), "one rule per cell");
+
+using Table = std::array<std::array<ArbCell, kArbEvents>, kArbModes>;
+inline constexpr Table kTable = [] {
+    Table t{};
+    for (const ArbRule& r : kRules) t[size_t(r.from)][size_t(r.ev)] = r.cell;
+    return t;
+}();
+}  // namespace arb
+
+constexpr ArbCell arbCell(ArbMode m, ArbEvent e) { return arb::kTable[size_t(m)][size_t(e)]; }
+constexpr bool arbSeeking(ArbMode m) { return m >= ArbMode::HomeApproach && m <= ArbMode::HomeFinish; }
+
+// Who may feed the planner in each mode, by MotionSource. A feed still meets
+// the gates that are not modes: a refused plan's hold, commissioned, homed and
+// the rail word (accept()).
+enum class ArbFeed : uint8_t { feed, jog, estop, unpowered, homing, paused, returning };
+inline constexpr std::array<std::array<ArbFeed, 4>, kArbModes> kArbFeed = [] {
+    using F = ArbFeed;
+    std::array<std::array<ArbFeed, 4>, kArbModes> t{};
+    //                                       Manual        Stream     Pattern    Advanced
+    t[size_t(ArbMode::Run)]          = {{F::feed,      F::feed,   F::feed,   F::feed}};
+    t[size_t(ArbMode::Paused)]       = {{F::paused,    F::paused, F::paused, F::paused}};
+    t[size_t(ArbMode::Jog)]          = {{F::jog,       F::paused, F::paused, F::paused}};
+    t[size_t(ArbMode::Returning)]    = {{F::returning, F::paused, F::paused, F::paused}};
+    for (ArbMode m : {ArbMode::HomeQueued, ArbMode::HomeApproach, ArbMode::HomeClear, ArbMode::HomeTouch,
+                      ArbMode::HomeFinish})
+        t[size_t(m)] = {{F::homing, F::homing, F::homing, F::homing}};
+    t[size_t(ArbMode::Unpowered)]    = {{F::unpowered, F::unpowered, F::unpowered, F::unpowered}};
+    t[size_t(ArbMode::Estop)]        = {{F::estop,     F::estop,  F::estop,  F::estop}};
+    return t;
+}();
+static_assert(kMotionSourceNames.size() == 4, "the feed table has one column per MotionSource");
+
+inline constexpr std::array<const char*, kArbModes> kArbModeNames{
+    "Run", "Paused", "Jog", "Returning", "HomeQueued", "HomeApproach", "HomeClear", "HomeTouch", "HomeFinish",
+    "Unpowered", "Estop"};
+inline constexpr std::array<const char*, kArbEvents> kArbEventNames{
+    "estop", "release", "power off", "power on", "pause", "resume", "override", "override off", "brake",
+    "home request", "home cancel", "home abort", "home start", "home moving", "home contact", "home cleared",
+    "home datum", "home measured", "home done", "home fail", "window edit", "return", "return failed",
+    "return arrived"};
+
+// The transition log's burst: this many lines per window, the rest counted.
+inline constexpr uint32_t kArbLogBurst = 8;
+inline constexpr uint64_t kArbLogWindowUs = 1000000;
 
 // ---- the steering word ------------------------------------------------------
 
@@ -507,6 +755,8 @@ public:
     // Planner task. The expectation the engine holds (Engine::expect), engine
     // clock; 0 when none. For host tests; nothing on the board calls it.
     uint64_t expectUntil() const { return _k2_expect_us; }
+    // Any task: the mode the planner applied last (ArbMode).
+    ArbMode arbMode() const { return _mode.load(); }
     float winMin() const { return _win_min; }
     float winMax() const { return _win_max; }
     float rail() const { return _rail; }
@@ -740,10 +990,25 @@ private:
     // The one door to the engine's stateAt(): records the brake the engine
     // takes from a knot that ends the timeline still moving (RFC-105 (dd)).
     kinetic2::State sampleEngine(uint64_t now_us);
+    // The ownership table (ArbMode above), planner task only. apply() looks
+    // up (mode, ev), moves the mode, logs and counts the change, and returns
+    // the cell's action; an illegal cell holds the mode and returns illegal.
+    // Callers run the action at the point the event is taken.
+    ArbAct apply(ArbEvent ev, const char* cause, uint64_t now_us);
+    // The mode the SPEC 11.1 latches name: Jog under override, else Paused
+    // under PAUSE, else Run.
+    ArbMode layer() const;
+    // Applies every posted change that carries no action: the release, the
+    // gate open again, the layer, a home request posted or withdrawn. An
+    // ESTOP latch or a shut gate carries one, so it is left to planStep() and
+    // reported: the mode returned is then Estop or Unpowered. accept() gates
+    // on what this returns.
+    ArbMode syncLatches(uint64_t now_us);
+    ArbMode mode() const { return _mode.load(); }
+    bool seeking() const { return arbSeeking(_mode.load()); }
     // The home cycle, planner task only (MotionArbiter.cpp, homing). A leg:
     // approach, clear (the backoff), touch; then the far leg, or finish (the
-    // final backoff).
-    enum class HomePhase : uint8_t { idle, approach, clear, touch, finish };
+    // final backoff): HomeApproach..HomeFinish.
     void homeStart(uint64_t now_us);
     void homeStep(uint64_t now_us, float dt_s);
     // A seek's stall at emitter count `hit`, the emitter already parked.
@@ -754,9 +1019,10 @@ private:
     // Starts the leg's approach (`touch` false) or re-touch at its speed, and
     // arms the sense: at once when the line is known LOW, else on its first
     // LOW read (the far approach starts pressed against the home stop).
-    void homeSeek(bool touch, bool armed, uint64_t now_us);
-    // Starts a constant-velocity leg in `phase` toward `end_mm` at v_mm_s.
-    void homeLeg(HomePhase phase, float end_mm, float v_mm_s, uint64_t now_us);
+    void homeSeek(bool touch, bool armed, ArbEvent ev, uint64_t now_us);
+    // Starts a constant-velocity leg toward `end_mm` at v_mm_s, in the mode
+    // `ev` moves to, before the sense is armed.
+    void homeLeg(ArbEvent ev, float end_mm, float v_mm_s, uint64_t now_us);
     // The seek producer's one tick: steers the leg's velocity, or parks and
     // answers true once the count has reached the leg's end.
     bool homeDrive(uint64_t now_us, float dt_s);
@@ -777,9 +1043,10 @@ private:
     // Re-origins the count so the carriage reads `at_mm` and reseeds the
     // engine there: a relabeling, never motion.
     void homeOrigin(int32_t count, float at_mm, uint64_t now_us);
-    // Ends the cycle: parks, disarms the interrupt, and resets the planner at
-    // the count. A failure records `why` and the leg for the census.
-    void homeEnd(const char* why, uint64_t now_us);
+    // Ends the request or the cycle by `ev`: parks, disarms the interrupt,
+    // and resets the planner at the count when a leg ran, then moves the mode.
+    // A failure records `why` (nullptr: homed) and the leg for the census.
+    void homeEnd(ArbEvent ev, const char* why, uint64_t now_us);
 
     MotionEmitter& _emitter;
     Clock          _now_us;
@@ -987,7 +1254,6 @@ private:
     std::atomic<uint8_t> _rail_gen{kRailFree};
     // Planner task only.
     bool     _rail_frame  = false;
-    bool     _returning   = false;
     // Where the last pause brought the machine to rest (the return target),
     // and the completed returns. Written by the planner and, for an
     // unpowered arrival, by returnToPause() on the hub task: atomics, so the
@@ -1004,16 +1270,25 @@ private:
     // (the strip it holds is in the old origin's mm).
     std::atomic<bool> _origin_moved{false};
 
+    // THE MODE (ArbMode): written by the planner task alone, through apply().
+    // An atomic, because the steer reads it to stand aside while the seek
+    // producer owns the emitter (seeking()). The census counts every change
+    // and every illegal event; the log's burst window runs on the planner's
+    // clock.
+    std::atomic<ArbMode> _mode{ArbMode::Unpowered};
+    uint32_t _arb_transitions = 0;
+    uint32_t _arb_illegal = 0;
+    uint64_t _arb_log_from_us = 0;
+    uint32_t _arb_log_n = 0;
+    uint32_t _arb_log_lost = 0;
+
     // The home cycle. _homing is set by home() and cleared only by the
-    // planner when the cycle ends; _home_req hands the start across; pause()
-    // sets _home_abort. The rest is the planner's. _home is not idle exactly
-    // while the seek producer owns the emitter: an atomic, because the steer
-    // reads it to stand aside.
+    // planner when the request or the cycle ends; _home_req hands the start
+    // across; pause() sets _home_abort. The rest is the planner's.
     HomeSense* _sense = &noHomeSense();
     std::atomic<bool> _homing{false};
     std::atomic<bool> _home_req{false};
     std::atomic<bool> _home_abort{false};
-    std::atomic<HomePhase> _home{HomePhase::idle};
     uint8_t   _home_leg = 0;      // 0 the home end, 1 the far end
     bool      _home_flip = false; // the flip as the cycle started
     uint64_t  _home_deadline_us = 0;

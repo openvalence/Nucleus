@@ -171,6 +171,12 @@ struct MotionCensus {
     const char* home_fail_why = nullptr;
     bool     busy           = false;
     bool     stream         = false;  // a Stream intent is the live source
+    // The arbiter's ownership mode (MotionArbiter.h ArbMode, its ordinal), the
+    // changes of it since boot, each logged until the log's burst, and the
+    // events its table has no rule for: held and logged, and any is a defect.
+    uint8_t  arb_mode        = 0;
+    uint32_t arb_transitions = 0;
+    uint32_t arb_illegal     = 0;
 
     // ---- the active plan, normalized, as 0x1110 publishes it ----
     uint8_t  mode             = 0;   // the 0x1111 mode select's ordinals (MotionArbiter.cpp PlanStyle)
