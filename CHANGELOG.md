@@ -2,6 +2,16 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.68 (2026-10-25)
+
+### For users
+
+- No change in behavior. The diagnostics log keeps the whole record of a glide into a moved stroke window.
+
+### Technical
+
+- **The GLIDE log is two lines** (`GLIDE: [old] -> [new] mm, carriage X, D mm to T mm, N ms`, then `GLIDE why: ...`). The single line passed Geiger's 104-byte message limit, and `/diag` cut it after the carriage's first digit on the 0.1.67 bench.
+
 ## 0.1.67 (2026-10-25)
 
 ### For users
