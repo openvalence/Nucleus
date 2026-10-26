@@ -4654,10 +4654,10 @@ TEST_CASE("wall: a jog to the window's edge lands on it inside the jog set, no c
     CHECK(c.wall_clamps == 0);
 }
 
-TEST_CASE("wall: a planner piece past the window (kin-pfbw) stops at the edge inside the set, never past it, and the next plan joins") {
+TEST_CASE("wall: a knot past the window (kin-pfbw) renders to the edge, never past it (kin-traw): no backstop, and the next plan joins") {
     auto r = incidentRig();
-    // No trim: a piece the ceilings or the window refuse renders at its
-    // least-over trim, the capped run's rendering (kin-pfbw).
+    // No trim: the render's own trims are off, so only the planner's window
+    // hold keeps the piece inside (kin-traw).
     valence::MotionTuning tu = valence::motionDefaultTuning();
     tu.trim_max = 0.0f;
     r->arb.applyTuning(tu);
@@ -4667,7 +4667,7 @@ TEST_CASE("wall: a planner piece past the window (kin-pfbw) stops at the edge in
     seg.duration_us = 100'000;
     REQUIRE(r->arb.accept(seg, g_now_us));
     // A knot 21 mm past the window that accept() never clamped: the engine
-    // renders the piece to it over the window.
+    // holds it to the edge.
     kinetic2::Knot past;
     past.t_us = g_now_us + 300'000;
     past.p = 1.25f;
@@ -4685,16 +4685,16 @@ TEST_CASE("wall: a planner piece past the window (kin-pfbw) stops at the edge in
         if (r->census().plan_flags & valence::plan_flags::clamped) flagged = true;
     }
     MESSAGE("plan peak ", plan_peak, " mm, carriage peak ", worst, " mm");
-    CHECK(plan_peak > kIncWinHi + 15.0f);   // the plan really left the window
+    CHECK(plan_peak <= kIncWinHi + valence::kMmPerStep);   // the plan never leaves the window
     checkKin(k, kIncVmax, kIncAmax, 10'000'000.0);
     MotionCensus c = r->census();
     CHECK(worst <= kIncWinHi + valence::kMmPerStep);
     CHECK(c.position_mm == doctest::Approx(kIncWinHi).epsilon(1e-4));
-    CHECK(flagged);
-    CHECK(c.backstops == 1);
+    CHECK(!flagged);
+    CHECK(c.backstops == 0);
     CHECK(c.wall_clamps == 0);
-    CHECK(c.hard_stops == 0);   // seen a strip ahead: the set stopped it
-    // The plan comes back in: it joins from the wall's rest, no burst.
+    CHECK(c.hard_stops == 0);
+    // The plan comes back in: it joins from the rest at the edge, no burst.
     REQUIRE(r->submit(MotionSource::Stream, 130.0f));
     SteerKin back;
     back.v = {0.0, 0.0};

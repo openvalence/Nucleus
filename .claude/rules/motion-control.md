@@ -231,9 +231,9 @@ window is solved at the next sample, and the sampler evaluates it.
   held inside the rail, or the asserted rail while the engine plans in the
   rail frame (override's jog and its return); a home cycle's seek producer
   never reaches it. The brakes (PAUSE, a generator's stop, a starved
-  timeline) are profiles the referee never scores, and a capped run renders
-  pieces past the window (Kinetic kin-pfbw), so the backstop holds whatever
-  the plan does. **THE WALL (operator ruling 2026-10-23, bd val-vj1j)**: at
+  timeline) are profiles the referee never scores, and the render's own
+  window hold (Kinetic kin-traw) is not the last line, so the backstop holds
+  whatever the plan does. **THE WALL (operator ruling 2026-10-23, bd val-vj1j)**: at
   every fill, where the strip (the plan, the oscillator and the connector)
   leaves the frame by more than a step, `MotionArbiter::applyWall()` stops it
   instead, at the edge: from the latest entry whose fastest jerk-limited stop

@@ -1466,7 +1466,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .hasUnitId = true, .unitId = valence::unit_ids::percent});
     c.addSchemaField({.key = anom_body::ceiling_ratio, .name = "ceiling_ratio", .type = CborFieldType::f32_t,
                       .unit = "x", .group = card::anomalies, .desc = "Worst ceiling ratio of the piece"});
-    // Option ordinals are wire values (ValenceDevice.cpp anomalyRefusal).
+    // Option ordinals are wire values (ValenceDevice.cpp anomalyDetail).
     c.addSelectSchemaField({.key = anom_body::refusal, .name = "refusal", .type = CborFieldType::uint_t,
                             .unit = "", .group = card::anomalies, .desc = "Why the knot was refused"},
                            {"non-finite", "in the past", "timeline full"});

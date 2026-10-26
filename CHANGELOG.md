@@ -2,6 +2,19 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.71 (2026-10-25)
+
+### For users
+
+- **No input makes the machine move faster than its limits or past the stroke window.** A stream with knots too close together, duplicated, out of order or out of range could briefly drive the carriage over the speed or acceleration limit (the bench's anomaly log showed spans 12 and 20 times over a limit). Such a knot is now approached as fast as the limits allow and reached late or short, and the Anomalies log reports it as a trimmed knot with the share of its stroke kept.
+- **Each anomaly says what it means, in units.** The share of a knot's stroke kept (%), how far over a limit a span was (x), the speed at a brake or as held (mm/s), why a knot was refused, the knot's position in mm on the stroke as you see it, and the time in ms since start-up.
+
+### Technical
+
+- **kinetic.pin -> 2d0ca3a** (Kinetic main: fix/traw-legality, kin-traw; the conditioner, kin-quis). Compiled paths changed: `conditioner.hpp` (new), `engine.hpp`, `profile.hpp`, `solver.hpp`, `types.hpp`, `tests/test_kinetic2.cpp`. Every knot is held to 0..1; every run end is judged as a brake start; `Engine::submit` refuses a past or duplicate knot before the horizon commit; the judged window never grows past 0..1; a profile phase into a constant one lands at zero acceleration. A fitted piece still over speed, acceleration or the window is replaced by `passKnot`, the fastest legal move toward its knot, reported `KnotTrimmed`. `trim_max` is the trim a client would like, never a license: past it the solver still renders legal (operator ruling 2026-10-25). Jerk-only excess still renders and reports `PieceOverCeiling` (kin-y6e). `Config::condition` compiles in, off by default (`KINETIC2_CONDITION`). Kinetic's fuzz, 480 runs: 0 over a ceiling, 0 outside the window; fingerprint 0xb43b8ddce5ab576b unchanged.
+- **motion-anomaly 0x4100 bodies are self-describing** (val-vb3w, RFC-122). Key 4 `detail` is retired, never reused; each kind sends only the field its detail means: `kept` (key 6, %, knot_trimmed), `ceiling_ratio` (key 7, x, piece_over_ceiling), `refusal` (key 8, options non-finite / in the past / timeline full, knot_refused), `v_end` (key 9, mm/s in the client frame, settle and endvel_clamped). `target` (key 3) is mm in the client frame (`MotionArbiter::popAnomaly`, flip mirrored against the rail) with role telemetry.target bound within its entry. Key 5 `t_us` becomes `t_ms`, ms since boot, SPEC 7.2's EVENT time. Catalog-only. Neutrino etag 0d182b0609ae5411 -> bc2505faa40d813d.
+- **Tests.** `test_valence_device` VD-ANOM-1/2: each kind's body and the declared schema, the mm target and its unit_id; `test_motion_arbiter`: the popAnomaly target flipped in a 50..450 mm window, the starved-stream settle's v_end in mm/s; the wall case whose knot lies 21 mm past the window now asserts the plan stays on the edge with no backstop (it asserted the plan left the window, which kin-traw ends). `test/fixtures/kinetic_trace.json` re-recorded once against the new pin (170 lines move); `kinetic.wasm` reproduces it bit for bit; the Neutrino wasm check passes at bc2505faa40d813d.
+
 ## 0.1.70 (2026-10-25)
 
 ### For users
