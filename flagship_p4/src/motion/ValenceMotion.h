@@ -296,13 +296,13 @@ struct MotionTuning {
 };
 
 // One planner anomaly as 0x4100 motion-anomaly carries it (ValenceCatalog.h,
-// anom_body): kinetic2::Anomaly, its target in the client frame (RFC-088).
+// anom_body): kinetic2::Anomaly in the client frame (RFC-088, RFC-122).
 struct MotionAnomaly {
     uint8_t  kind   = 0;      // kinetic2::AnomalyKind
     uint16_t seq    = 0;      // the engine's rolling id: a gap is an anomaly never handed over
     uint64_t t_us   = 0;      // motion core time
-    float    target = 0.0f;   // the knot's position, 0..1 across the window
-    float    detail = 0.0f;   // per kind (kinetic2::AnomalyKind)
+    float    target = 0.0f;   // the knot's position, mm in the client frame
+    float    detail = 0.0f;   // per kind (kinetic2::AnomalyKind); a speed is mm/s, client frame
 };
 
 // Each motion task's stack (the planner's and the steer's), in bytes, and the

@@ -34,6 +34,7 @@
 #include "LinkMode.h"
 #include "ValenceEstopDatagram.h"
 #include "geiger/geiger.h"
+#include "kinetic2/types.hpp"
 #include "motion/StreamIntent.h"
 #include "motion/ValenceMotion.h"
 #include "patterns/ValencePattern.h"
@@ -1308,12 +1309,33 @@ bool ValenceDevice::oscDriven(bool streamLive) const {
     return live(_osc.frequency_drive.drive) || live(_osc.amplitude_drive.drive);
 }
 
+// The one body field a kind's detail means (anom_body), or none: a kind with
+// no detail, or a refusal sentinel the table does not name.
+static std::optional<IntentValueField> anomalyDetail(const MotionAnomaly& a) {
+    using K = kinetic2::AnomalyKind;
+    switch (K(a.kind)) {
+    case K::SettleEngaged:
+    case K::EndVelClamped: return IntentValueField{anom_body::v_end, IntentValue::ofF32(a.detail)};
+    case K::KnotTrimmed: return IntentValueField{anom_body::kept, IntentValue::ofF32(a.detail * 100.0f)};
+    case K::PieceOverCeiling: return IntentValueField{anom_body::ceiling_ratio, IntentValue::ofF32(a.detail)};
+    case K::KnotRefused: {
+        // Ordinals are the catalog's refusal options.
+        constexpr float kRefusal[] = {kinetic2::kDetailNonFinite, kinetic2::kDetailPast,
+                                      kinetic2::kDetailTimelineFull};
+        for (uint8_t i = 0; i < 3; ++i)
+            if (a.detail == kRefusal[i]) return IntentValueField{anom_body::refusal, IntentValue::ofU64(i)};
+        return std::nullopt;
+    }
+    default: return std::nullopt;
+    }
+}
+
 // The parameters as applied, dwells as they play (the written ones
 // kept), then what renders: osc.active and osc.amplitude_effective from the
 // census.
 // Every anomaly is taken, so the handoff never fills behind the bucket; one
 // the bucket has no token for is dropped here. The kind rides event_kind and
-// is mirrored into body key 1 (SPEC 9.4); t_us is the low 32 bits (anom_body).
+// is mirrored into body key 1 (SPEC 9.4); t_ms is SPEC 7.2's EVENT time.
 void ValenceDevice::publishAnomalies(uint32_t nowMs) {
     const uint32_t refill = uint32_t(nowMs - _anomRefillMs) / kAnomalyEventMs;
     if (refill > 0) {
@@ -1329,12 +1351,12 @@ void ValenceDevice::publishAnomalies(uint32_t nowMs) {
         ev.timestamp = nowMs;
         ev.event_kind = a.kind;
         ev.has_body = true;
-        ev.body_count = 5;
         ev.body[0] = IntentValueField{anom_body::kind, IntentValue::ofU64(a.kind)};
         ev.body[1] = IntentValueField{anom_body::seq, IntentValue::ofU64(a.seq)};
         ev.body[2] = IntentValueField{anom_body::target, IntentValue::ofF32(a.target)};
-        ev.body[3] = IntentValueField{anom_body::detail, IntentValue::ofF32(a.detail)};
-        ev.body[4] = IntentValueField{anom_body::t_us, IntentValue::ofU64(uint32_t(a.t_us))};
+        ev.body[3] = IntentValueField{anom_body::t_ms, IntentValue::ofU64(uint32_t(a.t_us / 1000))};
+        ev.body_count = 4;
+        if (const auto d = anomalyDetail(a)) ev.body[ev.body_count++] = *d;
         std::array<std::byte, 96> buf{};
         const size_t n = encodeEvent(ev, std::span<std::byte>(buf));
         if (n > 0) _hub->publishEvent(ch::motion_anomaly, std::span<const std::byte>(buf.data(), n));

@@ -1329,7 +1329,15 @@ TEST_CASE("Kinetic² starved segment stream: the engine brakes a last knot still
     const MotionCensus c = r->census();
     CHECK_FALSE(c.busy);
     CHECK(c.position_mm > 100.0f);   // the stop runs on past the knot, at rest
-    r->arb.drainAnomalies();
+    // The speed at the brake leaves in mm/s, the knot's own 60 (0x4100 v_end).
+    MotionAnomaly a;
+    bool seen = false;
+    while (r->arb.popAnomaly(a))
+        if (a.kind == uint8_t(kinetic2::AnomalyKind::SettleEngaged)) {
+            seen = true;
+            CHECK(a.detail == doctest::Approx(60.0f).epsilon(0.05));
+        }
+    CHECK(seen);
     CHECK(r->census().anom[size_t(kinetic2::AnomalyKind::SettleEngaged)] == 1);
 }
 
@@ -4180,10 +4188,12 @@ TEST_CASE("generators in a narrow window: every half-stroke renders whole at the
 }
 
 // bd val-ku3: an anomaly leaves the engine once, counted for 0x1111 and handed
-// on for 0x4100 with its target in the client frame.
+// on for 0x4100 with its target in the client frame, mm (RFC-122): a window
+// off the rail's ends proves it is never window units.
 TEST_CASE("popAnomaly: each anomaly is counted as it leaves, its target in the flipped client's frame") {
     auto r = rig();
     r->arb.forceHome(500.0f);
+    r->arb.setWindow(50.0f, 450.0f, 500.0f);
     r->run(1000);
     r->arb.setFlipped(true);
     r->run(1000);
@@ -4195,7 +4205,7 @@ TEST_CASE("popAnomaly: each anomaly is counted as it leaves, its target in the f
     MotionAnomaly a;
     REQUIRE(r->arb.popAnomaly(a));
     CHECK(a.kind == uint8_t(kinetic2::AnomalyKind::KnotTrimmed));
-    CHECK(a.target == doctest::Approx(100.0f / 500.0f));   // 0.8 in the engine's physical frame
+    CHECK(a.target == doctest::Approx(100.0f));   // client mm: 400 mm in the engine's physical frame
     CHECK(r->census().anomalies == before + 1);
     CHECK(r->census().anom[a.kind] >= 1);
     r->arb.drainAnomalies();

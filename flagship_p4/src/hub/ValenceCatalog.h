@@ -257,9 +257,14 @@ static_assert([] {
 namespace anom_body {
 inline constexpr uint8_t kind   = 1;  // kinetic2::AnomalyKind, mirrors event_kind; labels live in event_kinds
 inline constexpr uint8_t seq    = 2;  // engine's rolling event id (wraps)
-inline constexpr uint8_t target = 3;  // the command target that provoked it, 0..1 normalized
-inline constexpr uint8_t detail = 4;  // KIND-SPECIFIC scalar — see the option labels
-inline constexpr uint8_t t_us   = 5;  // engine time at record, µs (low 32 bits)
+inline constexpr uint8_t target = 3;  // the command target that provoked it, mm in the client frame
+// Key 4 is retired (a unitless per-kind scalar): never reused.
+inline constexpr uint8_t t_ms   = 5;  // hub time at record, ms since boot (SPEC 7.2's EVENT time)
+// One key per meaning, each sent only by the kinds it names.
+inline constexpr uint8_t kept          = 6;  // knot_trimmed: share of the knot's chord kept, %
+inline constexpr uint8_t ceiling_ratio = 7;  // piece_over_ceiling: the worst ceiling ratio
+inline constexpr uint8_t refusal       = 8;  // knot_refused: why, an option ordinal
+inline constexpr uint8_t v_end         = 9;  // settle, endvel_clamped: speed, mm/s in the client frame
 }  // namespace anom_body
 
 // ---- Machine FEATURES that gate whether a channel is advertised AT ALL ------
@@ -1380,7 +1385,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .desc = "Stale arrival speeds ignored on held positions"});
     c.addLayoutField({.name = "anom_knot_refused", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = card::anomalies,
-                      .desc = "Points refused as late or out of order"});
+                      .desc = "Knots the timeline refused"});
     c.addLayoutField({.name = "anom_piece_over_ceiling", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = card::anomalies,
                       .desc = "Spans no trim could keep inside a limit"});
@@ -1443,17 +1448,31 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .group = card::anomalies, .desc = "Anomaly kind, same as the event kind"});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",
                       .group = card::anomalies, .desc = "Rolling event id, wraps"});
+    // Roles on an EVENT body bind within their own entry (RFC-122): this
+    // telemetry.target never competes with 0x1100's. mm in the client frame,
+    // so an old event keeps its place after the window moves.
     c.addSchemaField({.key = anom_body::target, .name = "target", .type = CborFieldType::f32_t,
-                      .unit = "norm", .group = card::anomalies,
-                      .desc = "Commanded position, 0 to 1 across the window"});
-    c.addSchemaField({.key = anom_body::detail, .name = "detail", .type = CborFieldType::f32_t, .unit = "",
-                      .group = card::anomalies, .desc = "Speed, duration or stroke fraction, per kind"});
-    // unit_ids us, not hub_s: a schema field carries no scale and the registry
-    // has no microsecond hub-time unit (RFC-086), so the wire states this
-    // stamp's magnitude only, never which clock it was read from.
-    c.addSchemaField({.key = anom_body::t_us, .name = "t_us", .type = CborFieldType::uint_t, .unit = "us",
-                      .group = card::anomalies, .desc = "Motion core time of the event",
-                      .hasUnitId = true, .unitId = valence::unit_ids::us});
+                      .unit = "mm", .group = card::anomalies,
+                      .desc = "Commanded position of the knot",
+                      .role = roles::telemetry_target,
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm});
+    // ms since boot: SPEC 7.2's EVENT time, the frame timestamp's own clock.
+    c.addSchemaField({.key = anom_body::t_ms, .name = "t_ms", .type = CborFieldType::uint_t, .unit = "ms",
+                      .group = card::anomalies, .desc = "Hub time of the event, ms since boot",
+                      .hasUnitId = true, .unitId = valence::unit_ids::ms});
+    c.addSchemaField({.key = anom_body::kept, .name = "kept", .type = CborFieldType::f32_t, .unit = "%",
+                      .group = card::anomalies, .desc = "Share of the knot's stroke kept",
+                      .step = 1.0f, .hasStep = true,
+                      .hasUnitId = true, .unitId = valence::unit_ids::percent});
+    c.addSchemaField({.key = anom_body::ceiling_ratio, .name = "ceiling_ratio", .type = CborFieldType::f32_t,
+                      .unit = "x", .group = card::anomalies, .desc = "Worst ceiling ratio of the piece"});
+    // Option ordinals are wire values (ValenceDevice.cpp anomalyRefusal).
+    c.addSelectSchemaField({.key = anom_body::refusal, .name = "refusal", .type = CborFieldType::uint_t,
+                            .unit = "", .group = card::anomalies, .desc = "Why the knot was refused"},
+                           {"non-finite", "in the past", "timeline full"});
+    c.addSchemaField({.key = anom_body::v_end, .name = "v_end", .type = CborFieldType::f32_t, .unit = "mm/s",
+                      .group = card::anomalies, .desc = "Speed at the brake or as held",
+                      .hasUnitId = true, .unitId = valence::unit_ids::mm_s});
     };
 
     // ---- "machine-modes" — STATE, elevated, on-change -----------------------
