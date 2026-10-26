@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -1195,11 +1196,12 @@ TEST_CASE("val-y3da: the flash rule follows the mode: a brake holds, ESTOP and p
         CHECK(kArbFlash[size_t(m)] == FlashRule::hold);
 }
 
-// Homed at 0 mm, the window 100..300 mm, under the factory tuning.
+// Homed at 0 mm, the window 0..300 mm, under the factory tuning. Inside it: a
+// segment from outside enters by a glide (bd val-xvq0), never planned whole.
 std::unique_ptr<Rig> rigAtOrigin() {
     auto r = rig();
     r->arb.forceHome(400.0f);
-    r->arb.setWindow(100.0f, 300.0f, 400.0f);
+    r->arb.setWindow(0.0f, 300.0f, 400.0f);
     r->run(1000);
     return r;
 }
@@ -1219,10 +1221,7 @@ bool tightSegment(Rig& r, uint32_t duration_us) {
 
 TEST_CASE("Kinetic² RFC-100: plan_flags from the solver, 0 with nothing in flight") {
     namespace pf = valence::plan_flags;
-    auto r = rig();
-    r->arb.forceHome(400.0f);
-    r->arb.setWindow(100.0f, 300.0f, 400.0f);
-    r->run(1000);
+    auto r = rigAtOrigin();
     // A segment the ceilings meet: nothing spent.
     MotionIntent easy;
     easy.source = MotionSource::Stream;
@@ -3619,6 +3618,7 @@ struct ArcadeRun {
     uint32_t holds = 0;          // submits that queued a knot besides the segment's
     float    rest_mm_s = 0.0f;   // the fastest plan speed in the long gap's middle half
     float    chord_mm_s = 0.0f;  // the fastest chord between knots as the hub resolved them
+    uint64_t lag_max_us = 0;     // the catch-up's lag (bd val-6ee8): 0 on a stream that never starves
 };
 
 // gap_at: the segment index the long rest precedes (-1: none); gap_us its length.
@@ -3689,6 +3689,7 @@ ArcadeRun arcadeRun(int64_t jit_us, bool late_only, int gap_at = -1, uint64_t ga
         v1 = v;
         if (gap_to > 0 && g_now_us > gap_from + gap_us / 4 && g_now_us < gap_to - gap_us / 4)
             out.rest_mm_s = std::fmax(out.rest_mm_s, std::fabs(v));
+        out.lag_max_us = std::max(out.lag_max_us, r->arb.catchUpLagUs());
     }
     r->arb.drainAnomalies();
     out.over = r->census().anom[size_t(kinetic2::AnomalyKind::PieceOverCeiling)] -
@@ -3705,6 +3706,7 @@ TEST_CASE("val-7t48: an arcade stream whose starts jitter 1 to 4 ms renders as o
     REQUIRE(tiled.chord_mm_s == doctest::Approx(250.0f));
     CHECK(tiled.holds == 0);
     CHECK(tiled.over == 0);
+    CHECK(tiled.lag_max_us == 0);
     for (const bool late_only : {true, false}) {
         for (const int64_t j : {1000, 2000, 3000, 4000}) {
             const ArcadeRun a = arcadeRun(j, late_only);
@@ -3714,6 +3716,7 @@ TEST_CASE("val-7t48: an arcade stream whose starts jitter 1 to 4 ms renders as o
                     a.chord_mm_s, ", jerk ", a.jerk_max, ", over ", a.over, ", holds ", a.holds);
             CHECK(a.holds == 0);
             CHECK(a.over == 0);
+            CHECK(a.lag_max_us == 0);   // never starved: the stamps as they came
             // A through point's curve, over the chords the jittered stamps ask:
             // 1.06 of the chord tiled, up to 1.12 on these uneven spans. A
             // v = 0 hold made both its spans rest-to-rest, 1.5 (SPEC 9.6).
@@ -3749,6 +3752,104 @@ TEST_CASE("val-7t48: a gap the sender schedules still rests, jittered or not") {
         CHECK(a.holds == 1);
         CHECK(a.rest_mm_s < 1.0f);
         CHECK(a.over == 0);
+    }
+}
+
+// ---- the bounded catch-up after a starvation brake (bd val-6ee8) ---------------
+// The arcade stream above, tiled, with the segments from stall_at held back
+// stall_us past their send and then sent at once, as the bench's WiFi delivers
+// them: the timeline runs dry, the engine brakes from its last knot, and the
+// late segments arrive with their stamps already due.
+
+namespace {
+
+struct StarveRun {
+    float    peak_mm_s = 0.0f;
+    float    chord_mm_s = 0.0f;   // the fastest authored chord
+    uint64_t lag_max_us = 0, lag_end_us = 0;
+    uint32_t settles = 0, over = 0;
+    uint64_t hash = 1469598103934665603ull;   // FNV-1a over the plan velocity's bits, every tick
+};
+
+StarveRun starvedRun(int stall_at, uint64_t stall_us) {
+    static constexpr float kChord[] = {100, 200, 250, 250, 250, 250, 150, 50, -50, -150, -250, -250, -250, -250, -200, -100};
+    constexpr int kSegs = 48;
+    constexpr uint64_t kSegUs = 100'000, kLeadUs = 60'000;
+    auto r = rig();
+    r->arb.forceHome(600.0f);
+    r->arb.setWindow(50.0f, 550.0f, 600.0f);
+    r->arb.setInputLimits(1200.0f, 100000.0f, 2e7f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 100.0f));
+    r->run(2'000'000);
+    r->arb.drainAnomalies();
+    const MotionCensus before = r->census();
+    StarveRun out;
+    float mm = 100.0f;
+    uint64_t start = g_now_us + kLeadUs + 10'000;
+    uint64_t release = 0;
+    int n = 0;
+    const uint64_t end = start + kSegs * kSegUs + 3'000'000;
+    while (g_now_us < end) {
+        while (n < kSegs) {
+            if (start > g_now_us + kLeadUs) break;
+            if (n == stall_at && release == 0) release = g_now_us + stall_us;
+            if (n >= stall_at && stall_at >= 0 && g_now_us < release) break;
+            mm += kChord[n % 16] * 0.1f;
+            out.chord_mm_s = std::fmax(out.chord_mm_s, std::fabs(kChord[n % 16]));
+            MotionIntent in;
+            in.source = MotionSource::Stream;
+            in.target_mm = mm;
+            in.duration_us = uint32_t(kSegUs);
+            in.anchor_us = start;
+            in.supersede = true;
+            in.expect_us = kQuietUs;
+            REQUIRE(r->arb.accept(in, g_now_us));
+            start += kSegUs;
+            ++n;
+        }
+        r->run(1000);
+        const float v = r->census().velocity_mm_s;
+        out.peak_mm_s = std::fmax(out.peak_mm_s, std::fabs(v));
+        uint32_t bits;
+        std::memcpy(&bits, &v, sizeof bits);
+        out.hash = (out.hash ^ bits) * 1099511628211ull;
+        out.lag_max_us = std::max(out.lag_max_us, r->arb.catchUpLagUs());
+    }
+    out.lag_end_us = r->arb.catchUpLagUs();
+    r->arb.drainAnomalies();
+    const MotionCensus c = r->census();
+    out.settles = c.anom[size_t(kinetic2::AnomalyKind::SettleEngaged)] - before.anom[size_t(kinetic2::AnomalyKind::SettleEngaged)];
+    out.over = c.anom[size_t(kinetic2::AnomalyKind::PieceOverCeiling)] - before.anom[size_t(kinetic2::AnomalyKind::PieceOverCeiling)];
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("val-6ee8: a starved arcade stream is re-timed: no catch-up past 1.11 of its own render, the lag drains to 0") {
+    const StarveRun fed = starvedRun(-1, 0);
+    MESSAGE("unstarved: peak ", fed.peak_mm_s, " mm/s over a chord of ", fed.chord_mm_s, ", settles ", fed.settles,
+            ", lag max ", fed.lag_max_us, " us, hash ", fed.hash);
+    CHECK(fed.settles <= 1);   // the stream's own end: its last knot passed moving, braked past
+    CHECK(fed.lag_max_us == 0);
+    for (const int at : {4, 9, 13}) {             // mid-cruise, a corner, the reversal's cruise
+        for (const uint64_t stall : {120'000ull, 200'000ull, 300'000ull}) {
+            const StarveRun s = starvedRun(at, stall);
+            CAPTURE(at);
+            CAPTURE(stall);
+            MESSAGE("stall ", stall / 1000, " ms at segment ", at, ": peak ", s.peak_mm_s, " mm/s (",
+                    s.peak_mm_s / s.chord_mm_s, " of the chord, ", s.peak_mm_s / fed.peak_mm_s,
+                    " of the unstarved render), settles ", s.settles, ", lag max ", s.lag_max_us / 1000, " ms, end ",
+                    s.lag_end_us, " us, over ", s.over);
+            CHECK(s.settles > fed.settles);
+            CHECK(s.lag_max_us > 0);
+            CHECK(s.lag_end_us == 0);
+            CHECK(s.over == 0);
+            // A drained span renders at 1 / (1 - share) of its chord, the
+            // through points' curve over it as unstarved; the stretched first
+            // span beside drained ones adds up to 1.3% (uneven spans).
+            CHECK(s.peak_mm_s <= fed.peak_mm_s / (1.0f - valence::kCatchUpShare) * 1.02f);
+        }
     }
 }
 
@@ -5331,9 +5432,11 @@ TEST_CASE("window edit follow-up (bd val-vj1j): a PAUSE brake planned past the e
 // ---- window adoption (operator ruling 2026-10-25: motion is only ever commanded)
 // The stored window adopted at boot, after homing or after a config restore
 // never moves the carriage: one it leaves outside waits there, and the first
-// commanded motion brings it in through the handover, jerk-limited.
+// commanded motion brings it in: a jog at the jog set, a segment stream by a
+// glide at the jog set (bd val-xvq0, operator ruling 2026-10-26; this case
+// ratified entry at the input set before).
 
-TEST_CASE("window adoption: a stored window that excludes the home position moves nothing until a command; a stream start enters it jerk-limited") {
+TEST_CASE("window adoption: a stored window that excludes the home position moves nothing until a command; a stream start enters it at the jog set") {
     for (const bool planner_first : {true, false}) {
         CAPTURE(planner_first);
         // The bench's boot: homed at 0, then the stored window [55, 255]. The
@@ -5350,22 +5453,22 @@ TEST_CASE("window adoption: a stored window that excludes the home position move
         CHECK(c.window_edits == (planner_first ? 1u : 0u));
         CHECK(std::fabs(c.position_mm) <= kTwoSteps);
         CHECK_FALSE(c.busy);
-        // The first command: a stream segment re-planned from the carriage's
-        // live state into the window, at the input set, and in from then on.
+        // The first command: a stream segment, glided to at the jog set (the
+        // StreamEnter cell), and in from then on.
         REQUIRE(segment(*r, 150.0f, 1'000'000));
         Track t;
         t.take(*r);
         SteerKin k;
-        for (int i = 0; i < 2500; ++i) {
+        for (int i = 0; i < 5000; ++i) {
             r->run(1000);
             t.take(*r);
             k.take(r->emitter);
         }
         c = r->census();
-        CHECK(c.glides == 0);
+        CHECK(c.glides == 1);
         CHECK(std::fabs(c.position_mm - 150.0f) <= kTwoSteps);
-        CHECK(t.within(0, kInV, kInA, kJerk));
-        checkKin(k, kInV, kInA, kJerk);
+        CHECK(t.within(0, kJogV, kJogA, kJerk));
+        checkKin(k, kJogV, kJogA, kJerk);
         CHECK(t.staysIn(55.0, 255.0));
         CHECK(*std::min_element(t.pos.begin(), t.pos.end()) >= -kTwoSteps);   // never away from the window
         CHECK(c.plans_refused == 0);
@@ -5417,4 +5520,104 @@ TEST_CASE("window adoption: the jog from outside the adopted window comes in at 
         CHECK(r->emitter.n == held);
         CHECK(r->census().glides == 0);
     }
+}
+
+// ---- a stream started outside the window (bd val-xvq0) --------------------------
+// The bench's boot: homed at 0 under the stored window 55..268.7, the bench's
+// sets (input 1200 mm/s, 1e5 mm/s^2, 2e7 mm/s^3; jog 200 mm/s, 400 mm/s^2), then
+// Phosphor's arcade drive: 100 ms segments 60 ms ahead, its seed held in the
+// window, chords to 106.8 mm/s (half the window a second). The first knot was
+// rendered from rest at the input set on the author's clock: 1168 to 1195 mm/s.
+
+namespace {
+
+struct EntryRun {
+    float    entry_peak_mm_s = 0.0f;   // until the carriage is inside the window
+    float    peak_mm_s = 0.0f;         // from then on
+    float    chord_mm_s = 0.0f;
+    uint64_t lag_max_us = 0, lag_end_us = 0;
+    uint32_t glides = 0, over = 0;
+    bool     stays_in = false;
+};
+
+EntryRun entryRun(bool from_inside) {
+    static constexpr float kChord[] = {100, 200, 250, 250, 250, 250, 150, 50, -50, -150, -250, -250, -250, -250, -200, -100};
+    constexpr float kScale = 106.8f / 250.0f;
+    constexpr int kSegs = 112;
+    constexpr uint64_t kSegUs = 100'000, kLeadUs = 60'000;
+    auto r = rig();
+    r->arb.setInputLimits(1200.0f, 100000.0f, 2e7f);
+    r->arb.setJogLimits(200.0f, 400.0f);
+    r->arb.forceHome(300.0f);
+    r->run(1000);
+    r->arb.setWindow(55.0f, 268.7f, 300.0f);
+    r->run(500'000);
+    if (from_inside) {
+        REQUIRE(r->submit(MotionSource::Manual, 55.0f));
+        r->run(3'000'000);
+    }
+    r->arb.drainAnomalies();
+    const MotionCensus before = r->census();
+    EntryRun out;
+    Track t;
+    t.take(*r);
+    float mm = 55.0f;
+    uint64_t start = g_now_us + kLeadUs + 10'000;
+    int n = 0;
+    bool in_window = false;
+    const uint64_t end = start + kSegs * kSegUs + 1'000'000;
+    while (g_now_us < end) {
+        while (n < kSegs && start <= g_now_us + kLeadUs) {
+            mm += kChord[n % 16] * kScale * 0.1f;
+            out.chord_mm_s = std::fmax(out.chord_mm_s, std::fabs(kChord[n % 16]) * kScale);
+            MotionIntent in;
+            in.source = MotionSource::Stream;
+            in.target_mm = mm;
+            in.duration_us = uint32_t(kSegUs);
+            in.anchor_us = start;
+            in.supersede = true;
+            in.expect_us = kQuietUs;
+            REQUIRE(r->arb.accept(in, g_now_us));
+            start += kSegUs;
+            ++n;
+        }
+        r->run(1000);
+        t.take(*r);
+        // The strip's speed: a glide is the connector, which the plan's own
+        // velocity never shows.
+        const size_t i = t.p.size() - 1;
+        const float v = i > 0 && t.gen[i] == t.gen[i - 1] ? float(std::fabs(t.v(i))) : 0.0f;
+        in_window = in_window || r->arb.positionMm() >= 55.0f - kTwoSteps;
+        if (in_window) out.peak_mm_s = std::fmax(out.peak_mm_s, v);
+        else out.entry_peak_mm_s = std::fmax(out.entry_peak_mm_s, v);
+        out.lag_max_us = std::max(out.lag_max_us, r->arb.catchUpLagUs());
+    }
+    out.lag_end_us = r->arb.catchUpLagUs();
+    r->arb.drainAnomalies();
+    const MotionCensus c = r->census();
+    out.glides = c.glides - before.glides;
+    out.over = c.anom[size_t(kinetic2::AnomalyKind::PieceOverCeiling)] - before.anom[size_t(kinetic2::AnomalyKind::PieceOverCeiling)];
+    out.stays_in = t.staysIn(55.0, 268.7);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("val-xvq0: an arcade stream started outside the window enters at the jog set, then runs at most 1.11 of its own render, back on its stamps") {
+    const EntryRun inside = entryRun(true);
+    const EntryRun e = entryRun(false);
+    for (const EntryRun* x : {&inside, &e})
+        MESSAGE(std::string(x == &inside ? "from inside" : "from outside"), ": entry peak ", x->entry_peak_mm_s, " mm/s, peak ",
+                x->peak_mm_s, " mm/s over a chord of ", x->chord_mm_s, ", lag max ", x->lag_max_us / 1000, " ms, end ",
+                x->lag_end_us, " us, glides ", x->glides, ", over ", x->over);
+    CHECK(inside.glides == 0);
+    CHECK(inside.lag_max_us == 0);
+    CHECK(e.glides == 1);
+    CHECK(e.entry_peak_mm_s <= 200.0f * 1.01f);
+    CHECK(e.peak_mm_s <= 200.0f * 1.01f);
+    CHECK(e.peak_mm_s <= inside.peak_mm_s / (1.0f - valence::kCatchUpShare) * 1.02f);
+    CHECK(e.lag_max_us > 0);
+    CHECK(e.lag_end_us == 0);
+    CHECK(e.over == 0);
+    CHECK(e.stays_in);
 }

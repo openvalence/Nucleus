@@ -222,29 +222,29 @@ namespace {
 // C HomeClear, H HomeTouch, F HomeFinish, U Unpowered, E Estop, L the layer.
 // act: no none, st settle, br brake, rc record, qu queue, rf refuse, sa start,
 // lg leg, ec endCycle, hm homed, fr reframe, rk recheck, df defer, ro reorigin,
-// pr planReturn, ar arrive, ad adopt.
+// pr planReturn, ar arrive, ad adopt, en enter.
 // Columns: estop release poweroff poweron pause resume override ovroff brake
 // homereq homecancel homeabort homestart homemoving contact cleared datum
-// measured done fail window adopt reorigin return returnfailed arrived.
+// measured done fail window adopt reorigin return returnfailed arrived enter.
 const std::array<const char*, kArbModes> kGrid{
-    /* Run       */ "E:st . U:st . P:no . J:no . P:br Q:qu . . . . . . . . . . R:fr R:ad R:ro . . .",
-    /* Paused    */ "E:st . U:st . . R:no J:no . P:br Q:qu . . . . . . . . . . P:rk P:ad P:ro . . .",
-    /* Jog       */ "E:st . U:st . . . . P:no J:br Q:qu . . . . . . . . . . J:rk J:ad J:ro T:pr J:pr .",
-    /* Returning */ "E:st . U:st . . . . . T:br . . T:rf . . . . . . . . T:rk T:ad T:ro T:pr J:pr P:ar",
-    /* Queued    */ "E:st . U:st . . . . . Q:br . L:no L:rf A:sa L:rf . . . . . . Q:df Q:df L:rf T:pr Q:pr .",
-    /* Approach  */ "E:st . U:st . . . . . A:br . . L:ec . . C:lg . . . . L:ec A:df A:df L:ec . . .",
-    /* Clear     */ "E:st . U:st . . . . . C:br . . L:ec . . . H:lg . . . L:ec C:df C:df L:ec . . .",
-    /* Touch     */ "E:st . U:st . . . . . H:br . . L:ec . . . . A:lg F:lg . L:ec H:df H:df L:ec . . .",
-    /* Finish    */ "E:st . U:st . . . . . F:br . . L:ec . . . . . . L:hm L:ec F:df F:df L:ec . . .",
-    /* Unpowered */ "E:st . U:rf L:no . . . . U:rc . . . . . . . . . . . U:df U:df U:df . . .",
-    /* Estop     */ "E:rf P:no . . . . . . . . . . . . . . . . . . E:df E:df E:df . . .",
+    /* Run       */ "E:st . U:st . P:no . J:no . P:br Q:qu . . . . . . . . . . R:fr R:ad R:ro . . . R:en",
+    /* Paused    */ "E:st . U:st . . R:no J:no . P:br Q:qu . . . . . . . . . . P:rk P:ad P:ro . . . .",
+    /* Jog       */ "E:st . U:st . . . . P:no J:br Q:qu . . . . . . . . . . J:rk J:ad J:ro T:pr J:pr . .",
+    /* Returning */ "E:st . U:st . . . . . T:br . . T:rf . . . . . . . . T:rk T:ad T:ro T:pr J:pr P:ar .",
+    /* Queued    */ "E:st . U:st . . . . . Q:br . L:no L:rf A:sa L:rf . . . . . . Q:df Q:df L:rf T:pr Q:pr . .",
+    /* Approach  */ "E:st . U:st . . . . . A:br . . L:ec . . C:lg . . . . L:ec A:df A:df L:ec . . . .",
+    /* Clear     */ "E:st . U:st . . . . . C:br . . L:ec . . . H:lg . . . L:ec C:df C:df L:ec . . . .",
+    /* Touch     */ "E:st . U:st . . . . . H:br . . L:ec . . . . A:lg F:lg . L:ec H:df H:df L:ec . . . .",
+    /* Finish    */ "E:st . U:st . . . . . F:br . . L:ec . . . . . . L:hm L:ec F:df F:df L:ec . . . .",
+    /* Unpowered */ "E:st . U:rf L:no . . . . U:rc . . . . . . . . . . . U:df U:df U:df . . . .",
+    /* Estop     */ "E:rf P:no . . . . . . . . . . . . . . . . . . E:df E:df E:df . . . .",
 };
 
 std::string token(const ArbCell& c) {
     if (c.act == ArbAct::illegal) return ".";
     static constexpr const char* kNext = "RPJTQACHFUE";
-    static constexpr std::array<const char*, 18> kAct{"",   "no", "st", "br", "rc", "qu", "rf", "sa", "lg",
-                                                      "ec", "hm", "fr", "rk", "df", "ro", "pr", "ar", "ad"};
+    static constexpr std::array<const char*, 19> kAct{"",   "no", "st", "br", "rc", "qu", "rf", "sa", "lg",
+                                                      "ec", "hm", "fr", "rk", "df", "ro", "pr", "ar", "ad", "en"};
     std::string t(1, c.layer ? 'L' : kNext[size_t(c.next)]);
     return t + ":" + kAct[size_t(c.act)];
 }
@@ -489,6 +489,32 @@ TEST_CASE("cells: a window edit or adoption in every mode outside a cycle is the
         edit(*jogRig(), ArbMode::Jog);
         edit(*returningRig(), ArbMode::Returning);
     }
+}
+
+TEST_CASE("cells: a stream taken at rest outside the window enters by a glide at the jog set; inside it, no cell (val-xvq0)") {
+    NoIllegal guard;
+    auto r = homedRig();
+    r->arb.setWindow(100.0f, 300.0f, 400.0f, WindowPost::adopt);
+    r->run(1000);
+    REQUIRE(r->census().position_mm < 100.0f);
+    auto segment = [&](float mm) {
+        MotionIntent in;
+        in.source = MotionSource::Stream;
+        in.target_mm = mm;
+        in.duration_us = 100'000;
+        in.anchor_us = g_now_us + 60'000;
+        in.expect_us = 500'000;
+        return r->arb.accept(in, g_now_us);
+    };
+    const int was = g_hits[size_t(ArbMode::Run)][size_t(ArbEvent::StreamEnter)];
+    REQUIRE(segment(150.0f));
+    CHECK(g_hits[size_t(ArbMode::Run)][size_t(ArbEvent::StreamEnter)] == was + 1);
+    CHECK(r->mode() == ArbMode::Run);
+    r->run(6'000'000);
+    CHECK(r->census().glides == 1);
+    CHECK(std::fabs(r->census().position_mm - 150.0f) <= 2.0f * kMmPerStep);
+    REQUIRE(segment(200.0f));
+    CHECK(g_hits[size_t(ArbMode::Run)][size_t(ArbEvent::StreamEnter)] == was + 1);
 }
 
 TEST_CASE("cells: a window edit or adoption under ESTOP or with the power off is held, and applied on the release or the power") {

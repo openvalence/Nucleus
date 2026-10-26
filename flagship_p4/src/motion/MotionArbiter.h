@@ -56,6 +56,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 #include "ValenceMotion.h"
 #include "hub/valence_config.h"
@@ -315,8 +316,9 @@ enum class ArbEvent : uint8_t {
     Return,         // a RETURN request taken, its plan accepted
     ReturnFailed,   // taken, its plan refused
     ReturnArrived,  // the RETURN plan at rest
+    StreamEnter,    // a Stream intent taken at rest with the carriage outside the window (bd val-xvq0)
 };
-inline constexpr size_t kArbEvents = size_t(ArbEvent::ReturnArrived) + 1;
+inline constexpr size_t kArbEvents = size_t(ArbEvent::StreamEnter) + 1;
 
 // What the code at the event's point does. The table names it; that code is
 // the action, so a cell and its call site never disagree on what runs.
@@ -339,6 +341,7 @@ enum class ArbAct : uint8_t {
     planReturn,  // a jog-set plan to the paused position
     arrive,      // override dropped, the return counted
     adopt,       // recheck, but nothing starts a glide: a carriage outside waits for the next command
+    enter,       // a glide at the jog set to the intent's target; the stream joins after it, re-timed
 };
 
 // layer: the next mode is the one the SPEC 11.1 latches name (layer() in the
@@ -490,6 +493,11 @@ inline constexpr ArbRule kRules[] = {
     {M::Returning, E::ReturnFailed, to(M::Jog, A::planReturn)},
     {M::HomeQueued, E::ReturnFailed, to(M::HomeQueued, A::planReturn)},   // race
     {M::Returning, E::ReturnArrived, to(M::Paused, A::arrive)},
+    // A stream started or resumed with the carriage outside the window (bd
+    // val-xvq0): it enters at the jog set, as a jog from outside and a window
+    // edit's glide do, never at the input set on the author's clock. Only Run
+    // feeds a stream.
+    {M::Run, E::StreamEnter, to(M::Run, A::enter)},
 };
 
 constexpr bool rulesUnique() {
@@ -559,7 +567,7 @@ inline constexpr std::array<const char*, kArbEvents> kArbEventNames{
     "estop", "release", "power off", "power on", "pause", "resume", "override", "override off", "brake",
     "home request", "home cancel", "home abort", "home start", "home moving", "home contact", "home cleared",
     "home datum", "home measured", "home done", "home fail", "window edit", "window adopt", "reorigin", "return",
-    "return failed", "return arrived"};
+    "return failed", "return arrived", "stream enter"};
 
 // The transition log's burst: this many lines per window, the rest counted.
 inline constexpr uint32_t kArbLogBurst = 8;
@@ -664,6 +672,23 @@ inline constexpr uint64_t kSegmentSeamUs = 16000;
 constexpr bool segmentContinues(uint64_t start_us, uint64_t newest_us, bool newest_rests) {
     return !newest_rests && start_us > newest_us && start_us - newest_us <= kSegmentSeamUs;
 }
+
+// The bounded catch-up (bd val-6ee8, val-xvq0): a stream re-timed after a
+// starvation brake or an entry glide runs behind its stamps by a lag, which
+// shrinks by at most kCatchUpShare of each later span, so a span renders at
+// most 1 / (1 - kCatchUpShare), 1.11 times, its authored chord, and no span
+// faster than that times the fastest chord the stream authored in the last
+// kCatchUpChordWindowUs. Constraint: keep the share under 0.5, so a span keeps
+// at least half its time; larger is a faster lurch, smaller a longer lag.
+// Story: motion-control.md, the Kinetic boundary.
+inline constexpr float    kCatchUpShare = 0.1f;
+inline constexpr uint64_t kCatchUpChordWindowUs = 1'000'000;
+// The first re-timed span leaving a rest (the brake's, the glide's) takes this
+// many times its authored duration: a through point's curve from rest peaks at
+// 4/3 of its chord (the cubic's, ending at the chord), 1.09 at a quarter
+// longer. Constraint: not under 1.2 (1.125 of the chord), measured 1.35 at 1.
+inline constexpr float    kCatchUpRestStretch = 1.25f;
+static_assert(kCatchUpShare > 0.0f && kCatchUpShare < 0.5f, "a span keeps at least half its time");
 
 class MotionArbiter {
 public:
@@ -837,6 +862,9 @@ public:
     // Planner task. The expectation the engine holds (Engine::expect), engine
     // clock; 0 when none. For host tests; nothing on the board calls it.
     uint64_t expectUntil() const { return _k2_expect_us; }
+    // Planner task. How far the stream renders behind its stamps (the bounded
+    // catch-up, bd val-6ee8); 0 on the author's clock. For host tests.
+    uint64_t catchUpLagUs() const { return _cu.lag_us; }
     // Any task: the mode the planner applied last (ArbMode).
     ArbMode arbMode() const { return _mode.load(); }
     float winMin() const { return _win_min; }
@@ -940,7 +968,8 @@ private:
     // (aim NaN); a glide that would leave the rail stops inside it first and
     // glides from that rest. It is the connector over the engine held at its
     // rest, as a refused plan's stop is: every intent is refused until it
-    // ends, the strip's frame widened to the glide's extent meanwhile.
+    // ends (but an entry glide's own stream segments, streamEnter()), the
+    // strip's frame widened to the glide's extent meanwhile.
     void glideIn(float aim_mm, const char* why, bool from_rest);
     // The glide from s at at_us (mm, absolute times) into [lo, hi], and when
     // its converge ends (at_us when it has none); false when it does not fit
@@ -1088,6 +1117,27 @@ private:
     // The Kinetic² boundary (MotionArbiter.cpp): an intent becomes a knot, a
     // brake or a refusal here and nowhere else.
     bool submitKnots(float target_norm, const MotionIntent& in, const EngineLimits& lim, uint64_t now_us);
+    // The bounded catch-up (kCatchUpShare), planner task only. Kept while the
+    // stream's knots render, across the at-rest reset of a starved stream
+    // inside its expectation, and through an entry glide; dropped by any
+    // other rebasing reset, a brake and a non-segment intent.
+    struct CatchUp {
+        uint64_t lag_us = 0;          // the render behind the stamps
+        uint64_t until_us = 0;        // the newest segment's expectation
+        uint64_t chord_at_us = 0;     // when chord_mm_s was authored
+        float    chord_mm_s = 0.0f;   // the fastest authored chord in kCatchUpChordWindowUs
+        float    auth_mm = std::numeric_limits<float>::quiet_NaN();   // the last segment's target
+        bool     entry = false;       // an entry glide took the first segment
+        bool     joins = false;       // the stream's segments are taken during that glide
+    };
+    // A Stream segment's start and duration on the render's clock, from its
+    // stamps and the lag `was` held before this submit (idle: nothing
+    // pending or moving then).
+    void retimeSegment(const MotionIntent& in, float target_norm, bool starved, bool idle, const CatchUp& was,
+                       uint64_t now_us, uint64_t& start_us, uint32_t& dur_us);
+    // A Stream intent at rest with the carriage outside the window: the
+    // StreamEnter cell's glide (bd val-xvq0). True when it took the intent.
+    bool streamEnter(float target_mm, const MotionIntent& in, uint64_t now_us);
     // The one door to the engine's stateAt(): records the brake the engine
     // takes from a knot that ends the timeline still moving (RFC-105 (dd)).
     kinetic2::State sampleEngine(uint64_t now_us);
@@ -1263,6 +1313,7 @@ private:
     uint64_t _k2_brake_from_us = 0, _k2_brake_to_us = 0;
     float    _k2_brake_from_p  = 0.0f, _k2_brake_to_p = 0.0f;
     bool     _k2_starved = false;
+    CatchUp  _cu;
     bool     _k2_chase = false;           // the newest knot is a sample's
     bool     _k2_window_clamped = false;  // the last plan's target was window-clamped
     bool     _k2_dirty = false;           // submitted since the last sample: it solves

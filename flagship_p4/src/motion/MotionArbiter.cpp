@@ -574,7 +574,10 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
             break;
     }
     // A refused plan's stop (handover()) renders to its end: nothing joins it.
-    if (now_us < _held_until_us) {
+    // An entry glide's stream does (bd val-xvq0): its segments are taken
+    // meanwhile and re-timed past the glide's end (retimeSegment()).
+    const bool joins = _cu.joins && !_glide_req && in.source == MotionSource::Stream && in.duration_us > 0;
+    if (now_us < _held_until_us && !joins) {
         ++_rejected;
         if (_glide_req || gliding(now_us)) GLOGW_EVERY_MS(1000, kTag, "REJECT: gliding into the travel window");
         else GLOGW_EVERY_MS(1000, kTag, "REJECT: a late plan's stop is braking to rest");
@@ -648,7 +651,37 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
     // Manual point move is the ratified exception and plans AT the jog set.
     // TODO(val-091.4): the soft-start cap, which shapes the INPUT set only and
     // has no source to shape yet.
+    // A segment stream only: its spans re-time past the glide. A sample stream
+    // has no span to re-time and enters by its chase, at the input set.
+    if (in.source == MotionSource::Stream && in.duration_us > 0 && streamEnter(target, in, now_us)) return true;
     return plan(target, in, limitsFor(manual), now_us);
+}
+
+bool MotionArbiter::streamEnter(float target, const MotionIntent& in, uint64_t now_us) {
+    // At rest only: a stream already moving the carriage carries it in, and
+    // nothing glides unhomed or under override (THE GLIDE).
+    if (!_homed || _rail_frame || _engine.pending() > 0 || joining(now_us) || _engine.isBusy(now_us)) return false;
+    const float p = positionMm();
+    const float lo = _win_min > 0.0f ? _win_min : 0.0f;
+    const float hi = _win_max < _rail ? _win_max : _rail;
+    if (p >= lo - kMmPerStep && p <= hi + kMmPerStep) return false;
+    const char* why = "a stream started outside the travel window";
+    if (apply(ArbEvent::StreamEnter, why, now_us) != ArbAct::enter) return false;
+    _win_old_min = _win_min;   // the glide's log line: the window did not move
+    _win_old_max = _win_max;
+    glideIn(target, why, true);
+    // The glide takes this segment to its target; the stream joins after
+    // it, its next span re-timed past the glide's end.
+    CatchUp cu;
+    cu.entry = cu.joins = true;
+    cu.auth_mm = target;
+    cu.until_us = now_us + std::max<uint64_t>(in.expect_us, kCatchUpChordWindowUs);
+    _cu = cu;
+    ++_intents;
+    _k2_window_clamped = target != in.target_mm;
+    _demand_mm = target;
+    _stream = true;
+    return true;
 }
 
 bool MotionArbiter::plan(float target, const MotionIntent& in, const EngineLimits& lim, uint64_t now_us) {
@@ -705,6 +738,7 @@ void MotionArbiter::resetEngine(float p_norm, uint64_t now_us, bool rebase) {
         _held_until_us = 0;
         _glide_req = _glide_again = false;
         _glide_end_us = 0;
+        _cu = CatchUp{};
         _strip_gen.fetch_add(1);
     }
     _eng_lo   = frameLo();
@@ -781,6 +815,7 @@ void MotionArbiter::windowEdited(ArbAct act, uint64_t now_us) {
 }
 
 void MotionArbiter::glideIn(float aim_mm, const char* why, bool from_rest) {
+    _cu.joins = false;   // only an entry glide's stream joins it (streamEnter())
     _glide_req = true;
     _glide_rest = from_rest;
     _glide_again = false;
@@ -864,6 +899,7 @@ bool MotionArbiter::brakeEngine(uint64_t at_us) {
     const kinetic2::Profile pr = kinetic2::Profile::brake(s, at_us, _engine.config().limits);
     _engine.brake(at_us);
     setExpect(0);
+    _cu = CatchUp{};
     _k2_dirty = true;
     _k2_brake_from_us = at_us;
     _k2_brake_from_p  = s.p;
@@ -922,8 +958,12 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     // bundle must not solve once per sample.
     // Never under a connector: the trajectory still moves toward the
     // engine's rest, and the new knot plans from that rest.
-    if (_engine.pending() == 0 && !joining(now_us) && !_engine.isBusy(now_us))
-        resetEngine(toNorm(positionMm()), now_us);
+    // The starvation brake and the catch-up as they stood before that reset,
+    // which drops both: a starved stream's next span re-times from them.
+    const bool starved = _k2_starved;
+    const CatchUp cu_was = _cu;
+    const bool idle = _engine.pending() == 0 && !joining(now_us) && !_engine.isBusy(now_us);
+    if (idle) resetEngine(toNorm(positionMm()), now_us);
 
     // Engine::expect, after the reset above (a reset clears it): a Stream
     // segment's free knot renders through while more segments are expected;
@@ -931,6 +971,7 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     // the expectation. Never a sample's: the kernel ignores samples.
     const bool streamed = in.source == MotionSource::Stream && in.duration_us > 0 && in.expect_us > 0;
     setExpect(streamed ? now_us + in.expect_us : 0);
+    if (in.source != MotionSource::Stream || in.duration_us == 0) _cu = CatchUp{};
 
     // A generator's stop arrives as a point at its braking distance; it
     // renders as the brake itself.
@@ -946,8 +987,12 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
         // its duration with the sender's end velocity. A start past the
         // newest knot and past the seam (segmentContinues()) leaves a gap the
         // sender meant as a rest, so the curve holds until the start.
-        const uint64_t start = in.anchor_us > now_us ? in.anchor_us : now_us;
-        if (in.source == MotionSource::Stream) noteArrival(in.anchor_us, now_us);
+        uint64_t start = in.anchor_us > now_us ? in.anchor_us : now_us;
+        uint32_t dur = in.duration_us;
+        if (in.source == MotionSource::Stream) {
+            noteArrival(in.anchor_us, now_us);
+            retimeSegment(in, p, starved, idle, cu_was, now_us, start, dur);
+        }
         // A start within a tick of the newest knot IS that knot: the sender
         // tiled its spans and two of its clock reads moved the stamp by
         // microseconds. Held there, a span ending moving stopped dead in one
@@ -976,7 +1021,7 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
             _k2_newest_us = start;
             _k2_dirty = true;
         }
-        k = kinetic2::knotFromSegment(p, in.duration_us, in.has_end_vel, in.end_vel_mm_s / span(), start);
+        k = kinetic2::knotFromSegment(p, dur, in.has_end_vel, in.end_vel_mm_s / span(), start);
         _k2_chase = false;
     } else if (manual) {
         // Motion the jog set did not plan (a stream, a pattern, segments) is
@@ -1030,6 +1075,58 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     if (_k2_starved) _k2_brake_to_us = 0;
     _k2_starved = false;
     return true;
+}
+
+void MotionArbiter::retimeSegment(const MotionIntent& in, float p, bool starved, bool idle, const CatchUp& was,
+                                  uint64_t now_us, uint64_t& start_us, uint32_t& dur_us) {
+    // The lag holds while the stream's knots render, never dropped under
+    // them (a knot before the newest is refused); at rest it holds only for
+    // the entry glide's stream and a starved stream inside its expectation.
+    const bool keep = !idle || was.entry || (starved && now_us <= was.until_us);
+    CatchUp cu = keep ? was : CatchUp{};
+    const float to_mm = toMm(p);
+    if (!std::isnan(cu.auth_mm)) {
+        const float chord = std::fabs(to_mm - cu.auth_mm) / (float(in.duration_us) * 1e-6f);
+        if (chord >= cu.chord_mm_s || now_us - cu.chord_at_us > kCatchUpChordWindowUs) {
+            // ponytail: the window's max is replaced when it ages out, not by
+            // the next fastest in it; that only lowers the cap.
+            cu.chord_mm_s = chord;
+            cu.chord_at_us = now_us;
+        }
+    }
+    cu.auth_mm = to_mm;
+    cu.until_us = now_us + std::max<uint64_t>(in.expect_us, kCatchUpChordWindowUs);
+    // The first span after a starvation brake or an entry glide renders at its
+    // authored duration from where the plan is free: past the reaction
+    // horizon, and past the glide.
+    const bool first = starved || cu.entry;
+    const uint64_t had = cu.lag_us;
+    if (first) {
+        const uint64_t free_us = std::max(now_us + _react_us_now, cu.joins ? _glide_end_us : uint64_t(0));
+        if (free_us > in.anchor_us + cu.lag_us) cu.lag_us = free_us - in.anchor_us;
+        cu.entry = false;
+    }
+    if (cu.lag_us > 0) {
+        const uint64_t authored_end = in.anchor_us + in.duration_us;
+        uint64_t span = in.duration_us;
+        if (!first) span -= std::min<uint64_t>(cu.lag_us, uint64_t(float(in.duration_us) * kCatchUpShare));
+        else if (_k2_brake_to_us <= in.anchor_us + cu.lag_us) span = uint64_t(float(span) * kCatchUpRestStretch);
+        // Never faster than 1 / (1 - share) of the stream's fastest chord,
+        // from wherever the span leaves (a brake's rest, the glide's end).
+        if (cu.chord_mm_s > 0.0f) {
+            const float d = std::fabs(to_mm - toMm(_k2_newest_p));
+            span = std::max(span, uint64_t(d * (1.0f - kCatchUpShare) / cu.chord_mm_s * 1e6f));
+        }
+        start_us = std::max(in.anchor_us + cu.lag_us, now_us);
+        dur_us = uint32_t(span);
+        cu.lag_us = start_us + span > authored_end ? start_us + span - authored_end : 0;
+    }
+    if (first && cu.lag_us > 0)
+        GLOGI_EVERY_MS(1000, kTag, "CATCH-UP: %lu ms behind the stamps after %s", static_cast<unsigned long>(cu.lag_us / 1000),
+                       starved ? "a starvation brake" : "the entry glide");
+    else if (had > 0 && cu.lag_us == 0)
+        GLOGI_EVERY_MS(1000, kTag, "CATCH-UP: back on the stamps");
+    _cu = cu;
 }
 
 void MotionArbiter::noteArrival(uint64_t start_us, uint64_t now_us) {

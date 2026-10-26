@@ -30,6 +30,29 @@ free last knot keeps its secant and is braked past, RFC-105 (dd)), stretched,
 never trimmed; a generator's stop and PAUSE are the arbiter's brake, which
 refuses a knot due before its end; a timeline that runs dry still moving is
 the engine's own brake, which a new knot re-plans from (RFC-105 (dd)).
+**THE BOUNDED CATCH-UP (operator ruling 2026-10-26, bd val-6ee8;
+`MotionArbiter::retimeSegment()`).** The first Stream segment accepted
+during or after that brake is re-timed: its start moves later by the lag,
+from its stamped start (the brake's start, on a tiled stream) to its
+acceptance plus the reaction horizon, so its span renders at its authored
+duration from the braking state, `kCatchUpRestStretch` (1.25) times it
+when it leaves a rest (a through point's curve from rest peaks at 4/3 of
+its chord). Every later segment of the stream moves by the lag still held,
+which shrinks by at most `kCatchUpShare` (a tenth) of each span, so a span
+renders at most 1.11 times its authored chord, and no span faster than 1.11
+times the fastest chord the stream authored in the last
+`kCatchUpChordWindowUs` (1 s); never past a ceiling, which the engine
+holds. The lag holds while the stream's knots render (dropping it under
+them would put a knot before the newest), across a starved stream's
+at-rest reset inside its expectation and through an entry glide (below); any
+other rebasing reset, a brake and a non-segment intent drop it. A stream
+that never starves never re-times. Wire-visible: none (a plan.flags bit
+would be a registry RFC) [verified 2026-10-26 -- test_motion_arbiter
+val-6ee8: the arcade stream (250 mm/s chords, 100 ms spans, 60 ms lead)
+held back 120 to 300 ms at three phases: peak 1.09 to 1.13 of its unstarved
+render, 1.16 to 1.20 of the chord (1.8 to 3.3 of the chord before), the lag
+(79 to 239 ms) back to 0, no piece over a ceiling; the unstarved run's
+velocity trace bit-identical before and after].
 A Stream segment arms the engine's expectation (`Engine::expect`) until its
 arrival plus the hub's quiet window, the larger of `stream_quiet_release_ms`
 and the grant's schedule horizon (`MotionIntent::expect_us`), so its free knot
@@ -79,7 +102,8 @@ trajectory, not modes. A cell with no rule is held, logged and counted (census
 (`arb_transitions`) [verified 2026-10-24 -- test_arbiter_table: every cell
 against the audited grid, 62 of 62 legal cells reached at runtime, 13
 race-only (75 of 75 with the window-edit cells, 2026-10-25, bd val-5ozv.2;
-86 of 86 with the window-adopt cells, bd val-5ozv.5);
+86 of 86 with the window-adopt cells, bd val-5ozv.5; 87 of 87 with the
+stream-enter cell, 2026-10-26, bd val-xvq0);
 test_motion_arbiter unchanged and passing with every illegal cell
 aborting (MOTION_ARB_STRICT); kinetic_trace.json byte-identical].
 
@@ -283,7 +307,8 @@ window is solved at the next sample, and the sampler evaluates it.
   under (`Profile::converge`), then the jog set's fastest move to rest where
   it would stop, held in the window (`Profile::point`), as the connector over
   the engine reset at that rest; a glide that would leave the rail stops
-  inside it first and glides from that rest. Intents wait for its end; the
+  inside it first and glides from that rest. Intents wait for its end (an
+  entry glide's own stream segments excepted, below); the
   strip's frame (the wall, the clamp, the fence) is widened to its extent
   meanwhile. A wall at rest with the engine's own rest past the frame (a
   PAUSE brake planned past the edge, bd val-vj1j) glides the engine in from
@@ -302,16 +327,32 @@ window is solved at the next sample, and the sampler evaluates it.
   cycle, and a trial revert. `ArbEvent::WindowAdopt` is its own event, and
   its act (`ArbAct::adopt`) is recheck that never starts a glide: a carriage
   the adopted window leaves outside waits there (one `WINDOW` line, "adopted,
-  waits outside"), and the first command plans from
-  its live state into the window through the handover at its own set. A
+  waits outside"), and the first command brings it in at the jog set: a
+  jog as planned, a segment stream by **THE STREAM ENTRY (operator ruling
+  2026-10-26, bd val-xvq0)**: `ArbEvent::StreamEnter`, legal in Run only
+  (the one mode a stream feeds), taken when a Stream segment arrives with
+  nothing pending or moving and the carriage outside the window by more
+  than a step; its act (`ArbAct::enter`) is a glide from that rest to the
+  segment's target held in the window, which takes the segment. The
+  stream's later segments are taken during the glide (no other intent is)
+  and re-timed past its end by the bounded catch-up above, the first one
+  leaving the glide's rest, so no catch-up lurch follows the glide. A sample
+  stream has no span to re-time and still enters by its chase, at the input
+  set. An adoption itself still moves nothing. A
   glide already in flight re-aims; an edit taken after an adoption that had
   not applied yet judges the carriage against the adopted window. A
   cycle, ESTOP and a power loss defer an adoption as they defer an edit
   [verified 2026-10-25 -- test_motion_arbiter, the window-adoption cases: the
   bench's boot (homed at 0, window [55, 255]) moves no step in 3 s whichever
-  post the planner takes first, a stream segment then enters inside the input
-  set and stays in, a jog inside the jog set; test_valence_device
-  VD-WIN-POST; test_arbiter_table, every cell].
+  post the planner takes first, a jog inside the jog set; test_valence_device
+  VD-WIN-POST; test_arbiter_table, every cell; 2026-10-26 -- a stream
+  segment then glides in inside the jog set and stays in (it entered at the
+  input set before, the case that ratified it changed); val-xvq0, the
+  bench's arcade (106.8 mm/s chords, input 1200 mm/s, 1e5 mm/s^2, 2e7
+  mm/s^3, jog 200 mm/s, 400 mm/s^2) from 0 under 55..268.7: entry peak 154
+  mm/s (1195 before), then 1.11 of the same stream's render from inside the
+  window (126 against 113 mm/s; 700 before), the 637 ms lag back to 0, no
+  piece over a ceiling].
 - **A late tick is a stall, never a burst (bd val-1w8).** Every steer is
   priced over at most `kTickDtCapS`, two `kMotionTickUs`, so none exceeds the
   vmax of the set the plan in flight was planned under (the jog set's for a
