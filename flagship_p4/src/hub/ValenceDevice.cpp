@@ -639,7 +639,9 @@ Ret ValenceDevice::applyIntent(uint16_t channel_id, const IntentValueMap& reques
     if (channel_id == channels::safety_intents) return applySafety(requested);
     if (channel_id == channels::provisioning) return applyNetworks(requested);
     if (channel_id != ch::config_set) return Ret::err(NackCode::UNSUPPORTED_OP);
-    return durable(applyConfig(requested, cfgChanged));
+    const Ret r = durable(applyConfig(requested, cfgChanged));
+    if (r && cfgChanged) _windowEditOwed = true;
+    return r;
 }
 
 // 0x000F reaches the delegate only from a network binding: the credential
@@ -2032,10 +2034,10 @@ void ValenceDevice::publishMachineConfig() {
     _cfgEverSent = true;
 }
 
-void ValenceDevice::pushConfigToMotion() const {
+void ValenceDevice::pushConfigToMotion(WindowPost post) const {
     motionSetCommissioned(commissioned(_modes));
     motionSetFlipped(_modes.flipped);
-    motionSetWindow(_cfg.window_min, _cfg.window_max, _cfg.max_rail);
+    motionSetWindow(_cfg.window_min, _cfg.window_max, _cfg.max_rail, post);
     motionSetJogLimits(_cfg.jog_speed, _cfg.jog_accel);
     motionSetInputLimits(_cfg.input_speed, _cfg.input_accel, _cfg.input_jerk);
 }
@@ -2522,7 +2524,8 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
         _patDirty = true;
     }
     if (dirty || (_cfgEverSent && !(_lastPublishedCfg == _cfg))) {
-        pushConfigToMotion();
+        pushConfigToMotion(_windowEditOwed ? WindowPost::edit : WindowPost::adopt);
+        _windowEditOwed = false;
         publishMachineConfig();
         _patDirty = true;   // the stroke frame is this config's window
         // RFC-011: a hub-side change bumps after its STATE is out. A client

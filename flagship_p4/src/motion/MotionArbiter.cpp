@@ -359,7 +359,7 @@ ReturnStart MotionArbiter::returnToPause() {
     return ReturnStart::arrived;
 }
 
-void MotionArbiter::setWindow(float lo, float hi, float rail) {
+void MotionArbiter::setWindow(float lo, float hi, float rail, WindowPost post) {
     if (!(std::isfinite(hi - lo) && std::isfinite(rail))) return;   // the span is a divisor (limitsFor)
     if (!(hi > lo)) return;
     // The flag before the post: raised after it, a planner that applied the
@@ -369,6 +369,7 @@ void MotionArbiter::setWindow(float lo, float hi, float rail) {
     _win_req_lo.store(lo);
     _win_req_hi.store(hi);
     _win_req_rail.store(rail > 0.0f ? rail : DEFAULT_MAX_RAIL_MM);
+    _win_req_edit.store(post == WindowPost::edit);
     _win_seq.fetch_add(1);   // even: whole
 }
 
@@ -383,11 +384,16 @@ bool MotionArbiter::takeWindow() {
     const float lo   = _win_req_lo.load();
     const float hi   = _win_req_hi.load();
     const float rail = _win_req_rail.load();
+    const bool edit  = _win_req_edit.load();
     if (_win_seq.load() != seq) return false;   // rewritten while read
     _win_taken = seq;
     // The window the edit replaces: the first post since the last edit
-    // applied (windowEdited()).
-    if (!_win_old_valid) {
+    // applied (windowEdited()), or the adoption an edit follows before it
+    // applied, so a carriage outside the adopted window counts as outside
+    // before the edit.
+    const bool after_adopt = _win_old_valid && _win_adopt;
+    _win_adopt = !edit;
+    if (!_win_old_valid || (edit && after_adopt)) {
         _win_old_valid = true;
         _win_old_min   = _win_min;
         _win_old_max   = _win_max;
@@ -712,7 +718,9 @@ void MotionArbiter::holdWindow(const char* until, uint64_t now_us) {
     _win_held = true;
     ++_window_held;
     const bool origin = _origin_moved;
-    apply(origin ? ArbEvent::Reorigin : ArbEvent::WindowEdit, until, now_us);
+    // A cycle holds the post untaken (takeWindow()): its kind is the post's.
+    const bool adopt = _homing.load() ? !_win_req_edit.load() : _win_adopt;
+    apply(origin ? ArbEvent::Reorigin : adopt ? ArbEvent::WindowAdopt : ArbEvent::WindowEdit, until, now_us);
     GLOGI(kTag, "WINDOW: %s in %s, held until %s", origin ? "a force_home" : "an edit",
           kArbModeNames[size_t(mode())], until);
 }
@@ -731,7 +739,7 @@ void MotionArbiter::windowEdited(ArbAct act, uint64_t now_us) {
     const float p = toMm(e.p), v = e.v * span();
     auto out = [](float x, float a, float b) { return x < a - kMmPerStep || x > b + kMmPerStep; };
     // The paused position, the RETURN's target, is held in the new window.
-    if (act == ArbAct::recheck) {
+    if (act == ArbAct::recheck || act == ArbAct::adopt) {
         const float was = _pause_pos_mm.load();
         const float held = std::clamp(was, lo, hi);
         if (held != was) {
@@ -747,8 +755,9 @@ void MotionArbiter::windowEdited(ArbAct act, uint64_t now_us) {
     // Past the carriage: the edit put it outside, and nothing in flight
     // carries it in (knots pending, the jog re-clamped, never moving away
     // from the window); or a glide is in flight. Nothing glides unhomed:
-    // its position is not the machine's.
-    const bool past = out(p, lo, hi) && !out(p, olo, ohi);
+    // its position is not the machine's. An adoption starts none: only a
+    // glide already in flight re-aims.
+    const bool past = act != ArbAct::adopt && out(p, lo, hi) && !out(p, olo, ohi);
     const bool away = (p > hi && v > 1.0f) || (p < lo && v < -1.0f);
     const bool carried = (jog || _engine.pending() > 0) && !away;
     if (_homed && !_rail_frame && (_glide_req || gliding(now_us) || (past && !carried))) {
@@ -764,7 +773,11 @@ void MotionArbiter::windowEdited(ArbAct act, uint64_t now_us) {
     }
     GLOGI_EVERY_MS(1000, kTag, "WINDOW: [%.1f, %.1f] -> [%.1f, %.1f] mm in %s, carriage %.2f mm: %s",
                    double(_win_old_min), double(_win_old_max), double(_win_min), double(_win_max),
-                   kArbModeNames[size_t(mode())], double(p), jog ? "the jog re-clamped" : "re-planned in place");
+                   kArbModeNames[size_t(mode())], double(p),
+                   jog                       ? "the jog re-clamped"
+                   : act != ArbAct::adopt    ? "re-planned in place"
+                   : out(p, lo, hi)          ? "adopted, waits outside"   // no longer: the line must fit kMsgBytes
+                                             : "adopted");
 }
 
 void MotionArbiter::glideIn(float aim_mm, const char* why, bool from_rest) {
@@ -1319,12 +1332,15 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
         ArbAct act = ArbAct::none;
         if (homing) homeEnd(ArbEvent::Reorigin, "force_home re-origined the count", now_us);
         else if (origin_moved) act = apply(ArbEvent::Reorigin, "force_home re-origined the count", now_us);
+        else if (_win_adopt) act = apply(ArbEvent::WindowAdopt, "the stored window adopted", now_us);
         else act = apply(ArbEvent::WindowEdit, "the travel window changed", now_us);
         if (reset) resetEngine(toNorm(positionMm()), now_us);
         else reseedEngine(now_us);
         // A pass with no post taken (a write in progress) moved nothing.
-        if (_win_old_valid && (act == ArbAct::reframe || act == ArbAct::recheck)) windowEdited(act, now_us);
+        if (_win_old_valid && (act == ArbAct::reframe || act == ArbAct::recheck || act == ArbAct::adopt))
+            windowEdited(act, now_us);
         _win_old_valid = false;
+        _win_adopt = false;
         if (reset) return false;
     }
 

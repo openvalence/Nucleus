@@ -2,6 +2,18 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.69 (2026-10-25)
+
+### For users
+
+- **The carriage no longer moves by itself at start-up.** Since 0.1.67 every start glided the carriage about 55 mm when the saved stroke window did not include the position it started at. Now the saved window is taken as it is at start-up, after homing and when a trial setting reverts: a carriage outside it waits there, and the first command (a jog, a stream, a pattern) brings it in at that command's own speed and smoothness. Only a stroke window you change while the carriage is inside the old one still glides it in.
+
+### Technical
+
+- **`ArbEvent::WindowAdopt`** (val-5ozv.5, operator ruling 2026-10-25: motion is only ever commanded). `setWindow()` takes a `WindowPost` (`edit` or `adopt`, default `adopt`). The hub passes `edit` only for the push after a session's own config-set (trials included) and `adopt` for the boot push, the measured rail after a home cycle and a trial revert. The adopt cells (Run, Paused, Jog, Returning) run `ArbAct::adopt`: recheck that never starts a glide (a glide already in flight re-aims), logging `WINDOW: ... adopted, waits outside`; a cycle, ESTOP and power loss defer it as they defer an edit. An edit taken after an adoption that had not applied yet judges the carriage against the adopted window. The table is 11 modes by 26 events.
+- **Cause.** On the bench the planner applied force_home's re-origin in one tick and the boot's window post in a later one, so the post was a `WindowEdit` that left the homed carriage at 0 outside [55, ...] and glided it. Both posts in one tick took the `Reorigin` cell and did not glide, so the move depended on task timing.
+- **Tests.** `test_arbiter_table` checks the new column and drives every window case with both posts (86 of 86 legal cells reached). `test_motion_arbiter`: the bench's boot moves no step in 3 s whichever post the planner takes first, then a stream segment enters the window inside the input set and stays in; a jog from outside comes in at the jog set; an adoption after a home cycle moves nothing, and neither does an edit after it with the carriage still outside. `test_valence_device` VD-WIN-POST: a config-set and a trial are edits, a revert and the measured rail adopt. `kinetic_trace.json` unchanged.
+
 ## 0.1.68 (2026-10-25)
 
 ### For users

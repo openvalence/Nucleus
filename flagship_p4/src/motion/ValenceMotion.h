@@ -403,8 +403,12 @@ void motionSetInputLimits(float speed_mm_s, float accel_mm_s2, float jerk_mm_s3)
 
 // The stroke window a Stream source is held inside, plus the physical rail
 // every source is held inside. Both come from the 0x1000 machine config, so
-// the arbiter and what 0x1000 publishes cannot disagree.
-void motionSetWindow(float min_mm, float max_mm, float rail_mm);
+// the arbiter and what 0x1000 publishes cannot disagree. edit is a session's
+// live window edit, which may glide a carriage it leaves outside in; adopt is
+// the stored window taken at boot, after homing or after a config restore,
+// which never moves the carriage (MotionArbiter.h ArbEvent::WindowAdopt).
+enum class WindowPost : uint8_t { adopt, edit };
+void motionSetWindow(float min_mm, float max_mm, float rail_mm, WindowPost post);
 
 // Stream-ingress counters for 0x1111. The hub delegate owns them -- it is the
 // only decoder of a bundle -- and pushes them here so ONE census answers the

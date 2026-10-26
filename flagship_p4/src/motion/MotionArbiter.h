@@ -309,8 +309,9 @@ enum class ArbEvent : uint8_t {
     HomeMeasured,   // the far end's re-touch stall: the final backoff
     HomeDone,       // the final backoff on its count, the line LOW: homed
     HomeFail,       // a leg ended without its stall, a stop still pressed, a short rail, a timeout
-    WindowEdit,     // a window post taken (setWindow())
-    Reorigin,       // force_home re-origined the count (forceHome())
+    WindowEdit,     // a session's live window edit taken (setWindow(), WindowPost::edit)
+    WindowAdopt,    // the stored window adopted: boot, homing, a config restore (WindowPost::adopt)
+    Reorigin,      // force_home re-origined the count (forceHome())
     Return,         // a RETURN request taken, its plan accepted
     ReturnFailed,   // taken, its plan refused
     ReturnArrived,  // the RETURN plan at rest
@@ -337,6 +338,7 @@ enum class ArbAct : uint8_t {
     reorigin,    // the engine reset at the carriage in the new origin; nothing glides
     planReturn,  // a jog-set plan to the paused position
     arrive,      // override dropped, the return counted
+    adopt,       // recheck, but nothing starts a glide: a carriage outside waits for the next command
 };
 
 // layer: the next mode is the one the SPEC 11.1 latches name (layer() in the
@@ -449,6 +451,22 @@ inline constexpr ArbRule kRules[] = {
     {M::HomeFinish, E::WindowEdit, to(M::HomeFinish, A::defer)},
     {M::Unpowered, E::WindowEdit, to(M::Unpowered, A::defer)},
     {M::Estop, E::WindowEdit, to(M::Estop, A::defer)},
+    // The stored window adopted (operator ruling 2026-10-25: motion is only
+    // ever commanded): at boot, after homing, after a config restore. Never a
+    // glide; a carriage it leaves outside waits there, and the next commanded
+    // motion brings it in through the handover. A glide already in flight
+    // re-aims into the adopted window. Held as an edit is.
+    {M::Run, E::WindowAdopt, to(M::Run, A::adopt)},
+    {M::Paused, E::WindowAdopt, to(M::Paused, A::adopt)},
+    {M::Jog, E::WindowAdopt, to(M::Jog, A::adopt)},
+    {M::Returning, E::WindowAdopt, to(M::Returning, A::adopt)},
+    {M::HomeQueued, E::WindowAdopt, to(M::HomeQueued, A::defer)},
+    {M::HomeApproach, E::WindowAdopt, to(M::HomeApproach, A::defer)},
+    {M::HomeClear, E::WindowAdopt, to(M::HomeClear, A::defer)},
+    {M::HomeTouch, E::WindowAdopt, to(M::HomeTouch, A::defer)},
+    {M::HomeFinish, E::WindowAdopt, to(M::HomeFinish, A::defer)},
+    {M::Unpowered, E::WindowAdopt, to(M::Unpowered, A::defer)},
+    {M::Estop, E::WindowAdopt, to(M::Estop, A::defer)},
     // force_home: a reset at the carriage outside a cycle, the end of one
     // inside (the hub refuses it during one, SPEC 11.1: race); held through
     // an ESTOP or a power loss.
@@ -520,8 +538,8 @@ inline constexpr std::array<const char*, kArbModes> kArbModeNames{
 inline constexpr std::array<const char*, kArbEvents> kArbEventNames{
     "estop", "release", "power off", "power on", "pause", "resume", "override", "override off", "brake",
     "home request", "home cancel", "home abort", "home start", "home moving", "home contact", "home cleared",
-    "home datum", "home measured", "home done", "home fail", "window edit", "reorigin", "return", "return failed",
-    "return arrived"};
+    "home datum", "home measured", "home done", "home fail", "window edit", "window adopt", "reorigin", "return",
+    "return failed", "return arrived"};
 
 // The transition log's burst: this many lines per window, the rest counted.
 inline constexpr uint32_t kArbLogBurst = 8;
@@ -728,8 +746,10 @@ public:
     void setInputLimits(float v, float a, float j) { _in_v = v; _in_a = a; _in_j = j; }
     // ONE WRITER, the hub task (bd val-8es): it posts the window and raises
     // the frame-move flag; the planner applies it at its next accept() or
-    // planTick(), so winMin(), winMax() and rail() read it from then on.
-    void setWindow(float lo, float hi, float rail);
+    // planTick(), so winMin(), winMax() and rail() read it from then on. Only
+    // WindowPost::edit may glide (ArbEvent::WindowAdopt): the default never
+    // moves the carriage.
+    void setWindow(float lo, float hi, float rail, WindowPost post = WindowPost::adopt);
     // RFC-103 (SPEC 9.7): the oscillator's parameters, already clamped by the
     // delegate. ONE WRITER, the hub task: a post the planner takes at its next
     // tick (takeOscillator()). The oscillator rides whatever owns the rail and
@@ -1245,7 +1265,11 @@ private:
     std::atomic<float>    _win_req_lo{0.0f};
     std::atomic<float>    _win_req_hi{0.0f};
     std::atomic<float>    _win_req_rail{0.0f};
+    std::atomic<bool>     _win_req_edit{false};
     uint32_t              _win_taken = 0;
+    // The post last taken was an adoption (WindowPost::adopt): planStep()
+    // applies ArbEvent::WindowAdopt for it. Planner task.
+    bool                  _win_adopt = false;
     // A post at or under this sequence was written before a completed cycle
     // measured the rail: taken late (a cycle holds it), it keeps the
     // measured rail. The hub pushes the measured one back as a newer post.

@@ -640,7 +640,7 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
 
     // The arbiter's window and ceilings ARE the stored config: pushed before
     // the hub exists so the first 0x1000 snapshot and the machine agree.
-    g_box->device.pushConfigToMotion();
+    g_box->device.pushConfigToMotion(WindowPost::adopt);
 
     g_box->hub.emplace(g_box->catalog, g_box->clock, g_box->rng, g_box->device);
     // cfg_gen survives the reboot with the values it belongs to (§4.2). The

@@ -260,7 +260,9 @@ HomeStart motionHome() { return g_sim.arbiter().home(); }
 void motionSetFlipped(bool on) { g_sim.arbiter().setFlipped(on); }
 void motionSetJogLimits(float v, float a) { g_sim.arbiter().setJogLimits(v, a); }
 void motionSetInputLimits(float v, float a, float j) { g_sim.arbiter().setInputLimits(v, a, j); }
-void motionSetWindow(float lo, float hi, float rail) { g_sim.arbiter().setWindow(lo, hi, rail); }
+void motionSetWindow(float lo, float hi, float rail, WindowPost post) {
+    g_sim.arbiter().setWindow(lo, hi, rail, post);
+}
 void motionNoteStream(uint32_t b, uint32_t s, uint32_t d) { g_sim.arbiter().noteStream(b, s, d); }
 float motionForceHome(float stroke_mm) { return g_sim.arbiter().forceHome(stroke_mm); }
 MotionCensus motionCensus() { return g_sim.census(); }

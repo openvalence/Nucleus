@@ -148,8 +148,9 @@ public:
     void enableRadios();
 
     // The stored config IS the arbiter's window and ceilings; this is the one
-    // door between them (C-1).
-    void pushConfigToMotion() const;
+    // door between them (C-1). WindowPost::edit only for a session's own
+    // config write (tick()); boot, homing and a trial revert adopt.
+    void pushConfigToMotion(WindowPost post) const;
 
     // HOST TWIN ONLY (neutrino-sim's commissioning posture): replaces the
     // first-run record for this run, before pushConfigToMotion(). Marks
@@ -323,6 +324,9 @@ private:
 
     StoredConfig _cfg{};
     bool _cfgDirty = false;
+    // A session's config-set changed the config since the last push: that
+    // push is a live window edit (WindowPost::edit), every other an adoption.
+    bool _windowEditOwed = false;
     // RFC-099: set while a trial write or a revert runs. Neither persists nor
     // counts toward the first-run record.
     bool _trialApply = false;

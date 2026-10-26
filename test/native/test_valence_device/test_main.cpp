@@ -137,7 +137,8 @@ bool g_flipped = false;
 void motionSetFlipped(bool on) { g_flipped = on; }
 void motionSetJogLimits(float, float) {}
 void motionSetInputLimits(float, float, float) {}
-void motionSetWindow(float, float, float) {}
+std::vector<WindowPost> g_windowPosts;
+void motionSetWindow(float, float, float, WindowPost post) { g_windowPosts.push_back(post); }
 void motionNoteStream(uint32_t, uint32_t, uint32_t) {}
 float motionForceHome(float stroke_mm) {
     ++g_forceHomes;
@@ -1390,6 +1391,32 @@ TEST_CASE("VD-TR-2: revert and a session's end restore the kinetic baseline") {
     CHECK(rig->hub->trialCount() == 0);
     // The client is gone, so the live value is read where a baseline is.
     CHECK(rig->device.trialBaseline(ch::kinetic_set, 6)->f32_val == doctest::Approx(trim0));
+}
+
+TEST_CASE("VD-WIN-POST: only a session's config write is a live window edit; a revert and the measured rail adopt") {
+    auto rig = std::make_unique<Rig>(AccessLevel::configure);
+    rig->step(50);
+    g_windowPosts.clear();
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(2, IntentValue::ofF32(200.0f))).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.empty());
+    REQUIRE(g_windowPosts.size() == 1);
+    CHECK(g_windowPosts.back() == WindowPost::edit);
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(2, IntentValue::ofF32(150.0f)), std::nullopt, false,
+                                    true).has_value());
+    rig->step();
+    REQUIRE(g_windowPosts.size() == 2);
+    CHECK(g_windowPosts.back() == WindowPost::edit);   // a trial is the session's live edit
+    REQUIRE(rig->client->sendIntent(channels::settings_trial, oneKey(1, IntentValue::ofU64(trial_ops::revert)))
+                .has_value());
+    rig->step();
+    REQUIRE(g_windowPosts.size() == 3);
+    CHECK(g_windowPosts.back() == WindowPost::adopt);
+    g_census.home_rail_mm = 180.0f;
+    ++g_census.homes;
+    rig->step();
+    REQUIRE(g_windowPosts.size() == 4);
+    CHECK(g_windowPosts.back() == WindowPost::adopt);
 }
 
 TEST_CASE("VD-TR-3: keys gated on live state refuse a trial; the flip waits for a window trial") {

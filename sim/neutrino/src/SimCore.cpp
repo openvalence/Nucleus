@@ -145,7 +145,7 @@ bool SimCore::begin(const SimConfig& opt, IClock& clock, ISimStore& store) {
                  "usable rail %.1f mm", double(farAt), double(between),
                  double(between - 2.0f * kHomeSafetyMarginMm));
     }
-    _device.pushConfigToMotion();
+    _device.pushConfigToMotion(WindowPost::adopt);
 
     _hub.emplace(_catalog, clock, _rng, _device);
     Hub& hub = *_hub;

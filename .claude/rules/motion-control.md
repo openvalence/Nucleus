@@ -74,7 +74,8 @@ trajectory, not modes. A cell with no rule is held, logged and counted (census
 `arb_illegal`); every change of mode logs one line and counts
 (`arb_transitions`) [verified 2026-10-24 -- test_arbiter_table: every cell
 against the audited grid, 62 of 62 legal cells reached at runtime, 13
-race-only (75 of 75 with the window-edit cells, 2026-10-25, bd val-5ozv.2);
+race-only (75 of 75 with the window-edit cells, 2026-10-25, bd val-5ozv.2;
+86 of 86 with the window-adopt cells, bd val-5ozv.5);
 test_motion_arbiter unchanged and passing with every illegal cell
 aborting (MOTION_ARB_STRICT); kinetic_trace.json byte-identical].
 
@@ -290,6 +291,23 @@ window is solved at the next sample, and the sampler evaluates it.
   set then inside the jog set from 15 ms on, never back outside, the stream
   after it landing on its knot with no connector; test_arbiter_table, every
   cell].
+- **Adopting the stored window is not an edit (operator ruling 2026-10-25,
+  bd val-5ozv.5: motion is only ever commanded).** The hub tags every window
+  post (`WindowPost`): `edit` only for a session's own config-set, trials
+  included; `adopt` for the boot's push, the measured rail after a home
+  cycle, and a trial revert. `ArbEvent::WindowAdopt` is its own event, and
+  its act (`ArbAct::adopt`) is recheck that never starts a glide: a carriage
+  the adopted window leaves outside waits there (one `WINDOW` line, "adopted,
+  waits outside"), and the first command plans from
+  its live state into the window through the handover at its own set. A
+  glide already in flight re-aims; an edit taken after an adoption that had
+  not applied yet judges the carriage against the adopted window. A
+  cycle, ESTOP and a power loss defer an adoption as they defer an edit
+  [verified 2026-10-25 -- test_motion_arbiter, the window-adoption cases: the
+  bench's boot (homed at 0, window [55, 255]) moves no step in 3 s whichever
+  post the planner takes first, a stream segment then enters inside the input
+  set and stays in, a jog inside the jog set; test_valence_device
+  VD-WIN-POST; test_arbiter_table, every cell].
 - **A late tick is a stall, never a burst (bd val-1w8).** Every steer is
   priced over at most `kTickDtCapS`, two `kMotionTickUs`, so none exceeds the
   vmax of the set the plan in flight was planned under (the jog set's for a

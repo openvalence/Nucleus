@@ -175,7 +175,7 @@ public:
     bool setWindow(float lo, float hi) {
         if (!(std::isfinite(lo) && std::isfinite(hi) && hi > lo && lo >= 0.0f && hi <= _params.rail))
             return false;
-        _arb.setWindow(lo, hi, _params.rail);
+        _arb.setWindow(lo, hi, _params.rail, valence::WindowPost::edit);
         _params.lo = lo;
         _params.hi = hi;
         return true;
