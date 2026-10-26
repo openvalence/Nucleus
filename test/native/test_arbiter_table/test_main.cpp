@@ -213,29 +213,30 @@ namespace {
 // NEXT: R Run, P Paused, J Jog, T Returning, Q HomeQueued, A HomeApproach,
 // C HomeClear, H HomeTouch, F HomeFinish, U Unpowered, E Estop, L the layer.
 // act: no none, st settle, br brake, rc record, qu queue, rf refuse, sa start,
-// lg leg, ec endCycle, hm homed, fr reframe, pr planReturn, ar arrive.
+// lg leg, ec endCycle, hm homed, fr reframe, rk recheck, df defer, ro reorigin,
+// pr planReturn, ar arrive.
 // Columns: estop release poweroff poweron pause resume override ovroff brake
 // homereq homecancel homeabort homestart homemoving contact cleared datum
-// measured done fail window return returnfailed arrived.
+// measured done fail window reorigin return returnfailed arrived.
 const std::array<const char*, kArbModes> kGrid{
-    /* Run       */ "E:st . U:st . P:no . J:no . P:br Q:qu . . . . . . . . . . R:fr . . .",
-    /* Paused    */ "E:st . U:st . . R:no J:no . P:br Q:qu . . . . . . . . . . P:fr . . .",
-    /* Jog       */ "E:st . U:st . . . . P:no J:br Q:qu . . . . . . . . . . J:fr T:pr J:pr .",
-    /* Returning */ "E:st . U:st . . . . . T:br . . T:rf . . . . . . . . T:fr T:pr J:pr P:ar",
-    /* Queued    */ "E:st . U:st . . . . . Q:br . L:no L:rf A:sa L:rf . . . . . . L:rf T:pr Q:pr .",
-    /* Approach  */ "E:st . U:st . . . . . A:br . . L:ec . . C:lg . . . . L:ec L:ec . . .",
-    /* Clear     */ "E:st . U:st . . . . . C:br . . L:ec . . . H:lg . . . L:ec L:ec . . .",
-    /* Touch     */ "E:st . U:st . . . . . H:br . . L:ec . . . . A:lg F:lg . L:ec L:ec . . .",
-    /* Finish    */ "E:st . U:st . . . . . F:br . . L:ec . . . . . . L:hm L:ec L:ec . . .",
-    /* Unpowered */ "E:st . U:rf L:no . . . . U:rc . . . . . . . . . . . . . . .",
-    /* Estop     */ "E:rf P:no . . . . . . . . . . . . . . . . . . . . . .",
+    /* Run       */ "E:st . U:st . P:no . J:no . P:br Q:qu . . . . . . . . . . R:fr R:ro . . .",
+    /* Paused    */ "E:st . U:st . . R:no J:no . P:br Q:qu . . . . . . . . . . P:rk P:ro . . .",
+    /* Jog       */ "E:st . U:st . . . . P:no J:br Q:qu . . . . . . . . . . J:rk J:ro T:pr J:pr .",
+    /* Returning */ "E:st . U:st . . . . . T:br . . T:rf . . . . . . . . T:rk T:ro T:pr J:pr P:ar",
+    /* Queued    */ "E:st . U:st . . . . . Q:br . L:no L:rf A:sa L:rf . . . . . . Q:df L:rf T:pr Q:pr .",
+    /* Approach  */ "E:st . U:st . . . . . A:br . . L:ec . . C:lg . . . . L:ec A:df L:ec . . .",
+    /* Clear     */ "E:st . U:st . . . . . C:br . . L:ec . . . H:lg . . . L:ec C:df L:ec . . .",
+    /* Touch     */ "E:st . U:st . . . . . H:br . . L:ec . . . . A:lg F:lg . L:ec H:df L:ec . . .",
+    /* Finish    */ "E:st . U:st . . . . . F:br . . L:ec . . . . . . L:hm L:ec F:df L:ec . . .",
+    /* Unpowered */ "E:st . U:rf L:no . . . . U:rc . . . . . . . . . . . U:df U:df . . .",
+    /* Estop     */ "E:rf P:no . . . . . . . . . . . . . . . . . . E:df E:df . . .",
 };
 
 std::string token(const ArbCell& c) {
     if (c.act == ArbAct::illegal) return ".";
     static constexpr const char* kNext = "RPJTQACHFUE";
-    static constexpr std::array<const char*, 14> kAct{"",   "no", "st", "br", "rc", "qu", "rf",
-                                                      "sa", "lg", "ec", "hm", "fr", "pr", "ar"};
+    static constexpr std::array<const char*, 17> kAct{"",   "no", "st", "br", "rc", "qu", "rf", "sa", "lg",
+                                                      "ec", "hm", "fr", "rk", "df", "ro", "pr", "ar"};
     std::string t(1, c.layer ? 'L' : kNext[size_t(c.next)]);
     return t + ":" + kAct[size_t(c.act)];
 }
@@ -358,7 +359,7 @@ TEST_CASE("cells: a forceHome under a RETURN brakes it, and the return arrives")
     r->arb.forceHome(400.0f);
     r->run(2000);
     CHECK(g_hits[size_t(ArbMode::Returning)][size_t(ArbEvent::Brake)] > 0);
-    CHECK(g_hits[size_t(ArbMode::Returning)][size_t(ArbEvent::WindowEdit)] > 0);
+    CHECK(g_hits[size_t(ArbMode::Returning)][size_t(ArbEvent::Reorigin)] > 0);
     CHECK(r->mode() == ArbMode::Paused);
 }
 
@@ -480,6 +481,94 @@ TEST_CASE("cells: a window edit in every mode outside a cycle is the motion laye
     edit(*returningRig(), ArbMode::Returning);
 }
 
+TEST_CASE("cells: a window edit under ESTOP or with the power off is held, and applied on the release or the power") {
+    NoIllegal guard;
+    {
+        auto r = homedRig();
+        r->arb.estop(true);
+        r->run(1000);
+        r->arb.setWindow(10.0f, 300.0f, 400.0f);
+        r->run(3000);
+        CHECK(r->mode() == ArbMode::Estop);
+        CHECK(g_hits[size_t(ArbMode::Estop)][size_t(ArbEvent::WindowEdit)] > 0);
+        CHECK(r->census().window_held == 1);
+        CHECK(r->census().window_edits == 0);
+        r->arb.estop(false);
+        r->run(1000);
+        CHECK(r->mode() == ArbMode::Paused);
+        CHECK(r->census().window_edits == 1);
+        CHECK(g_hits[size_t(ArbMode::Paused)][size_t(ArbEvent::WindowEdit)] > 0);
+    }
+    {
+        auto r = homedRig();
+        r->arb.setMotorPowered(false);
+        r->run(1000);
+        r->arb.setWindow(10.0f, 300.0f, 400.0f);
+        r->run(3000);
+        CHECK(r->mode() == ArbMode::Unpowered);
+        CHECK(g_hits[size_t(ArbMode::Unpowered)][size_t(ArbEvent::WindowEdit)] > 0);
+        CHECK(r->census().window_held == 1);
+        CHECK(r->census().window_edits == 0);
+        r->arb.setMotorPowered(true);
+        r->run(1000);
+        CHECK(r->mode() == ArbMode::Run);
+        CHECK(r->census().window_edits == 1);
+    }
+}
+
+TEST_CASE("cells: a force_home in every mode: a reset outside a cycle, the end of one inside, held by the latches") {
+    NoIllegal guard;
+    auto reorigin = [](Rig& r, ArbMode m, ArbMode after) {
+        INFO(valence::kArbModeNames[size_t(m)]);
+        REQUIRE(r.mode() == m);
+        r.arb.forceHome(400.0f);
+        r.run(1000);
+        CHECK(g_hits[size_t(m)][size_t(ArbEvent::Reorigin)] > 0);
+        CHECK(r.mode() == after);
+    };
+    {
+        auto r = homedRig();
+        reorigin(*r, ArbMode::Run, ArbMode::Run);
+        r->arb.pause(true);
+        r->run(1000);
+        reorigin(*r, ArbMode::Paused, ArbMode::Paused);
+    }
+    reorigin(*jogRig(), ArbMode::Jog, ArbMode::Jog);
+    for (ArbMode m : kSeekModes) {
+        auto r = seekRig(m);
+        reorigin(*r, m, ArbMode::Run);
+        CHECK_FALSE(r->census().homing);
+    }
+    {
+        auto r = std::make_unique<Rig>();
+        inQueued(*r, [&r] {
+            r->arb.forceHome(400.0f);
+            r->run(1000);
+            CHECK(r->mode() == ArbMode::Run);
+        });
+        CHECK(g_hits[size_t(ArbMode::HomeQueued)][size_t(ArbEvent::Reorigin)] > 0);
+    }
+    {
+        auto r = std::make_unique<Rig>(false);
+        r->run(1000);
+        reorigin(*r, ArbMode::Unpowered, ArbMode::Unpowered);
+        r->arb.setMotorPowered(true);
+        r->run(1000);
+        CHECK(g_hits[size_t(ArbMode::Run)][size_t(ArbEvent::Reorigin)] > 0);
+        CHECK(r->census().homed);
+    }
+    {
+        auto r = homedRig();
+        r->arb.estop(true);
+        r->run(1000);
+        reorigin(*r, ArbMode::Estop, ArbMode::Estop);
+        r->arb.estop(false);
+        r->run(1000);
+        CHECK(r->mode() == ArbMode::Paused);
+        CHECK(g_hits[size_t(ArbMode::Paused)][size_t(ArbEvent::Reorigin)] > 0);
+    }
+}
+
 // ---- home op 1 ----------------------------------------------------------------
 
 TEST_CASE("cells: a home cycle walks every phase and lands in the layer it left") {
@@ -530,7 +619,7 @@ TEST_CASE("cells: a cycle under PAUSE, and a request queued from the jog") {
     }
 }
 
-TEST_CASE("cells: a queued request withdrawn, aborted, refused in motion, ended by a window edit") {
+TEST_CASE("cells: a queued request withdrawn, aborted, refused in motion, a window edit held through its cycle") {
     NoIllegal guard;
     {
         auto r = std::make_unique<Rig>();
@@ -555,9 +644,15 @@ TEST_CASE("cells: a queued request withdrawn, aborted, refused in motion, ended 
         inQueued(*r, [&r] {
             r->arb.setWindow(0.0f, 300.0f, 300.0f);
             r->run(1000);
-            CHECK(r->mode() == ArbMode::Run);
+            CHECK(r->mode() == ArbMode::HomeQueued);
         });
         CHECK(g_hits[size_t(ArbMode::HomeQueued)][size_t(ArbEvent::WindowEdit)] > 0);
+        r->run(20'000'000);
+        CHECK(r->mode() == ArbMode::Run);
+        CHECK(r->census().homed);
+        CHECK(r->census().window_held == 1);
+        CHECK(r->census().window_edits == 1);
+        CHECK(r->arb.winMax() == doctest::Approx(300.0f));
     }
     {
         auto r = homedRig();
@@ -572,7 +667,7 @@ TEST_CASE("cells: a queued request withdrawn, aborted, refused in motion, ended 
     }
 }
 
-TEST_CASE("cells: a pause or a window edit ends a cycle in every phase") {
+TEST_CASE("cells: a pause ends a cycle in every phase; a window edit is held to its end, the measured rail kept") {
     for (ArbMode m : kSeekModes) {
         NoIllegal guard;
         INFO(valence::kArbModeNames[size_t(m)]);
@@ -582,11 +677,22 @@ TEST_CASE("cells: a pause or a window edit ends a cycle in every phase") {
         CHECK(a->mode() == ArbMode::Paused);
         CHECK(g_hits[size_t(m)][size_t(ArbEvent::HomeAbort)] > 0);
         auto w = seekRig(m);
-        w->arb.setWindow(0.0f, 300.0f, 300.0f);
+        const float lo = w->arb.winMin(), hi = w->arb.winMax();
+        w->arb.setWindow(5.0f, 300.0f, 300.0f);
         w->run(1000);
-        CHECK(w->mode() == ArbMode::Run);
         CHECK(g_hits[size_t(m)][size_t(ArbEvent::WindowEdit)] > 0);
-        CHECK_FALSE(w->census().homing);
+        CHECK(w->census().homing);
+        CHECK(w->arb.winMin() == lo);   // not taken while the cycle runs
+        CHECK(w->arb.winMax() == hi);
+        w->run(20'000'000);
+        const MotionCensus c = w->census();
+        CHECK(w->mode() == ArbMode::Run);
+        CHECK(c.homed);
+        CHECK(c.window_held == 1);
+        CHECK(c.window_edits == 1);
+        CHECK(w->arb.winMin() == doctest::Approx(5.0f));
+        // The post predates the cycle's end: its rail is the measured one.
+        CHECK(w->arb.rail() == doctest::Approx(c.home_rail_mm));
     }
 }
 

@@ -309,7 +309,8 @@ enum class ArbEvent : uint8_t {
     HomeMeasured,   // the far end's re-touch stall: the final backoff
     HomeDone,       // the final backoff on its count, the line LOW: homed
     HomeFail,       // a leg ended without its stall, a stop still pressed, a short rail, a timeout
-    WindowEdit,     // a frame move taken (setWindow(), forceHome())
+    WindowEdit,     // a window post taken (setWindow())
+    Reorigin,       // force_home re-origined the count (forceHome())
     Return,         // a RETURN request taken, its plan accepted
     ReturnFailed,   // taken, its plan refused
     ReturnArrived,  // the RETURN plan at rest
@@ -330,7 +331,10 @@ enum class ArbAct : uint8_t {
     leg,         // the next leg steered
     endCycle,    // parked, the engine reset at the count, the request dropped
     homed,       // the rail measured, homed, the engine reset at the count
-    reframe,     // the engine reset or reseeded in the new frame (planStep())
+    reframe,     // the engine reset or reseeded in the new frame; a jog re-clamped, a carriage left outside glides
+    recheck,     // reframe, and the paused position held in the new window; a RETURN re-planned to it
+    defer,       // the edit held, applied in the mode the cycle or the latch ends in
+    reorigin,    // the engine reset at the carriage in the new origin; nothing glides
     planReturn,  // a jog-set plan to the paused position
     arrive,      // override dropped, the return counted
 };
@@ -429,16 +433,36 @@ inline constexpr ArbRule kRules[] = {
     {M::HomeClear, E::HomeFail, toLayer(A::endCycle)},
     {M::HomeTouch, E::HomeFail, toLayer(A::endCycle)},
     {M::HomeFinish, E::HomeFail, toLayer(A::endCycle)},
-    // A frame move: the motion layer's outside a cycle, the end of one inside.
+    // A window edit (bd val-5ozv.2): the motion layer's, a carriage the edit
+    // left outside gliding in (THE GLIDE, below). Under PAUSE the paused
+    // position is held in the new window; under override the jog keeps the
+    // rail (SPEC 11.1) and a RETURN lands in the new window. A cycle, an
+    // ESTOP and a power loss hold it, and it applies in the mode they end in.
     {M::Run, E::WindowEdit, to(M::Run, A::reframe)},
-    {M::Paused, E::WindowEdit, to(M::Paused, A::reframe)},
-    {M::Jog, E::WindowEdit, to(M::Jog, A::reframe)},
-    {M::Returning, E::WindowEdit, to(M::Returning, A::reframe)},
-    {M::HomeQueued, E::WindowEdit, toLayer(A::refuse)},
-    {M::HomeApproach, E::WindowEdit, toLayer(A::endCycle)},
-    {M::HomeClear, E::WindowEdit, toLayer(A::endCycle)},
-    {M::HomeTouch, E::WindowEdit, toLayer(A::endCycle)},
-    {M::HomeFinish, E::WindowEdit, toLayer(A::endCycle)},
+    {M::Paused, E::WindowEdit, to(M::Paused, A::recheck)},
+    {M::Jog, E::WindowEdit, to(M::Jog, A::recheck)},
+    {M::Returning, E::WindowEdit, to(M::Returning, A::recheck)},
+    {M::HomeQueued, E::WindowEdit, to(M::HomeQueued, A::defer)},
+    {M::HomeApproach, E::WindowEdit, to(M::HomeApproach, A::defer)},
+    {M::HomeClear, E::WindowEdit, to(M::HomeClear, A::defer)},
+    {M::HomeTouch, E::WindowEdit, to(M::HomeTouch, A::defer)},
+    {M::HomeFinish, E::WindowEdit, to(M::HomeFinish, A::defer)},
+    {M::Unpowered, E::WindowEdit, to(M::Unpowered, A::defer)},
+    {M::Estop, E::WindowEdit, to(M::Estop, A::defer)},
+    // force_home: a reset at the carriage outside a cycle, the end of one
+    // inside (the hub refuses it during one, SPEC 11.1: race); held through
+    // an ESTOP or a power loss.
+    {M::Run, E::Reorigin, to(M::Run, A::reorigin)},
+    {M::Paused, E::Reorigin, to(M::Paused, A::reorigin)},
+    {M::Jog, E::Reorigin, to(M::Jog, A::reorigin)},
+    {M::Returning, E::Reorigin, to(M::Returning, A::reorigin)},
+    {M::HomeQueued, E::Reorigin, toLayer(A::refuse)},
+    {M::HomeApproach, E::Reorigin, toLayer(A::endCycle)},
+    {M::HomeClear, E::Reorigin, toLayer(A::endCycle)},
+    {M::HomeTouch, E::Reorigin, toLayer(A::endCycle)},
+    {M::HomeFinish, E::Reorigin, toLayer(A::endCycle)},
+    {M::Unpowered, E::Reorigin, to(M::Unpowered, A::defer)},
+    {M::Estop, E::Reorigin, to(M::Estop, A::defer)},
     // SPEC 11.1 RETURN. A second request re-plans; a refused plan hands the
     // rail back to the jog.
     {M::Jog, E::Return, to(M::Returning, A::planReturn)},
@@ -496,7 +520,7 @@ inline constexpr std::array<const char*, kArbModes> kArbModeNames{
 inline constexpr std::array<const char*, kArbEvents> kArbEventNames{
     "estop", "release", "power off", "power on", "pause", "resume", "override", "override off", "brake",
     "home request", "home cancel", "home abort", "home start", "home moving", "home contact", "home cleared",
-    "home datum", "home measured", "home done", "home fail", "window edit", "return", "return failed",
+    "home datum", "home measured", "home done", "home fail", "window edit", "reorigin", "return", "return failed",
     "return arrived"};
 
 // The transition log's burst: this many lines per window, the rest counted.
@@ -627,6 +651,7 @@ public:
     uint32_t latePlans() const { return _late_plans; }
     uint32_t plansRefused() const { return _plans_refused; }
     uint32_t hardStops() const { return _hard_stops; }
+    uint32_t glides() const { return _glides; }
     // The engine's oldest anomaly, counted for the census as it leaves; false
     // when none is left.
     bool popAnomaly(MotionAnomaly& out);
@@ -854,6 +879,31 @@ private:
     // refused for a certified stop from it. s.p_mm holds the new plan on
     // entry and on return; applyConnector() makes it the trajectory.
     void handover(PlanStrip& s, bool from_rest, uint64_t now_us);
+    // THE GLIDE (bd val-5ozv.2, operator ruling 2026-10-25): a window edit
+    // that leaves the carriage outside the new window moves it in, never an
+    // edge brake and a wait. Asked for on the planner (glideIn()), built at
+    // the next whole refill's handover from the trajectory in flight there:
+    // its velocity first brought inside the jog set at the set it renders
+    // under (Profile::converge), then the jog set's fastest move to rest at
+    // aim_mm, or where it comes to rest at the jog set held in the window
+    // (aim NaN); a glide that would leave the rail stops inside it first and
+    // glides from that rest. It is the connector over the engine held at its
+    // rest, as a refused plan's stop is: every intent is refused until it
+    // ends, the strip's frame widened to the glide's extent meanwhile.
+    void glideIn(float aim_mm, const char* why, bool from_rest);
+    // The glide from s at at_us (mm, absolute times) into [lo, hi], and when
+    // its converge ends (at_us when it has none); false when it does not fit
+    // one profile.
+    bool glideProfile(const kinetic2::State& s, uint64_t at_us, float aim_mm, float lo, float hi,
+                      kinetic2::Profile& out, uint64_t& conv_end_us) const;
+    bool gliding(uint64_t t) const { return t < _glide_end_us; }
+    // planStep() after a window edit's reset or reseed: the cell's action on
+    // the motion in flight, and the edit's one log line unless a glide's
+    // build logs it.
+    void windowEdited(ArbAct act, uint64_t now_us);
+    // A window edit an ESTOP, a power loss or a cycle holds: counted and
+    // logged once per hold, applied when the hold ends.
+    void holdWindow(const char* until, uint64_t now_us);
     // The connector in flight at t over a plan at plan_mm there: before the
     // handover the trajectory it kept, minus the plan; then its gap.
     float connAt(uint64_t t, float plan_mm) const;
@@ -1117,6 +1167,30 @@ private:
     uint32_t  _plans_refused = 0;
     uint32_t  _hard_stops = 0;
 
+    // THE GLIDE (glideIn(), planner task). Asked for: built at the next
+    // whole refill (handover()), intents refused from the ask. In flight:
+    // until _glide_end_us, the strip's frame widened to [_glide_lo,
+    // _glide_hi]. _glide_again: the glide stopped first inside the rail and
+    // glides again from that rest.
+    bool        _glide_req = false;
+    bool        _glide_again = false;
+    bool        _glide_rest = false;    // from the carriage at rest, not the strip
+    float       _glide_aim_mm = 0.0f;
+    const char* _glide_why = "";
+    uint64_t    _glide_end_us = 0;
+    float       _glide_lo = 0.0f, _glide_hi = 0.0f;
+    uint32_t    _glides = 0;
+    float       _glide_max_mm = 0.0f;
+    // The window an edit replaced (takeWindow(), the first post since the
+    // last edit applied) and the trajectory then, for the edit's decision
+    // and its log line.
+    bool        _win_old_valid = false;
+    float       _win_old_min = 0.0f, _win_old_max = 0.0f, _win_old_rail = 0.0f;
+    float       _win_log_p = 0.0f;
+    uint32_t    _window_edits = 0;
+    uint32_t    _window_held = 0;
+    bool        _win_held = false;
+
     // THE WALL (applyWall(), planner task): a stop to the frame's edge, mm,
     // absolute times, rendered for every entry after _wall_from_us.
     // Committed by wallCommitted(); until then each fill finds it again.
@@ -1172,6 +1246,10 @@ private:
     std::atomic<float>    _win_req_hi{0.0f};
     std::atomic<float>    _win_req_rail{0.0f};
     uint32_t              _win_taken = 0;
+    // A post at or under this sequence was written before a completed cycle
+    // measured the rail: taken late (a cycle holds it), it keeps the
+    // measured rail. The hub pushes the measured one back as a newer post.
+    uint32_t              _win_rail_kept = 0;
     // The oscillator's parameters setOscillator() posted, the same seqlock.
     std::atomic<uint32_t> _osc_seq{0};
     std::atomic<bool>     _osc_req_on{false};

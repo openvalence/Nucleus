@@ -74,7 +74,8 @@ trajectory, not modes. A cell with no rule is held, logged and counted (census
 `arb_illegal`); every change of mode logs one line and counts
 (`arb_transitions`) [verified 2026-10-24 -- test_arbiter_table: every cell
 against the audited grid, 62 of 62 legal cells reached at runtime, 13
-race-only; test_motion_arbiter unchanged and passing with every illegal cell
+race-only (75 of 75 with the window-edit cells, 2026-10-25, bd val-5ozv.2);
+test_motion_arbiter unchanged and passing with every illegal cell
 aborting (MOTION_ARB_STRICT); kinetic_trace.json byte-identical].
 
 Event-driven, never clocked: an intent becomes knots at arrival, the pending
@@ -260,6 +261,35 @@ window is solved at the next sample, and the sampler evaluates it.
   edge drawn 1 mm ahead at 400 mm/s holds by the clamp, counted]. The wall
   and the clamp are the FIRST line; the LP core's fence (below) is the
   second, and the only one an HP stall cannot skip.
+- **Window edits are cells of the table (operator ruling 2026-10-25, bd
+  val-5ozv.2).** `ArbEvent::WindowEdit` (setWindow()) and
+  `ArbEvent::Reorigin` (force_home) are separate events. Run reframes: the
+  pending knots re-target as window shares (bd val-17u) and a jog in flight
+  keeps its target in mm, held in the new window. Paused, Jog and Returning
+  recheck: the paused position is held in the new window and a RETURN in
+  flight re-plans to it; under override the jog keeps the whole rail (SPEC
+  11.1). A home cycle, ESTOP and a power loss DEFER: the post is not taken
+  during a cycle (`takeWindow()`), and it applies in the mode the cycle or the
+  latch ends in, a completed cycle's measured rail kept over the post's.
+  **THE GLIDE**: a homed carriage the edit leaves outside the window, with
+  nothing in flight carrying it in (pending knots or the re-clamped jog, never
+  moving away from it), glides in: from the trajectory in flight at the
+  handover, its speed first brought inside the jog set at the set it renders
+  under (`Profile::converge`), then the jog set's fastest move to rest where
+  it would stop, held in the window (`Profile::point`), as the connector over
+  the engine reset at that rest; a glide that would leave the rail stops
+  inside it first and glides from that rest. Intents wait for its end; the
+  strip's frame (the wall, the clamp, the fence) is widened to its extent
+  meanwhile. A wall at rest with the engine's own rest past the frame (a
+  PAUSE brake planned past the edge, bd val-vj1j) glides the engine in from
+  the carriage, a few steps at most. Nothing glides unhomed, under override,
+  or after a re-origin. Census `window_edits`, `window_held`, `glides`,
+  `glide_max_mm`; one log line per edit or glide [verified 2026-10-25 --
+  test_motion_arbiter, the window-edit cases: a 100 mm glide at rest inside
+  the jog set (50 mm/s, 244 mm/s^2), a glide from 520 mm/s slowed at the input
+  set then inside the jog set from 15 ms on, never back outside, the stream
+  after it landing on its knot with no connector; test_arbiter_table, every
+  cell].
 - **A late tick is a stall, never a burst (bd val-1w8).** Every steer is
   priced over at most `kTickDtCapS`, two `kMotionTickUs`, so none exceeds the
   vmax of the set the plan in flight was planned under (the jog set's for a
