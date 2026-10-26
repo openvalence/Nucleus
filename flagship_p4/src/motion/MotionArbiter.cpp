@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 
 #include "geiger/geiger.h"
 #include "valence/generated/registry_constants.hpp"
@@ -128,6 +129,36 @@ kinetic2::Profile stopUnder(const kinetic2::State& s, uint64_t at_us, EngineLimi
     kinetic2::Profile pr = kinetic2::Profile::brake(s, at_us, l);
     if (sgn * (pr.end().p - s.p) < 0.0f) pr = kinetic2::Profile::brake(kinetic2::State{s.p, s.v, 0.0f}, at_us, l);
     return pr;
+}
+
+// The least and greatest position pr passes through: its phase ends and
+// where its velocity crosses 0 inside a phase, the only points p peaks at.
+void profileExtent(const kinetic2::Profile& pr, float& lo, float& hi) {
+    kinetic2::State s = pr.s0;
+    lo = hi = s.p;
+    auto see = [&](float p) {
+        lo = std::fmin(lo, p);
+        hi = std::fmax(hi, p);
+    };
+    for (int i = 0; i < pr.n; ++i) {
+        const float j = pr.jerk[i], T = pr.dt[i];
+        // v(t) = v + a t + j t^2 / 2
+        const float qa = 0.5f * j, qb = s.a, qc = s.v;
+        std::array<float, 2> r{-1.0f, -1.0f};
+        if (std::fabs(qa) > 1e-12f) {
+            const float d = qb * qb - 4.0f * qa * qc;
+            if (d >= 0.0f) {
+                const float q = std::sqrt(d);
+                r = {(-qb - q) / (2.0f * qa), (-qb + q) / (2.0f * qa)};
+            }
+        } else if (std::fabs(qb) > 1e-12f) {
+            r[0] = -qc / qb;
+        }
+        for (const float t : r)
+            if (t > 0.0f && t < T) see(kinetic2::Profile::step(s, j, t).p);
+        s = kinetic2::Profile::step(s, j, T);
+        see(s.p);
+    }
 }
 
 }  // namespace
@@ -342,6 +373,9 @@ void MotionArbiter::setWindow(float lo, float hi, float rail) {
 }
 
 bool MotionArbiter::takeWindow() {
+    // A cycle holds the post (ArbAct::defer): its legs are counted in the
+    // frame it started in, and its end measures the rail.
+    if (_homing.load()) return false;
     // Mid-write or nothing new: the next pass takes it. Never spin here, the
     // writer may be the task this one preempted.
     const uint32_t seq = _win_seq.load();
@@ -351,14 +385,24 @@ bool MotionArbiter::takeWindow() {
     const float rail = _win_req_rail.load();
     if (_win_seq.load() != seq) return false;   // rewritten while read
     _win_taken = seq;
+    // The window the edit replaces: the first post since the last edit
+    // applied (windowEdited()).
+    if (!_win_old_valid) {
+        _win_old_valid = true;
+        _win_old_min   = _win_min;
+        _win_old_max   = _win_max;
+        _win_old_rail  = _rail;
+    }
     // The flag before the fields, fenced: a steer preempting between them
     // parks instead of reading a window half old and half new.
     _frame_moved = true;   // normalized units now mean different millimeters
     std::atomic_thread_fence(std::memory_order_seq_cst);
     _win_min  = lo;
     _win_max  = hi;
-    _rail     = rail;
-    _max_rail = rail;
+    if (seq > _win_rail_kept) {
+        _rail     = rail;
+        _max_rail = rail;
+    }
     return true;
 }
 
@@ -526,7 +570,8 @@ bool MotionArbiter::accept(const MotionIntent& asked, uint64_t now_us) {
     // A refused plan's stop (handover()) renders to its end: nothing joins it.
     if (now_us < _held_until_us) {
         ++_rejected;
-        GLOGW_EVERY_MS(1000, kTag, "REJECT: a late plan's stop is braking to rest");
+        if (_glide_req || gliding(now_us)) GLOGW_EVERY_MS(1000, kTag, "REJECT: gliding into the travel window");
+        else GLOGW_EVERY_MS(1000, kTag, "REJECT: a late plan's stop is braking to rest");
         return false;
     }
     const bool jog = feed == ArbFeed::jog;
@@ -652,10 +697,114 @@ void MotionArbiter::resetEngine(float p_norm, uint64_t now_us, bool rebase) {
         _anchor_mm = positionMm();
         _conn_h_us = _conn_end_us = 0;
         _held_until_us = 0;
+        _glide_req = _glide_again = false;
+        _glide_end_us = 0;
         _strip_gen.fetch_add(1);
     }
     _eng_lo   = frameLo();
     _eng_span = span();
+}
+
+// ---- window edits (bd val-5ozv.2) --------------------------------------------
+
+void MotionArbiter::holdWindow(const char* until, uint64_t now_us) {
+    if (_win_held) return;
+    _win_held = true;
+    ++_window_held;
+    const bool origin = _origin_moved;
+    apply(origin ? ArbEvent::Reorigin : ArbEvent::WindowEdit, until, now_us);
+    GLOGI(kTag, "WINDOW: %s in %s, held until %s", origin ? "a force_home" : "an edit",
+          kArbModeNames[size_t(mode())], until);
+}
+
+void MotionArbiter::windowEdited(ArbAct act, uint64_t now_us) {
+    ++_window_edits;
+    // The window's frame held inside the rail, never the rail frame: the jog
+    // under override reaches the whole rail whatever the window (SPEC 11.1).
+    const float lo = _win_min > 0.0f ? _win_min : 0.0f;
+    const float hi = _win_max < _rail ? _win_max : _rail;
+    const float olo = _win_old_min > 0.0f ? _win_old_min : 0.0f;
+    const float ohi = _win_old_max < _win_old_rail ? _win_old_max : _win_old_rail;
+    // The plan the carriage rides, restated in the new frame: never the
+    // oscillation about it, which the window narrows instead (RFC-112).
+    const kinetic2::State e = sampleEngine(now_us);
+    const float p = toMm(e.p), v = e.v * span();
+    auto out = [](float x, float a, float b) { return x < a - kMmPerStep || x > b + kMmPerStep; };
+    // The paused position, the RETURN's target, is held in the new window.
+    if (act == ArbAct::recheck) {
+        const float was = _pause_pos_mm.load();
+        const float held = std::clamp(was, lo, hi);
+        if (held != was) {
+            _pause_pos_mm.store(held);
+            if (mode() == ArbMode::Returning) _return_req.store(true);
+        }
+    }
+    // A jog in flight keeps its target in mm, held in the new window; the
+    // reseed restated it as a window share.
+    const bool jog = mode() == ArbMode::Run && (_plan_manual || _jog_after_us != 0) &&
+                     (_engine.pending() > 0 || _engine.isBusy(now_us));
+    const float jog_to = std::clamp(_demand_mm, lo, hi);
+    // Past the carriage: the edit put it outside, and nothing in flight
+    // carries it in (knots pending, the jog re-clamped, never moving away
+    // from the window); or a glide is in flight. Nothing glides unhomed:
+    // its position is not the machine's.
+    const bool past = out(p, lo, hi) && !out(p, olo, ohi);
+    const bool away = (p > hi && v > 1.0f) || (p < lo && v < -1.0f);
+    const bool carried = (jog || _engine.pending() > 0) && !away;
+    if (_homed && !_rail_frame && (_glide_req || gliding(now_us) || (past && !carried))) {
+        glideIn(jog ? jog_to : std::numeric_limits<float>::quiet_NaN(), "the travel window moved past the carriage",
+                false);
+        return;
+    }
+    if (jog) {
+        MotionIntent in;
+        in.source = MotionSource::Manual;
+        in.target_mm = _demand_mm;
+        (void)plan(jog_to, in, limitsFor(true), now_us);
+    }
+    GLOGI_EVERY_MS(1000, kTag, "WINDOW: [%.1f, %.1f] -> [%.1f, %.1f] mm in %s, carriage %.2f mm: %s",
+                   double(_win_old_min), double(_win_old_max), double(_win_min), double(_win_max),
+                   kArbModeNames[size_t(mode())], double(p), jog ? "the jog re-clamped" : "re-planned in place");
+}
+
+void MotionArbiter::glideIn(float aim_mm, const char* why, bool from_rest) {
+    _glide_req = true;
+    _glide_rest = from_rest;
+    _glide_again = false;
+    _glide_aim_mm = aim_mm;
+    _glide_why = why;
+    // Nothing is accepted between the ask and the build, whose engine reset
+    // would drop it; the build sets the glide's own end.
+    _held_until_us = std::numeric_limits<uint64_t>::max();
+    // The glide owns the trajectory from its handover: the wall goes.
+    _wall_on = false;
+    _strip_stale = true;
+}
+
+bool MotionArbiter::glideProfile(const kinetic2::State& s, uint64_t at_us, float aim, float lo, float hi,
+                                 kinetic2::Profile& out, uint64_t& conv_end_us) const {
+    EngineLimits jog = limitsFor(true);
+    const float sp = span();
+    jog.vmax *= sp;
+    jog.amax *= sp;
+    jog.jmax *= sp;
+    // Kinetic's own chase shape (solver.hpp chaseRun): converge(), then
+    // point() from its end, which has no acceleration: 13 phases at most.
+    out = kinetic2::Profile::converge(s, at_us, jog, renderLimits());
+    conv_end_us = out.n > 0 ? out.end_us() : at_us;
+    const kinetic2::State c = out.n > 0 ? out.atSeconds(out.duration()) : s;
+    if (std::isnan(aim)) aim = kinetic2::Profile::brake(c, 0, jog).end().p;
+    aim = std::clamp(aim, lo, hi);
+    const kinetic2::Profile mv = kinetic2::Profile::point(c, aim, out.n > 0 ? out.end_us() : at_us, jog);
+    if (mv.n < 0) return false;
+    if (out.n == 0) {
+        out = mv;
+        return true;
+    }
+    for (int i = 0; i < mv.n; ++i)
+        if (!out.add(mv.dt[i], mv.jerk[i])) return false;
+    out.ends_at_rest = true;
+    return true;
 }
 
 void MotionArbiter::reseedEngine(uint64_t now_us) {
@@ -1116,6 +1265,7 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
             resetEngine(toNorm(positionMm()), now_us);
             _estop_settled = true;
         }
+        if (_frame_moved) holdWindow("the ESTOP release", now_us);
         return false;
     }
 
@@ -1130,6 +1280,7 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
             _pause_pos_mm.store(positionMm());
         _emitter.park();
         if (!_power_settled.exchange(true)) resetEngine(toNorm(positionMm()), now_us);
+        if (_frame_moved) holdWindow("motor power returns", now_us);
         return false;
     }
 
@@ -1150,24 +1301,31 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     // A reset's generation moves BEFORE the flags drop, so the steer never
     // takes a strip of the old origin in between; a reseed's strip runs on in
     // mm and keeps its generation, so the steer never holds a tick for it.
-    if (_frame_moved) {
+    // A window post a cycle holds (takeWindow()) waits for its end; a
+    // force_home ends it.
+    const bool homing = _homing.load();
+    if (_frame_moved && homing && !_origin_moved) {
+        holdWindow("the home cycle ends", now_us);
+    } else if (_frame_moved) {
         const bool origin_moved = _origin_moved;
         // A cycle counted in the old frame: its seek or backoff is void.
-        const bool homing = _homing.load();
         const bool reset = origin_moved || homing ||
                            (_engine.pending() == 0 && !_engine.isBusy(now_us) && !_osc.active() &&
                             !joining(now_us));
         if (reset) _strip_gen.fetch_add(1);
         _frame_moved = false;
         _origin_moved = false;
-        if (homing) homeEnd(ArbEvent::WindowEdit, "the travel window changed", now_us);
-        else apply(ArbEvent::WindowEdit, origin_moved ? "force_home re-origined the count" : "the travel window changed",
-                   now_us);
-        if (reset) {
-            resetEngine(toNorm(positionMm()), now_us);
-            return false;
-        }
-        reseedEngine(now_us);
+        _win_held = false;
+        ArbAct act = ArbAct::none;
+        if (homing) homeEnd(ArbEvent::Reorigin, "force_home re-origined the count", now_us);
+        else if (origin_moved) act = apply(ArbEvent::Reorigin, "force_home re-origined the count", now_us);
+        else act = apply(ArbEvent::WindowEdit, "the travel window changed", now_us);
+        if (reset) resetEngine(toNorm(positionMm()), now_us);
+        else reseedEngine(now_us);
+        // A pass with no post taken (a write in progress) moved nothing.
+        if (_win_old_valid && (act == ArbAct::reframe || act == ArbAct::recheck)) windowEdited(act, now_us);
+        _win_old_valid = false;
+        if (reset) return false;
     }
 
     // A pause ends a cycle, which parks: a seek has no brake to run. The
@@ -1237,6 +1395,19 @@ bool MotionArbiter::planStep(uint64_t now_us, float dt_s) {
     } else if (_jog_after_us != 0 && now_us >= _jog_after_us) {
         _plan_manual = true;
         _jog_after_us = 0;
+    }
+    // THE GLIDE's other doors: the wall at rest with the plan's own rest past
+    // the frame (a PAUSE brake planned past the edge, bd val-vj1j), and a
+    // glide that stopped inside the rail first, from that rest.
+    if (_homed && !_rail_frame && !_glide_req && !gliding(now_us) && !joining(now_us) && !_engine.isBusy(now_us)) {
+        const float p = toMm(st.p);
+        const bool past = p < backstopLo() - kMmPerStep || p > backstopHi() + kMmPerStep;
+        if (_glide_again || (_wall_on && !walling(now_us) && past)) {
+            _win_old_min = _win_min;
+            _win_old_max = _win_max;
+            glideIn(std::numeric_limits<float>::quiet_NaN(),
+                    _glide_again ? "the glide stopped inside the rail first" : "the plan rested past the frame", true);
+        }
     }
 
     // Arrival ends the return: override drops, plain PAUSE stays.
@@ -1350,6 +1521,11 @@ void MotionArbiter::fillStrip(uint64_t now_us, bool live) {
         applyConnector(s);
         s.lo_mm = backstopLo();
         s.hi_mm = backstopHi();
+        // A glide in flight renders from where the edit left the carriage.
+        if (gliding(s.t0_us)) {
+            s.lo_mm = std::fmin(s.lo_mm, _glide_lo);
+            s.hi_mm = std::fmax(s.hi_mm, _glide_hi);
+        }
         s.lim = renderLimits();
         const bool kept = applyWall(s);
         // THE TAIL (bd val-cy1g): the stop the steer plays past the last
@@ -1386,13 +1562,21 @@ void MotionArbiter::handover(PlanStrip& s, bool from_rest, uint64_t now_us) {
     const PlanStrip& old = _strip_pub;
     const bool quiet = _handover_quiet;
     _handover_quiet = false;
+    // A glide asked for, or one in flight the carriage lapsed out of, is
+    // built here; any other refill during one keeps it (applyConnector()).
+    const bool glide = _glide_req || (from_rest && gliding(s.t0_us));
+    if (!glide && gliding(s.t0_us)) return;
     // After a rebasing reset the steer re-anchors at the carriage: nothing
-    // to join.
-    if (!from_rest && (old.n == 0 || old.gen != s.gen)) {
+    // to join, and a glide starts from it.
+    const bool unjoined = old.n == 0 || old.gen != s.gen;
+    if (!from_rest && !glide && unjoined) {
         _conn = kinetic2::Profile{};
         _conn_h_us = _conn_end_us = 0;
         return;
     }
+    // At rest the carriage, not the strip: a strip the last line held at
+    // the edge rests past it.
+    if (glide && (unjoined || _glide_rest)) from_rest = true;
 
     constexpr int h = int(kHandoverTicks);
     constexpr float dt = float(kMotionTickUs) * 1e-6f;
@@ -1402,6 +1586,66 @@ void MotionArbiter::handover(PlanStrip& s, bool from_rest, uint64_t now_us) {
     // The trajectory in flight at k in [-3, h], index k + 3.
     std::array<float, h + 4> o{};
     for (int k = -3; k <= h; ++k) o[size_t(k + 3)] = from_rest ? rest : stripAt(old, tAt(k));
+
+    // THE GLIDE (glideIn()): from the trajectory in flight at the handover,
+    // kept through the tick before it, over the engine held at the glide's
+    // rest, as a refused plan's stop is.
+    if (glide) {
+        const uint64_t t_g = tAt(h);
+        const kinetic2::State g0 = gridState(o[size_t(h + 1)], o[size_t(h + 2)], o[size_t(h + 3)]);
+        const float wlo = backstopLo(), whi = backstopHi();
+        kinetic2::Profile g;
+        float elo = 0.0f, ehi = 0.0f;
+        uint64_t conv_us = t_g;
+        const bool fits = glideProfile(g0, t_g, _glide_aim_mm, wlo, whi, g, conv_us);
+        if (fits) profileExtent(g, elo, ehi);
+        _glide_again = !fits || elo < -kMmPerStep || ehi > _rail + kMmPerStep;
+        if (_glide_again) {
+            bool hard = false;
+            g = certifiedStop(g0, t_g, renderLimits(), 0.0f, _rail, hard);
+            if (hard) ++_hard_stops;
+            profileExtent(g, elo, ehi);
+        }
+        for (size_t k = 3; k < o.size(); ++k) {
+            elo = std::fmin(elo, o[k]);
+            ehi = std::fmax(ehi, o[k]);
+        }
+        const float to = g.n > 0 ? g.end().p : g0.p;
+        const uint64_t end = g.n > 0 ? std::max(t_g, g.end_us()) : t_g;
+        resetEngine(toNorm(to), now_us, false);
+        _strip_stale = false;   // this refill publishes the reset
+        _glide_req = false;
+        _held_until_us = g.n > 0 ? end : 0;
+        _glide_end_us = g.n > 0 ? end : 0;
+        _glide_lo = std::fmin(wlo, elo);
+        _glide_hi = std::fmax(whi, ehi);
+        // The steer's set: the jog set's from the converge's end, as a jog
+        // that braked a stream first (plan()); a stop leg keeps the set.
+        if (!_glide_again && g.n > 0) {
+            _plan_manual = conv_us <= t_g;
+            _jog_after_us = conv_us > t_g ? conv_us : 0;
+        }
+        if (_paused.load()) _pause_pos_mm.store(to);
+        const float dist = std::fabs(to - o[3]);
+        ++_glides;
+        _glide_max_mm = std::fmax(_glide_max_mm, dist);
+        GLOGI_EVERY_MS(1000, kTag,
+                       "GLIDE (%s): window [%.1f, %.1f] -> [%.1f, %.1f] mm, carriage %.2f mm, %.2f mm to %.2f mm "
+                       "over %.0f ms%s",
+                       _glide_why, double(_win_old_min), double(_win_old_max), double(_win_min), double(_win_max),
+                       double(o[3]), double(dist), double(to), double(end - t_g) * 1e-3,
+                       _glide_again ? ", stopping inside the rail first" : "");
+        g.s0.p -= to;   // the glide as a gap over its rest
+        _conn = g;
+        _conn_h_us = t_g;
+        _conn_end_us = end;
+        _conn_pre_t0 = s.t0_us;
+        for (int k = 0; k < h; ++k) _conn_pre[size_t(k)] = o[size_t(k + 3)];
+        _plan_ext.fill(to);
+        s.p_mm.fill(to);
+        _osc_head = 0.0f;
+        return;
+    }
     // The candidate, index k + 3 for k in [-3, n): the trajectory in flight
     // before the handover, the new one from it.
     std::array<float, kStripLen + 3> c{};
@@ -2026,6 +2270,7 @@ void MotionArbiter::homeStep(uint64_t now_us, float dt_s) {
                                now_us);
             _homed = true;
             _max_rail = _rail;
+            _win_rail_kept = (_win_seq.load() + 1u) & ~1u;
             _home_rail_mm = _rail;
             ++_homes;
             homeEnd(ArbEvent::HomeDone, nullptr, now_us);
@@ -2266,6 +2511,10 @@ MotionCensus MotionArbiter::snapshot(uint64_t now_us) {
     c.arb_mode       = uint8_t(mode());
     c.arb_transitions = _arb_transitions;
     c.arb_illegal    = _arb_illegal;
+    c.window_edits   = _window_edits;
+    c.window_held    = _window_held;
+    c.glides         = _glides;
+    c.glide_max_mm   = _glide_max_mm;
     c.mode           = s.mode;
     c.plan_kind      = s.plan_kind;
     c.plan_start     = s.start;

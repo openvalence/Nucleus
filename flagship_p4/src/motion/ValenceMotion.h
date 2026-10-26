@@ -177,6 +177,14 @@ struct MotionCensus {
     uint8_t  arb_mode        = 0;
     uint32_t arb_transitions = 0;
     uint32_t arb_illegal     = 0;
+    // Window edits (bd val-5ozv.2): applied, held by an ESTOP, a power loss
+    // or a cycle until it ended, and the glides that moved a carriage the
+    // window left outside back in (MotionArbiter.h THE GLIDE), with the
+    // longest since boot, mm.
+    uint32_t window_edits    = 0;
+    uint32_t window_held     = 0;
+    uint32_t glides          = 0;
+    float    glide_max_mm    = 0.0f;
 
     // ---- the active plan, normalized, as 0x1110 publishes it ----
     uint8_t  mode             = 0;   // the 0x1111 mode select's ordinals (MotionArbiter.cpp PlanStyle)

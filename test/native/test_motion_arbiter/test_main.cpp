@@ -1630,6 +1630,10 @@ TEST_CASE("home: consecutive cycles land the same datums and end on the rail's f
     FakeSense s{r->emitter, -30.0f, 170.0f};
     isr(*r, s);
     r->arb.setHomeSense(s);
+    // The window the hub adopts the rail into is the one configured before
+    // the cycle: a relabel, never an edit past the carriage (a glide).
+    r->arb.setWindow(0.0f, 150.0f, DEFAULT_MAX_RAIL_MM);
+    r->run(1000);
     std::optional<float> zero0, rail0;
     for (int i = 0; i < 3; ++i) {
         CAPTURE(i);
@@ -2328,8 +2332,12 @@ TEST_CASE("fence: a home cycle searches inside the wide frame and is never fence
     // The backstop's frame in the measured frame: the window held in the rail.
     r->run(1000);
     checkFence(*r, 0.0f, c.rail_mm);
+    // The cycle ends on the rail's far end, past the new window's: the
+    // carriage glides in (bd val-5ozv.2), and the fence follows the window.
     r->arb.setWindow(20.0f, 150.0f, c.rail_mm);
-    r->run(2000);
+    r->run(3'000'000);
+    CHECK(r->census().glides == 1);
+    CHECK(std::fabs(r->census().position_mm - 150.0f) <= kMmPerStep);
     checkFence(*r, 20.0f, 150.0f);
     CHECK(r->emitter.fence_hits == 0);
 }
@@ -4694,4 +4702,381 @@ TEST_CASE("wall: a window edge drawn closer than any stop holds by the last line
     CHECK(c.wall_clamps == 1);
     CHECK(c.hard_stops >= 1);
     CHECK(c.backstops >= 1);
+}
+
+// ---- window edits (bd val-5ozv.2, operator ruling 2026-10-25) ----------------
+// A window edit that leaves the carriage outside glides it in at the jog set,
+// jerk-limited, through the handover's connector; a window that still holds
+// it re-plans in place; a jog keeps its target in mm, held in the window; a
+// cycle, an ESTOP and a power loss hold the edit until they end.
+
+namespace {
+
+constexpr double kJogV = DEFAULT_JOG_MAX_SPEED_MM_S;
+constexpr double kJogA = DEFAULT_JOG_ACCEL_MM_S2;
+constexpr double kJerk = DEFAULT_INPUT_MAX_JERK_MM_S3;
+constexpr float  kTwoSteps = 2.0f * valence::kMmPerStep;
+
+// The commanded trajectory, one strip entry a tick (the planner publishes it
+// at now), and the carriage. A reset that re-anchors the steer at the
+// carriage (a new generation) is no motion: its sub-step jump is never
+// steered, so no difference spans one.
+struct Track {
+    std::vector<double> p, pos;
+    std::vector<uint32_t> gen;
+    void take(Rig& r) {
+        const auto s = r.arb.publishedStrip();
+        const double held = p.empty() ? double(r.arb.positionMm()) : p.back();
+        p.push_back(s.n > 0 ? double(s.p_mm[0]) : held);
+        pos.push_back(double(r.arb.positionMm()));
+        gen.push_back(s.gen);
+    }
+    void run(Rig& r, uint64_t us) {
+        for (uint64_t t = 0; t < us; t += 1000) {
+            r.run(1000);
+            take(r);
+        }
+    }
+    double v(size_t i) const { return (p[i] - p[i - 1]) / 1e-3; }
+    double a(size_t i) const { return (p[i] - 2.0 * p[i - 1] + p[i - 2]) / 1e-6; }
+    double j(size_t i) const { return (p[i] - 3.0 * p[i - 1] + 3.0 * p[i - 2] - p[i - 3]) / 1e-9; }
+    // Every tick from `from` inside the set, with the float rounding of a
+    // strip position near 500 mm in the differences.
+    bool within(size_t from, double vmax, double amax, double jmax) const {
+        double pv = 0.0, pa = 0.0, pj = 0.0;
+        for (size_t i = std::max<size_t>(from, 3); i < p.size(); ++i) {
+            if (gen[i] != gen[i - 3]) continue;
+            pv = std::max(pv, std::fabs(v(i)));
+            pa = std::max(pa, std::fabs(a(i)));
+            pj = std::max(pj, std::fabs(j(i)));
+        }
+        MESSAGE("from tick ", from, ": ", pv, " mm/s, ", pa, " mm/s^2, ", pj, " mm/s^3");
+        return pv <= vmax * 1.01 + 1.0 && pa <= amax * 1.05 + 100.0 && pj <= jmax * 1.05 + 2e5;
+    }
+    // The first tick the carriage is inside [lo, hi]; npos when never.
+    size_t entered(double lo, double hi) const {
+        for (size_t i = 0; i < pos.size(); ++i)
+            if (pos[i] >= lo - kTwoSteps && pos[i] <= hi + kTwoSteps) return i;
+        return std::string::npos;
+    }
+    // Inside it from that tick on, the carriage and the plan alike.
+    bool staysIn(double lo, double hi) const {
+        const size_t e = entered(lo, hi);
+        if (e == std::string::npos) return false;
+        for (size_t i = e; i < pos.size(); ++i)
+            if (pos[i] < lo - kTwoSteps || pos[i] > hi + kTwoSteps) return false;
+        for (size_t i = e; i < p.size(); ++i)
+            if (p[i] < lo - kTwoSteps || p[i] > hi + kTwoSteps) return false;
+        return true;
+    }
+};
+
+// Homed at 0 on a 500 mm rail, the carriage at rest on `at` after a jog.
+std::unique_ptr<Rig> parkedRig(float at) {
+    auto r = rig();
+    r->arb.forceHome(500.0f);
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, at));
+    r->run(moveUs(uint64_t(at / DEFAULT_JOG_MAX_SPEED_MM_S * 1e6f) + 500'000));
+    REQUIRE(std::fabs(r->arb.positionMm() - at) <= kTwoSteps);
+    REQUIRE_FALSE(r->census().busy);
+    return r;
+}
+
+// A 0x2101 segment from now.
+bool segment(Rig& r, float to_mm, uint32_t us) {
+    MotionIntent in;
+    in.source = MotionSource::Stream;
+    in.target_mm = to_mm;
+    in.duration_us = us;
+    in.anchor_us = g_now_us;
+    return r.arb.accept(in, g_now_us);
+}
+
+}  // namespace
+
+TEST_CASE("window edit: a shrink past the carriage at rest glides it in at the jog set, jerk-limited, never back out") {
+    auto r = parkedRig(300.0f);
+    const MotionCensus before = r->census();
+    r->arb.setWindow(0.0f, 200.0f, 500.0f);
+    Track t;
+    t.take(*r);
+    SteerKin k;
+    bool refused = false;
+    for (int i = 0; i < 3000; ++i) {
+        r->run(1000);
+        t.take(*r);
+        k.take(r->emitter);
+        if (i == 500) refused = !r->submit(MotionSource::Stream, 100.0f);
+    }
+    const MotionCensus c = r->census();
+    MESSAGE("glides ", c.glides, ", longest ", c.glide_max_mm, " mm, rest ", c.position_mm, " mm");
+    CHECK(refused);   // every intent waits for the glide's end
+    CHECK(c.glides == before.glides + 1);
+    CHECK(c.glide_max_mm == doctest::Approx(100.0f).epsilon(0.001));
+    CHECK(c.window_edits == before.window_edits + 1);
+    CHECK(std::fabs(c.position_mm - 200.0f) <= kTwoSteps);
+    CHECK_FALSE(c.busy);
+    CHECK(t.within(0, kJogV, kJogA, kJerk));
+    checkKin(k, kJogV, kJogA, kJerk);
+    CHECK(t.staysIn(0.0, 200.0));
+    // 100 mm at 50 mm/s and its two ramps: the glide is the jog's own move.
+    const size_t in_at = t.entered(0.0, 200.0);
+    CHECK(in_at >= 2000);
+    CHECK(in_at <= 2400);
+    CHECK(c.late_plans == before.late_plans);
+    CHECK(c.plans_refused == before.plans_refused);
+    CHECK(c.backstops == before.backstops);
+    CHECK(c.wall_clamps == before.wall_clamps);
+    CHECK(r->emitter.fence_hits == 0);
+}
+
+TEST_CASE("window edit: a shrink past the carriage mid-stroke at speed slows it at the input set, glides back at the jog set, and the stream after it is the normal handover") {
+    auto r = parkedRig(100.0f);
+    const MotionCensus before = r->census();
+    REQUIRE(segment(*r, 450.0f, 1'000'000));
+    for (int i = 0; i < 2000 && r->arb.positionMm() < 300.0f; ++i) r->run(1000);
+    REQUIRE(r->census().velocity_mm_s > 300.0f);
+    r->arb.setWindow(0.0f, 250.0f, 500.0f);
+    Track t;
+    t.take(*r);
+    t.run(*r, 3'000'000);
+    MotionCensus c = r->census();
+    MESSAGE("glides ", c.glides, ", longest ", c.glide_max_mm, " mm, rest ", c.position_mm, " mm, peak ",
+            *std::max_element(t.pos.begin(), t.pos.end()), " mm");
+    CHECK(c.glides == before.glides + 1);
+    CHECK(std::fabs(c.position_mm - 250.0f) <= kTwoSteps);
+    // One trajectory: no velocity step anywhere, the input set's accel and
+    // jerk while it slows, the jog set's from the tick its speed is in it.
+    CHECK(t.within(0, kInV, kInA, kJerk));
+    size_t slow = t.p.size();
+    for (size_t i = 3; i < t.p.size(); ++i)
+        if (std::fabs(t.v(i)) <= kJogV && std::fabs(t.a(i)) <= kJogA * 1.05 + 100.0) {
+            slow = i;
+            break;
+        }
+    REQUIRE(slow < 100);
+    CHECK(t.within(slow, kJogV, kJogA, kJerk));
+    CHECK(*std::max_element(t.pos.begin(), t.pos.end()) < 330.0);   // stopped well inside the rail
+    CHECK(t.staysIn(0.0, 250.0));
+    CHECK(c.late_plans == before.late_plans);
+    CHECK(c.plans_refused == before.plans_refused);
+    CHECK(c.wall_clamps == before.wall_clamps);
+    CHECK(c.hard_stops == before.hard_stops);
+    // The stream after the glide: its segment plans from the glide's rest and
+    // lands on its knot at its time, no connector, nothing refused.
+    REQUIRE(segment(*r, 150.0f, 400'000));
+    const uint64_t due = g_now_us + 400'000;
+    Track s;
+    s.take(*r);
+    while (g_now_us < due) {
+        r->run(1000);
+        s.take(*r);
+    }
+    c = r->census();
+    CHECK(c.position_mm == doctest::Approx(150.0f).epsilon(1e-3));
+    CHECK(s.within(0, kInV, kInA, kJerk));
+    CHECK(c.late_plans == before.late_plans);
+    CHECK(c.plans_refused == before.plans_refused);
+}
+
+TEST_CASE("window edit during a jog: past the carriage it glides to the jog's target held in the window; inside, the jog keeps its mm") {
+    {
+        auto r = parkedRig(100.0f);
+        REQUIRE(r->submit(MotionSource::Manual, 300.0f));
+        for (int i = 0; i < 6000 && r->arb.positionMm() < 200.0f; ++i) r->run(1000);
+        REQUIRE(r->census().velocity_mm_s > 40.0f);
+        r->arb.setWindow(0.0f, 180.0f, 500.0f);
+        Track t;
+        t.take(*r);
+        t.run(*r, 2'000'000);
+        const MotionCensus c = r->census();
+        CHECK(c.glides == 1);
+        CHECK(std::fabs(c.position_mm - 180.0f) <= kTwoSteps);
+        CHECK(t.within(0, kJogV, kJogA, kJerk));
+        CHECK(t.staysIn(0.0, 180.0));
+    }
+    {
+        // Re-targeted as a window share the jog would land at 0.6 of the new
+        // window, 150 mm: a jog that lands short is a wrong answer.
+        auto r = parkedRig(100.0f);
+        REQUIRE(r->submit(MotionSource::Manual, 300.0f));
+        for (int i = 0; i < 6000 && r->arb.positionMm() < 150.0f; ++i) r->run(1000);
+        r->arb.setWindow(0.0f, 250.0f, 500.0f);
+        Track t;
+        t.take(*r);
+        t.run(*r, 4'000'000);
+        const MotionCensus c = r->census();
+        CHECK(c.glides == 0);
+        CHECK(c.window_edits == 1);
+        CHECK(std::fabs(c.position_mm - 250.0f) <= kTwoSteps);
+        CHECK(t.within(0, kJogV, kJogA, kJerk));
+        CHECK(t.staysIn(0.0, 250.0));
+    }
+}
+
+TEST_CASE("window edit while paused: the carriage glides in under PAUSE, which holds, and the RETURN goes back to the held position") {
+    auto r = parkedRig(300.0f);
+    r->arb.pause(true);
+    r->run(1000);
+    r->arb.setWindow(0.0f, 200.0f, 500.0f);
+    Track t;
+    t.take(*r);
+    t.run(*r, 3'000'000);
+    MotionCensus c = r->census();
+    CHECK(c.paused);
+    CHECK(c.glides == 1);
+    CHECK(std::fabs(c.position_mm - 200.0f) <= kTwoSteps);
+    CHECK(t.within(0, kJogV, kJogA, kJerk));
+    CHECK(t.staysIn(0.0, 200.0));
+    CHECK_FALSE(r->submit(MotionSource::Stream, 100.0f));   // PAUSE still suspends every source
+    // Override lifts the window (SPEC 11.1): the jog reaches past it, a
+    // window edit moves nothing, and the paused position it holds is the
+    // RETURN's target.
+    r->arb.override();
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 320.0f));
+    r->run(moveUs(3'000'000));
+    REQUIRE(std::fabs(r->arb.positionMm() - 320.0f) <= kTwoSteps);
+    const int32_t held = r->emitter.n;
+    r->arb.setWindow(0.0f, 150.0f, 500.0f);
+    r->run(500'000);
+    CHECK(r->emitter.n == held);
+    CHECK(r->census().glides == 1);
+    REQUIRE(r->arb.returnToPause() == valence::ReturnStart::queued);
+    r->run(moveUs(4'000'000));
+    c = r->census();
+    CHECK_FALSE(c.override_mode);
+    CHECK(c.paused);
+    CHECK(std::fabs(c.position_mm - 150.0f) <= kTwoSteps);
+}
+
+TEST_CASE("window edit during a RETURN: the paused position is held in the new window and the return re-plans to it") {
+    auto r = parkedRig(250.0f);
+    r->arb.pause(true);
+    r->run(1000);
+    r->arb.override();
+    r->run(1000);
+    REQUIRE(r->submit(MotionSource::Manual, 400.0f));
+    r->run(moveUs(4'000'000));
+    REQUIRE(r->arb.returnToPause() == valence::ReturnStart::queued);
+    for (int i = 0; i < 6000 && r->arb.positionMm() > 330.0f; ++i) r->run(1000);
+    REQUIRE(r->census().returning);
+    r->arb.setWindow(0.0f, 200.0f, 500.0f);
+    Track t;
+    t.take(*r);
+    t.run(*r, 5'000'000);
+    const MotionCensus c = r->census();
+    CHECK_FALSE(c.returning);
+    CHECK_FALSE(c.override_mode);
+    CHECK(c.paused);
+    CHECK(c.glides == 0);
+    CHECK(std::fabs(c.position_mm - 200.0f) <= kTwoSteps);
+    CHECK(t.within(0, kJogV, kJogA, kJerk));
+}
+
+TEST_CASE("window edit during a home cycle: held to its end, then the carriage glides in from the rail's far end") {
+    auto r = rig();
+    FakeSense s{r->emitter, -30.0f, 170.0f};
+    isr(*r, s);
+    r->arb.setHomeSense(s);
+    REQUIRE(r->arb.home() == HomeStart::started);
+    r->run(1'000'000);
+    REQUIRE(r->census().homing);
+    r->arb.setWindow(0.0f, 100.0f, DEFAULT_MAX_RAIL_MM);
+    r->run(1000);
+    CHECK(r->census().homing);
+    CHECK(r->census().window_held == 1);
+    CHECK(r->arb.winMax() == doctest::Approx(DEFAULT_MAX_RAIL_MM));   // not taken while it runs
+    for (int i = 0; i < 30'000 && r->census().homing; ++i) r->run(1000);
+    MotionCensus c = r->census();
+    REQUIRE(c.homed);
+    CHECK(c.homes == 1);
+    CHECK(std::fabs(c.position_mm - c.home_rail_mm) <= 2.0f * kMmPerStep);   // the cycle ends on the far end
+    CHECK(r->arb.rail() == doctest::Approx(c.home_rail_mm));                  // the post kept the measured rail
+    Track t;
+    t.take(*r);
+    t.run(*r, 4'000'000);
+    c = r->census();
+    CHECK(c.window_edits == 1);
+    CHECK(c.glides == 1);
+    CHECK(std::fabs(c.position_mm - 100.0f) <= kTwoSteps);
+    CHECK(t.within(0, kJogV, kJogA, kJerk));
+    CHECK(t.staysIn(0.0, 100.0));
+}
+
+TEST_CASE("window edit during ESTOP: held, nothing moves; on the release it glides in, or with the machine unhomed stays put") {
+    for (const bool cuts : {false, true}) {
+        CAPTURE(cuts);
+        auto r = parkedRig(300.0f);
+        r->arb.setEstopCutsPower(cuts);
+        r->arb.estop(true);
+        r->run(1000);
+        const int32_t held = r->emitter.n;
+        r->arb.setWindow(0.0f, 200.0f, 500.0f);
+        r->run(500'000);
+        CHECK(r->emitter.n == held);
+        CHECK(r->census().window_held == 1);
+        CHECK(r->census().window_edits == 0);
+        r->arb.estop(false);
+        Track t;
+        t.take(*r);
+        t.run(*r, 3'000'000);
+        const MotionCensus c = r->census();
+        CHECK(c.paused);
+        CHECK(c.window_edits == 1);
+        CHECK(c.homed == !cuts);
+        CHECK(c.glides == (cuts ? 0u : 1u));
+        CHECK(std::fabs(c.position_mm - (cuts ? 300.0f : 200.0f)) <= kTwoSteps);
+        CHECK(t.within(0, kJogV, kJogA, kJerk));
+    }
+}
+
+TEST_CASE("window edit: a window that still holds the carriage moves nothing, a grown one neither, and nothing glides unhomed") {
+    auto r = parkedRig(150.0f);
+    const int32_t held = r->emitter.n;
+    r->arb.setWindow(100.0f, 200.0f, 500.0f);
+    r->run(500'000);
+    r->arb.setWindow(0.0f, 500.0f, 500.0f);
+    r->run(500'000);
+    const MotionCensus c = r->census();
+    CHECK(r->emitter.n == held);
+    CHECK(c.window_edits == 2);
+    CHECK(c.glides == 0);
+    // Unhomed: the position is not the machine's.
+    auto u = rig();
+    REQUIRE(u->submit(MotionSource::Manual, 60.0f));
+    u->run(moveUs(2'000'000));
+    const int32_t at = u->emitter.n;
+    u->arb.setWindow(0.0f, 30.0f, 500.0f);
+    u->run(2'000'000);
+    CHECK(u->emitter.n == at);
+    CHECK(u->census().glides == 0);
+}
+
+TEST_CASE("window edit follow-up (bd val-vj1j): a PAUSE brake planned past the edge rests on it, and the plan rests there too") {
+    auto r = incidentRig();
+    r->arb.setInputLimits(kIncVmax, 20.0f, 10'000'000.0f);
+    REQUIRE(r->submit(MotionSource::Manual, kIncWinHi));
+    for (int i = 0; i < 5000 && r->arb.positionMm() < 145.0f; ++i) r->run(1000);
+    r->arb.pause(true);
+    float worst = 0.0f;
+    for (int i = 0; i < 8000; ++i) {
+        r->run(1000);
+        worst = std::max(worst, r->arb.positionMm());
+    }
+    const MotionCensus c = r->census();
+    const float plan = kIncWinLo + r->arb.planState(g_now_us).p * (kIncWinHi - kIncWinLo);
+    MESSAGE("carriage ", c.position_mm, " mm, plan ", plan, " mm, glides ", c.glides, ", longest ", c.glide_max_mm, " mm");
+    CHECK(worst <= kIncWinHi + kStepTol);
+    CHECK(c.position_mm == doctest::Approx(kIncWinHi).epsilon(0.0001));
+    CHECK(std::fabs(plan - kIncWinHi) <= kStepTol);   // the engine no longer rests past the window
+    CHECK(c.glides == 1);
+    CHECK(c.glide_max_mm <= kStepTol);
+    CHECK(c.paused);
+    // Resumed, the next intent plans from the edge.
+    r->arb.pause(false);
+    REQUIRE(r->submit(MotionSource::Manual, 120.0f));
+    r->run(moveUs(2'000'000));
+    CHECK(std::fabs(r->arb.positionMm() - 120.0f) <= kStepTol);
 }
