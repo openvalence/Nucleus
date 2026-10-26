@@ -1644,7 +1644,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addSelectField({.name = "radios", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(1),
                       .group = card::radios,
-                      .desc = "WiFi and BLE from the next boot; off: USB only",
+                      .desc = "WiFi and BLE after reboot; off: USB only",
                       .settingKey = 11, .hasSettingKey = true,
                       .hasRank = true, .rank = valence::ui_ranks::advanced},
                      {"off", "on"});
@@ -1760,7 +1760,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "react_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(factory::react_ms), .group = card::replanning,
-                      .desc = "Least committed curve ahead of a re-plan; the hub extends it to cover its solve, up to 64 ms",
+                      .desc = "Committed lead before a re-plan, max 64 ms",
                       .step = 0.5f, .settingKey = 8, .flags = valence::setting_flags::advanced,
                       .hasSettingKey = true, .hasStep = true});
     // Bit i gates the i-th setting-annotated field.
