@@ -1629,11 +1629,11 @@ void MotionArbiter::handover(PlanStrip& s, bool from_rest, uint64_t now_us) {
         const float dist = std::fabs(to - o[3]);
         ++_glides;
         _glide_max_mm = std::fmax(_glide_max_mm, dist);
-        GLOGI_EVERY_MS(1000, kTag,
-                       "GLIDE (%s): window [%.1f, %.1f] -> [%.1f, %.1f] mm, carriage %.2f mm, %.2f mm to %.2f mm "
-                       "over %.0f ms%s",
-                       _glide_why, double(_win_old_min), double(_win_old_max), double(_win_min), double(_win_max),
-                       double(o[3]), double(dist), double(to), double(end - t_g) * 1e-3,
+        // Two lines: one would pass kMsgBytes (geiger_core.hpp) and lose the numbers.
+        GLOGI_EVERY_MS(1000, kTag, "GLIDE: [%.1f, %.1f] -> [%.1f, %.1f] mm, carriage %.2f, %.2f mm to %.2f mm, %.0f ms",
+                       double(_win_old_min), double(_win_old_max), double(_win_min), double(_win_max), double(o[3]),
+                       double(dist), double(to), double(end - t_g) * 1e-3);
+        GLOGI_EVERY_MS(1000, kTag, "GLIDE why: %s%s", _glide_why,
                        _glide_again ? ", stopping inside the rail first" : "");
         g.s0.p -= to;   // the glide as a gap over its rest
         _conn = g;
