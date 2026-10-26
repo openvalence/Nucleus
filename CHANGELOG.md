@@ -2,6 +2,18 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.73 (2026-10-26)
+
+### For users
+
+- **Streamed motion over WiFi no longer runs dry every few hundred milliseconds.** The machine's Bluetooth discovery signal shares one radio with its WiFi, and while it was on, WiFi traffic to the machine stalled for 40 to 80 ms out of every 100 ms. A player sending short moves a little ahead (the arcade games) ran out of moves 5 to 15 times in 8 s: the carriage braked, then hurried to catch up at up to twice the requested speed. Bluetooth discovery now pauses while the machine moves and resumes 5 s after it stops. Phones that find the machine over Bluetooth find it while it is idle; a client already connected is unaffected.
+
+### Technical
+
+- **BLE advertising pauses while motion runs** (val-1qji). `linkmode::Policy::noteMotion()` and `advertisingNow()` (`LinkMode.h`): normal mode's advertisement is off while `motionRuns()` and for `kAdvQuietAfterMotionMs` (5 s) after; config mode never pauses; SPEC 13.4 makes normal-mode advertising a MAY. Mechanism: the C6 time-shares one radio between the station and the BLE controller (coexistence), and the scannable non-connectable advertiser at 1 s still cost the station 40 to 80 ms of every ~100 ms. Power save was not the cause: the C6 reads back `WIFI_PS_NONE` after the join (now logged on the `joined` line). Bench, TCP handshake RTT to the hub, 300 probes 13 ms apart: advertising p50 41.6 ms, p90 62.4 ms, max 86 ms; not advertising p50 3.6 ms, p90 11.2 ms, max 41 ms. Arcade replay (100 ms segments, 60 ms lead), 8 s square: settles 7 to 12 per run before, 0 after; 0x1100 inter-arrival gaps of 50 to 80 ms 93 before, 0 after (max 37 ms).
+- **Stream delivery census.** `MotionArbiter::noteArrival()` logs `STREAM ARRIVALS` every 2 s while segments arrive: each segment's start minus its arrival, binned (<0 is a late segment), and the longest gap between arrivals. The `wifi_set_ps` failure line moves from printf to the diag archive.
+- **Tests.** `test_config_mode`: the pause while motion runs, the 5 s quiet, a brake to rest inside it keeping the radio, config mode never pausing, radios off never advertising.
+
 ## 0.1.72 (2026-10-26)
 
 ### For users

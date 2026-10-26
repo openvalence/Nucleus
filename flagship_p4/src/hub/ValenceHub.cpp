@@ -391,10 +391,11 @@ void serviceLinkMode(uint32_t nowMs, bool motion) {
     linkmode::Policy& m = g_box->mode;
     const bool up = g_stationUp.load(std::memory_order_acquire);
     m.tick(up && g_wsUp && g_endpointIpv4 != 0, nowMs);
+    m.noteMotion(motion);
     if (const uint32_t s = g_box->device.takePresenceApproval()) g_box->desk->presenceApproved(s, nowMs);
     if (m.advertising()) {
         ble::bringUp(VALENCE_HUB_NAME, m.configMode());
-        ble::setAdvertising(true, m.advFlags(g_box->hub->pairingWindowOpen()), __builtin_bswap32(g_endpointIpv4),
+        ble::setAdvertising(m.advertisingNow(), m.advFlags(g_box->hub->pairingWindowOpen()), __builtin_bswap32(g_endpointIpv4),
                             kWsPort);
     }
     g_netLook.store(uint8_t(m.look()), std::memory_order_relaxed);

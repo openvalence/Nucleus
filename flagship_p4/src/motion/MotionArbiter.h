@@ -1478,6 +1478,21 @@ private:
     // EMA alpha 1/4: about the last four knots. 0 after a reset.
     float    _lead_us_avg  = 0.0f;
     MotionSource _lead_source = MotionSource::Manual;   // the source the lead is measured for
+    // Stream segment delivery (bd val-1qji): each segment's start minus its
+    // arrival here, binned, one log line per kArriveWindowUs while segments
+    // arrive. A start lead under 0 is a segment that arrived late. Read the
+    // line before blaming the planner for a starved stream.
+    struct ArriveCensus {
+        static constexpr uint64_t kWindowUs = 2000000;
+        static constexpr int32_t  kBinMs[5] = {0, 10, 20, 40, 60};   // <0 <10 <20 <40 <60 >=60
+        uint32_t n = 0;
+        uint32_t bins[6] = {};
+        int32_t  min_ms = 0;
+        uint64_t gap_max_us = 0;
+        uint64_t since_us = 0;
+        uint64_t last_us = 0;
+    } _arrive;
+    void noteArrival(uint64_t start_us, uint64_t now_us);
     uint32_t _react_us_now = 0;    // the horizon the last submit chose
     uint32_t _react_floor_us = kinetic2::Config{}.react_us;   // the react_ms setting (applyTuning)
     uint32_t _react_us_logged = 0; // the last horizon logged (one line per change, throttled)

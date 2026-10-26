@@ -121,7 +121,11 @@ static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
                   static_cast<unsigned long>(g_wifi_drops.load(std::memory_order_relaxed)), g_ip);
             g_wifi_down_us = 0;
         } else {
-            GLOGI("wifi", "joined, ip %s", g_ip);
+            // The C6's own answer after the join: anything but 0 (WIFI_PS_NONE)
+            // is the AP holding inbound frames to a beacon.
+            wifi_ps_type_t ps = WIFI_PS_MIN_MODEM;
+            const esp_err_t pe = esp_wifi_get_ps(&ps);
+            GLOGI("wifi", "joined, ip %s, power save %d (%s)", g_ip, int(ps), esp_err_to_name(pe));
         }
     }
 }
@@ -193,9 +197,7 @@ static bool wifi_up(bool joinSaved, bool radios) {
     // problem and gets hunted there. Measured both ways on the bench; the
     // numbers live on bd val-091.11.
     if ((err = esp_wifi_set_ps(WIFI_PS_NONE)) != ESP_OK)
-        printf("wifi_set_ps(NONE): %s -- inbound frames will wait for DTIM\n", esp_err_to_name(err));
-    else
-        printf("wifi power save: OFF (WIFI_PS_NONE)\n");
+        GLOGW("wifi", "wifi_set_ps(NONE): %s -- inbound frames will wait for DTIM", esp_err_to_name(err));
     return true;
 }
 

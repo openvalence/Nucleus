@@ -15,6 +15,11 @@
 //   SPEC §13.4.1's rule before it reboots: no motion source running, no join
 //   in flight, GOODBYE REBOOTING to every session first (ValenceHub.cpp).
 // - kJoinWindowMs is device policy, not a registry limit (RFC-121).
+// - NORMAL MODE'S ADVERTISEMENT PAUSES WHILE MOTION RUNS and for
+//   kAdvQuietAfterMotionMs after it (bd val-1qji). The C6 time-shares one
+//   radio between the station and BLE: advertising, even at 1 s, held inbound
+//   WiFi 40-80 ms out of every ~100 ms, longer than a stream's lead. SPEC
+//   §13.4 makes that advertisement a MAY. Config mode never pauses (no motion).
 // See: Valence SPEC.md §12.3, §13.1, §13.4, §13.4.1, §13.9
 
 #include <cstddef>
@@ -27,6 +32,10 @@ namespace valence::linkmode {
 // The boot-time join reaches an address within this long, or the hub reboots
 // into config mode (unless a session is attached).
 inline constexpr uint32_t kJoinWindowMs = 60000;
+
+// Quiet after the last motion before normal mode advertises again: a stream
+// that brakes to rest and resumes keeps the radio.
+inline constexpr uint32_t kAdvQuietAfterMotionMs = 5000;
 
 // What the previous boot asked of this one. Stored as one byte; the values
 // are the stored encoding, append-only.
@@ -96,6 +105,16 @@ public:
     Boot route() const { return _boot; }
     bool configMode() const { return isConfig(_boot); }
     bool advertising() const { return _boot != Boot::radios_off; }
+    // Hub task, every tick, after tick(): whether a motion source runs.
+    void noteMotion(bool runs) {
+        if (runs) _motionMs = _nowMs | 1u;
+    }
+    // The advertisement wanted now: advertising(), paused in normal mode
+    // while motion runs and kAdvQuietAfterMotionMs after.
+    bool advertisingNow() const {
+        if (!advertising()) return false;
+        return configMode() || _motionMs == 0 || uint32_t(_nowMs - _motionMs) >= kAdvQuietAfterMotionMs;
+    }
     bool wsAvailable() const { return _online; }
 
     // The scan response's flags byte (SPEC §13.4, registry ble_adv_flags).
@@ -134,6 +153,7 @@ private:
     bool _everOnline = false;
     uint32_t _bootMs = 0;
     uint32_t _nowMs = 0;
+    uint32_t _motionMs = 0;   // the last tick motion ran, 0 for never
 };
 
 // What one press of PAIR does (RFC-114 item 4; SPEC §12.3 for config mode).

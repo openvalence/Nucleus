@@ -15,7 +15,9 @@
 //   clients' bonding flow.
 // - THE SERVICE AND CONNECTIONS IN CONFIG MODE ONLY (SPEC §13.4): bringUp()
 //   without `gatt` registers no Valence service and advertises scannable and
-//   non-connectable, at kQuietAdvMs so the shared radio stays with the station.
+//   non-connectable, at kQuietAdvMs. Even that costs the station tens of ms
+//   per beacon under coexistence: the hub pauses it while motion runs
+//   (LinkMode.h, advertisingNow()).
 // - The advertisement (≤ 31 B): flags, the 128-bit service UUID, the name cut
 //   to fit. The scan response: the name cut to what the record leaves, and
 //   the RFC-072 record with its RFC-121 endpoint tail (scanRecord()).

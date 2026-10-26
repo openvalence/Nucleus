@@ -140,6 +140,35 @@ TEST_CASE("normal mode: advertises, ws_available only while online, never config
     CHECK(p.look() == NetLook::lost);
 }
 
+TEST_CASE("normal mode: the advertisement pauses while motion runs and kAdvQuietAfterMotionMs after") {
+    Policy p;
+    uint32_t t = 0;
+    p.boot(Boot::normal, true, t);
+    run(p, t, 1000, true);
+    CHECK(p.advertisingNow());
+    p.noteMotion(true);
+    CHECK_FALSE(p.advertisingNow());
+    run(p, t, linkmode::kAdvQuietAfterMotionMs - 10, true);
+    p.noteMotion(false);
+    CHECK_FALSE(p.advertisingNow());   // a brake to rest inside the stream keeps the radio
+    run(p, t, 20, true);
+    CHECK(p.advertisingNow());
+    CHECK(p.advertising());
+}
+
+TEST_CASE("config mode never pauses its advertisement; radios off never advertises") {
+    for (Boot b : {Boot::config_gesture, Boot::config_policy}) {
+        Policy p;
+        uint32_t t = 0;
+        p.boot(b, true, t);
+        p.noteMotion(true);
+        CHECK(p.advertisingNow());
+    }
+    Policy off;
+    off.boot(Boot::radios_off, true, 0);
+    CHECK_FALSE(off.advertisingNow());
+}
+
 TEST_CASE("radios off: nothing advertised, nothing online") {
     Policy p;
     uint32_t t = 0;

@@ -947,6 +947,7 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
         // newest knot and past the seam (segmentContinues()) leaves a gap the
         // sender meant as a rest, so the curve holds until the start.
         const uint64_t start = in.anchor_us > now_us ? in.anchor_us : now_us;
+        if (in.source == MotionSource::Stream) noteArrival(in.anchor_us, now_us);
         // A start within a tick of the newest knot IS that knot: the sender
         // tiled its spans and two of its clock reads moved the stamp by
         // microseconds. Held there, a span ending moving stopped dead in one
@@ -1029,6 +1030,29 @@ bool MotionArbiter::submitKnots(float p, const MotionIntent& in, const EngineLim
     if (_k2_starved) _k2_brake_to_us = 0;
     _k2_starved = false;
     return true;
+}
+
+void MotionArbiter::noteArrival(uint64_t start_us, uint64_t now_us) {
+    ArriveCensus& c = _arrive;
+    if (c.n > 0 && now_us - c.since_us >= ArriveCensus::kWindowUs) {
+        GLOGI(kTag, "STREAM ARRIVALS: %lu segments in %lu ms, start lead min %ld ms, <0 %lu <10 %lu <20 %lu <40 %lu "
+                    "<60 %lu >=60 %lu, longest gap %lu ms",
+              static_cast<unsigned long>(c.n), static_cast<unsigned long>((now_us - c.since_us) / 1000),
+              static_cast<long>(c.min_ms), static_cast<unsigned long>(c.bins[0]), static_cast<unsigned long>(c.bins[1]),
+              static_cast<unsigned long>(c.bins[2]), static_cast<unsigned long>(c.bins[3]),
+              static_cast<unsigned long>(c.bins[4]), static_cast<unsigned long>(c.bins[5]),
+              static_cast<unsigned long>(c.gap_max_us / 1000));
+        c = ArriveCensus{};
+    }
+    const int32_t lead_ms = int32_t((int64_t(start_us) - int64_t(now_us)) / 1000);
+    if (c.n == 0) { c.since_us = now_us; c.min_ms = lead_ms; }
+    else if (now_us - c.last_us > c.gap_max_us) c.gap_max_us = now_us - c.last_us;
+    size_t b = 0;
+    while (b < 5 && lead_ms >= ArriveCensus::kBinMs[b]) ++b;
+    ++c.bins[b];
+    if (lead_ms < c.min_ms) c.min_ms = lead_ms;
+    c.last_us = now_us;
+    ++c.n;
 }
 
 void MotionArbiter::takeOscillator() {
