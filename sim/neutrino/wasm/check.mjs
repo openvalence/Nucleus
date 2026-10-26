@@ -17,7 +17,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const flag = (f, d) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : d; };
 const modPath = resolve(args.find((a) => a.endsWith('.js')) || here + '/build/neutrino.js');
-const ETAG = flag('--etag', '0d182b0609ae5411');
+const ETAG = flag('--etag', 'c380fe70d035f46c');
 
 let fails = 0;
 const ok = (name, cond, extra) => {

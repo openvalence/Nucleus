@@ -294,7 +294,7 @@ struct MotionAnomaly {
     uint16_t seq    = 0;      // the engine's rolling id: a gap is an anomaly never handed over
     uint64_t t_us   = 0;      // motion core time
     float    target = 0.0f;   // the knot's position, 0..1 across the window
-    float    detail = 0.0f;   // per kind (kinetic2::AnomalyKind)
+    float    detail = 0.0f;   // per kind (kinetic2::AnomalyKind); a speed is mm/s, client frame
 };
 
 // Each motion task's stack (the planner's and the steer's), in bytes, and the

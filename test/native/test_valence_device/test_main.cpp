@@ -1757,8 +1757,8 @@ TEST_CASE("VD-ANOM-1: each planner anomaly is one 0x4100 event, kind and body pe
     CHECK(body[anom_body::kind].u64_val == 6);
     CHECK(body[anom_body::seq].u64_val == 11);
     CHECK(body[anom_body::target].f32_val == 0.75f);
-    CHECK(body[anom_body::detail].f32_val == 1.25f);
-    CHECK(body[anom_body::t_us].u64_val == 0x1240u);   // low 32 bits
+    CHECK(body[anom_body::ceiling_ratio].f32_val == 1.25f);
+    CHECK(body[anom_body::t_ms].u64_val == 0x100001240ull / 1000);   // ms since boot, past 2^32 us
     CHECK(rig->del.anomalyEvents[0].event_kind == 3);
     CHECK(rig->del.anomalyEvents[2].event_kind == 1);
 
@@ -1776,6 +1776,59 @@ TEST_CASE("VD-ANOM-1: each planner anomaly is one 0x4100 event, kind and body pe
     rig->step(1);
     REQUIRE(rig->del.anomalyEvents.size() == kAnomalyEventBurst + 1);
     CHECK(rig->del.anomalyEvents.back().event_kind == 5);
+}
+
+// Each kind sends the one body field its detail means, declared in the
+// schema with its unit; a kind with no detail, or an unnamed refusal, sends none.
+TEST_CASE("VD-ANOM-2: each kind's detail rides its own declared field, nothing else") {
+    auto rig = std::make_unique<Rig>();
+    const CatalogEntry* entry = rig->catalog.find(ch::motion_anomaly);
+    REQUIRE(entry != nullptr);
+    std::map<uint8_t, SchemaField> schema;
+    for (const SchemaField& f : rig->catalog.schemaFields(*entry)) schema[f.key] = f;
+    CHECK(schema.count(4) == 0);   // the retired unitless detail
+    CHECK(schema[anom_body::target].role == valence::field_roles::telemetry_target);
+    CHECK(schema[anom_body::target].unitId == valence::unit_ids::normalized);
+    CHECK(schema[anom_body::t_ms].unitId == valence::unit_ids::ms);
+    CHECK(schema[anom_body::kept].unitId == valence::unit_ids::percent);
+    CHECK(schema[anom_body::ceiling_ratio].unit == "x");
+    CHECK(schema[anom_body::v_end].unitId == valence::unit_ids::mm_s);
+    CHECK(rig->catalog.labels(schema[anom_body::refusal].options).size() == 3);
+
+    struct Case { uint8_t kind; float detail; int key; double want; };
+    const Case cases[] = {
+        {1, 42.5f, anom_body::v_end, 42.5},           // settle: speed at the brake
+        {2, -80.0f, anom_body::v_end, -80.0},         // endvel_clamped: the speed held
+        {3, 0.72f, anom_body::kept, 72.0},            // knot_trimmed: share kept, %
+        {4, 0.0f, -1, 0.0},                           // dwell_zeroed: no detail
+        {5, -99.0f, anom_body::refusal, 0.0},         // non-finite
+        {5, -95.0f, anom_body::refusal, 1.0},         // in the past
+        {5, -96.0f, anom_body::refusal, 2.0},         // timeline full
+        {5, -1.0f, -1, 0.0},                          // a sentinel the table does not name
+        {6, 12.64f, anom_body::ceiling_ratio, 12.64}, // piece_over_ceiling
+    };
+    for (size_t i = 0; i < std::size(cases); ++i) {
+        const Case& c = cases[i];
+        CAPTURE(i);
+        g_anomalies.push_back({c.kind, 0, 5'000'000, 0.5f, c.detail});
+        rig->step(1000);   // one at a time, under the cap
+        REQUIRE(rig->del.anomalyEvents.size() == i + 1);
+        const EventMsg& e = rig->del.anomalyEvents[i];
+        CHECK(e.event_kind == c.kind);
+        std::map<uint8_t, IntentValue> body;
+        for (uint32_t k = 0; k < e.body_count; ++k) body[e.body[k].key] = e.body[k].value;
+        CHECK(body.count(anom_body::kind) == 1);
+        CHECK(body.count(anom_body::seq) == 1);
+        CHECK(body.count(anom_body::target) == 1);
+        CHECK(body[anom_body::t_ms].u64_val == 5000);
+        CHECK(e.body_count == (c.key < 0 ? 4u : 5u));
+        for (const auto& [k, f] : schema) CHECK(body.count(k) <= 1);
+        if (c.key < 0) continue;
+        REQUIRE(body.count(uint8_t(c.key)) == 1);
+        const IntentValue& v = body[uint8_t(c.key)];
+        if (c.key == anom_body::refusal) CHECK(v.u64_val == uint64_t(c.want));
+        else CHECK(v.f32_val == doctest::Approx(c.want));
+    }
 }
 
 // bd val-vik: a plan outside the window is a share below 0 or past 6.5535,

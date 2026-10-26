@@ -1242,7 +1242,15 @@ TEST_CASE("Kinetic² starved segment stream: the engine brakes a last knot still
     const MotionCensus c = r->census();
     CHECK_FALSE(c.busy);
     CHECK(c.position_mm > 100.0f);   // the stop runs on past the knot, at rest
-    r->arb.drainAnomalies();
+    // The speed at the brake leaves in mm/s, the knot's own 60 (0x4100 v_end).
+    MotionAnomaly a;
+    bool seen = false;
+    while (r->arb.popAnomaly(a))
+        if (a.kind == uint8_t(kinetic2::AnomalyKind::SettleEngaged)) {
+            seen = true;
+            CHECK(a.detail == doctest::Approx(60.0f).epsilon(0.05));
+        }
+    CHECK(seen);
     CHECK(r->census().anom[size_t(kinetic2::AnomalyKind::SettleEngaged)] == 1);
 }
 

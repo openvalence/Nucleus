@@ -2355,8 +2355,13 @@ bool MotionArbiter::popAnomaly(MotionAnomaly& out) {
     out.t_us   = a.t_us;
     // The engine plans the physical frame; a flipped client's window runs the
     // other way (RFC-088).
-    out.target = _flipped.load() ? 1.0f - a.target : a.target;
+    const bool flipped = _flipped.load();
+    out.target = flipped ? 1.0f - a.target : a.target;
     out.detail = a.detail;
+    // A speed leaves in mm/s, signed in the client frame.
+    using K = kinetic2::AnomalyKind;
+    if (a.kind == uint8_t(K::SettleEngaged) || a.kind == uint8_t(K::EndVelClamped))
+        out.detail = (flipped ? -a.detail : a.detail) * span();
     return true;
 }
 
