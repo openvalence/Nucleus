@@ -2,6 +2,16 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.67 (2026-10-24)
+
+### For users
+
+- **A false warning is gone from the start-up log.** Bluetooth advertising at every normal start no longer logs "Failed to persist local IRK". Nothing about Bluetooth behavior changes.
+
+### Technical
+
+- **`CONFIG_BT_NIMBLE_HS_PVCY=n`** (val-64ir). The NimBLE host generated a local IRK at sync and tried to store it; with `SECURITY_ENABLE=n` the store write is compiled out (it needs `BLE_SM_SC`) and returns `BLE_HS_ENOTSUP` (rc=8). Nothing uses the IRK: there is no pairing, bonding or resolvable private address, and the advertisement and GATT sessions use the public address. Re-enable privacy together with security and `NVS_PERSIST` if pairing ever lands.
+
 ## 0.1.66 (2026-10-24)
 
 ### For users
