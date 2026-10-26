@@ -388,8 +388,9 @@ bool BoardStation::takeScan(net::VisibleNetworks& out) {
 }
 
 bool BoardStation::persist(std::span<const uint8_t> blob) {
-    // NVS writes wait out an OTA transfer (ValenceHub.cpp, the persist rule).
-    if (otaInFlight()) return false;
+    // NVS writes wait out an OTA transfer and motion (ValenceHub.cpp, the
+    // persist rule).
+    if (hubFlashHeld()) return false;
     // Not retried: a failed write only means the next boot has the old list.
     if (saveBlob(kNvsNets, blob, false)) GLOGI(kTag, "saved networks written");
     return true;

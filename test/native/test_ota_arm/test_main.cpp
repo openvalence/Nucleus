@@ -107,3 +107,24 @@ TEST_CASE("OA-10: the reported words") {
     CHECK(std::string_view(ota::armStateName(ArmState::approved)) == "approved");
     CHECK(std::string_view(ota::armStateName(ArmState::expired)) == "expired");
 }
+
+TEST_CASE("OA-11: a live image buys at its first rest, once; motion only defers it, never expires it") {
+    ota::BuyGate g;
+    CHECK(g.take(false, true) == ota::Buy::wait);   // not live yet: nothing owed
+    CHECK_FALSE(g.held());
+    CHECK(g.take(true, false) == ota::Buy::held);   // live mid-stroke: said once
+    CHECK(g.take(true, false) == ota::Buy::wait);
+    CHECK(g.held());
+    for (int i = 0; i < 100000; ++i) REQUIRE(g.take(i % 2 == 0, false) == ota::Buy::wait);   // hours of motion
+    CHECK(g.held());
+    CHECK(g.take(false, true) == ota::Buy::now);    // the first rest, from any caller
+    CHECK_FALSE(g.held());
+    CHECK(g.take(true, true) == ota::Buy::wait);
+    CHECK(g.take(false, true) == ota::Buy::wait);
+}
+
+TEST_CASE("OA-12: a live image already at rest buys at once") {
+    ota::BuyGate g;
+    CHECK(g.take(true, true) == ota::Buy::now);
+    CHECK(g.take(true, true) == ota::Buy::wait);
+}

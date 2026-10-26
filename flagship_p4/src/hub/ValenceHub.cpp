@@ -24,10 +24,12 @@
 //   Adoption never becomes an intent, an ECHO or a cfg_gen bump.
 // - NVS WRITES RUN ON THE HUB TASK (T5: never in a transport callback), each
 //   DEBOUNCED by ValenceDevice's kCfgPersistDebounceMs of quiet, and are HELD
-//   while an OTA transfer is in flight (otaInFlight()); the one exception is
-//   a HOME-hold reboot, which writes everything pending at once
-//   (rebootNow()). Wear arithmetic, 4 KB
-//   page = 126 entries of 32 B: "cfg" costs ~5 entries a write (blob index,
+//   while an OTA transfer is in flight (otaInFlight()) or motion runs
+//   (motionFlashOk(), bd val-y3da: a write stops a moving carriage), then
+//   flushed at the first rest; the one exception is a planned reboot, which
+//   writes everything pending, the image buy included, at once (rebootNow()).
+//   A held write is RAM only: a power loss before rest loses it. Wear
+//   arithmetic, 4 KB page = 126 entries of 32 B: "cfg" costs ~5 entries a write (blob index,
 //   data header, 3 data), so ~25 writes fill a page and cost one sector erase;
 //   at the 2 s floor that is one erase per ~50 s, and the 100,000-cycle floor
 //   is ~58 days of tuning without pause on ONE page, before NVS wear-levels
@@ -246,6 +248,10 @@ uint32_t g_endpointIpv4 = 0;   // esp_netif's network order; 0 = no address
 // kPersist* bits tick() reported due that no write has landed for yet. Hub
 // task only.
 uint8_t g_persistDue = 0;
+// This tick holds its flash writes (hubFlashHeld()). Hub task only.
+bool g_flashHeld = false;
+// hubSavesPending()'s copy, refreshed by the hub task every tick.
+std::atomic<uint8_t> g_savesPending{0};
 // Written once by hubBegin(), read by the self-check: app_main, one task.
 selfcheck::LedgerBoot g_ledgerBoot{};
 
@@ -258,6 +264,24 @@ void persistDue() {
     if (g_persistDue & kPersistPresets)
         saveBlob(kNvsPresetsKey, scratch.first(g_box->device.encodePresetsBlob(scratch)));
     g_persistDue = 0;
+}
+
+// Refreshes hubSavesPending() and logs a hold as it begins and ends. Hub task.
+uint32_t g_holdSinceMs = 0;   // 0 = no hold logged
+void noteSavesPending(uint32_t nowMs) {
+    uint8_t s = uint8_t(g_persistDue | g_box->device.pendingPersist());
+    if (g_box->trust.pending(nowMs)) s |= kSaveTrust;
+    if (g_box->nets->persistPending()) s |= kSaveNets;
+    g_savesPending.store(s, std::memory_order_relaxed);
+    const bool holding = (g_flashHeld && s != 0) || otaBuyHeld();
+    if (holding && g_holdSinceMs == 0) {
+        g_holdSinceMs = std::max<uint32_t>(nowMs, 1);
+        GLOGI(kTag, "flash writes held: saved in RAM, written at rest");
+    } else if (!holding && g_holdSinceMs != 0) {
+        GLOGI(kTag, "flash hold released after %lu ms",
+              static_cast<unsigned long>(nowMs - g_holdSinceMs));
+        g_holdSinceMs = 0;
+    }
 }
 
 // WELCOME keys 46/47 (RFC-046): the hub's own reachable endpoint. 0/0 omits
@@ -331,6 +355,7 @@ void saveNext(linkmode::Next next) {
     if (g_persistDue != 0) persistDue();
     if (g_box->trust.flush(g_box->hub->pairing(), g_nvs, nowMs) & kTrustLedgerFailed)
         GLOGW(kTag, "trust ledger change not persisted before the reboot");
+    otaBuy(false, true);
     g_box->port.goodbyeAll(NackCode::REBOOTING);
     g_box->serial.goodbye(NackCode::REBOOTING);
     g_box->blePort.goodbye(NackCode::REBOOTING);
@@ -466,7 +491,10 @@ void hubTask(void*) {
         // Port first: it performs the deferred attach/detach and re-arms the
         // per-tick BLOB pacing budget that update() is about to spend.
         // Read once: the desk's join gate and the saved list's scan gate.
-        const bool motion = motionRuns(motionCensus());
+        const MotionCensus mo = motionCensus();
+        const bool motion = motionRuns(mo);
+        const bool ota = otaInFlight();
+        g_flashHeld = ota || !motionFlashOk(mo);
         g_box->desk->setMotionRuns(motion);
         g_box->port.loop(nowMs);
         phase.mark("ws.loop");
@@ -498,12 +526,13 @@ void hubTask(void*) {
                 rebootNow(nowMs, "config-mode gesture", linkmode::Next::config_gesture);
             rebootNow(nowMs, "HOME hold", linkmode::Next::none);
         }
-        const bool ota = otaInFlight();
-        if (g_persistDue != 0 && !ota) persistDue();
+        if (g_persistDue != 0 && !g_flashHeld) persistDue();
         phase.mark("persistDue");
         // nowMs is uptime, which is also the §12.3 gesture's clock.
-        const uint8_t trust = g_box->trust.tick(g_box->hub->pairing(), g_nvs, nowMs, ota);
+        const uint8_t trust = g_box->trust.tick(g_box->hub->pairing(), g_nvs, nowMs, g_flashHeld);
         phase.mark("trust.tick");
+        if (!g_flashHeld) otaBuy(false, true);   // a live image's buy held for rest
+        noteSavesPending(nowMs);
         if (trust & kTrustLedgerFailed)
             GLOGW_EVERY_MS(30000, kTag, "trust ledger not persisted: retrying every %lu ms",
                            static_cast<unsigned long>(kLedgerWriteMinIntervalMs));
@@ -544,6 +573,10 @@ uint32_t deviceFreeHeapBytes() { return uint32_t(heap_caps_get_free_size(MALLOC_
 valence::Hub* hub() { return (g_box && g_box->hub) ? &*g_box->hub : nullptr; }
 
 selfcheck::LedgerBoot hubLedgerBoot() { return g_ledgerBoot; }
+
+uint8_t hubSavesPending() { return g_savesPending.load(std::memory_order_relaxed); }
+
+bool hubFlashHeld() { return g_flashHeld; }
 
 bool hubStoredRadiosOff() {
     std::array<std::byte, stored::kConfigBlobBytes> buf{};

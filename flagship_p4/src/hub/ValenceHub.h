@@ -95,6 +95,16 @@ struct HubCensus {
 };
 HubCensus hubCensus();
 
+// The runtime flash writes still to land, for /diag: ValenceDevice.h's
+// kPersistConfig and kPersistPresets, then these. Any task; the hub task
+// refreshes it every tick.
+inline constexpr uint8_t kSaveTrust = 0x04;   // the trust ledger or the pgest clear
+inline constexpr uint8_t kSaveNets  = 0x08;   // the saved-network list
+uint8_t hubSavesPending();
+// Hub task only: this tick holds its flash writes, for an OTA transfer or
+// because motion runs (motionFlashOk(), bd val-y3da).
+bool hubFlashHeld();
+
 // The PAIR control's look (ValenceDevice.h PairLook), any task; 0 before the
 // hub is up.
 uint8_t hubPairLook();

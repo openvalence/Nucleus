@@ -2,6 +2,23 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.70 (2026-10-25)
+
+### For users
+
+- **Changing a setting while the machine moves no longer stops it.** A setting (speed, depth, any machine setting), a pairing change, a saved network, or the first start after an update, wrote to flash about 2 s later, and that write froze the motion control for about 18 ms: long enough for the carriage to stop hard wherever it was, then start again. The setting still takes effect at once; only saving it waits until the machine is at rest (nothing playing, or paused, or e-stopped, or motor power off).
+- **A setting changed during motion is lost if power is cut before the machine comes to rest.** It is saved the moment the machine rests. `/diag` shows `save=pending:...` while a save waits.
+- **A new firmware image is confirmed at its first rest.** If the machine starts moving within about 10 s of an update, the update confirms itself when the motion stops. Until then a power cut brings the previous firmware back.
+
+### Technical
+
+- **`kArbFlash`** (val-y3da, operator 2026-10-25: settings are adjusted during motion and never stop it). A per-mode flash-write rule beside `kArbFeed`: Run, Paused and Jog `rest`, Estop and Unpowered `open`, Returning and the five home modes `hold`. The census carries it (`MotionCensus::flash`); `motionFlashOk()` is `open`, or `rest` with `!motionRuns()` and no oscillation. Mechanism: with code in flash, an ESP32-P4 flash write disables the flash cache and IDF parks both cores' tasks for the write (`spi_flash/cache_utils.c`), so the steer cannot renew the 4 ms LP lease.
+- **Every runtime flash write waits for `motionFlashOk()`**: the cfg and presets blobs (`ValenceDevice::tick()`, armed and coalescing), the trust ledger and the pgest clear (`TrustStore::tick()` holdWrites), the saved networks (`BoardStation::persist()` through `hubFlashHeld()`), and the image buy (`otaBuy()`, `ota::BuyGate` in `OtaArm.h`: owed once the liveness proof passes, taken at the first rest by the liveness loop or the hub task). A planned reboot writes everything and buys first. There is no buy deadline: only a reset before the first rest reverts an unbought image. Logged as `flash writes held: saved in RAM, written at rest` and `flash hold released after N ms`; `/diag` line 2 is `# save=none` or `# save=pending:cfg,presets,trust,nets,buy`.
+- **Removed `MotionArbiter::stillFor()` and `motionStillFor()`** with `kPersistStillUs`: the persist gate was their only caller. Also the unused `_win_log_p`. val-ggj closed as superseded.
+- **valence.pin -> 4127e70** (comment-only change under `lib/valence`).
+- **Tests.** `test_motion_arbiter`: a write due mid-stream waits for rest and the stream never lapses the lease, the same write ungated lapses it at speed, and the rule per mode (a brake holds, ESTOP and power off open, a cycle and a RETURN hold). `test_valence_device` VD-PERSIST-1/2: a config-set during a stream applies at once and is written once at rest, an oscillation holds it, the mode's rule decides. `test_ota_arm` OA-11/12: the buy is owed, held through motion, taken once at rest.
+- **Evaluated, not taken: a cache-safe steer** (val-mfs5). No task runs during a cache-off write, so it would have to be an IRAM ISR, and the P4 offers no FPU in ISRs; XIP from PSRAM (val-5gh) is the structural route.
+
 ## 0.1.69 (2026-10-25)
 
 ### For users

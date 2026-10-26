@@ -442,9 +442,11 @@ extern "C" void app_main() {
         // later than the task watchdog's own window -- so a hung hub resets
         // first and the bootloader restores its pair.
         // The radios-off route never has an address; ticking is its proof.
-        if (hub_ok && (g_got_ip || route == valence::linkmode::Boot::radios_off) && haveTicks &&
-            census.ticks > lastTicks)
-            valence::otaMarkAppValid();
+        // A live image buys at its first rest (ValenceOta.h BUY AT REST).
+        const valence::MotionCensus mo = valence::motionCensus();
+        valence::otaBuy(hub_ok && (g_got_ip || route == valence::linkmode::Boot::radios_off) && haveTicks &&
+                            census.ticks > lastTicks,
+                        valence::motionFlashOk(mo));
         lastTicks = census.ticks;
         haveTicks = true;
         // The hub-status channel's RSSI, pushed from HERE and not read on the
@@ -482,7 +484,6 @@ extern "C" void app_main() {
         // DMA descriptor needs ONE contiguous block, and a fragmented heap
         // reads healthy on free right up to the allocation that fails
         // (.claude/rules/memory-budget.md T21).
-        const valence::MotionCensus mo = valence::motionCensus();
         // The arbiter's census in the archive, logged at the first tick and on
         // every change, not every 5 s; the printf line reaches the console only.
         // Two lines: one would pass kMsgBytes (geiger_core.hpp).

@@ -48,7 +48,10 @@ constexpr size_t kChunkBytes = 4096;
 // truncated upload, refused BEFORE esp_ota_begin so a typo never erases a slot.
 constexpr size_t kMinImageBytes = 64 * 1024;
 
-bool g_bought = false;
+// The liveness loop, the hub task and /diag call in; each call holds
+// g_buyLock and nothing else runs under it.
+ota::BuyGate g_buy;
+portMUX_TYPE g_buyLock = portMUX_INITIALIZER_UNLOCKED;
 
 // Claimed at the top of POST /ota, before the gates, so the ESTOP release
 // sees it from the first moment the idle verdict is relied on. Written on the
@@ -255,12 +258,22 @@ bool otaBegin() {
     return true;
 }
 
-void otaMarkAppValid() {
-    if (g_bought) return;
-    g_bought = true;
+void otaBuy(bool live, bool atRest) {
+    portENTER_CRITICAL(&g_buyLock);
+    const ota::Buy b = g_buy.take(live, atRest);
+    portEXIT_CRITICAL(&g_buyLock);
+    if (b == ota::Buy::held) GLOGW(kTag, "image buy held: motion runs, it lands at the first rest");
+    if (b != ota::Buy::now) return;
     const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
     if (err == ESP_OK) GLOGW(kTag, "image bought: %s is now the boot slot", otaRunningSlot());
     else GLOGE(kTag, "mark_app_valid failed: %s", esp_err_to_name(err));
+}
+
+bool otaBuyHeld() {
+    portENTER_CRITICAL(&g_buyLock);
+    const bool held = g_buy.held();
+    portEXIT_CRITICAL(&g_buyLock);
+    return held;
 }
 
 bool otaInFlight() { return g_inFlight.load(std::memory_order_relaxed); }

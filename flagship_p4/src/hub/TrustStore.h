@@ -13,7 +13,8 @@
 //   sent on the wire (Valence session/pairing.hpp, encodeLedger).
 // - WRITTEN ONLY ON CHANGE: a write lands when the encoded bytes differ from
 //   the bytes last stored, at most once per kLedgerWriteMinIntervalMs, and
-//   never while holdWrites is true (an OTA transfer in flight). A change made
+//   never while holdWrites is true (an OTA transfer in flight, or motion
+//   running: ValenceHub.cpp). A change made
 //   inside the interval is held, never dropped.
 // - CLAIMABLE AT BOOT means an empty ledger (Valence RFC-114 draft: a demote
 //   keeps the hub claimed) AND no stored ledger that failed to load. A stored ledger that is unreadable or rejected leaves the
@@ -146,6 +147,11 @@ public:
         if (_ledgerPending && (!_wroteOnce || uptimeMs - _lastWriteMs >= kLedgerWriteMinIntervalMs))
             out |= writeLedger(p, store, uptimeMs);
         return out;
+    }
+
+    // A ledger change or the gesture clear waits for a write. Reads only.
+    bool pending(uint32_t uptimeMs) const {
+        return _ledgerPending || (_gestureClearDue && uptimeMs >= limits::pairing_gesture_max_uptime_ms);
     }
 
     // Hub task, before a planned reboot: a pending ledger change is written

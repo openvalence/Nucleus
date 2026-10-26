@@ -155,13 +155,6 @@ bool motionTakeAnomaly(MotionAnomaly& out) {
     g_anomalies.erase(g_anomalies.begin());
     return true;
 }
-// The plan strip's answer (MotionArbiter::stillFor()), and the window asked.
-bool g_still = true;
-uint32_t g_stillWindowUs = 0;
-bool motionStillFor(uint32_t window_us) {
-    g_stillWindowUs = window_us;
-    return g_still;
-}
 MotionTuning motionDefaultTuning() { return MotionTuning{}; }
 void motionSetTuning(const MotionTuning&) {}
 void motionSetOscillator(const MotionOsc& o) { g_osc = o; }
@@ -325,8 +318,6 @@ struct Rig {
         g_estop = estop::Reading{};
         g_estop.known = true;
         g_datagramOn = true;
-        g_still = true;
-        g_stillWindowUs = 0;
         g_anomalies.clear();
         g_linkTcp = LinkTcp{};
         g_powerNow = PowerNow{};
@@ -2404,51 +2395,71 @@ TEST_CASE("VD-CONFORM: the board catalog passes conformance::checkCatalog") {
     CHECK(r.ok());
 }
 
-// ---- bd val-4rr: a persist waits for a still window -------------------------------
+// ---- bd val-4rr, val-y3da: a persist waits for rest ---------------------------------
 
-TEST_CASE("VD-PERSIST-1: a save requested mid-stroke lands in the next still window, once, never during motion") {
+// A stream in flight, as the census shows it in Run.
+void streamRuns(bool on) {
+    g_census.busy = on;
+    g_census.stream = on;
+    g_census.step_q8 = on ? 4000u : 0u;
+}
+
+TEST_CASE("VD-PERSIST-1: a config-set during a stream applies at once and is written once, at rest") {
     auto rig = std::make_unique<Rig>(AccessLevel::configure);
     rig->step(3000);
     rig->persisted = 0;
     rig->persistWrites = 0;
-    g_still = false;   // a stroke in flight
-    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(9, IntentValue::ofF32(30.0f))).has_value());
+    streamRuns(true);
+    const float before = rig->device.config().jog_speed;
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(3, IntentValue::ofF32(before + 7.0f))).has_value());
     rig->step(3000);   // past the debounce
     REQUIRE(rig->del.nacks.empty());
+    CHECK(stateF32(*rig, ch::machine_config, 8) == doctest::Approx(before + 7.0f));   // live now
     CHECK(rig->persisted == 0);
-    CHECK(g_stillWindowUs >= 60000u);
-    // A second change while moving coalesces into the same write.
-    REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(9, IntentValue::ofF32(35.0f))).has_value());
-    rig->step(3000);
+    CHECK(rig->device.pendingPersist() == kPersistConfig);
+    // A second change while moving coalesces into the same write; nothing
+    // stops the stream for it.
+    REQUIRE(rig->client->sendIntent(ch::config_set, oneKey(3, IntentValue::ofF32(before + 9.0f))).has_value());
+    rig->step(10000);
     CHECK(rig->persisted == 0);
+    CHECK_FALSE(g_census.estop);
+    CHECK_FALSE(g_census.paused);
 
-    g_still = true;
+    // An oscillation alone also holds it.
+    streamRuns(false);
+    g_census.osc_active = true;
+    rig->step(100);
+    CHECK(rig->persisted == 0);
+    g_census.osc_active = false;
     rig->step(1);
     CHECK(rig->persisted == kPersistConfig);
     CHECK(rig->persistWrites == 1);
+    CHECK(rig->device.pendingPersist() == 0);
+    CHECK(storedF32(*rig, kBlobJogSpeed) == doctest::Approx(before + 9.0f));
     rig->step(3000);
     CHECK(rig->persistWrites == 1);
 }
 
-TEST_CASE("VD-PERSIST-2: under ESTOP a due write goes whatever the strip shows; a home cycle holds it") {
+TEST_CASE("VD-PERSIST-2: the mode's rule decides: ESTOP writes whatever moves, a cycle holds") {
     {
         auto rig = std::make_unique<Rig>(AccessLevel::configure);
         rig->step(3000);
         rig->persisted = 0;
-        g_still = false;
-        g_census.estop = true;
+        streamRuns(true);
+        g_census.flash = FlashRule::open;   // Estop
         REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(9, IntentValue::ofF32(30.0f))).has_value());
         rig->step(3000);
         CHECK(rig->persisted == kPersistConfig);
+        streamRuns(false);
     }
     auto rig = std::make_unique<Rig>(AccessLevel::configure);
     rig->step(3000);
     rig->persisted = 0;
-    g_census.homing = true;
+    g_census.flash = FlashRule::hold;   // a home cycle, at rest between legs
     REQUIRE(rig->client->sendIntent(ch::modes_set, oneKey(9, IntentValue::ofF32(30.0f))).has_value());
     rig->step(3000);
     CHECK(rig->persisted == 0);
-    g_census.homing = false;
+    g_census.flash = FlashRule::rest;
     rig->step(1);
     CHECK(rig->persisted == kPersistConfig);
 }

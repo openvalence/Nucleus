@@ -1082,30 +1082,117 @@ TEST_CASE("val-0ep: a commit through a knot keeps the plan census on the piece i
     CHECK(n.plan_elapsed_us < 5'000u);
 }
 
-// bd val-4rr: the persist gate's question, answered from the published strip.
-TEST_CASE("val-4rr: stillFor is true at rest and before a move, false once the move starts inside the window") {
-    constexpr uint32_t kWindowUs = 60000;
+// bd val-y3da: on the board a flash write stops both motion tasks for ~18 ms
+// (the cache is off) while the LP core runs on. The census's flash rule holds
+// every write until rest; these cases model the write as that stall.
+namespace {
+
+using valence::ArbMode;
+using valence::FlashRule;
+using valence::kArbFlash;
+using valence::motionFlashOk;
+
+constexpr uint64_t kFlashWriteUs = 18'000;
+
+MotionCensus flashCensus(Rig& r) {
+    MotionCensus c = r.census();
+    c.step_q8 = r.emitter.q8;   // the host's field (ValenceMotion.cpp refreshSnapshot())
+    return c;
+}
+
+// The write as the board takes it: the LP core renders on, the planner and
+// the steer run again only after it.
+void flashWrite(Rig& r) {
+    g_now_us += kFlashWriteUs;
+    r.emitter.advance(double(kFlashWriteUs) * 1e-6);
+    r.arb.evaluate(g_now_us, float(kFlashWriteUs) * 1e-6f);
+}
+
+// A 300 mm stream move from a homed 0, starting 20 ms from now.
+std::unique_ptr<Rig> flashStreamRig() {
     auto r = rig();
     r->arb.forceHome(400.0f);
     r->run(1000);
-    CHECK(r->arb.stillFor(g_now_us, kWindowUs));
-
-    const uint64_t t0 = g_now_us;
     MotionIntent in;
     in.source = MotionSource::Stream;
-    in.target_mm = 200.0f;
-    in.duration_us = 300'000;
-    in.anchor_us = t0 + 100'000;
+    in.target_mm = 300.0f;
+    in.duration_us = 600'000;
+    in.anchor_us = g_now_us + 20'000;
     REQUIRE(r->arb.accept(in, g_now_us));
-    r->run(1000);
-    CHECK(r->arb.stillFor(g_now_us, kWindowUs));   // the move starts 39 ms past the window
-    r->run(69'000);
-    CHECK_FALSE(r->arb.stillFor(g_now_us, kWindowUs));   // 30 ms of it inside the window
-    r->run(150'000);
-    CHECK_FALSE(r->arb.stillFor(g_now_us, kWindowUs));
-    r->run(2'000'000);
-    REQUIRE(std::fabs(r->census().velocity_mm_s) < 1e-3f);
-    CHECK(r->arb.stillFor(g_now_us, kWindowUs));
+    return r;
+}
+
+}  // namespace
+
+TEST_CASE("val-y3da: a write due mid-stream waits for rest, and the stream never lapses the lease") {
+    auto r = flashStreamRig();
+    r->run(120'000);
+    REQUIRE(std::fabs(r->census().velocity_mm_s) > 100.0f);
+    // A config-set's persist falls due here, mid-stroke.
+    bool written = false;
+    uint32_t lapsesMoving = 0;
+    for (int i = 0; i < 3000 && !written; ++i) {
+        const MotionCensus c = flashCensus(*r);
+        if (motionFlashOk(c)) {
+            CHECK(c.step_q8 == 0u);
+            CHECK(std::fabs(c.velocity_mm_s) < 1e-3f);
+            CHECK(r->arb.positionMm() == doctest::Approx(300.0f).epsilon(1e-4));
+            lapsesMoving = r->emitter.lapse_count;
+            const float at = r->arb.positionMm();
+            flashWrite(*r);
+            CHECK(r->arb.positionMm() == at);   // the stall moved nothing
+            written = true;
+        } else {
+            r->run(1000);
+        }
+    }
+    REQUIRE(written);
+    CHECK(lapsesMoving == 0u);
+    const MotionCensus end = r->census();
+    CHECK(end.stalls == 1u);   // the write's own, at rest
+    CHECK(end.hard_stops == 0u);
+}
+
+TEST_CASE("val-y3da: the same write mid-stroke, ungated, lapses the lease under a moving carriage") {
+    auto r = flashStreamRig();
+    r->run(120'000);
+    REQUIRE(std::fabs(r->census().velocity_mm_s) > 100.0f);
+    CHECK_FALSE(motionFlashOk(flashCensus(*r)));
+    flashWrite(*r);
+    CHECK(r->emitter.lapse_count == 1u);   // the LP core parked the carriage at speed
+}
+
+TEST_CASE("val-y3da: the flash rule follows the mode: a brake holds, ESTOP and power off open, a cycle holds") {
+    {
+        auto r = flashStreamRig();
+        r->run(120'000);
+        r->arb.pause(true);
+        r->run(1000);
+        MotionCensus c = flashCensus(*r);
+        CHECK(c.flash == FlashRule::rest);
+        CHECK_FALSE(motionFlashOk(c));   // braking to rest
+        r->run(2'000'000);
+        c = flashCensus(*r);
+        CHECK(c.arb_mode == uint8_t(ArbMode::Paused));
+        CHECK(motionFlashOk(c));
+    }
+    {
+        auto r = flashStreamRig();
+        r->run(120'000);
+        r->arb.estop(true);
+        r->run(1000);
+        const MotionCensus c = flashCensus(*r);
+        CHECK(c.flash == FlashRule::open);
+        CHECK(motionFlashOk(c));
+    }
+    {
+        Rig r(false);
+        r.run(1000);
+        CHECK(flashCensus(r).flash == FlashRule::open);
+    }
+    for (ArbMode m : {ArbMode::Returning, ArbMode::HomeQueued, ArbMode::HomeApproach, ArbMode::HomeClear,
+                      ArbMode::HomeTouch, ArbMode::HomeFinish})
+        CHECK(kArbFlash[size_t(m)] == FlashRule::hold);
 }
 
 // Homed at 0 mm, the window 100..300 mm, under the factory tuning.

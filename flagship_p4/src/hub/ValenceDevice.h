@@ -166,8 +166,8 @@ public:
 
     // The device half of one hub tick. Call on the hub task right after
     // Hub::update(). Returns the kPersist* bits whose debounced write is due
-    // NOW, which waits for a still window (ValenceDevice.cpp kPersistStillUs);
-    // each is returned once, so a composition that cannot write yet holds the
+    // NOW, which waits for motionFlashOk() (bd val-y3da); each is returned
+    // once, so a composition that cannot write yet holds the
     // bits itself. The config blob takes the hub's cfgGen() at
     // write time.
     uint8_t tick(uint32_t nowMs);
@@ -192,6 +192,11 @@ public:
     // The kPersist* bits armed and not yet due, disarmed: a planned reboot
     // writes them now instead of after the debounce.
     uint8_t takePendingPersist();
+    // The kPersist* bits armed and not yet returned by tick(): in the
+    // debounce, or due and waiting for rest. Reads only.
+    uint8_t pendingPersist() const {
+        return uint8_t((_persistArmed ? kPersistConfig : 0) | (_presetsArmed ? kPersistPresets : 0));
+    }
 
     // ---- the e-stop at the machine (bd val-091.23) --------------------------
     // tick() latches ESTOP while ValenceEstopInput.h's reading stops, and

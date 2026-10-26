@@ -1,8 +1,8 @@
 #pragma once
 
 // OtaArm -- the firmware update request a PAIR double press approves: one
-// request at a time, its window, its one use; and the idle gate every update
-// passes
+// request at a time, its window, its one use; the idle gate every update
+// passes; and the new image's buy at rest
 // Constraints:
 // - Hardware-free and allocation-free; suite test_ota_arm drives it. The
 //   board glue (ValenceOta.cpp) owns the one instance, its lock and its clock.
@@ -14,7 +14,7 @@
 // - press() approves only a PENDING request inside its window, and take()
 //   spends an approval once, for the id that armed it. Nothing else approves.
 // - Milliseconds in the glue's clock; wrap-safe (signed differences only).
-// See: ValenceOta.h, bd val-ktal
+// See: ValenceOta.h, bd val-ktal, val-y3da
 
 #include <cstdint>
 
@@ -91,5 +91,32 @@ constexpr const char* idleRefusal(bool moving, motorswitch::State power) {
         return "motor power is on: latch the E-stop first";
     return nullptr;
 }
+
+// THE BUY AT REST (bd val-y3da, ValenceOta.h): the image's buy writes otadata,
+// a flash write that would stop a moving carriage. A live call makes the buy
+// owed; it is taken at the first call at rest, once. No deadline: nothing here
+// expires an owed buy. Single owner, as ArmGate.
+enum class Buy : uint8_t {
+    wait,   // nothing to do now
+    now,    // commit the image now, the only time
+    held,   // first owed while motion runs: say so once
+};
+
+class BuyGate {
+public:
+    Buy take(bool live, bool atRest) {
+        const bool first = live && !_owed;
+        if (live) _owed = true;
+        if (!_owed || _bought) return Buy::wait;
+        if (!atRest) return first ? Buy::held : Buy::wait;
+        _bought = true;
+        return Buy::now;
+    }
+    bool held() const { return _owed && !_bought; }
+
+private:
+    bool _owed = false;
+    bool _bought = false;
+};
 
 }  // namespace valence::ota

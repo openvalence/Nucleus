@@ -26,6 +26,8 @@
 #include <freertos/task.h>
 
 #include "geiger/geiger.h"
+#include "hub/ValenceDevice.h"
+#include "hub/ValenceHub.h"
 #include "hub/valence_config.h"
 #include "system/CrashRing.h"
 #include "system/ValenceHttp.h"
@@ -209,6 +211,17 @@ esp_err_t handleGet(httpd_req_t* req) {
              static_cast<unsigned long>(g_ar->_bootSeq),
              resetName(esp_reset_reason()),
              static_cast<unsigned long>(esp_timer_get_time() / 1000000));
+    // save= names the flash writes still to land: a held one is in RAM only
+    // until the machine rests (ValenceHub.cpp, bd val-y3da).
+    const uint8_t saves = hubSavesPending();
+    char held[48] = "none";
+    if (saves != 0 || otaBuyHeld()) {
+        snprintf(held, sizeof(held), "pending:%s%s%s%s%s", (saves & kPersistConfig) ? "cfg," : "",
+                 (saves & kPersistPresets) ? "presets," : "", (saves & kSaveTrust) ? "trust," : "",
+                 (saves & kSaveNets) ? "nets," : "", otaBuyHeld() ? "buy," : "");
+        held[strlen(held) - 1] = '\0';
+    }
+    out.emit("# save=%s\n", held);
     out.emit("# archive %u B PSRAM, %u slots, seq %lu..%lu, from=%lu tag=%s, geiger dropped %s\n",
              unsigned(sizeof(Archive)), unsigned(kSlots),
              static_cast<unsigned long>(oldest), static_cast<unsigned long>(w),

@@ -532,6 +532,26 @@ inline constexpr std::array<std::array<ArbFeed, 4>, kArbModes> kArbFeed = [] {
 }();
 static_assert(kMotionSourceNames.size() == 4, "the feed table has one column per MotionSource");
 
+// When a flash write may run in each mode (bd val-y3da, operator 2026-10-25:
+// settings change during motion and never stop it). On a build that runs
+// code from flash, a write turns the flash cache off and no task on either
+// core runs until it ends (~18 ms measured on the 0.1.68 bench): the steer
+// cannot renew the lease, and the LP core parks the carriage at whatever
+// speed it had. So a write waits for a mode where that stops nothing; the
+// census carries the rule (MotionCensus::flash) and motionFlashOk() adds the
+// "nothing moves" half. A cycle and a RETURN own the rail until they end:
+// hold. Estop and Unpowered render nothing: open.
+inline constexpr std::array<FlashRule, kArbModes> kArbFlash = [] {
+    std::array<FlashRule, kArbModes> t{};
+    t.fill(FlashRule::hold);
+    t[size_t(ArbMode::Run)]       = FlashRule::rest;
+    t[size_t(ArbMode::Paused)]    = FlashRule::rest;
+    t[size_t(ArbMode::Jog)]       = FlashRule::rest;
+    t[size_t(ArbMode::Unpowered)] = FlashRule::open;
+    t[size_t(ArbMode::Estop)]     = FlashRule::open;
+    return t;
+}();
+
 inline constexpr std::array<const char*, kArbModes> kArbModeNames{
     "Run", "Paused", "Jog", "Returning", "HomeQueued", "HomeApproach", "HomeClear", "HomeTouch", "HomeFinish",
     "Unpowered", "Estop"};
@@ -879,12 +899,6 @@ public:
         if (_lock) _lock(false);
         return s;
     }
-    // Any task. True when the published strip holds the plan within a step
-    // from now_us through now_us + window_us (past its end its tail), or no
-    // strip renders. One scan of at most window_us /
-    // kMotionTickUs + 1 entries under the strip lock, nothing copied. The
-    // home cycle's seek producer never draws on the strip: ask the census.
-    bool stillFor(uint64_t now_us, uint32_t window_us) const;
 
 private:
     // planTick() up to the strip: false when no plan renders this tick (the
@@ -1206,7 +1220,6 @@ private:
     // and its log line.
     bool        _win_old_valid = false;
     float       _win_old_min = 0.0f, _win_old_max = 0.0f, _win_old_rail = 0.0f;
-    float       _win_log_p = 0.0f;
     uint32_t    _window_edits = 0;
     uint32_t    _window_held = 0;
     bool        _win_held = false;

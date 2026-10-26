@@ -267,7 +267,6 @@ void motionNoteStream(uint32_t b, uint32_t s, uint32_t d) { g_sim.arbiter().note
 float motionForceHome(float stroke_mm) { return g_sim.arbiter().forceHome(stroke_mm); }
 MotionCensus motionCensus() { return g_sim.census(); }
 bool motionTakeAnomaly(MotionAnomaly& out) { return g_sim.takeAnomaly(out); }
-bool motionStillFor(uint32_t window_us) { return g_sim.arbiter().stillFor(deviceNowUs(), window_us); }
 
 void motionSetTuning(const MotionTuning& t) { g_sim.setTuning(t); }
 void motionSetOscillator(const MotionOsc& o) { g_sim.arbiter().setOscillator(o); }

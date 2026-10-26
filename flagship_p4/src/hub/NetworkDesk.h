@@ -361,6 +361,10 @@ public:
         n[2] = std::byte(open);
     }
 
+    // The saved list waits for a write (the station refused it: an OTA
+    // transfer, or motion running). Reads only.
+    bool persistPending() const { return _persistDue; }
+
 private:
     static constexpr const char* kTag = "nets";
 

@@ -79,6 +79,11 @@ struct MotionIntent {
 // One cross-task snapshot of the whole motion plane, refreshed on the motion
 // task. Every field is consistent with every other, which is what lets the hub
 // publish 0x1100 / 0x1110 / 0x1111 / 0x1020 out of a single read.
+// When a flash write may run, as the arbiter's mode rules it (MotionArbiter.h
+// kArbFlash, bd val-y3da). hold: never; rest: only while nothing moves; open:
+// always, nothing can render.
+enum class FlashRule : uint8_t { hold, rest, open };
+
 struct MotionCensus {
     // ---- position truth and the plan ----
     uint64_t sample_us      = 0;     // deviceNowUs() when this census was read:
@@ -175,6 +180,9 @@ struct MotionCensus {
     // changes of it since boot, each logged until the log's burst, and the
     // events its table has no rule for: held and logged, and any is a defect.
     uint8_t  arb_mode        = 0;
+    // The mode's flash-write rule (MotionArbiter.h kArbFlash); read it
+    // through motionFlashOk(), never alone. The default is Run's.
+    FlashRule flash          = FlashRule::rest;
     uint32_t arb_transitions = 0;
     uint32_t arb_illegal     = 0;
     // Window edits (bd val-5ozv.2): applied, held by an ESTOP, a power loss
@@ -432,14 +440,16 @@ MotionCensus motionCensus();
 inline bool motionRuns(const MotionCensus& c) {
     return c.busy || c.homing || c.returning || c.step_q8 != 0;
 }
+// A flash write may run now (bd val-y3da): the mode's rule is open, or it is
+// rest and nothing moves, the oscillator included. Every runtime NVS and
+// otadata write waits for it.
+inline bool motionFlashOk(const MotionCensus& c) {
+    return c.flash == FlashRule::open || (c.flash == FlashRule::rest && !motionRuns(c) && !c.osc_active);
+}
 // Hub task, never blocks. The oldest planner anomaly not yet taken, false when
 // none. The planner hands each over once it is counted on 0x1111; a full
 // handoff drops the newest, which the counters keep and the seq gap shows.
 bool motionTakeAnomaly(MotionAnomaly& out);
-// Any task. The published plan holds the carriage still from now for
-// window_us, or no plan renders (MotionArbiter::stillFor()); a home cycle
-// moves without one, so read census.homing too.
-bool motionStillFor(uint32_t window_us);
 // The steer task's stack high-water headroom, bytes; the planner's is the
 // census's stack_free. 0 before motionBegin(). Any task.
 uint32_t motionSteerStackFree();

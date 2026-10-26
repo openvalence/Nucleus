@@ -37,10 +37,17 @@
 //   not running from, so a short body or a wrong magic costs an unusable spare
 //   slot and nothing else.
 // - BUY LATE. CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE leaves a new image
-//   PENDING_VERIFY; otaMarkAppValid() is the only call that commits it, and
-//   the composition root makes it only once the hub is up and WiFi holds an
-//   IP. A build that hangs before that resets on the hub task's watchdog and
-//   the bootloader brings the previous slot back.
+//   PENDING_VERIFY; otaBuy() is the only call that commits it, and the
+//   composition root makes it only once the hub is up and WiFi holds an IP. A
+//   build that hangs before that resets on the hub task's watchdog and the
+//   bootloader brings the previous slot back.
+// - BUY AT REST (bd val-y3da). The buy writes otadata, a flash write that
+//   would stop a moving carriage, so a live image waits for its first rest
+//   (motionFlashOk()). No deadline exists: the bootloader reverts an unbought
+//   image only at a reset, nothing here resets one for waiting, and a planned
+//   reboot buys first (ValenceHub.cpp rebootNow()). An image that never
+//   rests reverts only at an unplanned reset (a power cut, a panic, a
+//   watchdog) before its first rest.
 // - Declarations only, no IDF: the hardware-free hub delegate calls
 //   otaPressTake() and otaInFlight(), so the host twins link their own.
 // See: OtaArm.h, .claude/rules/build-test-deploy.md, bd val-091.16, val-ktal
@@ -51,10 +58,13 @@ namespace valence {
 // failure: the machine runs, it just cannot be updated remotely.
 bool otaBegin();
 
-// Commits the running image, canceling the pending rollback. Idempotent and
-// cheap after the first call. The caller is the composition root's liveness
-// loop, which owns the "hub up and addressable" judgment.
-void otaMarkAppValid();
+// Commits the running image, canceling the pending rollback, at the first
+// call with atRest once any call has passed live. live is the composition
+// root's "hub up and addressable" judgment, atRest motionFlashOk(). Any task;
+// idempotent and cheap after the buy.
+void otaBuy(bool live, bool atRest);
+// A live image's buy is waiting for rest. Any task.
+bool otaBuyHeld();
 
 // True from the moment an update is let in until the reboot that follows it
 // (or until it fails). Any task; the hub task holds its NVS writes and the
