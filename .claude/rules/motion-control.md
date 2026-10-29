@@ -70,13 +70,21 @@ quintic, up to 1.875 times a cruise.
 **Homing never reaches the planner (operator ruling 2026-10-06, bd val-cp5).**
 Home op 1 is the arbiter's own second producer, the seek producer
 (MotionArbiter.cpp, homing): every leg steers the emitter directly at a
-constant velocity, no accel, decel or jerk profile (`kHomeRampMs`, a build
-constant, 0 by default, gives a drive that faults on a step-rate step a
-linear ramp without a wire change). An approach or a re-touch ends on the
-home sense's rise, which parks the emitter from the interrupt
-(`MotionArbiter::homeSenseRose()`); a backoff ends on a distance counted on
+constant velocity, no decel or jerk profile. The legs that start off a stop
+(the home approach, both re-touches) ramp from rest at `kHomeAccelMmS2`
+(1000 mm/s^2, the stock OSSM firmware's homing acceleration), so no velocity
+step reads as a stall; the legs that start pressed on a stop (the backoffs,
+the far approach, the unload) step to their speed, so the drive unloads at
+once. An approach or a re-touch ends on the home sense's rise, which parks
+the emitter from the interrupt (`MotionArbiter::homeSenseRose()`), or on a
+HIGH level the planner tick reads; a backoff ends on a distance counted on
 the emitter's step count, its last tick rendering the remainder so it lands
-on the count. The plan-tracking feedforward, its velocity cap and its
+on the count. **Nothing leaves the drive pushing** (the drive closes every
+step it was sent, so a command past a stop is a push at its output limit):
+every confirmed stall reverses on the next tick, and a sensed leg that fails
+pressed or possibly pressed (no stall across its search, a timeout, a short
+rail at the far stall) unloads first, a counted leg back to where its sense
+armed, then fails (`HomeUnload`, bd val-quxy). The plan-tracking feedforward, its velocity cap and its
 residual never steer during a cycle; the engine is reset at the count
 when the cycle ends, as after an e-stop. Exclusivity is the rail: a cycle
 owns it from the request to its end, `accept()` refuses every intent

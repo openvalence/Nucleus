@@ -23,7 +23,8 @@
 //   system's Degraded look itself through Flux.
 // - Current reads provisional mA until kCurrentCalibrated (bd val-omh3.4),
 //   and none until barnacle::CurrentZero has measured the 0 A output in idle
-//   (bd val-hjf7): no current, no TRIP.
+//   (bd val-hjf7): no current, no TRIP. Homing trips on the
+//   kHomeAverageSamples mean, running on the raw sample (tripInput()).
 // See: ../lib/barnacle_link/include/barnacle_link/barnacle_link.hpp,
 // openvalence.github.io guides/barnacle (the WROOM helper pin map), bd
 // val-omh3.3
@@ -67,7 +68,7 @@ constexpr uart_port_t kUart = UART_NUM_1;
 
 // ---- THE KNOBS ---------------------------------------------------------------------
 
-constexpr uint8_t kShimVersion = 2;
+constexpr uint8_t kShimVersion = 3;
 constexpr uint32_t kCpuMhz = 80;
 
 // The CH701's slope at the sensor pin (before the divider). A placeholder: the
@@ -80,6 +81,11 @@ constexpr bool kCurrentCalibrated = false;
 // 10k over 20k: the sensor's volts are the pin's times 3/2.
 constexpr int32_t kCurrentDividerNum = 3;
 constexpr int32_t kCurrentDividerDen = 2;
+// The home trip is the stock OSSM firmware's 6 % of full scale at the pin
+// (barnacle_link.hpp): a slope or divider change moves its mA here first.
+static_assert(barnacle::kDefaultHomeTripMa ==
+                  barnacle::kRefHomeTripPinMv * kCurrentDividerNum / kCurrentDividerDen * 1000 / kCurrentMvPerA,
+              "the home trip must stay the reference's pin millivolts in this slope's mA");
 // 1:40: the J2 supply's volts are the pin's times this.
 // TODO(val-omh3.5): check the ratio against a meter.
 constexpr int32_t kMotorVoltsPerPinVolt = 40;
@@ -169,6 +175,7 @@ bool g_uartOk = false;
 
 barnacle::Decoder g_decoder;
 barnacle::TripDetector g_trip;
+barnacle::Boxcar<barnacle::kHomeAverageSamples> g_homeMean;   // fed in every mode, so full when a home starts
 barnacle::CurrentZero g_zero;
 barnacle::Command g_cmd{barnacle::Mode::idle, 0, 0, 0, barnacle::kDefaultHomeTripMa, barnacle::kDefaultRunTripMa};
 bool g_heardP4 = false;
@@ -332,7 +339,9 @@ void sampleCurrent() {
     if (!ma) return;   // no zero yet: the status reads none, TRIP stays released
     g_maSum += *ma;
     ++g_maCount;
-    const bool trip = g_trip.sample(*ma, barnacle::activeThreshold(g_cmd.mode, g_cmd.home_trip_ma, g_cmd.run_trip_ma));
+    const std::optional<int32_t> mean = g_homeMean.push(*ma);
+    const bool trip = g_trip.sample(barnacle::tripInput(g_cmd.mode, *ma, mean),
+                                    barnacle::activeThreshold(g_cmd.mode, g_cmd.home_trip_ma, g_cmd.run_trip_ma));
     if (trip != g_tripOut) {
         g_tripOut = trip;
         digitalWrite(kPinTrip, trip ? HIGH : LOW);

@@ -60,6 +60,9 @@
 
 #include "ValenceMotion.h"
 #include "hub/valence_config.h"
+#if defined(CONFIG_NUCLEUS_BOARD_BARNACLE)
+#include "barnacle_link/barnacle_link.hpp"
+#endif
 #include "kinetic2/engine.hpp"
 #include "kinetic2/oscillator.hpp"
 #include "kinetic2/sources.hpp"
@@ -183,6 +186,18 @@ static_assert(kOscDriveHeldUs / (kOscPlanDriveTicks * kMotionTickUs) + kOscDrive
 // from. No stall within either, a usable rail under MIN_RAIL_MM, or no end by
 // homeCycleS() plus kHomeTimeoutMarginUs fails it unhomed.
 //
+// NOTHING LEAVES THE DRIVE PUSHING. The drive closes every step it was sent:
+// a step past a stop is following error it pushes to close at its output
+// limit until the command comes back. So every confirmed stall reverses on
+// the next tick at the leg's speed, unramped (the backoff, or the far
+// approach off the home stop), as the stock OSSM firmware backs off at once.
+// A sensed leg that fails pressed or possibly pressed (no stall across its
+// search, a timeout, a short rail at the far stall) first UNLOADS: a counted
+// leg back to where its sense armed, a point it passed with the line LOW,
+// then fails. The far approach, which starts pressed on the home stop, must
+// read the line LOW within kHomeSafetyMarginMm of leaving it, or fails there:
+// a line held HIGH would leave it unarmed into the far stop.
+//
 // A CYCLE PUBLISHES THE PHYSICAL FRAME: 0.0 mm is kHomeSafetyMarginMm off the
 // low stop's datum, the rail ends kHomeSafetyMarginMm short of the high one,
 // and the stall the home leg takes reads its datum's label (minus the margin,
@@ -201,10 +216,17 @@ static_assert(kOscDriveHeldUs / (kOscPlanDriveTicks * kMotionTickUs) + kOscDrive
 // the line with two reads kHomeSenseDebounceUs apart, its rise wakes the
 // planner task (ValenceHomeSense.cpp), and nothing else. kHomeSenseLatencyUs is
 // the two ends' shared contact-to-park figure; a change to the source's
-// numbers moves it here.
+// numbers moves it here. On the barnacle the source is the R+D board's helper
+// (barnacle_link.hpp): the home trip's mean over kHomeAverageSamples, its
+// detect figure for a step at the trip (a harder stall trips sooner, so a
+// re-touch datum reads up to the touch speed times the difference early).
+#if defined(CONFIG_NUCLEUS_BOARD_BARNACLE)
+inline constexpr uint32_t kStallDetectUs        = barnacle::kHomeTripDetectUs;
+#else
 inline constexpr uint32_t kStallConversionUs    = 150;    // the S3's INA228 shunt conversion
 inline constexpr uint32_t kStallOnSamples       = 3;      // the S3's N
 inline constexpr uint32_t kStallDetectUs        = kStallOnSamples * kStallConversionUs;
+#endif
 // A SAFETY MARGIN, NEVER A COMMANDABLE POSITION AND NEVER A CONVENIENCE
 // (operator ruling 2026-10-06): the rail ends this far short of each stop's
 // datum, the window clamp never admits a point inside it, and every backoff of
@@ -216,11 +238,14 @@ inline constexpr float    kHomeTouchFloorMmS    = 8.0f;
 inline constexpr uint32_t kHomeSenseDebounceUs  = 100;    // the board's two reads of a rise
 inline constexpr uint32_t kHomeTimeoutMarginUs  = 2000000;
 inline constexpr uint32_t kHomeSenseLatencyUs   = kStallDetectUs + kHomeSenseDebounceUs;
-// A linear velocity ramp over this many ms at the start of every leg, from
-// rest to the leg's speed; 0 = none, the first steer is the full speed. For a
-// drive that faults on a step-rate step: a build constant, never a wire field.
-inline constexpr uint32_t kHomeRampMs           = 0;
-inline constexpr uint32_t kHomeLegs             = 7;   // two approaches, two re-touches, three backoffs
+// The sensed legs that start off a stop (the home approach, both re-touches)
+// ramp from rest at this rate, the stock OSSM firmware's homing acceleration
+// (homing.cpp setAcceleration(1000_mm)): a velocity step is a torque burst the
+// stall sense can read as a stall. Never the legs that start pressed on a
+// stop (the backoffs, the far approach, the unload): they step to speed, so
+// the drive unloads at once. A build constant, never a wire field.
+inline constexpr float    kHomeAccelMmS2        = 1000.0f;
+inline constexpr uint32_t kHomeRampedLegs       = 3;
 
 // The re-touch speed for an approach speed: a quarter of it, floored, never
 // above the approach itself.
@@ -233,15 +258,16 @@ constexpr float homeTouchMmS(float home_mm_s) {
 // The cycle's own time, before kHomeTimeoutMarginUs, every leg at its constant
 // speed: both approaches across their whole search and the three backoffs at
 // the home speed, both re-touches across their whole reach at the touch speed,
-// and half of kHomeRampMs for each leg. The 1 ms dwell between legs is inside
-// kHomeTimeoutMarginUs.
+// and half the ramp time to the home speed for each ramped leg. The 1 ms dwell
+// between legs is inside kHomeTimeoutMarginUs; an unload has its own, its
+// distance at the home speed plus kHomeTimeoutMarginUs.
 constexpr float homeCycleS(float max_rail_mm, float home_mm_s) {
     const float stops = max_rail_mm + 2.0f * kHomeSafetyMarginMm;
     const float seek = (stops + 2.0f * kHomeSearchMarginMm) + (stops + kHomeSearchMarginMm);
     const float slow = 2.0f * (kHomeSafetyMarginMm + kHomeSearchMarginMm);
     const float backoff = 3.0f * kHomeSafetyMarginMm;
     return (seek + backoff) / home_mm_s + slow / homeTouchMmS(home_mm_s) +
-           float(kHomeLegs) * 0.5e-3f * float(kHomeRampMs);
+           float(kHomeRampedLegs) * 0.5f * home_mm_s / kHomeAccelMmS2;
 }
 
 // At the factory speeds. A faster home speed is checked where it runs: the
@@ -310,6 +336,7 @@ enum class ArbEvent : uint8_t {
     HomeMeasured,   // the far end's re-touch stall: the final backoff
     HomeDone,       // the final backoff on its count, the line LOW: homed
     HomeFail,       // a leg ended without its stall, a stop still pressed, a short rail, a timeout
+    HomeUnload,     // a sensed leg failing pressed or possibly pressed: back to where its sense armed
     WindowEdit,     // a session's live window edit taken (setWindow(), WindowPost::edit)
     WindowAdopt,    // the stored window adopted: boot, homing, a config restore (WindowPost::adopt)
     Reorigin,      // force_home re-origined the count (forceHome())
@@ -436,8 +463,9 @@ inline constexpr ArbRule kRules[] = {
     {M::HomeFinish, E::HomeDone, toLayer(A::homed)},
     {M::HomeApproach, E::HomeFail, toLayer(A::endCycle)},
     {M::HomeClear, E::HomeFail, toLayer(A::endCycle)},
-    {M::HomeTouch, E::HomeFail, toLayer(A::endCycle)},
     {M::HomeFinish, E::HomeFail, toLayer(A::endCycle)},
+    {M::HomeApproach, E::HomeUnload, to(M::HomeClear, A::leg)},
+    {M::HomeTouch, E::HomeUnload, to(M::HomeClear, A::leg)},
     // A window edit (bd val-5ozv.2): the motion layer's, a carriage the edit
     // left outside gliding in (THE GLIDE, below). Under PAUSE the paused
     // position is held in the new window; under override the jog keeps the
@@ -566,7 +594,7 @@ inline constexpr std::array<const char*, kArbModes> kArbModeNames{
 inline constexpr std::array<const char*, kArbEvents> kArbEventNames{
     "estop", "release", "power off", "power on", "pause", "resume", "override", "override off", "brake",
     "home request", "home cancel", "home abort", "home start", "home moving", "home contact", "home cleared",
-    "home datum", "home measured", "home done", "home fail", "window edit", "window adopt", "reorigin", "return",
+    "home datum", "home measured", "home done", "home fail", "home unload", "window edit", "window adopt", "reorigin", "return",
     "return failed", "return arrived", "stream enter"};
 
 // The transition log's burst: this many lines per window, the rest counted.
@@ -1171,9 +1199,12 @@ private:
     // arms the sense: at once when the line is known LOW, else on its first
     // LOW read (the far approach starts pressed against the home stop).
     void homeSeek(bool touch, bool armed, ArbEvent ev, uint64_t now_us);
-    // Starts a constant-velocity leg toward `end_mm` at v_mm_s, in the mode
-    // `ev` moves to, before the sense is armed.
-    void homeLeg(ArbEvent ev, float end_mm, float v_mm_s, uint64_t now_us);
+    // Starts a leg toward `end_mm` at v_mm_s, in the mode `ev` moves to,
+    // before the sense is armed; `ramp` ramps it from rest at kHomeAccelMmS2.
+    void homeLeg(ArbEvent ev, float end_mm, float v_mm_s, bool ramp, uint64_t now_us);
+    // A sensed leg failing by `why`: the unload leg back to where its sense
+    // armed, at the home speed, then the failure (HomeClear's end).
+    void homeUnload(const char* why, uint64_t now_us);
     // The seek producer's one tick: steers the leg's velocity, or parks and
     // answers true once the count has reached the leg's end.
     bool homeDrive(uint64_t now_us, float dt_s);
@@ -1483,6 +1514,10 @@ private:
     int32_t   _leg_dir = 1;
     float     _leg_v = 0.0f;
     uint64_t  _leg_start_us = 0;
+    bool      _leg_ramp = false;
+    int32_t   _leg_from = 0;       // the count the leg started at
+    int32_t   _leg_armed_at = 0;   // the count its sense armed at, the line LOW
+    const char* _unload_why = nullptr;   // the failure an unload in flight ends in, a string literal
     float     _seek_v = 0.0f;
     // The interrupt's handshake with the planner. The task stores armed
     // (and idle); homeSenseRose() alone moves armed -> tripping -> latched,

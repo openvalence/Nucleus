@@ -71,7 +71,8 @@ uint64_t nowUs() { return g_now_us; }
 
 // Hard stops in the emitter's boot frame: HIGH at or below lo, at or above hi.
 // sticky_lo holds the line once the home stop has read HIGH; hi_sticky_from
-// holds it from that many rises of the far stop on (2: the far re-touch).
+// holds it from that many rises of the far stop on (2: the far re-touch), and
+// lo_sticky_from the home stop's (2: the home re-touch).
 // on_probe runs once inside home(), with the request word already set: a
 // planner tick there is the planner preempting the hub between the word and
 // the request.
@@ -92,9 +93,12 @@ public:
         const float p = float(emitter.count()) * kMmPerStep;
         const bool l = p <= lo_mm, h = p >= hi_mm;
         if (l) lo_seen = true;
+        if (l && !was_lo) ++lo_rises;
+        was_lo = l;
         if (h && !was_hi) ++hi_rises;
         was_hi = h;
-        return l || h || (sticky_lo && lo_seen) || (hi_sticky_from > 0 && hi_rises >= hi_sticky_from);
+        return l || h || (sticky_lo && lo_seen) || (hi_sticky_from > 0 && hi_rises >= hi_sticky_from) ||
+               (lo_sticky_from > 0 && lo_rises >= lo_sticky_from);
     }
     bool level() const {
         const float p = float(emitter.count()) * kMmPerStep;
@@ -106,11 +110,14 @@ public:
     float hi_mm = 60.0f;
     bool sticky_lo = false;
     int hi_sticky_from = 0;
+    int lo_sticky_from = 0;
     std::optional<Probe> probe_as;
     std::function<void()> on_probe;
     bool lo_seen = false;
     bool was_hi = false;
     int hi_rises = 0;
+    bool was_lo = false;
+    int lo_rises = 0;
 };
 
 // Built on the heap (the arbiter holds a KB-scale engine): powered and
@@ -225,19 +232,19 @@ namespace {
 // pr planReturn, ar arrive, ad adopt, en enter.
 // Columns: estop release poweroff poweron pause resume override ovroff brake
 // homereq homecancel homeabort homestart homemoving contact cleared datum
-// measured done fail window adopt reorigin return returnfailed arrived enter.
+// measured done fail unload window adopt reorigin return returnfailed arrived enter.
 const std::array<const char*, kArbModes> kGrid{
-    /* Run       */ "E:st . U:st . P:no . J:no . P:br Q:qu . . . . . . . . . . R:fr R:ad R:ro . . . R:en",
-    /* Paused    */ "E:st . U:st . . R:no J:no . P:br Q:qu . . . . . . . . . . P:rk P:ad P:ro . . . .",
-    /* Jog       */ "E:st . U:st . . . . P:no J:br Q:qu . . . . . . . . . . J:rk J:ad J:ro T:pr J:pr . .",
-    /* Returning */ "E:st . U:st . . . . . T:br . . T:rf . . . . . . . . T:rk T:ad T:ro T:pr J:pr P:ar .",
-    /* Queued    */ "E:st . U:st . . . . . Q:br . L:no L:rf A:sa L:rf . . . . . . Q:df Q:df L:rf T:pr Q:pr . .",
-    /* Approach  */ "E:st . U:st . . . . . A:br . . L:ec . . C:lg . . . . L:ec A:df A:df L:ec . . . .",
-    /* Clear     */ "E:st . U:st . . . . . C:br . . L:ec . . . H:lg . . . L:ec C:df C:df L:ec . . . .",
-    /* Touch     */ "E:st . U:st . . . . . H:br . . L:ec . . . . A:lg F:lg . L:ec H:df H:df L:ec . . . .",
-    /* Finish    */ "E:st . U:st . . . . . F:br . . L:ec . . . . . . L:hm L:ec F:df F:df L:ec . . . .",
-    /* Unpowered */ "E:st . U:rf L:no . . . . U:rc . . . . . . . . . . . U:df U:df U:df . . . .",
-    /* Estop     */ "E:rf P:no . . . . . . . . . . . . . . . . . . E:df E:df E:df . . . .",
+    /* Run       */ "E:st . U:st . P:no . J:no . P:br Q:qu . . . . . . . . . . . R:fr R:ad R:ro . . . R:en",
+    /* Paused    */ "E:st . U:st . . R:no J:no . P:br Q:qu . . . . . . . . . . . P:rk P:ad P:ro . . . .",
+    /* Jog       */ "E:st . U:st . . . . P:no J:br Q:qu . . . . . . . . . . . J:rk J:ad J:ro T:pr J:pr . .",
+    /* Returning */ "E:st . U:st . . . . . T:br . . T:rf . . . . . . . . . T:rk T:ad T:ro T:pr J:pr P:ar .",
+    /* Queued    */ "E:st . U:st . . . . . Q:br . L:no L:rf A:sa L:rf . . . . . . . Q:df Q:df L:rf T:pr Q:pr . .",
+    /* Approach  */ "E:st . U:st . . . . . A:br . . L:ec . . C:lg . . . . L:ec C:lg A:df A:df L:ec . . . .",
+    /* Clear     */ "E:st . U:st . . . . . C:br . . L:ec . . . H:lg . . . L:ec . C:df C:df L:ec . . . .",
+    /* Touch     */ "E:st . U:st . . . . . H:br . . L:ec . . . . A:lg F:lg . . C:lg H:df H:df L:ec . . . .",
+    /* Finish    */ "E:st . U:st . . . . . F:br . . L:ec . . . . . . L:hm L:ec . F:df F:df L:ec . . . .",
+    /* Unpowered */ "E:st . U:rf L:no . . . . U:rc . . . . . . . . . . . . U:df U:df U:df . . . .",
+    /* Estop     */ "E:rf P:no . . . . . . . . . . . . . . . . . . . E:df E:df E:df . . . .",
 };
 
 std::string token(const ArbCell& c) {
@@ -741,7 +748,9 @@ TEST_CASE("cells: a pause ends a cycle in every phase; a window edit is held to 
 }
 
 TEST_CASE("cells: a cycle fails in every phase and lands unhomed in the layer") {
-    auto fail = [](const std::function<void(Rig&)>& setup, ArbMode at, const char* why) {
+    // `unload`: the sensed leg that unloaded the drive before failing at `at`.
+    auto fail = [](const std::function<void(Rig&)>& setup, ArbMode at, const char* why,
+                   std::optional<ArbMode> unload = std::nullopt) {
         NoIllegal guard;
         INFO(why);
         auto r = std::make_unique<Rig>();
@@ -755,16 +764,19 @@ TEST_CASE("cells: a cycle fails in every phase and lands unhomed in the layer") 
         REQUIRE(c.home_fail_why != nullptr);
         CHECK(std::string(c.home_fail_why) == why);
         CHECK(g_hits[size_t(at)][size_t(ArbEvent::HomeFail)] > 0);
+        if (unload) CHECK(g_hits[size_t(*unload)][size_t(ArbEvent::HomeUnload)] > 0);
     };
     fail([](Rig& r) {
         r.sense.lo_mm = -1e6f;
         r.arb.setWindow(0.0f, 40.0f, 40.0f);
         r.run(1000);   // taken before the request, which a frame move would end
-    }, ArbMode::HomeApproach, "no stall across max_rail");
+    }, ArbMode::HomeClear, "no stall across max_rail", ArbMode::HomeApproach);
+    fail([](Rig& r) { r.sense.lo_sticky_from = 2; }, ArbMode::HomeApproach,
+         "still on the home stop a safety margin after leaving it");
     fail([](Rig& r) { r.sense.sticky_lo = true; }, ArbMode::HomeClear,
          "still on the stop after the backoff (lower home_speed)");
-    fail([](Rig& r) { r.sense.hi_mm = 5.0f; }, ArbMode::HomeTouch,
-         "the usable rail between the safety margins is under the rail floor");
+    fail([](Rig& r) { r.sense.hi_mm = 5.0f; }, ArbMode::HomeClear,
+         "the usable rail between the safety margins is under the rail floor", ArbMode::HomeTouch);
     fail([](Rig& r) { r.sense.hi_sticky_from = 2; }, ArbMode::HomeFinish,
          "still on the far stop after the final backoff (lower home_speed)");
 }

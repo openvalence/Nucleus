@@ -55,23 +55,52 @@ static_assert(kHelperStaleMs * 1000 >= 10 * kStatusPeriodUs, "stale must outlast
 static_assert(kP4SilentMs >= 10 * kCommandPeriodMs, "silent must outlast a burst of lost commands");
 
 // ---- the trip detector's timing -------------------------------------------
-// The helper samples motor current every kTripSampleUs. kTripOnSamples
-// consecutive samples at or over the active threshold assert TRIP;
-// kTripOffSamples consecutive samples under kTripReleasePercent of it release
-// it. kTripDetectUs is the stall-detect half of the P4's contact-to-park
-// latency: the P4 static_asserts it against its own figure.
+// The helper samples motor current every kTripSampleUs. Running and idle trip
+// on the raw sample, homing on its kHomeAverageSamples mean (tripInput()):
+// kTripOnSamples consecutive inputs at or over the active threshold assert
+// TRIP; kTripOffSamples consecutive inputs under kTripReleasePercent of it
+// release it. kTripDetectUs (running) and kHomeTripDetectUs (homing, a step
+// at the threshold; a larger step trips sooner) are the stall-detect half of
+// the P4's contact-to-park latency: the P4 static_asserts them against its
+// own figures.
 inline constexpr uint32_t kTripSampleUs = 150;
 inline constexpr uint32_t kTripOnSamples = 3;
 inline constexpr uint32_t kTripOffSamples = 3;
 inline constexpr uint32_t kTripReleasePercent = 50;
 inline constexpr uint32_t kTripDetectUs = kTripSampleUs * kTripOnSamples;
 
+// THE HOME TRIP IS THE STOCK OSSM FIRMWARE'S, the stall detector proven on
+// this R+D board, sensor and divider (researchanddesire/OSSM software/
+// firmware: Config.h sensorlessCurrentLimit, motor.cpp getCurrent(),
+// homing.cpp). Its rule: the mean of 50 ADC reads on IO36, minus the mean of
+// 1000 taken at the start of every home, over 6.0 % of the 12-bit full scale
+// (4096 counts) trips. Constraints:
+// - The threshold in our units: 6 % of 4096 counts is 245.76 counts at the
+//   same 12 dB attenuation. ASSUMED full scale: 3300 mV per 4096 counts, the
+//   ESP32 line-fitting slope at the nominal 1100 mV Vref (the chip's eFuse
+//   Vref spans 1000..1200 mV, so +-9 %), so 198 mV at the pin, 297 mV at the
+//   sensor through the 10k over 20k divider, 2970 mA at the provisional
+//   100 mV/A. The shim static_asserts this chain against its own slope and
+//   divider; a calibrated slope (bd val-omh3.4) moves the mA, never the mV.
+// - The filter: the reference's 50-read mean, here 50 consecutive samples
+//   (7.5 ms, its 10 ms poll's span), so +-180 mV of pin noise per sample
+//   leaves a mean about 15 mV rms at the pin against a 198 mV trip. Never
+//   the raw sample: at the 1000 mA this replaced (67 mV at the pin) noise
+//   alone tripped the fast approach mid-rail.
+// - The rest offset: the P4 adds the rest current it averaged before the
+//   home (BarnacleLink.h homeTripFrom()), the reference's per-home zero.
+inline constexpr uint32_t kHomeAverageSamples = 50;
+inline constexpr int32_t kRefHomeTripPinMv = 6 * 3300 / 100;   // 6 % of the assumed 3300 mV full scale
+inline constexpr uint32_t kHomeTripDetectUs = kTripSampleUs * (kHomeAverageSamples + kTripOnSamples - 1);
+
 // The trip thresholds, in the helper's current scale (provisional mA until
 // the CH701 is calibrated, bd val-omh3.4): what the P4 sends, and what the
 // helper applies from boot until its first command. Homing is the stall
-// against the end stop (the S3 home sense's 1.0 A), running a jam.
-// TODO(val-omh3.5): both from the bench.
-inline constexpr uint16_t kDefaultHomeTripMa = 1000;
+// against the end stop (above), running a jam on the raw sample: 8000 mA is
+// 533 mV at the pin, three times the per-sample noise, so the noise argument
+// that moved the home trip does not reach it.
+// TODO(val-omh3.5): the run trip from the bench.
+inline constexpr uint16_t kDefaultHomeTripMa = 2970;
 inline constexpr uint16_t kDefaultRunTripMa = 8000;
 
 // ---- vocabulary --------------------------------------------------------------
@@ -496,6 +525,40 @@ constexpr uint16_t activeThreshold(Mode m, uint16_t home_ma, uint16_t run_ma) {
     return m == Mode::homing ? home_ma : run_ma;
 }
 
+// The running mean of the last N samples; nullopt until N have arrived.
+// SINGLE OWNER: its caller's loop.
+template <uint32_t N>
+class Boxcar {
+public:
+    std::optional<int32_t> push(int32_t v) {
+        _sum += v - _ring[_at];
+        _ring[_at] = v;
+        _at = (_at + 1) % N;
+        if (_n < N) ++_n;
+        if (_n < N) return std::nullopt;
+        return int32_t(_sum / int64_t(N));
+    }
+    void reset() {
+        _ring.fill(0);
+        _sum = 0;
+        _at = 0;
+        _n = 0;
+    }
+
+private:
+    std::array<int32_t, N> _ring{};
+    int64_t _sum = 0;
+    uint32_t _at = 0;
+    uint32_t _n = 0;
+};
+
+// What the detector judges in a mode: the home mean in a home cycle (kNoCurrent
+// before it fills, which never trips), the raw sample otherwise.
+constexpr int32_t tripInput(Mode m, int32_t raw_ma, std::optional<int32_t> home_mean_ma) {
+    if (m != Mode::homing) return raw_ma;
+    return home_mean_ma ? *home_mean_ma : int32_t(kNoCurrent);
+}
+
 // ---- the current zero (the helper runs it; the suite drives it) -----------------
 
 // The sensor's 0 A output, measured at the helper, never assumed: U6 is a
@@ -518,10 +581,12 @@ constexpr uint16_t activeThreshold(Mode m, uint16_t home_ma, uint16_t run_ma) {
 // - The zero is the mean of kZeroAgreeWindows consecutive windows whose means
 //   all lie within kZeroAgreeMv of each other; a window that breaks the band
 //   starts the next run. Taken once per helper boot, never re-taken: a zero
-//   that drifted after it is the P4's restCurrentSane() to refuse.
+//   that drifted after it is the P4's restCurrentSane() to refuse and the
+//   home trip's rest offset to absorb (homeTripFrom(), BarnacleLink.h).
 // - The zero tracks the rail only while it is taken: a later sag of dV reads
 //   as -dV/2 of sensor output (a real current under-read). Nothing on the
-//   board reads the 5 V rail, so no correction exists.
+//   board reads the 5 V rail, so no correction exists here: the home trip's
+//   rest offset (kDefaultHomeTripMa above) is the per-home correction.
 // - Until a zero is taken there is no current: the helper reads kNoCurrent
 //   and TRIP never asserts, the no-ADC state, so the P4 refuses a home.
 // SINGLE OWNER: the helper's sampling loop.

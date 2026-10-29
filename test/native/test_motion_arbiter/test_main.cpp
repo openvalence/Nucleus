@@ -1690,16 +1690,25 @@ TEST_CASE("home: the window clamp never admits a point inside either safety marg
     CHECK_FALSE(s.level());
 }
 
-TEST_CASE("home: the approach steers home_speed on its first tick, never a ramp, and no planner") {
+TEST_CASE("home: the approach ramps from rest at kHomeAccelMmS2, then holds home_speed, and no planner") {
     auto r = rig();
     FakeSense s{r->emitter, -30.0f, 170.0f};
     isr(*r, s);
     r->arb.setHomeSense(s);
     REQUIRE(r->arb.home() == HomeStart::started);
     const uint32_t plans = r->census().plans;
-    r->run(1000);
-    static_assert(valence::kHomeRampMs == 0, "this case pins the factory build: no ramp");
-    CHECK(r->emitter.q8 == valence::steerWord(-DEFAULT_HOME_SPEED_MM_S).step_q8);
+    // The stock OSSM firmware's 1000 mm/s^2: no velocity step for the stall
+    // sense to read as a stall.
+    const int rampTicks = int(std::ceil(DEFAULT_HOME_SPEED_MM_S / valence::kHomeAccelMmS2 * 1000.0f)) + 2;
+    float was = 0.0f;
+    for (int i = 0; i < rampTicks; ++i) {
+        r->run(1000);
+        const float v = -r->census().velocity_mm_s;
+        CAPTURE(i);
+        REQUIRE(v >= was);
+        REQUIRE(v - was <= valence::kHomeAccelMmS2 * 1e-3f + 1e-3f);
+        was = v;
+    }
     CHECK_FALSE(r->emitter.fwd);
     CHECK(r->census().velocity_mm_s == doctest::Approx(-DEFAULT_HOME_SPEED_MM_S));
     // Constant: the same word every tick until contact, whatever the jog accel.
@@ -1708,7 +1717,10 @@ TEST_CASE("home: the approach steers home_speed on its first tick, never a ramp,
         r->run(1000);
         REQUIRE(r->emitter.q8 == valence::steerWord(-DEFAULT_HOME_SPEED_MM_S).step_q8);
     }
-    CHECK(s.bootMm() == doctest::Approx(-0.5f * DEFAULT_HOME_SPEED_MM_S).epsilon(0.001));
+    // The ramp costs half its time at the home speed.
+    const float t_s = float(rampTicks + 500) * 1e-3f;
+    const float rampS = DEFAULT_HOME_SPEED_MM_S / valence::kHomeAccelMmS2;
+    CHECK(s.bootMm() == doctest::Approx(-DEFAULT_HOME_SPEED_MM_S * (t_s - 0.5f * rampS)).epsilon(0.005));
     CHECK(std::fabs(r->census().plan_mm - r->census().position_mm) < 1e-6f);   // the census plan is the count
     r->run(20'000'000);
     CHECK(r->census().homed);
@@ -1773,10 +1785,9 @@ TEST_CASE("home: a far-leg failure leaves positions measured from the home datum
         REQUIRE(c.home_fail_leg == 1);
         CHECK_FALSE(c.homed);
         CHECK(c.rail_mm == 100.0f);
-        // The far search ends max_rail plus both margins plus one search
-        // margin from the home datum, which reads minus a margin.
-        CHECK(std::fabs(c.position_mm - (100.0f + kHomeSafetyMarginMm + kHomeSearchMarginMm)) <=
-              kDatumTol + kMmPerStep);
+        // The far search ran out, so it unloaded back to where its sense
+        // armed: just off the home stop's datum, which reads minus a margin.
+        CHECK(std::fabs(c.position_mm - (-kHomeSafetyMarginMm)) <= kDatumTol + 0.05f);
         CHECK(std::fabs((s.bootMm() - c.position_mm) - (-30.0f + kHomeSafetyMarginMm)) <= kDatumTol);
     }
 }
@@ -1879,8 +1890,9 @@ TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores
         CHECK(c.home_fail_leg == 0);
         CHECK(std::string(c.home_fail_why) == "no stall across max_rail");
         CHECK_FALSE(c.busy);
-        CHECK(s.bootMm() == doctest::Approx(-(30.0f + 2.0f * kHomeSafetyMarginMm + 2.0f * kHomeSearchMarginMm))
-                                .epsilon(0.001));
+        // The search ran out pressed or not: the unload returns the command
+        // to where the approach armed, the carriage's start.
+        CHECK(std::fabs(s.bootMm()) <= kMmPerStep);
         CHECK(r->submit(MotionSource::Manual, 10.0f));   // the rail is free again
     }
     SUBCASE("far end: no stall across max_rail from the home datum") {
@@ -1900,8 +1912,9 @@ TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores
         CHECK(c.home_fail_leg == 1);
         CHECK(std::string(c.home_fail_why) == "no stall across max_rail");
         CHECK(c.home_rail_mm == 0.0f);
-        CHECK(s.bootMm() ==
-              doctest::Approx(-30.0f + 100.0f + 2.0f * kHomeSafetyMarginMm + kHomeSearchMarginMm).epsilon(0.001));
+        // Unloaded to where the far approach armed, just off the home stop.
+        CHECK(s.bootMm() >= -30.0f);
+        CHECK(s.bootMm() <= -30.0f + 0.1f);
     }
     SUBCASE("a stop-to-stop rail under the floor plus both margins") {
         auto r = rig();
@@ -1953,8 +1966,10 @@ TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores
 
 TEST_CASE("home: the deadline covers every leg at its constant speed and 2 s, and ends a cycle whose count never moves") {
     // max_rail 500 at the factory speeds: (530 + 520) mm of seeks and three
-    // 5 mm backoffs at 40 mm/s, two 15 mm re-touches at 10 mm/s, no ramp.
-    CHECK(valence::homeCycleS(500.0f, 40.0f) == doctest::Approx(1065.0f / 40.0f + 3.0f));
+    // 5 mm backoffs at 40 mm/s, two 15 mm re-touches at 10 mm/s, and half the
+    // ramp to 40 mm/s for each of the three ramped legs.
+    CHECK(valence::homeCycleS(500.0f, 40.0f) ==
+          doctest::Approx(1065.0f / 40.0f + 3.0f + 3.0f * 0.5f * 40.0f / valence::kHomeAccelMmS2));
 
     auto r = rig();
     r->arb.setWindow(0.0f, 200.0f, 200.0f);
@@ -2117,6 +2132,74 @@ TEST_CASE("home: a rise the confirming read rejects parks the seek for one tick,
     r->run(20'000'000);
     CHECK(r->census().homed);
     CHECK(std::fabs(r->census().home_rail_mm - (200.0f - 2.0f * kHomeSafetyMarginMm)) <= 2.0f * kDatumTol);
+}
+
+// The drive closes every step it was sent, so a command left past a stop is a
+// push at its output limit. Every stall reverses within the sense's latency
+// plus one planner tick (this sense has none of its own), at the leg's full
+// speed: never a ramp off a stop.
+TEST_CASE("home: stall at the end: the plan reverses within the stated latency, unramped, at every stall") {
+    auto r = rig();
+    FakeSense s{r->emitter, -30.0f, 170.0f};
+    isr(*r, s);
+    r->arb.setHomeSense(s);
+    REQUIRE(r->arb.home() == HomeStart::started);
+    constexpr int kTicksToReverse = 2;   // the parking tick and the next leg's first steer
+    size_t seen = 0;
+    int since = -1;
+    for (int t = 0; t < 20'000 && !r->census().homed; ++t) {
+        r->run(valence::kMotionTickUs);
+        if (s.rises.size() > seen) {
+            seen = s.rises.size();
+            since = 0;
+        }
+        if (since < 0) continue;
+        ++since;
+        // Rises 1 and 2 are the home stop's (low), 3 and 4 the far stop's.
+        const float away = seen <= 2 ? 1.0f : -1.0f;
+        const float v = r->census().velocity_mm_s;
+        CAPTURE(seen);
+        CAPTURE(since);
+        if (v * away > 0.0f) {
+            CHECK(since <= kTicksToReverse);
+            CHECK(std::fabs(v) == doctest::Approx(DEFAULT_HOME_SPEED_MM_S));
+            since = -1;
+        } else {
+            REQUIRE(since < kTicksToReverse);
+        }
+    }
+    CHECK(seen == 4);
+    CHECK(r->census().homed);
+}
+
+// A re-touch whose sense went deaf runs its whole search into the stop: the
+// command ends kHomeSearchMarginMm past the stall, the drive pushing. The
+// cycle unloads first: back to where the re-touch armed, off the stop.
+TEST_CASE("home: a sensed leg that runs out of search unloads the drive before it fails") {
+    auto r = rig();
+    FakeSense s{r->emitter, -30.0f, 170.0f};
+    isr(*r, s);
+    r->arb.setHomeSense(s);
+    REQUIRE(r->arb.home() == HomeStart::started);
+    for (int t = 0; t < 5'000 && s.rises.empty(); ++t) r->run(1000);
+    REQUIRE(s.rises.size() == 1);
+    const int32_t stall = s.rises[0];
+    s.stop_mm = -1000.0f;   // deaf from here: the real stop stays at -30 mm
+    float deepest = 0.0f;
+    for (int t = 0; t < 10'000 && r->census().homing; ++t) {
+        r->run(1000);
+        deepest = std::min(deepest, s.bootMm());
+    }
+    const MotionCensus c = r->census();
+    CHECK_FALSE(c.homed);
+    REQUIRE(c.home_fail_why != nullptr);
+    CHECK(std::string(c.home_fail_why) == "no stall on the slow re-touch");
+    CHECK(deepest < -30.0f - 0.5f * kHomeSearchMarginMm);   // the command went well past the stop
+    // Back where the re-touch armed: the backoff's end, a margin off the stall.
+    const int32_t margin = int32_t(std::lround(kHomeSafetyMarginMm * valence::kStepsPerMm));
+    CHECK(std::abs(r->emitter.n - (stall + margin)) <= 2);
+    CHECK(s.bootMm() > -30.0f);   // off the stop: nothing left pushing
+    CHECK(r->emitter.q8 == 0);
 }
 
 TEST_CASE("home: the interrupt entry does nothing while no seek is armed") {

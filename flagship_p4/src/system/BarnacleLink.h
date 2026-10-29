@@ -52,6 +52,11 @@ inline constexpr uint16_t kRunTripMa = barnacle::kDefaultRunTripMa;
 // status frame and the pad read.
 inline constexpr uint32_t kTripDisagreePasses = 10;
 
+// The rest current a home starts from: the mean of the last kRestFrames
+// status currents (128 ms at 500 Hz, about 850 helper samples), the stock
+// OSSM firmware's 1000-read zero at every home start (barnacle_link.hpp).
+inline constexpr uint32_t kRestFrames = 64;
+
 // ---- the helper's reading -------------------------------------------------------
 
 struct HelperReading {
@@ -64,6 +69,7 @@ struct HelperReading {
     barnacle::RxStats rx{};
     uint32_t lost = 0;             // frames the helper's sequence says were lost
     uint32_t restarts = 0;         // helper restarts seen since this boot
+    int16_t rest_ma = barnacle::kNoCurrent;   // kRestFrames mean of status.current_ma
 };
 
 // ---- the doors ------------------------------------------------------------------
@@ -99,6 +105,17 @@ constexpr barnacle::Mode modeFor(bool homing, bool gateOpen, bool estop) {
     if (homing) return barnacle::Mode::homing;
     if (gateOpen && !estop) return barnacle::Mode::running;
     return barnacle::Mode::idle;
+}
+
+// The home trip the helper applies: `trip_ma` over the rest current read
+// before the home, so the trip is measured from the rest, as the stock OSSM
+// firmware's re-zero at every home start makes it. restCurrentSane() has held
+// the rest under half the trip before any home starts; never 0, which
+// disables the trip.
+constexpr uint16_t homeTripFrom(uint16_t trip_ma, int16_t rest_ma) {
+    if (rest_ma == barnacle::kNoCurrent) return trip_ma;
+    const int32_t t = int32_t(trip_ma) + rest_ma;
+    return uint16_t(t < 1 ? 1 : (t > 65535 ? 65535 : t));
 }
 
 // TRIP while running, once per trip: a trip that began in another mode

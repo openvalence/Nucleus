@@ -2257,12 +2257,29 @@ void MotionArbiter::homeOrigin(int32_t count, float at_mm, uint64_t now_us) {
     resetEngine(toNorm(positionMm()), now_us);
 }
 
-void MotionArbiter::homeLeg(ArbEvent ev, float end_mm, float v_mm_s, uint64_t now_us) {
+void MotionArbiter::homeLeg(ArbEvent ev, float end_mm, float v_mm_s, bool ramp, uint64_t now_us) {
     apply(ev, _home_leg == 0 ? "the home end" : "the far end", now_us);
     _leg_end = _origin + int32_t(std::lround(end_mm * kStepsPerMm));
-    _leg_dir = _leg_end >= _emitter.count() ? 1 : -1;
+    _leg_from = _emitter.count();
+    _leg_dir = _leg_end >= _leg_from ? 1 : -1;
     _leg_v = v_mm_s;
+    _leg_ramp = ramp;
     _leg_start_us = now_us;
+}
+
+void MotionArbiter::homeUnload(const char* why, uint64_t now_us) {
+    // An unarmed leg is the far approach moving off the home stop: nothing
+    // to unload.
+    if (!_sense_armed) return homeEnd(ArbEvent::HomeFail, why, now_us);
+    _seek.store(kSeekIdle);
+    _emitter.park();
+    _seek_v = 0.0f;
+    _unload_why = why;
+    const float back_mm = float(_leg_dir * (_emitter.count() - _leg_armed_at)) * kMmPerStep;
+    GLOGW(kTag, "HOME: %s; unloading the drive: back to where the sense armed, %.1f mm", why, double(back_mm));
+    // Its own deadline: a dead emitter never reaches the count.
+    _home_deadline_us = now_us + uint64_t(std::fabs(back_mm) / _home_v * 1e6f) + kHomeTimeoutMarginUs;
+    homeLeg(ArbEvent::HomeUnload, float(_leg_armed_at - _origin) * kMmPerStep, _home_v, false, now_us);
 }
 
 void MotionArbiter::homeSteer(float v_mm_s) {
@@ -2287,9 +2304,9 @@ bool MotionArbiter::homeDrive(uint64_t now_us, float dt_s) {
         return true;
     }
     float v = _leg_v;
-    if constexpr (kHomeRampMs > 0) {
-        const float ramp = float(now_us - _leg_start_us) * 1e-3f / float(kHomeRampMs);
-        if (ramp < 1.0f) v *= ramp;
+    if (_leg_ramp) {
+        const float ramped = kHomeAccelMmS2 * (float(now_us - _leg_start_us) * 1e-6f + dt_s);
+        if (ramped < v) v = ramped;
     }
     // The last tick renders the remainder, so a counted leg lands on its count
     // and never past it into the safety margin.
@@ -2302,13 +2319,17 @@ bool MotionArbiter::homeDrive(uint64_t now_us, float dt_s) {
 void MotionArbiter::homeSeek(bool touch, bool armed, ArbEvent ev, uint64_t now_us) {
     _sense_armed = armed;
     const float end = touch ? homeAway(_home_leg, _home_at_mm, -kHomeSearchMarginMm) : homePast(_home_leg);
-    homeLeg(ev, end, touch ? _touch_v : _home_v, now_us);
-    if (armed) _seek.store(kSeekArmed);
+    homeLeg(ev, end, touch ? _touch_v : _home_v, armed, now_us);
+    if (armed) {
+        _leg_armed_at = _emitter.count();
+        _seek.store(kSeekArmed);
+    }
 }
 
 void MotionArbiter::homeStart(uint64_t now_us) {
     if (!_homing.load()) return;   // ended between the request and this tick
     _home_leg = 0;
+    _unload_why = nullptr;
     if (_engine.isBusy(now_us) || joining(now_us)) return homeEnd(ArbEvent::HomeMoving, "the machine is moving", now_us);
     // Nothing of the cycle runs in a mode with no rule for its start.
     if (arbCell(mode(), ArbEvent::HomeStart).act == ArbAct::illegal)
@@ -2331,7 +2352,11 @@ void MotionArbiter::homeStart(uint64_t now_us) {
 }
 
 void MotionArbiter::homeStep(uint64_t now_us, float dt_s) {
-    if (now_us >= _home_deadline_us) return homeEnd(ArbEvent::HomeFail, "timed out", now_us);
+    const bool sensed = mode() == ArbMode::HomeApproach || mode() == ArbMode::HomeTouch;
+    if (now_us >= _home_deadline_us) {
+        if (_unload_why != nullptr) return homeEnd(ArbEvent::HomeFail, _unload_why, now_us);
+        return sensed ? homeUnload("timed out", now_us) : homeEnd(ArbEvent::HomeFail, "timed out", now_us);
+    }
     switch (mode()) {
         case ArbMode::HomeApproach:
         case ArbMode::HomeTouch: {
@@ -2358,18 +2383,24 @@ void MotionArbiter::homeStep(uint64_t now_us, float dt_s) {
                         was == kSeekLatched ? _seek_hit.load(std::memory_order_relaxed) : _emitter.count();
                     return homeContact(touch, hit, now_us);
                 }
+                // Unarmed is the far approach leaving the home stop: the
+                // line must fall within a safety margin, as after a backoff.
+                if (float(_leg_dir * (_emitter.count() - _leg_from)) * kMmPerStep >= kHomeSafetyMarginMm)
+                    return homeEnd(ArbEvent::HomeFail, "still on the home stop a safety margin after leaving it",
+                                   now_us);
             } else if (!_sense_armed) {
                 _sense_armed = true;
+                _leg_armed_at = _emitter.count();
                 _seek.store(kSeekArmed);
             }
             if (homeDrive(now_us, dt_s))
-                return homeEnd(ArbEvent::HomeFail, touch ? "no stall on the slow re-touch" : "no stall across max_rail",
-                               now_us);
+                return homeUnload(touch ? "no stall on the slow re-touch" : "no stall across max_rail", now_us);
             return;
         }
         case ArbMode::HomeClear:
-            // The level at rest decides.
+            // The level at rest decides; an unload ends in its failure.
             if (!homeDrive(now_us, dt_s)) return;
+            if (_unload_why != nullptr) return homeEnd(ArbEvent::HomeFail, _unload_why, now_us);
             if (_sense->high())
                 return homeEnd(ArbEvent::HomeFail, "still on the stop after the backoff (lower home_speed)", now_us);
             return homeSeek(true, true, ArbEvent::HomeCleared, now_us);
@@ -2401,7 +2432,8 @@ void MotionArbiter::homeContact(bool touch, int32_t hit, uint64_t now_us) {
         // stall is only read: the home datum keeps its label.
         if (_home_leg == 0) homeOrigin(hit, homeStopAt(0), now_us);
         _home_at_mm = float(hit - _origin) * kMmPerStep;
-        return homeLeg(ArbEvent::HomeContact, homeAway(_home_leg, _home_at_mm, kHomeSafetyMarginMm), _home_v, now_us);
+        return homeLeg(ArbEvent::HomeContact, homeAway(_home_leg, _home_at_mm, kHomeSafetyMarginMm), _home_v, false,
+                       now_us);
     }
     // The contact came kHomeSenseLatencyUs of re-touch travel before the
     // sense did: the datum is moved back along the leg by it.
@@ -2419,17 +2451,18 @@ void MotionArbiter::homeMeasure(uint64_t now_us) {
     const float stops = float(steps < 0 ? -steps : steps) * kMmPerStep;
     const float len = stops - 2.0f * kHomeSafetyMarginMm;
     if (!(len >= MIN_RAIL_MM))
-        return homeEnd(ArbEvent::HomeFail, "the usable rail between the safety margins is under the rail floor", now_us);
+        return homeUnload("the usable rail between the safety margins is under the rail floor", now_us);
     // The physical frame: 0 a safety margin off the low end's datum, the rail
     // the usable length. A completed cycle makes it max_rail too; the hub
     // stores it and pushes it back (setWindow()).
     _rail = len;
     homeOrigin(_home_flip ? _home_datum[1] : _home_datum[0], -kHomeSafetyMarginMm, now_us);
-    homeLeg(ArbEvent::HomeMeasured, _home_flip ? 0.0f : len, _home_v, now_us);
+    homeLeg(ArbEvent::HomeMeasured, _home_flip ? 0.0f : len, _home_v, false, now_us);
 }
 
 void MotionArbiter::homeEnd(ArbEvent ev, const char* why, uint64_t now_us) {
     _seek.store(kSeekIdle);
+    _unload_why = nullptr;
     if (why != nullptr) {
         ++_home_fails;
         _home_fail_leg = _home_leg;

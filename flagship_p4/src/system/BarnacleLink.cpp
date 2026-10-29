@@ -71,8 +71,8 @@ constexpr uint32_t kCensusEveryMs = 60000;
 // A helper never heard this long after the link task starts is logged once.
 constexpr uint32_t kNeverHeardMs = 3000;
 
-static_assert(barnacle::kTripDetectUs <= kStallDetectUs,
-              "the helper's stall detect must fit the arbiter's contact-to-park budget");
+static_assert(barnacle::kHomeTripDetectUs <= kStallDetectUs,
+              "the helper's home stall detect must fit the arbiter's contact-to-park budget");
 static_assert(barnacle::kCommandPeriodMs == kDriveLinkPeriodMs,
               "one command frame per link pass");
 static_assert(std::is_trivially_copyable_v<HelperReading>, "the mailbox copies it bytewise");
@@ -108,6 +108,7 @@ uint32_t g_nextCensusMs = 0;
 uint32_t g_startMs = 0;
 bool g_neverLogged = false;
 bool g_noCurrent = false;       // the helper's last status carried no current
+barnacle::Boxcar<kRestFrames> g_rest;   // status currents, for HelperReading::rest_ma
 barnacle::Mode g_mode = barnacle::Mode::idle;
 uint32_t g_alarms = 0;
 bool g_uartUp = false;          // written once by driveLinkBegin() before the task exists
@@ -118,6 +119,8 @@ TaskHandle_t g_task = nullptr;
 std::atomic<bool> g_alarmPending{false};
 // r | g << 8 | b << 16, written by the BoardIo task (glow), read here.
 std::atomic<uint32_t> g_rgb{0};
+// The rest current the last home's probe read, written by the probing task.
+std::atomic<int32_t> g_homeRestMa{barnacle::kNoCurrent};
 
 StaticQueue_t g_readingQ;
 std::array<uint8_t, sizeof(HelperReading)> g_readingStore{};
@@ -173,6 +176,12 @@ void onFrame(const barnacle::Frame& f, uint32_t now) {
     if (const std::optional<barnacle::Status> s = barnacle::asStatus(f)) {
         g_reading.status = *s;
         const bool none = s->current_ma == barnacle::kNoCurrent;
+        if (none) {
+            g_rest.reset();
+            g_reading.rest_ma = barnacle::kNoCurrent;
+        } else if (const std::optional<int32_t> m = g_rest.push(s->current_ma)) {
+            g_reading.rest_ma = int16_t(*m);
+        }
         if (none != g_noCurrent) {
             g_noCurrent = none;
             if (none) GLOGE(kTag, "the helper reads no motor current (no ADC on IO36, or no 0 A zero measured in idle yet): home refused");
@@ -225,6 +234,8 @@ void judgeFreshness(uint32_t now) {
         return;
     }
     g_seq.reset();
+    g_rest.reset();
+    g_reading.rest_ma = barnacle::kNoCurrent;
     GLOGE(kTag, "helper link LOST: no valid frame for %lu ms (crc %lu, malformed %lu, overrun %lu): "
                 "motor current, voltage and S2 unread, home refused",
           static_cast<unsigned long>(barnacle::kHelperStaleMs), static_cast<unsigned long>(rx.crc),
@@ -263,7 +274,7 @@ void sendCommand() {
     c.r = uint8_t(rgb);
     c.g = uint8_t(rgb >> 8);
     c.b = uint8_t(rgb >> 16);
-    c.home_trip_ma = kHomeTripMa;
+    c.home_trip_ma = homeTripFrom(kHomeTripMa, int16_t(g_homeRestMa.load(std::memory_order_relaxed)));
     c.run_trip_ma = kRunTripMa;
     std::array<uint8_t, barnacle::kMaxWire> out{};
     const size_t n = barnacle::encode(c, g_txSeq++, out);
@@ -348,13 +359,20 @@ public:
             GLOGE(kTag, "home refused: the helper reads no motor current (IO36 ADC or its 0 A zero), so no stall can trip");
             return Probe::undriven;
         }
-        if (!barnacle::restCurrentSane(h.status.current_ma, kHomeTripMa)) {
+        if (h.rest_ma == barnacle::kNoCurrent) {
+            GLOGE(kTag, "home refused: the helper's current is too new for a rest reading; retry the home");
+            return Probe::undriven;
+        }
+        if (!barnacle::restCurrentSane(h.rest_ma, kHomeTripMa)) {
             GLOGE(kTag, "home refused: the motor reads %d mA before moving, at least half the %u mA home trip, so "
                         "the home would stall where it stands; the helper's 0 A zero is off: power-cycle the R+D "
                         "board with the motor still",
-                  int(h.status.current_ma), unsigned(kHomeTripMa));
+                  int(h.rest_ma), unsigned(kHomeTripMa));
             return Probe::undriven;
         }
+        g_homeRestMa.store(h.rest_ma, std::memory_order_relaxed);
+        GLOGI(kTag, "home trip %u mA: %u over a %d mA rest (provisional scale until calibrated)",
+              unsigned(homeTripFrom(kHomeTripMa, h.rest_ma)), unsigned(kHomeTripMa), int(h.rest_ma));
         const bool tripped = padTripped();
         const bool helperSays = (h.status.flags & barnacle::kFlagTrip) != 0;
         if (tripped != helperSays) {

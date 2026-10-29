@@ -298,6 +298,7 @@ TEST_CASE("trip: the mode picks the threshold; the detect window is the stall-de
     CHECK(bl::activeThreshold(bl::Mode::running, 1000, 8000) == 8000);
     CHECK(bl::activeThreshold(bl::Mode::idle, 1000, 8000) == 8000);
     CHECK(bl::kTripDetectUs == bl::kTripSampleUs * bl::kTripOnSamples);
+    CHECK(bl::kHomeTripDetectUs == bl::kTripSampleUs * (bl::kHomeAverageSamples + bl::kTripOnSamples - 1));
 }
 
 // ---- the current zero (val-hjf7) ---------------------------------------------------
@@ -546,6 +547,118 @@ TEST_CASE("the self-check's helper row: never heard, stale and no slow frame fai
     h.status.motor_mv = bl::kNoMillivolts;
     CHECK(valence::describeHelper(h, out));
     CHECK(std::string(out.data()).find("no motor V") != std::string::npos);
+}
+
+// ---- the home trip: the stock OSSM firmware's detector --------------------------
+
+namespace {
+// Provisional mA from pin mV, as the shim converts: x3/2 to the sensor, 100 mV/A.
+constexpr int32_t maOfPin(int32_t pinMv) { return pinMv * 3 / 2 * 10; }
+
+// The shim's homing chain: every sample into the mean, the mode's input into
+// the detector.
+struct HomeChain {
+    bl::Boxcar<bl::kHomeAverageSamples> mean;
+    bl::TripDetector trip;
+    bool sample(int32_t ma, uint16_t threshold = bl::kDefaultHomeTripMa) {
+        const std::optional<int32_t> m = mean.push(ma);
+        return trip.sample(bl::tripInput(bl::Mode::homing, ma, m), threshold);
+    }
+};
+
+constexpr int32_t kPinNoiseMv = 180;   // the field's per-sample noise at IO36
+constexpr uint32_t kTenSeconds = 10 * kSamplesPerSecond;
+}  // namespace
+
+TEST_CASE("home trip: the reference's 6 % of 4096 counts is 198 mV at the pin, 2970 provisional mA") {
+    CHECK(std::fabs(4096.0 * 0.06 * 3300.0 / 4096.0 - double(bl::kRefHomeTripPinMv)) < 0.5);
+    CHECK(maOfPin(bl::kRefHomeTripPinMv) == bl::kDefaultHomeTripMa);
+    CHECK(bl::kHomeAverageSamples == 50);   // the reference's getAnalogAveragePercent(pin, 50)
+}
+
+TEST_CASE("home trip: +-180 mV of pin noise per sample at rest never trips; the raw 1000 mA trip did at once") {
+    Noise noise;
+    HomeChain home;
+    uint32_t trips = 0;
+    for (uint32_t i = 0; i < kTenSeconds; ++i) trips += home.sample(maOfPin(noise(kPinNoiseMv))) ? 1 : 0;
+    CHECK(trips == 0);
+    CHECK(home.trip.assertions() == 0);
+    // The mechanism of the field's false stall: three raw samples over 67 mV.
+    bl::TripDetector raw;
+    uint32_t first = kTenSeconds;
+    for (uint32_t i = 0; i < kTenSeconds && first == kTenSeconds; ++i)
+        if (raw.sample(maOfPin(noise(kPinNoiseMv)), 1000)) first = i;
+    CHECK(first * bl::kTripSampleUs < 150000);
+}
+
+TEST_CASE("home trip: a sustained step at the reference's 6 % trips within kHomeTripDetectUs") {
+    SUBCASE("a step exactly at the trip, no noise: the stated latency") {
+        HomeChain home;
+        for (uint32_t i = 0; i < 2 * bl::kHomeAverageSamples; ++i) REQUIRE_FALSE(home.sample(0));
+        uint32_t n = 0;
+        while (!home.sample(bl::kDefaultHomeTripMa) && n < 1000) ++n;
+        CHECK((n + 1) * bl::kTripSampleUs == bl::kHomeTripDetectUs);
+    }
+    SUBCASE("a quarter over the trip under +-180 mV of noise: inside the stated latency") {
+        Noise noise;
+        for (int run = 0; run < 50; ++run) {
+            CAPTURE(run);
+            HomeChain home;
+            for (uint32_t i = 0; i < 2 * bl::kHomeAverageSamples; ++i)
+                REQUIRE_FALSE(home.sample(maOfPin(noise(kPinNoiseMv))));
+            uint32_t n = 1;
+            while (!home.sample(bl::kDefaultHomeTripMa * 5 / 4 + maOfPin(noise(kPinNoiseMv))) && n < 1000) ++n;
+            CHECK(n * bl::kTripSampleUs <= bl::kHomeTripDetectUs);
+        }
+    }
+}
+
+// A velocity step at a leg's start is a torque burst: a burst of amplitude A
+// lasting L never moves the 7.5 ms mean to the trip while A x L stays under
+// the trip x 7.5 ms. The sensed legs also ramp at the reference's 1000 mm/s^2
+// (MotionArbiter.h kHomeAccelMmS2), so this is the margin, not the plan.
+TEST_CASE("home trip: a burst of 2.5x the trip for 2 ms, every 100 ms under noise, never trips") {
+    Noise noise;
+    HomeChain home;
+    constexpr uint32_t kBurst = 2000 / bl::kTripSampleUs;   // 13 samples
+    constexpr uint32_t kEvery = 100000 / bl::kTripSampleUs;
+    uint32_t trips = 0;
+    for (uint32_t i = 0; i < kTenSeconds; ++i) {
+        const int32_t burst = i % kEvery < kBurst ? bl::kDefaultHomeTripMa * 5 / 2 : 0;
+        trips += home.sample(burst + maOfPin(noise(kPinNoiseMv))) ? 1 : 0;
+    }
+    CHECK(trips == 0);
+    // The same burst on the raw sample, as running judges it, trips.
+    bl::TripDetector raw;
+    bool tripped = false;
+    for (uint32_t i = 0; i < kBurst; ++i) tripped = raw.sample(bl::kDefaultHomeTripMa * 5 / 2, bl::kDefaultHomeTripMa);
+    CHECK(tripped);
+}
+
+TEST_CASE("home trip: running judges the raw sample, homing the mean, an unfilled mean never trips") {
+    CHECK(bl::tripInput(bl::Mode::running, 5000, 100) == 5000);
+    CHECK(bl::tripInput(bl::Mode::idle, 5000, 100) == 5000);
+    CHECK(bl::tripInput(bl::Mode::homing, 5000, 100) == 100);
+    CHECK(bl::tripInput(bl::Mode::homing, 5000, std::nullopt) == bl::kNoCurrent);
+    bl::TripDetector t;
+    for (int i = 0; i < 10; ++i) CHECK_FALSE(t.sample(bl::tripInput(bl::Mode::homing, 30000, std::nullopt), 2970));
+    bl::Boxcar<4> b;
+    CHECK_FALSE(b.push(4).has_value());
+    CHECK_FALSE(b.push(8).has_value());
+    CHECK_FALSE(b.push(12).has_value());
+    CHECK(b.push(16) == 10);
+    CHECK(b.push(20) == 14);   // the oldest left
+    b.reset();
+    CHECK_FALSE(b.push(1).has_value());
+}
+
+TEST_CASE("home trip: measured from the rest current read before the home, never 0") {
+    CHECK(valence::homeTripFrom(2970, bl::kNoCurrent) == 2970);
+    CHECK(valence::homeTripFrom(2970, 163) == 3133);   // the field's rest readings
+    CHECK(valence::homeTripFrom(2970, -138) == 2832);
+    CHECK(valence::homeTripFrom(100, -200) == 1);
+    CHECK(valence::homeTripFrom(65000, 1000) == 65535);
+    CHECK(valence::kRestFrames * bl::kStatusPeriodUs == 128000);
 }
 
 TEST_CASE("the P4 sends the link's default thresholds") {
