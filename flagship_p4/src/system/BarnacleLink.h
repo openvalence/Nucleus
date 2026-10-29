@@ -30,6 +30,7 @@
 // See: lib/barnacle_link/include/barnacle_link/barnacle_link.hpp, BoardPins.h
 // (the barnacle section), openvalence.github.io guides/barnacle, bd val-omh3
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <optional>
@@ -82,6 +83,14 @@ std::optional<bool> helperButtonPressed();
 inline constexpr uint32_t kPairAtBootWaitMs = 600;
 bool barnaclePairHeldAtBoot();
 
+// Blocks the calling task until the helper reports a current (its 0 A zero
+// taken, barnacle::CurrentZero) or kHelperZeroWaitMs passes; returns early
+// while no frame has arrived kPairAtBootWaitMs in. Call only while the motion
+// gate is still closed: the helper zeroes only in Mode::idle, and the open
+// gate is Mode::running for the rest of the boot.
+inline constexpr uint32_t kHelperZeroWaitMs = 8000;
+void helperAwaitZero();
+
 // ---- hardware-free policy ---------------------------------------------------------
 
 // The mode the helper applies: homing through a home cycle, running while the
@@ -116,7 +125,8 @@ constexpr bool helperRestarted(const barnacle::Slow& was, const barnacle::Slow& 
 }
 
 // The self-check's helper row: pass only on a fresh reading that has carried
-// a slow frame. Writes the reason into `out`.
+// a slow frame and a current (the helper's 0 A zero taken). Writes the reason
+// into `out`.
 inline bool describeHelper(const HelperReading& h, std::span<char> out) {
     if (!h.ever) {
         std::snprintf(out.data(), out.size(), "no frame from the WROOM helper on J8 pin 9");
@@ -131,15 +141,21 @@ inline bool describeHelper(const HelperReading& h, std::span<char> out) {
         std::snprintf(out.data(), out.size(), "helper up, no slow frame yet");
         return false;
     }
-    const char* scale = (h.status.flags & barnacle::kFlagCalibrated) != 0 ? "mA" : "mA provisional";
-    if (h.status.motor_mv == barnacle::kNoMillivolts)
-        std::snprintf(out.data(), out.size(), "helper v%u boot %u: no motor V, %d %s",
-                      unsigned(h.slow.shim_version), unsigned(h.slow.boots), int(h.status.current_ma), scale);
+    const bool zeroed = h.status.current_ma != barnacle::kNoCurrent;
+    std::array<char, 40> current{};
+    if (!zeroed)
+        std::snprintf(current.data(), current.size(), "no current: no ADC or 0 A zero");
     else
-        std::snprintf(out.data(), out.size(), "helper v%u boot %u: %.1f V, %d %s",
+        std::snprintf(current.data(), current.size(), "%d %s", int(h.status.current_ma),
+                      (h.status.flags & barnacle::kFlagCalibrated) != 0 ? "mA" : "mA provisional");
+    if (h.status.motor_mv == barnacle::kNoMillivolts)
+        std::snprintf(out.data(), out.size(), "helper v%u boot %u: no motor V, %s",
+                      unsigned(h.slow.shim_version), unsigned(h.slow.boots), current.data());
+    else
+        std::snprintf(out.data(), out.size(), "helper v%u boot %u: %.1f V, %s",
                       unsigned(h.slow.shim_version), unsigned(h.slow.boots),
-                      double(h.status.motor_mv) / 1000.0, int(h.status.current_ma), scale);
-    return true;
+                      double(h.status.motor_mv) / 1000.0, current.data());
+    return zeroed;
 }
 
 }  // namespace valence

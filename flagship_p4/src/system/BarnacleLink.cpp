@@ -348,6 +348,13 @@ public:
             GLOGE(kTag, "home refused: the helper reads no motor current (IO36 ADC or its 0 A zero), so no stall can trip");
             return Probe::undriven;
         }
+        if (!barnacle::restCurrentSane(h.status.current_ma, kHomeTripMa)) {
+            GLOGE(kTag, "home refused: the motor reads %d mA before moving, at least half the %u mA home trip, so "
+                        "the home would stall where it stands; the helper's 0 A zero is off: power-cycle the R+D "
+                        "board with the motor still",
+                  int(h.status.current_ma), unsigned(kHomeTripMa));
+            return Probe::undriven;
+        }
         const bool tripped = padTripped();
         const bool helperSays = (h.status.flags & barnacle::kFlagTrip) != 0;
         if (tripped != helperSays) {
@@ -468,6 +475,17 @@ std::optional<bool> helperButtonPressed() {
     const HelperReading h = helperReading();
     if (!h.fresh) return std::nullopt;
     return (h.status.flags & barnacle::kFlagButton) != 0;
+}
+
+void helperAwaitZero() {
+    const uint32_t start = nowMs();
+    for (;;) {
+        const HelperReading h = helperReading();
+        if (h.fresh && h.status.current_ma != barnacle::kNoCurrent) return;
+        const uint32_t waited = nowMs() - start;
+        if (waited >= kHelperZeroWaitMs || (!h.ever && waited >= kPairAtBootWaitMs)) return;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
 }
 
 bool barnaclePairHeldAtBoot() {

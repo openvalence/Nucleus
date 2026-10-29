@@ -221,6 +221,7 @@ void recordBarnacleBoard() {
     g_table.record(Check::board_monitor, Verdict::absent, "no board monitor on the R+D board");
     g_table.record(Check::rails, Verdict::absent, "no rail monitor on the R+D board");
     std::array<char, selfcheck::kReasonBytes> helper{};
+    helperAwaitZero();
     const bool helperOk = describeHelper(helperReading(), helper);
     g_table.record(Check::power_monitor, helperOk ? Verdict::pass : Verdict::fail, "%s", helper.data());
     g_table.record(Check::pd_source, Verdict::absent, "DC input on J10, no PD source");

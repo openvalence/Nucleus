@@ -498,23 +498,49 @@ constexpr uint16_t activeThreshold(Mode m, uint16_t home_ma, uint16_t run_ma) {
 
 // ---- the current zero (the helper runs it; the suite drives it) -----------------
 
-// The sensor's 0 A output, measured at the helper, never assumed: a CH701's
-// zero is half its supply, and the R+D board's U6 supply is not on record
-// (3.3 V puts it at 1650 mV, the 5 V rail at about 2250 to 2500 mV; bd
-// val-hjf7). Constraints:
+// The sensor's 0 A output, measured at the helper, never assumed: U6 is a
+// ratiometric CH701 on the R+D 5 V rail (the field's 0 A reads about 2510 mV
+// at the sensor), so its zero is half that rail, wherever the rail stands
+// (bd val-hjf7). Constraints:
+// - NOT WHILE THE RAIL SETTLES: the first kZeroSettleSamples samples after the
+//   helper boots never count. The rail is a 0.6 A buck that also feeds the
+//   Stamp-P4 and C6 through their boot; the helper's 3.3 V comes up first, and
+//   a zero taken then reads half a sagging rail (the field: about 1925 mV, a
+//   3.86 V rail, read as 5765 to 5951 mA at rest).
 // - NEVER IN MOTION: only Mode::idle samples count (the motion gate closed,
-//   the emitter parked). A sample in another mode discards the window; a
-//   sample that takes its spread past kZeroSpreadMaxMv starts a new one.
-// - The mean of kZeroSamples consecutive samples is the zero, taken once per
-//   helper boot; a mean outside kZeroMinMv..kZeroMaxMv is no zero (a sensor
-//   unpowered, shorted or open) and the next idle window tries again.
+//   the emitter parked). A sample in another mode discards the window and the
+//   run; a sample that takes a window's spread past kZeroSpreadMaxMv does too.
+//   The P4 holds its gate closed until a zero is taken (helperAwaitZero()).
+// - A window is kZeroSamples consecutive samples; its mean outside
+//   kZeroMinMv..kZeroMaxMv is no zero (a rail out of the CH701's 4.5 to 5.5 V
+//   range, or a sensor unpowered, shorted or open), counted in refused(), and
+//   ends the run.
+// - The zero is the mean of kZeroAgreeWindows consecutive windows whose means
+//   all lie within kZeroAgreeMv of each other; a window that breaks the band
+//   starts the next run. Taken once per helper boot, never re-taken: a zero
+//   that drifted after it is the P4's restCurrentSane() to refuse.
+// - The zero tracks the rail only while it is taken: a later sag of dV reads
+//   as -dV/2 of sensor output (a real current under-read). Nothing on the
+//   board reads the 5 V rail, so no correction exists.
 // - Until a zero is taken there is no current: the helper reads kNoCurrent
 //   and TRIP never asserts, the no-ADC state, so the P4 refuses a home.
 // SINGLE OWNER: the helper's sampling loop.
-inline constexpr uint32_t kZeroSamples = 256;      // 38.4 ms at kTripSampleUs
-inline constexpr int32_t kZeroMinMv = 1400;        // at the sensor: under a 3.3 V part's 1650
-inline constexpr int32_t kZeroMaxMv = 2750;        // over a 5 V part's 2500
+// The settle: a CH701's power-on time is 62 us typical once VCC reaches its
+// operating voltage, so the wait is the rail's. The rail's recovery from the
+// P4's boot draw is not on record; assumed within 1 s of the helper's boot,
+// doubled. The band and the agreement hold whatever it takes. Samples, not
+// wall time: a late sample stretches it, never shortens it.
+inline constexpr uint32_t kZeroSettleMs = 2000;
+inline constexpr uint32_t kZeroSettleSamples = kZeroSettleMs * 1000 / kTripSampleUs;
+inline constexpr uint32_t kZeroSamples = 1024;     // 153.6 ms at kTripSampleUs
+inline constexpr int32_t kZeroMinMv = 2250;        // at the sensor: half the CH701's 4.5 V VCC minimum
+inline constexpr int32_t kZeroMaxMv = 2750;        // half its 5.5 V maximum
 inline constexpr int32_t kZeroSpreadMaxMv = 400;   // max minus min in one window: ADC noise passes, a stroke does not
+// 13 windows span 2 s: a rail still moving 10 mV/s fails the band. +-180 mV
+// of sample noise leaves a window mean about 3 mV rms, so 13 means span about
+// 11 mV and the band passes.
+inline constexpr uint32_t kZeroAgreeWindows = 13;
+inline constexpr int32_t kZeroAgreeMv = 20;
 
 class CurrentZero {
 public:
@@ -522,13 +548,19 @@ public:
     // that takes the zero.
     bool sample(int32_t sensorMv, Mode m) {
         if (_taken) return false;
+        if (_settled < kZeroSettleSamples) {
+            ++_settled;
+            return false;
+        }
         if (m != Mode::idle) {
             _n = 0;
+            _run = 0;
             return false;
         }
         const int32_t lo = sensorMv < _lo ? sensorMv : _lo;
         const int32_t hi = sensorMv > _hi ? sensorMv : _hi;
         if (_n == 0 || hi - lo > kZeroSpreadMaxMv) {   // this sample starts a window
+            if (_n != 0) _run = 0;
             _n = 0;
             _sum = 0;
             _lo = _hi = sensorMv;
@@ -542,9 +574,22 @@ public:
         _n = 0;
         if (mean < kZeroMinMv || mean > kZeroMaxMv) {
             ++_refused;
+            _run = 0;
             return false;
         }
-        _zeroMv = mean;
+        const int32_t runLo = mean < _runLo ? mean : _runLo;
+        const int32_t runHi = mean > _runHi ? mean : _runHi;
+        if (_run == 0 || runHi - runLo > kZeroAgreeMv) {   // this window starts a run
+            _run = 0;
+            _runSum = 0;
+            _runLo = _runHi = mean;
+        } else {
+            _runLo = runLo;
+            _runHi = runHi;
+        }
+        _runSum += mean;
+        if (++_run < kZeroAgreeWindows) return false;
+        _zeroMv = int32_t(_runSum / int64_t(_run));
         _taken = true;
         return true;
     }
@@ -563,11 +608,25 @@ public:
 private:
     bool _taken = false;
     int32_t _zeroMv = 0;
+    uint32_t _settled = 0;
     uint32_t _n = 0;
     int64_t _sum = 0;
     int32_t _lo = 0;
     int32_t _hi = 0;
+    uint32_t _run = 0;
+    int64_t _runSum = 0;
+    int32_t _runLo = 0;
+    int32_t _runHi = 0;
     uint16_t _refused = 0;
 };
+
+// The motor at rest before a home reads near 0 A. A reading at half the home
+// trip or more is a zero gone wrong (taken on a settling supply, or drifted),
+// and a home would stall at once where it stands: the P4 refuses it.
+constexpr bool restCurrentSane(int16_t ma, uint16_t home_ma) {
+    if (ma == kNoCurrent) return false;
+    const int32_t a = ma < 0 ? -int32_t(ma) : int32_t(ma);
+    return 2 * a < int32_t(home_ma);
+}
 
 }  // namespace barnacle

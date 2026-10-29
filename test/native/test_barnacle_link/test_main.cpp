@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -304,8 +306,35 @@ namespace {
 // The shim's conversion: pin mV through the 10k over 20k divider.
 int32_t sensorOf(int32_t pinMv) { return pinMv * 3 / 2; }
 
+constexpr uint32_t kSamplesPerSecond = 1000000 / bl::kTripSampleUs;
+constexpr uint32_t kRunSamples = bl::kZeroAgreeWindows * bl::kZeroSamples;
+
 void feed(bl::CurrentZero& z, int32_t sensorMv, uint32_t n, bl::Mode m = bl::Mode::idle) {
     for (uint32_t i = 0; i < n; ++i) z.sample(sensorMv, m);
+}
+
+// The settle delay spent at a rail still at 0 V.
+void settle(bl::CurrentZero& z) { feed(z, 0, bl::kZeroSettleSamples); }
+
+// Uniform noise in -amp..amp, deterministic.
+struct Noise {
+    uint32_t state = 12345;
+    int32_t operator()(int32_t amp) {
+        state = state * 1664525u + 1013904223u;
+        return int32_t((state >> 8) % uint32_t(2 * amp + 1)) - amp;
+    }
+};
+
+// Idle samples from boot until the zero is taken or `limit` runs out, the
+// sensor reading shape(seconds) plus noise. Returns the sample that took it.
+template <typename Shape>
+uint32_t runUntilZero(bl::CurrentZero& z, Shape shape, int32_t noiseMv, uint32_t limit) {
+    Noise noise;
+    for (uint32_t i = 0; i < limit; ++i) {
+        const double t = double(i) / double(kSamplesPerSecond);
+        if (z.sample(int32_t(shape(t)) + noise(noiseMv), bl::Mode::idle)) return i;
+    }
+    return limit;
 }
 }  // namespace
 
@@ -313,7 +342,11 @@ TEST_CASE("zero: a 5 V CH701 at rest reads 0 mA and never trips (the field's 850
     bl::CurrentZero z;
     const int32_t rest = sensorOf(1667);   // 2500 mV at the sensor: half of 5 V
     CHECK_FALSE(z.ma(rest, 100).has_value());
-    for (uint32_t i = 0; i + 1 < bl::kZeroSamples; ++i) CHECK_FALSE(z.sample(rest, bl::Mode::idle));
+    feed(z, rest, bl::kZeroSettleSamples);
+    CHECK_FALSE(z.taken());   // the settle never counts, however steady
+    uint32_t early = 0;
+    for (uint32_t i = 0; i + 1 < kRunSamples; ++i) early += z.sample(rest, bl::Mode::idle) ? 1 : 0;
+    CHECK(early == 0);
     CHECK(z.sample(rest, bl::Mode::idle));
     REQUIRE(z.taken());
     CHECK(z.zeroMv() == rest);
@@ -324,43 +357,107 @@ TEST_CASE("zero: a 5 V CH701 at rest reads 0 mA and never trips (the field's 850
     for (int i = 0; i < 100; ++i) CHECK_FALSE(t.sample(*z.ma(rest, 100), bl::kDefaultRunTripMa));
 }
 
-TEST_CASE("zero: a 3.3 V part's 1650 mV is taken too; noise inside the spread averages") {
-    bl::CurrentZero z;
-    for (uint32_t i = 0; i < bl::kZeroSamples; ++i) z.sample(1650 + int32_t(i % 2 == 0 ? 40 : -40), bl::Mode::idle);
-    REQUIRE(z.taken());
-    CHECK(z.zeroMv() == 1650);
+TEST_CASE("zero: the settle and the agreement run are the documented times") {
+    CHECK(bl::kZeroSettleSamples * bl::kTripSampleUs <= bl::kZeroSettleMs * 1000);
+    CHECK(bl::kZeroSettleSamples * bl::kTripSampleUs > bl::kZeroSettleMs * 1000 - bl::kTripSampleUs);
+    CHECK(kRunSamples * bl::kTripSampleUs >= 1900000);
+    CHECK(kRunSamples * bl::kTripSampleUs <= 2100000);
 }
 
-TEST_CASE("zero: single-shot ADC noise well past the field's averaged 25 mV still zeroes") {
+TEST_CASE("zero: the field's sagging rail (1925 mV, a 3.86 V rail) is out of band, never a zero") {
     bl::CurrentZero z;
-    for (uint32_t i = 0; i < bl::kZeroSamples; ++i) z.sample(2510 + int32_t(i % 2 == 0 ? 180 : -180), bl::Mode::idle);
+    settle(z);
+    feed(z, 1925, 4 * kRunSamples);
+    CHECK_FALSE(z.taken());
+    CHECK(z.refused() == 4 * bl::kZeroAgreeWindows);
+    feed(z, 2510, kRunSamples);
     REQUIRE(z.taken());
     CHECK(z.zeroMv() == 2510);
 }
 
-TEST_CASE("zero: never in motion; a homing or running sample discards the window") {
+TEST_CASE("zero: +-180 mV of sample noise, alternating or random, still converges") {
     bl::CurrentZero z;
-    feed(z, 2500, bl::kZeroSamples, bl::Mode::running);
-    feed(z, 2500, bl::kZeroSamples, bl::Mode::homing);
+    settle(z);
+    for (uint32_t i = 0; i < kRunSamples; ++i) z.sample(2510 + int32_t(i % 2 == 0 ? 180 : -180), bl::Mode::idle);
+    REQUIRE(z.taken());
+    CHECK(z.zeroMv() == 2510);
+
+    bl::CurrentZero r;
+    const uint32_t at = runUntilZero(r, [](double) { return 2500.0; }, 180, bl::kZeroSettleSamples + 3 * kRunSamples);
+    REQUIRE(r.taken());
+    CHECK(at < bl::kZeroSettleSamples + 2 * kRunSamples);
+    CHECK(std::abs(r.zeroMv() - 2500) <= 5);
+}
+
+TEST_CASE("zero: a power-up ramp, 0 to 2.5 V over 0.5 s with +-180 mV noise, zeroes within 20 mV") {
+    const auto ramp = [](double t0) {
+        return [t0](double t) { return t < t0 ? 0.0 : (t < t0 + 0.5 ? 5000.0 * (t - t0) : 2500.0); };
+    };
+    // From boot: the settle outlasts it.
+    bl::CurrentZero z;
+    runUntilZero(z, ramp(0.0), 180, 10 * kSamplesPerSecond);
+    REQUIRE(z.taken());
+    CHECK(std::abs(z.zeroMv() - 2500) <= 20);
+    // Starting as the settle ends: the band and the agreement alone reject it.
+    bl::CurrentZero late;
+    const uint32_t at = runUntilZero(late, ramp(double(bl::kZeroSettleMs) / 1000.0), 180, 10 * kSamplesPerSecond);
+    REQUIRE(late.taken());
+    CHECK(at >= bl::kZeroSettleSamples + kSamplesPerSecond * 9 / 20 + kRunSamples);   // in band from 2250 mV, 0.45 s in
+    CHECK(std::abs(late.zeroMv() - 2500) <= 20);
+}
+
+TEST_CASE("zero: a rail recovering slowly into band (2250 to 2510 mV, 1 s time constant) zeroes within 20 mV") {
+    const auto recover = [](double t0) {
+        return [t0](double t) { return t < t0 ? 1925.0 : 2510.0 - 260.0 * std::exp(-(t - t0)); };
+    };
+    for (const double t0 : {0.0, 2.0, 5.0}) {
+        CAPTURE(t0);
+        bl::CurrentZero z;
+        runUntilZero(z, recover(t0), 180, 30 * kSamplesPerSecond);
+        REQUIRE(z.taken());
+        CHECK(std::abs(z.zeroMv() - 2510) <= 20);
+    }
+}
+
+TEST_CASE("zero: never in motion; a homing or running sample discards the window and the run") {
+    bl::CurrentZero z;
+    settle(z);
+    feed(z, 2500, kRunSamples, bl::Mode::running);
+    feed(z, 2500, kRunSamples, bl::Mode::homing);
     CHECK_FALSE(z.taken());
-    feed(z, 2500, bl::kZeroSamples - 1);
+    feed(z, 2500, kRunSamples - 1);
     feed(z, 2500, 1, bl::Mode::running);   // the gate opened one sample short
     feed(z, 2500, 1);
     CHECK_FALSE(z.taken());
-    feed(z, 2500, bl::kZeroSamples - 1);
+    feed(z, 2500, kRunSamples - 2);
+    CHECK_FALSE(z.taken());   // the run restarted with the window
+    feed(z, 2500, 1);
     CHECK(z.taken());
 }
 
 TEST_CASE("zero: a window that moves past the spread is discarded") {
     bl::CurrentZero z;
-    for (uint32_t i = 0; i < bl::kZeroSamples; ++i) z.sample(2500 + 2 * int32_t(i), bl::Mode::idle);   // a ramp: current flowing
+    settle(z);
+    for (uint32_t i = 0; i < bl::kZeroSamples; ++i) z.sample(2300 + int32_t(i), bl::Mode::idle);   // a ramp: current flowing
     CHECK_FALSE(z.taken());
-    feed(z, 2500, bl::kZeroSamples);
+    feed(z, 2500, kRunSamples);
     CHECK(z.taken());
+}
+
+TEST_CASE("zero: window means that drift past the agreement band start a new run") {
+    bl::CurrentZero z;
+    settle(z);
+    for (uint32_t w = 0; w < 3 * bl::kZeroAgreeWindows; ++w)
+        feed(z, 2400 + int32_t(w) * 3, bl::kZeroSamples);   // 20 mV/s, under the window spread
+    CHECK_FALSE(z.taken());
+    feed(z, 2600, kRunSamples);
+    REQUIRE(z.taken());
+    CHECK(z.zeroMv() == 2600);
 }
 
 TEST_CASE("zero: outside the sane band is no zero, counted, and the next window tries again") {
     bl::CurrentZero z;
+    settle(z);
     feed(z, 0, bl::kZeroSamples);                       // sensor unpowered or shorted
     feed(z, sensorOf(3100), bl::kZeroSamples);          // input open at the ADC's top
     feed(z, bl::kZeroMinMv - 1, bl::kZeroSamples);
@@ -368,16 +465,28 @@ TEST_CASE("zero: outside the sane band is no zero, counted, and the next window 
     CHECK_FALSE(z.taken());
     CHECK(z.refused() == 4);
     CHECK_FALSE(z.ma(2500, 100).has_value());
-    feed(z, bl::kZeroMaxMv, bl::kZeroSamples);
+    feed(z, bl::kZeroMaxMv, kRunSamples);
     CHECK(z.taken());
 }
 
 TEST_CASE("zero: taken once per boot, later samples never move it") {
     bl::CurrentZero z;
-    feed(z, 2250, bl::kZeroSamples);
+    settle(z);
+    feed(z, 2300, kRunSamples);
     REQUIRE(z.taken());
-    feed(z, 2000, 4 * bl::kZeroSamples);
-    CHECK(z.zeroMv() == 2250);
+    feed(z, 2600, 4 * kRunSamples);
+    CHECK(z.zeroMv() == 2300);
+}
+
+TEST_CASE("rest current: half the home trip or more refuses a home (the field's 5765 mA)") {
+    CHECK(bl::restCurrentSane(0, 1000));
+    CHECK(bl::restCurrentSane(499, 1000));
+    CHECK(bl::restCurrentSane(-499, 1000));
+    CHECK_FALSE(bl::restCurrentSane(500, 1000));
+    CHECK_FALSE(bl::restCurrentSane(-500, 1000));
+    CHECK_FALSE(bl::restCurrentSane(5765, 1000));
+    CHECK_FALSE(bl::restCurrentSane(bl::kNoCurrent, 1000));
+    CHECK(bl::restCurrentSane(5765, 20000));
 }
 
 // ---- the P4's link policy (BarnacleLink.h) ---------------------------------------
@@ -429,6 +538,8 @@ TEST_CASE("the self-check's helper row: never heard, stale and no slow frame fai
     h.slow.shim_version = 1;
     h.slow.boots = 2;
     h.status.motor_mv = 36100;
+    CHECK_FALSE(valence::describeHelper(h, out));   // no 0 A zero yet: no current, no gate
+    CHECK(std::string(out.data()) == "helper v1 boot 2: 36.1 V, no current: no ADC or 0 A zero");
     h.status.current_ma = 250;
     CHECK(valence::describeHelper(h, out));
     CHECK(std::string(out.data()) == "helper v1 boot 2: 36.1 V, 250 mA provisional");
