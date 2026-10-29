@@ -145,6 +145,9 @@ private:
     uint32_t _epoch = 0;
     // From the WELCOME this link carried; 0 before one and after GOODBYE.
     uint32_t _sessionId = 0;
+    // The frame read() last handed the hub was a PAIR_REQ while the presence
+    // window was open (Provisioning::windowKnockDispatched()).
+    bool _knockInWindow = false;
     uint32_t _nowMs = 0;
     uint32_t _lastRxMs = 0;
     uint32_t _txStallSinceMs = 0;
@@ -235,10 +238,15 @@ inline void ValenceLinkPort::detach() {
     _rxHead = _rxCount = 0;
     _txHead = _txCount = 0;
     _txStallSinceMs = 0;
+    _knockInWindow = false;
     if (_desk != nullptr) _desk->forget(*this);
 }
 
 inline std::optional<FrameBuffer> ValenceLinkPort::read() {
+    // The hub reads this link's next frame only once it dispatched the last
+    // one (hub_impl.hpp pumpSlot), so a knock handed over is answered by now.
+    if (_knockInWindow && _desk != nullptr) _desk->windowKnockDispatched(_sessionId, _nowMs);
+    _knockInWindow = false;
     while (_rxCount > 0) {
         FrameBuffer& slot = _rx[_rxHead];
         _rxHead = uint8_t((_rxHead + 1) % kRxDepth);
@@ -249,6 +257,8 @@ inline std::optional<FrameBuffer> ValenceLinkPort::read() {
             slot.setSize(0);
             continue;
         }
+        const std::optional<FrameHeader> h = decodeFrameHeader(slot.bytes());
+        _knockInWindow = h && h->type == uint8_t(FrameType::PAIR_REQ) && _sessionId != 0 && _hub->presenceWindowOpen();
         return slot;
     }
     return std::nullopt;

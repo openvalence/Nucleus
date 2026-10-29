@@ -393,6 +393,14 @@ struct Rig {
         REQUIRE(at(i).ears.granted == AccessLevel::configure);
     }
 
+    // Time passes with every session alive: 50 ms rounds.
+    void age(uint32_t ms) {
+        for (uint32_t t = 0; t < ms; t += 50) {
+            g_clock.advanceUs(45000);
+            step(1);
+        }
+    }
+
     void finish(JoinOutcome o) {
         station.outcome = o;
         step();
@@ -607,23 +615,93 @@ TEST_CASE("desk: over BLE GATT a watch session is refused ACCESS_DENIED") {
     CHECK(rig->station.joins == 0);
 }
 
-TEST_CASE("desk: over BLE GATT the knock that granted configure closed the window, so the join waits for PAIR") {
-    // SPEC 13.9's gate read literally: no window open, and a configure token
-    // now exists. A second PAIR press is what lets this session provision.
+TEST_CASE("desk: over BLE GATT the knock that won the fresh hub's window joins once; nobody else does (val-jham)") {
+    // RFC-121 amendment draft: the window's grant at configure is that
+    // session's presence approval, single use, pairing_window_default_s.
+    auto rig = std::make_unique<Rig>(true, 2, /*cable=*/false);
+    rig->live(0);
+    rig->live(1);
+    REQUIRE_FALSE(rig->hub->pairing().claimed());
+    rig->configure(0);
+    REQUIRE(rig->hub->pairing().claimed());
+    REQUIRE_FALSE(rig->hub->presenceWindowOpen());
+
+    REQUIRE(rig->client(1).sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    REQUIRE(rig->at(1).ears.nacks.size() == 1);
+    CHECK(rig->at(1).ears.nacks[0].code == NackCode::ACCESS_DENIED);
+
+    REQUIRE(rig->client(0).sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    CHECK(rig->at(0).ears.nacks.empty());
+    CHECK(rig->station.joins == 1);
+    rig->finish({false, 0, JoinFailure::auth});
+    REQUIRE(rig->at(0).ears.nacks.size() == 1);
+    CHECK(rig->at(0).ears.nacks[0].code == NackCode::NETWORK_JOIN_FAILED);
+
+    REQUIRE(rig->client(0).sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    REQUIRE(rig->at(0).ears.nacks.size() == 2);
+    CHECK(rig->at(0).ears.nacks[1].code == NackCode::ACCESS_DENIED);
+    CHECK(rig->at(0).ears.nacks[1].detail == "pairing window closed");
+    CHECK(rig->station.joins == 1);
+}
+
+TEST_CASE("desk: the window's grant lets its session join only within pairing_window_default_s") {
     auto rig = std::make_unique<Rig>(true, 1, /*cable=*/false);
     rig->live();
     rig->configure();
+    rig->age(limits::pairing_window_default_s * 1000u);
+    REQUIRE(rig->client().state() == ClientSessionState::LIVE);
     REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
     rig->step();
     REQUIRE(rig->at().ears.nacks.size() == 1);
     CHECK(rig->at().ears.nacks[0].code == NackCode::ACCESS_DENIED);
-    CHECK(rig->at().ears.nacks[0].detail == "pairing window closed");
     CHECK(rig->station.joins == 0);
+}
 
-    rig->hub->openPresenceWindow();
-    REQUIRE(rig->client().sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+TEST_CASE("desk: gesture config mode on a claimed hub: the window's winner joins once, the earlier owner does not") {
+    // SPEC 12.3's config-mode exception: the gesture route's window grants
+    // configure though configure tokens exist (ValenceHub.cpp, config_gesture).
+    auto rig = std::make_unique<Rig>(true, 2, /*cable=*/false);
+    rig->live(0);
+    rig->live(1);
+    rig->configure(0);
+    rig->age(limits::pairing_window_default_s * 1000u);   // the owner's own approval lapses
+    rig->hub->setPresenceDefaultRole(AccessLevel::configure);
+    rig->configure(1);
+
+    REQUIRE(rig->client(0).sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    REQUIRE(rig->at(0).ears.nacks.size() == 1);
+    CHECK(rig->at(0).ears.nacks[0].code == NackCode::ACCESS_DENIED);
+
+    REQUIRE(rig->client(1).sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
     rig->step();
     CHECK(rig->station.joins == 1);
+    rig->finish({false, 0, JoinFailure::auth});
+    REQUIRE(rig->client(1).sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    REQUIRE(rig->at(1).ears.nacks.size() == 2);
+    CHECK(rig->at(1).ears.nacks[1].code == NackCode::ACCESS_DENIED);
+    CHECK(rig->station.joins == 1);
+}
+
+TEST_CASE("desk: a knock the window granted only control approves no join") {
+    auto rig = std::make_unique<Rig>(true, 2, /*cable=*/false);
+    rig->live(0);
+    rig->live(1);
+    rig->configure(0);
+    rig->age(limits::pairing_window_default_s * 1000u);
+    rig->hub->openPresenceWindow();   // claimed: this window grants control
+    REQUIRE(rig->client(1).sendPairKnock());
+    rig->step();
+    REQUIRE(rig->at(1).ears.granted == AccessLevel::control);
+    REQUIRE(rig->client(1).sendIntent(channels::provisioning, wifiJoin(kSsid, kPass)));
+    rig->step();
+    REQUIRE(rig->at(1).ears.nacks.size() == 1);
+    CHECK(rig->at(1).ears.nacks[0].code == NackCode::ACCESS_DENIED);
+    CHECK(rig->station.joins == 0);
 }
 
 TEST_CASE("desk: a bad SSID or passphrase is refused INVALID_VALUE and starts nothing") {
@@ -782,6 +860,7 @@ TEST_CASE("desk: over BLE GATT the list ops answer at once; the live entry goes 
     remove.fields[0] = {1, IntentValue::ofU64(net::draft::op_net_remove)};
     remove.fields[1] = {6, IntentValue::ofU64(0)};
     // RFC-116 item 5: no window, no presence, so the live entry stays.
+    rig->age(limits::pairing_window_default_s * 1000u);   // the window grant's approval lapses
     REQUIRE(rig->client().sendIntent(channels::provisioning, remove));
     rig->step();
     REQUIRE(rig->at().ears.nacks.size() == 1);
@@ -901,6 +980,7 @@ TEST_CASE("cable: the live entry may be removed with no window; over BLE GATT it
         remove.count = 2;
         remove.fields[0] = {1, IntentValue::ofU64(net::draft::op_net_remove)};
         remove.fields[1] = {6, IntentValue::ofU64(0)};
+        rig->age(limits::pairing_window_default_s * 1000u);   // the window grant's approval lapses
         REQUIRE(rig->client().sendIntent(channels::provisioning, remove));
         rig->step();
         CHECK(rig->netDesk->list().count() == (cable ? 0u : 1u));

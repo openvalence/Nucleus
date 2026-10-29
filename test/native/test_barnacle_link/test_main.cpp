@@ -298,6 +298,88 @@ TEST_CASE("trip: the mode picks the threshold; the detect window is the stall-de
     CHECK(bl::kTripDetectUs == bl::kTripSampleUs * bl::kTripOnSamples);
 }
 
+// ---- the current zero (val-hjf7) ---------------------------------------------------
+
+namespace {
+// The shim's conversion: pin mV through the 10k over 20k divider.
+int32_t sensorOf(int32_t pinMv) { return pinMv * 3 / 2; }
+
+void feed(bl::CurrentZero& z, int32_t sensorMv, uint32_t n, bl::Mode m = bl::Mode::idle) {
+    for (uint32_t i = 0; i < n; ++i) z.sample(sensorMv, m);
+}
+}  // namespace
+
+TEST_CASE("zero: a 5 V CH701 at rest reads 0 mA and never trips (the field's 8500 provisional mA)") {
+    bl::CurrentZero z;
+    const int32_t rest = sensorOf(1667);   // 2500 mV at the sensor: half of 5 V
+    CHECK_FALSE(z.ma(rest, 100).has_value());
+    for (uint32_t i = 0; i + 1 < bl::kZeroSamples; ++i) CHECK_FALSE(z.sample(rest, bl::Mode::idle));
+    CHECK(z.sample(rest, bl::Mode::idle));
+    REQUIRE(z.taken());
+    CHECK(z.zeroMv() == rest);
+    CHECK(*z.ma(rest, 100) == 0);
+    CHECK(*z.ma(rest + 850, 100) == 8500);    // 8.5 A really is 8.5 A
+    CHECK(*z.ma(rest - 200, 100) == -2000);   // regeneration reads negative
+    bl::TripDetector t;
+    for (int i = 0; i < 100; ++i) CHECK_FALSE(t.sample(*z.ma(rest, 100), bl::kDefaultRunTripMa));
+}
+
+TEST_CASE("zero: a 3.3 V part's 1650 mV is taken too; noise inside the spread averages") {
+    bl::CurrentZero z;
+    for (uint32_t i = 0; i < bl::kZeroSamples; ++i) z.sample(1650 + int32_t(i % 2 == 0 ? 40 : -40), bl::Mode::idle);
+    REQUIRE(z.taken());
+    CHECK(z.zeroMv() == 1650);
+}
+
+TEST_CASE("zero: single-shot ADC noise well past the field's averaged 25 mV still zeroes") {
+    bl::CurrentZero z;
+    for (uint32_t i = 0; i < bl::kZeroSamples; ++i) z.sample(2510 + int32_t(i % 2 == 0 ? 180 : -180), bl::Mode::idle);
+    REQUIRE(z.taken());
+    CHECK(z.zeroMv() == 2510);
+}
+
+TEST_CASE("zero: never in motion; a homing or running sample discards the window") {
+    bl::CurrentZero z;
+    feed(z, 2500, bl::kZeroSamples, bl::Mode::running);
+    feed(z, 2500, bl::kZeroSamples, bl::Mode::homing);
+    CHECK_FALSE(z.taken());
+    feed(z, 2500, bl::kZeroSamples - 1);
+    feed(z, 2500, 1, bl::Mode::running);   // the gate opened one sample short
+    feed(z, 2500, 1);
+    CHECK_FALSE(z.taken());
+    feed(z, 2500, bl::kZeroSamples - 1);
+    CHECK(z.taken());
+}
+
+TEST_CASE("zero: a window that moves past the spread is discarded") {
+    bl::CurrentZero z;
+    for (uint32_t i = 0; i < bl::kZeroSamples; ++i) z.sample(2500 + 2 * int32_t(i), bl::Mode::idle);   // a ramp: current flowing
+    CHECK_FALSE(z.taken());
+    feed(z, 2500, bl::kZeroSamples);
+    CHECK(z.taken());
+}
+
+TEST_CASE("zero: outside the sane band is no zero, counted, and the next window tries again") {
+    bl::CurrentZero z;
+    feed(z, 0, bl::kZeroSamples);                       // sensor unpowered or shorted
+    feed(z, sensorOf(3100), bl::kZeroSamples);          // input open at the ADC's top
+    feed(z, bl::kZeroMinMv - 1, bl::kZeroSamples);
+    feed(z, bl::kZeroMaxMv + 1, bl::kZeroSamples);
+    CHECK_FALSE(z.taken());
+    CHECK(z.refused() == 4);
+    CHECK_FALSE(z.ma(2500, 100).has_value());
+    feed(z, bl::kZeroMaxMv, bl::kZeroSamples);
+    CHECK(z.taken());
+}
+
+TEST_CASE("zero: taken once per boot, later samples never move it") {
+    bl::CurrentZero z;
+    feed(z, 2250, bl::kZeroSamples);
+    REQUIRE(z.taken());
+    feed(z, 2000, 4 * bl::kZeroSamples);
+    CHECK(z.zeroMv() == 2250);
+}
+
 // ---- the P4's link policy (BarnacleLink.h) ---------------------------------------
 
 TEST_CASE("mode: a home cycle is homing, an open gate without ESTOP is running, else idle") {

@@ -496,4 +496,78 @@ constexpr uint16_t activeThreshold(Mode m, uint16_t home_ma, uint16_t run_ma) {
     return m == Mode::homing ? home_ma : run_ma;
 }
 
+// ---- the current zero (the helper runs it; the suite drives it) -----------------
+
+// The sensor's 0 A output, measured at the helper, never assumed: a CH701's
+// zero is half its supply, and the R+D board's U6 supply is not on record
+// (3.3 V puts it at 1650 mV, the 5 V rail at about 2250 to 2500 mV; bd
+// val-hjf7). Constraints:
+// - NEVER IN MOTION: only Mode::idle samples count (the motion gate closed,
+//   the emitter parked). A sample in another mode discards the window; a
+//   sample that takes its spread past kZeroSpreadMaxMv starts a new one.
+// - The mean of kZeroSamples consecutive samples is the zero, taken once per
+//   helper boot; a mean outside kZeroMinMv..kZeroMaxMv is no zero (a sensor
+//   unpowered, shorted or open) and the next idle window tries again.
+// - Until a zero is taken there is no current: the helper reads kNoCurrent
+//   and TRIP never asserts, the no-ADC state, so the P4 refuses a home.
+// SINGLE OWNER: the helper's sampling loop.
+inline constexpr uint32_t kZeroSamples = 256;      // 38.4 ms at kTripSampleUs
+inline constexpr int32_t kZeroMinMv = 1400;        // at the sensor: under a 3.3 V part's 1650
+inline constexpr int32_t kZeroMaxMv = 2750;        // over a 5 V part's 2500
+inline constexpr int32_t kZeroSpreadMaxMv = 400;   // max minus min in one window: ADC noise passes, a stroke does not
+
+class CurrentZero {
+public:
+    // One sample, mV at the sensor, in the mode in force. True on the sample
+    // that takes the zero.
+    bool sample(int32_t sensorMv, Mode m) {
+        if (_taken) return false;
+        if (m != Mode::idle) {
+            _n = 0;
+            return false;
+        }
+        const int32_t lo = sensorMv < _lo ? sensorMv : _lo;
+        const int32_t hi = sensorMv > _hi ? sensorMv : _hi;
+        if (_n == 0 || hi - lo > kZeroSpreadMaxMv) {   // this sample starts a window
+            _n = 0;
+            _sum = 0;
+            _lo = _hi = sensorMv;
+        } else {
+            _lo = lo;
+            _hi = hi;
+        }
+        _sum += sensorMv;
+        if (++_n < kZeroSamples) return false;
+        const int32_t mean = int32_t(_sum / int64_t(_n));
+        _n = 0;
+        if (mean < kZeroMinMv || mean > kZeroMaxMv) {
+            ++_refused;
+            return false;
+        }
+        _zeroMv = mean;
+        _taken = true;
+        return true;
+    }
+
+    bool taken() const { return _taken; }
+    int32_t zeroMv() const { return _zeroMv; }
+    // Full windows whose mean fell outside kZeroMinMv..kZeroMaxMv, wraps.
+    uint16_t refused() const { return _refused; }
+
+    // mA from mV at the sensor and the slope; nullopt before a zero.
+    std::optional<int32_t> ma(int32_t sensorMv, int32_t mvPerA) const {
+        if (!_taken) return std::nullopt;
+        return (sensorMv - _zeroMv) * 1000 / mvPerA;
+    }
+
+private:
+    bool _taken = false;
+    int32_t _zeroMv = 0;
+    uint32_t _n = 0;
+    int64_t _sum = 0;
+    int32_t _lo = 0;
+    int32_t _hi = 0;
+    uint16_t _refused = 0;
+};
+
 }  // namespace barnacle

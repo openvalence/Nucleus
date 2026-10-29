@@ -175,7 +175,7 @@ void onFrame(const barnacle::Frame& f, uint32_t now) {
         const bool none = s->current_ma == barnacle::kNoCurrent;
         if (none != g_noCurrent) {
             g_noCurrent = none;
-            if (none) GLOGE(kTag, "the helper reads no motor current (its ADC on IO36): home refused");
+            if (none) GLOGE(kTag, "the helper reads no motor current (no ADC on IO36, or no 0 A zero measured in idle yet): home refused");
             else      GLOGW(kTag, "the helper reads motor current again");
         }
     } else if (const std::optional<barnacle::Slow> s = barnacle::asSlow(f)) {
@@ -345,7 +345,7 @@ public:
         const HelperReading h = helperReading();
         if (!h.fresh) return Probe::undriven;
         if (h.status.current_ma == barnacle::kNoCurrent) {
-            GLOGE(kTag, "home refused: the helper reads no motor current (IO36), so no stall can trip");
+            GLOGE(kTag, "home refused: the helper reads no motor current (IO36 ADC or its 0 A zero), so no stall can trip");
             return Probe::undriven;
         }
         const bool tripped = padTripped();

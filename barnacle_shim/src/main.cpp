@@ -21,7 +21,9 @@
 //   barnacle::kP4SilentMs, the shim holds the last mode and thresholds it was
 //   given (the boot defaults if none), sets kFlagP4Silent, and shows the Link
 //   system's Degraded look itself through Flux.
-// - Current reads provisional mA until kCurrentCalibrated (bd val-omh3.4).
+// - Current reads provisional mA until kCurrentCalibrated (bd val-omh3.4),
+//   and none until barnacle::CurrentZero has measured the 0 A output in idle
+//   (bd val-hjf7): no current, no TRIP.
 // See: ../lib/barnacle_link/include/barnacle_link/barnacle_link.hpp,
 // openvalence.github.io guides/barnacle (the WROOM helper pin map), bd
 // val-omh3.3
@@ -65,14 +67,14 @@ constexpr uart_port_t kUart = UART_NUM_1;
 
 // ---- THE KNOBS ---------------------------------------------------------------------
 
-constexpr uint8_t kShimVersion = 1;
+constexpr uint8_t kShimVersion = 2;
 constexpr uint32_t kCpuMhz = 80;
 
-// The CH701's output at 0 A and its slope, both at the sensor pin (before the
-// divider). Placeholders: the variant on U6 is not on record.
+// The CH701's slope at the sensor pin (before the divider). A placeholder: the
+// variant on U6 is not on record. Its 0 A output is measured at boot
+// (barnacle::CurrentZero, bd val-hjf7), never set here.
 // TODO(val-omh3.4): read the part marking or calibrate against a clamp meter,
-// then set both and kCurrentCalibrated.
-constexpr int32_t kCurrentZeroMv = 1650;
+// then set the slope and kCurrentCalibrated.
 constexpr int32_t kCurrentMvPerA = 100;
 constexpr bool kCurrentCalibrated = false;
 // 10k over 20k: the sensor's volts are the pin's times 3/2.
@@ -167,6 +169,7 @@ bool g_uartOk = false;
 
 barnacle::Decoder g_decoder;
 barnacle::TripDetector g_trip;
+barnacle::CurrentZero g_zero;
 barnacle::Command g_cmd{barnacle::Mode::idle, 0, 0, 0, barnacle::kDefaultHomeTripMa, barnacle::kDefaultRunTripMa};
 bool g_heardP4 = false;
 int64_t g_lastCmdUs = 0;
@@ -181,8 +184,9 @@ uint32_t g_statusCount = 0;
 
 // The status frame's averages since the last one.
 int32_t g_rawSum = 0;
+int32_t g_rawCount = 0;
 int32_t g_maSum = 0;
-int32_t g_sampleCount = 0;
+int32_t g_maCount = 0;
 
 uint16_t g_motorMv = barnacle::kNoMillivolts;
 uint16_t g_ana1Mv = barnacle::kNoMillivolts;
@@ -269,12 +273,10 @@ void sendStatus(int64_t now) {
     if (kCurrentCalibrated) s.flags |= barnacle::kFlagCalibrated;
     if (p4Silent(now)) s.flags |= barnacle::kFlagP4Silent;
     if (digitalRead(kPinSpareIn) == HIGH) s.flags |= barnacle::kFlagSpareIn;
-    if (g_sampleCount > 0) {
-        s.current_raw = uint16_t(g_rawSum / g_sampleCount);
-        s.current_ma = int16_t(constrain(g_maSum / g_sampleCount, -32767, 32767));
-    }
+    if (g_rawCount > 0) s.current_raw = uint16_t(g_rawSum / g_rawCount);
+    if (g_maCount > 0) s.current_ma = int16_t(constrain(g_maSum / g_maCount, -32767, 32767));
     s.motor_mv = g_motorMv;
-    g_rawSum = g_maSum = g_sampleCount = 0;
+    g_rawSum = g_rawCount = g_maSum = g_maCount = 0;
     std::array<uint8_t, barnacle::kMaxWire> out{};
     send(barnacle::encode(s, g_txSeq++, out), out);
 
@@ -323,11 +325,14 @@ void sampleCurrent() {
     const std::optional<Adc1::Sample> s = g_adc.read(kChCurrent);
     if (!s) return;   // no sample: the detector holds, the status reads none
     const int32_t sensorMv = int32_t(s->mv) * kCurrentDividerNum / kCurrentDividerDen;
-    const int32_t ma = (sensorMv - kCurrentZeroMv) * 1000 / kCurrentMvPerA;
     g_rawSum += s->raw;
-    g_maSum += ma;
-    ++g_sampleCount;
-    const bool trip = g_trip.sample(ma, barnacle::activeThreshold(g_cmd.mode, g_cmd.home_trip_ma, g_cmd.run_trip_ma));
+    ++g_rawCount;
+    g_zero.sample(sensorMv, g_cmd.mode);
+    const std::optional<int32_t> ma = g_zero.ma(sensorMv, kCurrentMvPerA);
+    if (!ma) return;   // no zero yet: the status reads none, TRIP stays released
+    g_maSum += *ma;
+    ++g_maCount;
+    const bool trip = g_trip.sample(*ma, barnacle::activeThreshold(g_cmd.mode, g_cmd.home_trip_ma, g_cmd.run_trip_ma));
     if (trip != g_tripOut) {
         g_tripOut = trip;
         digitalWrite(kPinTrip, trip ? HIGH : LOW);

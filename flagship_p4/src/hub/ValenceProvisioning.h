@@ -132,6 +132,12 @@ public:
         _presenceAtMs = nowMs;
     }
 
+    // RFC-121 amendment draft (val-jham): the knock that won the presence
+    // window's single grant at configure is that session's presence approval,
+    // as a PAIR approval is. Hub task, from the binding, right after the hub
+    // dispatched `sessionId`'s PAIR_REQ that arrived with the window open.
+    void windowKnockDispatched(uint32_t sessionId, uint32_t nowMs);
+
 private:
     struct Attempt {
         ITransport* link = nullptr;
@@ -215,6 +221,15 @@ inline const HubSession* Provisioning::sessionById(uint32_t id) const {
         if (s == nullptr) return nullptr;
         if (s->occupied() && s->session_id == id) return s;
     }
+}
+
+inline void Provisioning::windowKnockDispatched(uint32_t sessionId, uint32_t nowMs) {
+    if (_hub.presenceWindowOpen()) return;   // not granted from the window
+    const HubSession* s = sessionById(sessionId);
+    if (s == nullptr || s->role != AccessLevel::configure) return;
+    presenceApproved(sessionId, nowMs);
+    GLOGI(detail::kProvisioningTag, "session %08lx won the pairing window at configure: one wifi_join within %lu s",
+          static_cast<unsigned long>(sessionId), static_cast<unsigned long>(limits::pairing_window_default_s));
 }
 
 inline void Provisioning::wipe() {
@@ -334,7 +349,8 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
     map.fields = in.value;
     const std::optional<uint8_t> op = NetworkDesk::opOf(map);
     // SPEC §13.9: an association window open now, an unused presence approval
-    // of this very session, a factory-fresh hub, or the cable.
+    // of this very session (a PAIR approval, or the window's own grant at
+    // configure: windowKnockDispatched()), a factory-fresh hub, or the cable.
     const bool presence = _presenceSession != 0 && _presenceSession == sessionId &&
                           nowMs - _presenceAtMs < limits::pairing_window_default_s * 1000u;
     const bool windowOrFresh = cable || _hub.pairingWindowOpen() || presence || !_hub.pairing().claimed();
