@@ -178,13 +178,19 @@ static_assert(kOscDriveHeldUs / (kOscPlanDriveTicks * kMotionTickUs) + kOscDrive
 // home datum is the stop-to-stop length; minus two kHomeSafetyMarginMm it is
 // the usable rail, which becomes the rail and max_rail. Then
 // kHomeSafetyMarginMm off the far datum, which is the rail's far end, where the
-// line must read LOW again, and homed; the planner is reset there. The home
-// approach searches max_rail plus both margins plus two kHomeSearchMarginMm,
-// so a retry reaches the home stop from where a failed far approach stopped;
-// the far approach searches max_rail plus both margins plus one from the home
-// datum; a re-touch reaches kHomeSearchMarginMm past the stall it backed off
-// from. No stall within either, a usable rail under MIN_RAIL_MM, or no end by
-// homeCycleS() plus kHomeTimeoutMarginUs fails it unhomed.
+// line must read LOW again, and homed; the planner is reset there.
+//
+// THE SEARCH IS BOUNDED BY THE PHYSICAL CEILING, NEVER BY max_rail (operator
+// ruling 2026-10-30, bd val-m2tk): before a home nobody knows the rail, so
+// max_rail is the RESULT of a completed cycle and no setting caps its search.
+// The home approach searches kHomeSearchRailMm plus both margins plus two
+// kHomeSearchMarginMm, so a retry reaches the home stop from where a failed far
+// approach stopped; the far approach searches kHomeSearchRailMm plus both
+// margins plus one from the home datum; a re-touch reaches kHomeSearchMarginMm
+// past the stall it backed off from. No stall within either, a usable rail
+// under MIN_RAIL_MM, or no end by homeCycleS(kHomeSearchRailMm) plus
+// kHomeTimeoutMarginUs fails it unhomed. Positions keep the max_rail frame
+// until the far datum measures the rail (the flip mirrors about it).
 //
 // NOTHING LEAVES THE DRIVE PUSHING. The drive closes every step it was sent:
 // a step past a stop is following error it pushes to close at its output
@@ -233,6 +239,7 @@ inline constexpr uint32_t kStallDetectUs        = kStallOnSamples * kStallConver
 // the cycle is this distance.
 inline constexpr float    kHomeSafetyMarginMm   = 5.0f;
 inline constexpr float    kHomeSearchMarginMm   = 10.0f;
+inline constexpr float    kHomeSearchRailMm     = MAX_RAIL_MM;
 inline constexpr float    kHomeTouchDivisor     = 4.0f;
 inline constexpr float    kHomeTouchFloorMmS    = 8.0f;
 inline constexpr uint32_t kHomeSenseDebounceUs  = 100;    // the board's two reads of a rise
@@ -1219,8 +1226,12 @@ private:
         return homeTowardLow(leg) ? -kHomeSafetyMarginMm : _rail + kHomeSafetyMarginMm;
     }
     float homeAway(uint8_t leg, float at_mm, float d) const { return homeTowardLow(leg) ? at_mm + d : at_mm - d; }
+    // The far stop's label is the max_rail frame's: its search reaches the
+    // rest of kHomeSearchRailMm past it.
     float homePast(uint8_t leg) const {
-        return homeAway(leg, homeStopAt(leg), (leg == 0 ? -2.0f : -1.0f) * kHomeSearchMarginMm);
+        if (leg == 0) return homeAway(0, homeStopAt(0), -2.0f * kHomeSearchMarginMm);
+        const float rest = kHomeSearchRailMm > _rail ? kHomeSearchRailMm - _rail : 0.0f;
+        return homeAway(1, homeStopAt(1), -kHomeSearchMarginMm - rest);
     }
     // Re-origins the count so the carriage reads `at_mm` and reseeds the
     // engine there: a relabeling, never motion.

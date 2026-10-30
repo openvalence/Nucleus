@@ -1612,10 +1612,10 @@ TEST_CASE("VD-HOME-6: a failed cycle is logged in words with its leg; nothing is
     g_census.homing = false;
     g_census.homed = false;
     g_census.home_fail_leg = 1;
-    g_census.home_fail_why = "no stall across max_rail";
+    g_census.home_fail_why = "no stall within the rail ceiling";
     ++g_census.home_fails;
     rig->step();
-    CHECK(logged("HOME failed at the far end: no stall across max_rail, unhomed"));
+    CHECK(logged("HOME failed at the far end: no stall within the rail ceiling, unhomed"));
     CHECK(rig->device.config().max_rail == rail);
     CHECK(rig->hub->cfgGen() == gen);
     CHECK(stateF32(*rig, ch::machine_config, 33) == 0.0f);   // never measured

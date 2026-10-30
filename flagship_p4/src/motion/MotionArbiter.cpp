@@ -2226,13 +2226,16 @@ void MotionArbiter::steerTick(uint64_t now_us, float dt_s) {
 
 void MotionArbiter::syncFence(float lo_mm, float hi_mm) {
     // A home cycle searches a stop past each datum's safety margin by up to
-    // two search margins (MotionArbiter.h, homing), in the frame of its last
-    // relabel; otherwise the backstop's frame. The emitter orders the two
-    // stores.
+    // two search margins across kHomeSearchRailMm (MotionArbiter.h, homing),
+    // in the frame of its last relabel, which the flip mirrors about the rail;
+    // otherwise the backstop's frame. The emitter orders the two stores.
     const bool seek = seeking();
     const float reach = kHomeSafetyMarginMm + 2.0f * kHomeSearchMarginMm;
-    const int32_t lo = _origin + fenceCount(seek ? -reach : lo_mm, false);
-    const int32_t hi = _origin + fenceCount(seek ? _max_rail + reach : hi_mm, true);
+    const float span = kHomeSearchRailMm > _rail ? kHomeSearchRailMm : _rail;
+    const float seek_lo = _home_flip ? _rail - span - reach : -reach;
+    const float seek_hi = _home_flip ? _rail + reach : span + reach;
+    const int32_t lo = _origin + fenceCount(seek ? seek_lo : lo_mm, false);
+    const int32_t hi = _origin + fenceCount(seek ? seek_hi : hi_mm, true);
     if (lo == _fence_lo && hi == _fence_hi) return;
     _emitter.fence(lo, hi);
     _fence_lo = lo;
@@ -2341,13 +2344,13 @@ void MotionArbiter::homeStart(uint64_t now_us) {
     _home_v = _jog_v < _home_speed ? _jog_v : _home_speed;
     _touch_v = homeTouchMmS(_home_v);
     _rail = _max_rail;
-    _home_deadline_us = now_us + uint64_t(homeCycleS(_max_rail, _home_v) * 1e6f) + kHomeTimeoutMarginUs;
-    // The carriage is declared at the far stop's datum: max_rail plus both
-    // margins from the home stop's.
-    homeOrigin(_emitter.count(), homeAway(0, homeStopAt(0), _max_rail + 2.0f * kHomeSafetyMarginMm), now_us);
-    GLOGI(kTag, "HOME: approaching the home end at %.1f mm/s (re-touch %.1f mm/s), searching %.0f mm",
+    _home_deadline_us = now_us + uint64_t(homeCycleS(kHomeSearchRailMm, _home_v) * 1e6f) + kHomeTimeoutMarginUs;
+    // The carriage is declared at the farthest stop the search admits:
+    // kHomeSearchRailMm plus both margins from the home stop's datum.
+    homeOrigin(_emitter.count(), homeAway(0, homeStopAt(0), kHomeSearchRailMm + 2.0f * kHomeSafetyMarginMm), now_us);
+    GLOGI(kTag, "HOME: approaching the home end at %.1f mm/s (re-touch %.1f mm/s), searching up to %.0f mm",
           double(_home_v), double(_touch_v),
-          double(_max_rail + 2.0f * (kHomeSafetyMarginMm + kHomeSearchMarginMm)));
+          double(kHomeSearchRailMm + 2.0f * (kHomeSafetyMarginMm + kHomeSearchMarginMm)));
     homeSeek(false, true, ArbEvent::HomeStart, now_us);   // home() probed the line LOW
 }
 
@@ -2394,7 +2397,7 @@ void MotionArbiter::homeStep(uint64_t now_us, float dt_s) {
                 _seek.store(kSeekArmed);
             }
             if (homeDrive(now_us, dt_s))
-                return homeUnload(touch ? "no stall on the slow re-touch" : "no stall across max_rail", now_us);
+                return homeUnload(touch ? "no stall on the slow re-touch" : "no stall within the rail ceiling", now_us);
             return;
         }
         case ArbMode::HomeClear:

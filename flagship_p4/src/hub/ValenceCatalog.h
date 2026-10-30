@@ -817,15 +817,14 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     // this one before the kinetic ceilings on 0x1120.
     //
     // `max_rail` is a REAL SAVABLE SETTING: the usable rail length, stop to
-    // stop minus a safety margin at each end, and the home cycle's search
-    // distance per leg (plus both margins and a search margin, MotionArbiter.h
-    // homing). Before the first home an owner sets it at or above the real
-    // rail; a completed home writes the usable length it measured into it
-    // through config-set key 8's
+    // stop minus a safety margin at each end. It never bounds a home's search,
+    // which reaches the physical ceiling ceiling::rail_mm (operator ruling
+    // 2026-10-30, bd val-m2tk; MotionArbiter.h homing). A completed home writes
+    // the usable length it measured into it through config-set key 8's
     // own writer (operator ruling 2026-10-03, Valence RFC-101), so after a
     // home the setting IS the measurement. While that home stands, max_rail
     // and the window clamp to the measurement (ValenceDevice::applyConfig(),
-    // bd val-3kd); unhomed, max_rail can be raised for a longer rail's search.
+    // bd val-3kd).
     // `measured_stroke` (field 10, below)
     // is this boot's raw measurement, read-only; a client never writes one
     // from the other.

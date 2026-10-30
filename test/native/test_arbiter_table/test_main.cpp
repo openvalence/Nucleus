@@ -756,7 +756,8 @@ TEST_CASE("cells: a cycle fails in every phase and lands unhomed in the layer") 
         auto r = std::make_unique<Rig>();
         setup(*r);
         REQUIRE(r->arb.home() == HomeStart::started);
-        r->run(20'000'000);
+        // A search that runs out crosses kHomeSearchRailMm and unloads back.
+        for (int s = 0; s < 240 && (s < 20 || r->census().homing); ++s) r->run(1'000'000);
         const MotionCensus c = r->census();
         CHECK(r->mode() == ArbMode::Run);
         CHECK_FALSE(c.homed);
@@ -770,7 +771,7 @@ TEST_CASE("cells: a cycle fails in every phase and lands unhomed in the layer") 
         r.sense.lo_mm = -1e6f;
         r.arb.setWindow(0.0f, 40.0f, 40.0f);
         r.run(1000);   // taken before the request, which a frame move would end
-    }, ArbMode::HomeClear, "no stall across max_rail", ArbMode::HomeApproach);
+    }, ArbMode::HomeClear, "no stall within the rail ceiling", ArbMode::HomeApproach);
     fail([](Rig& r) { r.sense.lo_sticky_from = 2; }, ArbMode::HomeApproach,
          "still on the home stop a safety margin after leaving it");
     fail([](Rig& r) { r.sense.sticky_lo = true; }, ArbMode::HomeClear,

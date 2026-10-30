@@ -94,7 +94,11 @@ leg is in flight. **The safety margin
 (`kHomeSafetyMarginMm`, 5 mm) is never a commandable position**: 0.0 mm is a
 margin off the low stop's datum, the rail ends a margin short of the high
 one, so a 300 mm stop-to-stop rail is a 290 mm usable rail, and the usable
-rail is what max_rail stores.
+rail is what max_rail stores. **The search is bounded by the physical
+ceiling, never by max_rail** (operator ruling 2026-10-30, bd val-m2tk): each
+approach searches `kHomeSearchRailMm` (`MAX_RAIL_MM`, configValid's 2000 mm
+max_rail bound) and the cycle's deadline is `homeCycleS()` of it, so a
+completed home's measurement is max_rail and no user value caps the search.
 
 **Who may feed the planner is ONE mode (bd val-5ozv.1).** `ArbMode` in
 `MotionArbiter.h`: Run, Paused, Jog, Returning, HomeQueued, the four seek
@@ -458,8 +462,10 @@ per sample, decoded in numpy; board `val-091.3`].
   the fine wait, reading only the word for the edge's direction. The arbiter
   writes it (`MotionArbiter::syncFence()`) before every nonzero steer: the
   backstop's frame in counts, rounded outward by under a step
-  (`fenceCount()`), or during a home cycle its whole search, max_rail plus a
-  safety margin and two search margins past each end. The board stores the
+  (`fenceCount()`), or during a home cycle its whole search,
+  `kHomeSearchRailMm` (the physical ceiling, never max_rail: operator ruling
+  2026-10-30, bd val-m2tk) plus a safety margin and two search margins past
+  each end. The board stores the
   bound that narrows first, a memory fence after each store
   (`ValenceMotion.cpp` `LpEmitter::fence()`), so the pair the core can read
   between the stores lies inside the old fence or the new one. Open at load:

@@ -1773,13 +1773,13 @@ TEST_CASE("home: a far-leg failure leaves positions measured from the home datum
     auto r = rig();
     r->arb.setWindow(0.0f, 100.0f, 100.0f);
     r->run(1000);
-    FakeSense s{r->emitter, -30.0f, 500.0f};
+    FakeSense s{r->emitter, -30.0f};
     isr(*r, s);
     r->arb.setHomeSense(s);
     for (int i = 0; i < 2; ++i) {
         CAPTURE(i);
         REQUIRE(r->arb.home() == HomeStart::started);
-        r->run(15'000'000);
+        r->run(120'000'000);
         const MotionCensus c = r->census();
         REQUIRE(c.home_fails == uint32_t(i + 1));
         REQUIRE(c.home_fail_leg == 1);
@@ -1872,45 +1872,75 @@ TEST_CASE("home: under the flip the home leg runs to the far end, 0.0 mm is ther
     CHECK(s.bootMm() == doctest::Approx(-160.0f + kHomeSafetyMarginMm).epsilon(0.002));
 }
 
-TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores no rail") {
-    SUBCASE("home end: no stall across max_rail") {
+// Field 2026-10-30 (bd val-m2tk): a max_rail of 10 mm capped the search at
+// 40 mm and the home failed. The search reaches kHomeSearchRailMm whatever
+// max_rail holds; the completed cycle's measurement is the rail.
+TEST_CASE("home: max_rail 10 never caps the search; the cycle measures a 292.1 mm rail") {
+    for (const bool flip : {false, true}) {
+        CAPTURE(flip);
         auto r = rig();
-        r->arb.setWindow(0.0f, 30.0f, 30.0f);   // max_rail 30: a 60 mm search
+        r->arb.setFlipped(flip);
+        r->arb.setWindow(0.0f, 10.0f, 10.0f);
         r->run(1000);
-        FakeSense s{r->emitter, -1000.0f};
+        const float stops = 292.1f + 2.0f * kHomeSafetyMarginMm;
+        const float home = flip ? 40.0f : -30.0f;
+        FakeSense s{r->emitter, home, flip ? home - stops : home + stops};
         isr(*r, s);
         r->arb.setHomeSense(s);
         REQUIRE(r->arb.home() == HomeStart::started);
-        r->run(6'000'000);
+        r->run(40'000'000);
+        const MotionCensus c = r->census();
+        CHECK(c.home_fails == 0);
+        REQUIRE(c.homed);
+        CHECK(std::fabs(c.home_rail_mm - 292.1f) <= 2.0f * kDatumTol);
+        CHECK(c.rail_mm == c.home_rail_mm);
+        CHECK(std::fabs(c.position_mm - c.home_rail_mm) <= kMmPerStep);
+        CHECK(r->emitter.fence_hits == 0);
+    }
+}
+
+TEST_CASE("home: a failure on either leg ends unhomed, names the leg, and stores no rail") {
+    SUBCASE("home end: no stall within the rail ceiling") {
+        auto r = rig();
+        r->arb.setWindow(0.0f, 30.0f, 30.0f);   // max_rail 30 never caps the search
+        r->run(1000);
+        FakeSense s{r->emitter, -1e6f};
+        isr(*r, s);
+        r->arb.setHomeSense(s);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        r->run(30'000'000);
+        CHECK(r->census().homing);   // past max_rail's old 60 mm by far
+        CHECK(s.bootMm() < -1000.0f);
+        r->run(90'000'000);
         const MotionCensus c = r->census();
         CHECK_FALSE(c.homing);
         CHECK_FALSE(c.homed);
         CHECK(c.homes == 0);
         CHECK(c.home_fails == 1);
         CHECK(c.home_fail_leg == 0);
-        CHECK(std::string(c.home_fail_why) == "no stall across max_rail");
+        CHECK(std::string(c.home_fail_why) == "no stall within the rail ceiling");
         CHECK_FALSE(c.busy);
         // The search ran out pressed or not: the unload returns the command
         // to where the approach armed, the carriage's start.
         CHECK(std::fabs(s.bootMm()) <= kMmPerStep);
         CHECK(r->submit(MotionSource::Manual, 10.0f));   // the rail is free again
     }
-    SUBCASE("far end: no stall across max_rail from the home datum") {
+    SUBCASE("far end: no stall within the rail ceiling from the home datum") {
         auto r = rig();
         r->arb.setWindow(0.0f, 100.0f, 100.0f);
         r->run(1000);
-        FakeSense s{r->emitter, -30.0f, 500.0f};
+        FakeSense s{r->emitter, -30.0f};
         isr(*r, s);
         r->arb.setHomeSense(s);
         REQUIRE(r->arb.home() == HomeStart::started);
-        r->run(15'000'000);
+        r->run(120'000'000);
         const MotionCensus c = r->census();
         CHECK_FALSE(c.homing);
         CHECK_FALSE(c.homed);
         CHECK(c.homes == 0);
         CHECK(c.home_fails == 1);
         CHECK(c.home_fail_leg == 1);
-        CHECK(std::string(c.home_fail_why) == "no stall across max_rail");
+        CHECK(std::string(c.home_fail_why) == "no stall within the rail ceiling");
         CHECK(c.home_rail_mm == 0.0f);
         // Unloaded to where the far approach armed, just off the home stop.
         CHECK(s.bootMm() >= -30.0f);
@@ -1978,7 +2008,7 @@ TEST_CASE("home: the deadline covers every leg at its constant speed and 2 s, an
     r->arb.setHomeSense(s);
     r->emitter.frozen = true;   // a dead emitter: steered, never counting
     REQUIRE(r->arb.home() == HomeStart::started);
-    const float budgetS = valence::homeCycleS(200.0f, DEFAULT_HOME_SPEED_MM_S) +
+    const float budgetS = valence::homeCycleS(valence::kHomeSearchRailMm, DEFAULT_HOME_SPEED_MM_S) +
                           float(valence::kHomeTimeoutMarginUs) * 1e-6f;
     r->run(uint64_t((budgetS - 0.3f) * 1e6f));
     CHECK(r->census().homing);
@@ -2490,8 +2520,8 @@ TEST_CASE("fence: a home cycle searches inside the wide frame and is never fence
     isr(*r, s);
     r->arb.setHomeSense(s);
     REQUIRE(r->arb.home() == HomeStart::started);
-    // max_rail plus a safety margin and two search margins past each end.
-    const float wide = DEFAULT_MAX_RAIL_MM + 2.0f * (kHomeSafetyMarginMm + 2.0f * kHomeSearchMarginMm);
+    // The search ceiling plus a safety margin and two search margins past each end.
+    const float wide = valence::kHomeSearchRailMm + 2.0f * (kHomeSafetyMarginMm + 2.0f * kHomeSearchMarginMm);
     int ticks = 0, off = 0;
     for (int i = 0; i < 20'000; ++i) {
         r->run(1000);

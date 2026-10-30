@@ -58,6 +58,9 @@
 // ---- Stroke geometry --------------------------------------------------------
 #define DEFAULT_MAX_RAIL_MM 500.0f
 #define MIN_RAIL_MM         10.0f
+// The physical ceiling configValid holds max_rail to, and the home search's
+// reach (MotionArbiter.h, homing).
+#define MAX_RAIL_MM         2000.0f
 
 // ---- Homing: the approach speed's factory value and floor (MotionArbiter.h) --
 #define DEFAULT_HOME_SPEED_MM_S 40.0f
