@@ -1486,11 +1486,15 @@ Ret ValenceDevice::refuseUnpowered(const char* what) {
 std::optional<NackCode> ValenceDevice::startRefusal(const MotionCensus& c, const char* what) {
     if (!c.power_gate) return refuseUnpowered(what).error();
     if (!commissioned(_modes)) {
-        GLOGW_EVERY_MS(1000, kTag, "%s refused INTERLOCK: not commissioned "
-                       "(setup fields written 0x%02x of 0x%02x)",
-                       what, unsigned(_modes.setup_written), unsigned(kSetupRequiredMask));
-        std::snprintf(_nackDetail.data(), _nackDetail.size(), "not commissioned: setup 0x%02x of 0x%02x",
-                      unsigned(_modes.setup_written), unsigned(kSetupRequiredMask));
+        // Named in plain words, the action included. The list is held to
+        // nack_detail_max_bytes with the NACK's prefix, which also keeps the
+        // log line inside geiger's 103 characters.
+        constexpr std::string_view kPrefix = "set in Setup: ";
+        std::array<char, limits::nack_detail_max_bytes + 1 - kPrefix.size()> owed{};
+        missingSetupFields(_modes.setup_written, owed);
+        GLOGW_EVERY_MS(1000, kTag, "%s refused, not commissioned: set %s in Setup", what, owed.data());
+        std::snprintf(_nackDetail.data(), _nackDetail.size(), "%.*s%s", int(kPrefix.size()), kPrefix.data(),
+                      owed.data());
         return NackCode::INTERLOCK;
     }
     if (!c.homed) return NackCode::NOT_HOMED;

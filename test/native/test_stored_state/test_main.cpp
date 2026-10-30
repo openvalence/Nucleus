@@ -16,6 +16,7 @@
 #include <cstring>
 #include <limits>
 #include <span>
+#include <string>
 
 // Named directly so the library finder adds lib/valence; StoredState.h
 // reaches it only through ValenceCatalog.h, which the finder does not follow.
@@ -655,4 +656,22 @@ TEST_CASE("config blob: v10 carries radios; a v9 blob migrates to on") {
     const auto r = stored::decodeConfig(b, kFactory, c, t, got, gen);
     REQUIRE_FALSE(r);
     CHECK(r.error() == Reject::BadModes);
+}
+
+// Field 2026-10-30: "not commissioned (setup fields written 0xb3 of 0xff)"
+// named no field. The refusal names the owed ones in plain words.
+TEST_CASE("setup: the missing fields in plain words, key order, cut with a count past the room") {
+    std::array<char, 64> wide{};
+    CHECK(valence::missingSetupFields(0xb3, wide) == 32);
+    CHECK(std::string(wide.data()) == "jog speed, jog accel, input jerk");
+    CHECK(valence::missingSetupFields(valence::kSetupRequiredMask, wide) == 0);
+    CHECK(std::string(wide.data()).empty());
+    std::array<char, 35> room{};   // a 48-byte NACK detail after "set in Setup: "
+    valence::missingSetupFields(0x00, room);
+    CHECK(std::string(room.data()) == "window min, window max, +6 more");
+    valence::missingSetupFields(0xb3, room);
+    CHECK(std::string(room.data()) == "jog speed, jog accel, input jerk");
+    std::array<char, 8> tiny{};
+    valence::missingSetupFields(0x00, tiny);
+    CHECK(std::string(tiny.data()) == "+8 more");
 }

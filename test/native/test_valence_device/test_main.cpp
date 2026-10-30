@@ -1604,6 +1604,37 @@ TEST_CASE("VD-HOME-5: a rail past max_rail's bounds is stored clamped; measured_
     CHECK(logged("HOME: homed. Usable rail 2600.0 mm between the safety margins, max_rail 2000.0 mm"));
 }
 
+// Field 2026-10-30: a full home measured 292.1 mm, then "classic start
+// refused INTERLOCK: not commissioned (setup fields written 0xb3 of 0xff)".
+// The home's measurement is the owner's max_rail (key 8, bit 0x80); the
+// refusal names the three fields Setup never wrote.
+TEST_CASE("VD-HOME-7: a completed home marks max_rail written; an uncommissioned start names the owed fields") {
+    auto rig = std::make_unique<Rig>();
+    logCapture();
+    rig->device.setSetupWritten(0x33);   // the field's 0xb3 without max_rail
+    completeHome(*rig, 292.1f);
+    CHECK(rig->device.setupWritten() == 0xb3);
+
+    clearLog();
+    IntentValueMap start{};
+    start.count = 1;
+    start.fields[0] = IntentValueField{1, IntentValue::ofBool(true)};
+    REQUIRE(rig->client->sendIntent(ch::pattern_cmd, start).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 1);
+    CHECK(rig->del.nacks[0].code == NackCode::INTERLOCK);
+    CHECK(rig->del.nacks[0].detail == "set in Setup: jog speed, jog accel, input jerk");
+    CHECK(rig->del.nacks[0].detail.size() <= limits::nack_detail_max_bytes);
+    CHECK(logged("classic start refused, not commissioned: set jog speed, jog accel, input jerk in Setup"));
+
+    // Factory fresh: the NACK names what fits and counts the rest.
+    rig->device.setSetupWritten(0x00);
+    REQUIRE(rig->client->sendIntent(ch::pattern_cmd, start).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 2);
+    CHECK(rig->del.nacks[1].detail == "set in Setup: window min, window max, +6 more");
+}
+
 TEST_CASE("VD-HOME-6: a failed cycle is logged in words with its leg; nothing is stored") {
     auto rig = std::make_unique<Rig>();
     clearLog();

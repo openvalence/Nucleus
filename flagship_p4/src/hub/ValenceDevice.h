@@ -157,6 +157,7 @@ public:
     // nothing dirty; a later config persist writes whatever it then holds.
     // The board never calls it: its record comes from the owner's writes.
     void setSetupWritten(uint8_t mask) { _modes.setup_written = mask; }
+    uint8_t setupWritten() const { return _modes.setup_written; }
 
     // Binds the hub and the catalog it was built over, then publishes every
     // retained STATE at its truthful at-rest value. Call once, after the Hub

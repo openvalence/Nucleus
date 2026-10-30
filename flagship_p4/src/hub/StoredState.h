@@ -40,12 +40,15 @@
 // See: ValenceHub.cpp (NVS key and wear), ValenceDevice.h, bd val-091.11.2
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <expected>
 #include <span>
+#include <string_view>
 
 #include "ValenceCatalog.h"
 #include "motion/ValenceMotion.h"
@@ -72,6 +75,42 @@ struct StoredConfig {
 // or a ceiling, so all eight are required; the 0x3120 ceiling overrides are
 // not (0 derives them from these).
 inline constexpr uint8_t kSetupRequiredMask = 0xFF;
+
+// The setup fields by bit, in plain words: a refusal names what is still owed
+// (health-for-DIYers: every degradation says what to do).
+inline constexpr std::array<std::string_view, 8> kSetupFieldNames{
+    "window min", "window max", "jog speed", "jog accel", "input speed", "input accel", "input jerk", "max rail"};
+static_assert(kSetupRequiredMask >> kSetupFieldNames.size() == 0, "every required bit has a name");
+
+// The required setup fields `written` lacks, key order, comma separated, into
+// `out` (NUL-terminated); past out.size() - 1 characters the rest reads
+// ", +N more". Returns the length written.
+inline size_t missingSetupFields(uint8_t written, std::span<char> out) {
+    if (out.empty()) return 0;
+    out[0] = '\0';
+    const uint8_t missing = uint8_t(kSetupRequiredMask & ~written);
+    const size_t cap = out.size() - 1;
+    constexpr size_t kMoreBytes = 9;   // ", +N more", N one digit
+    unsigned left = unsigned(std::popcount(missing));
+    size_t n = 0;
+    for (size_t k = 0; k < kSetupFieldNames.size(); ++k) {
+        if ((missing & (1u << k)) == 0) continue;
+        const std::string_view sep = n == 0 ? "" : ", ";
+        const std::string_view name = kSetupFieldNames[k];
+        --left;
+        if (n + sep.size() + name.size() + (left == 0 ? 0 : kMoreBytes) > cap) {
+            const int m = std::snprintf(out.data() + n, out.size() - n, "%.*s+%u more", int(sep.size()), sep.data(),
+                                        left + 1);
+            const size_t end = m > 0 ? n + size_t(m) : n;
+            return end < cap ? end : cap;
+        }
+        std::memcpy(out.data() + n, sep.data(), sep.size());
+        std::memcpy(out.data() + n + sep.size(), name.data(), name.size());
+        n += sep.size() + name.size();
+        out[n] = '\0';
+    }
+    return n;
+}
 
 // The stored 0x1030 modes that are not engine tuning, and the first-run record.
 struct StoredModes {
