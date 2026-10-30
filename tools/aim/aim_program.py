@@ -1,7 +1,12 @@
-"""Program the bench 57AIM30 to the machine drive's settings and persist them.
-The save gate (bench-verified): 0x00=1, 0x01=0 (output off), write, 0x14=1 last
-x3 polling 0x14 for 2, 0x01 back to what it read, then leave the Modbus door
-with 0x00=506 then 0x00=0. 0x19 engages at power-on from the SAVED value.
+"""Program an AIM drive to the machine drive's settings and persist them.
+The save that survives a power cycle (proven 2026-08-07 over three power cycles,
+held A/B on the field drive 2026-10-30; the site servo tool's sequence, bd
+val-7z2b): 0x00=1, 0x01=0 (output off), then three passes of [the values,
+0x14=1, 200 ms with no bus traffic], then 0x01=1, and NO 0x00=506 release:
+Modbus control stays on, so the drive ignores its pulse input, until the user
+power-cycles it. Do not poll 0x14 through the save, save with the output live,
+or release with 506 before the power cycle: those runs read back fine and
+revert at power-on. 0x19 engages at power-on from the SAVED value.
 Never writes 0x0A=0, never touches the baud envelope.
 Usage: python aim_program.py COM2 [--verify] [--baud N]
 """
@@ -49,6 +54,12 @@ def write(ser, addr, val):
     print('  write 0x%02X %-14s = %-6d -> %s' % (addr, NAMES.get(addr, ''), val, 'ok' if ok else 'FAILED (reply %r, readback %r)' % (r, rb)))
     return ok
 
+def send(ser, addr, val):
+    """A write whose reply and read-back are not judged (the save's later passes, 0x14, 0x01)."""
+    xfer(ser, 0x06, struct.pack('>HH', addr, val))
+    time.sleep(0.03)
+    print('  write 0x%02X %-14s = %d' % (addr, NAMES.get(addr, ''), val))
+
 def dump(ser):
     v = read(ser, 0x00, 26)
     return dict(enumerate(v)) if v else None
@@ -68,23 +79,20 @@ if not diff:
 print('to change:', {'0x%02X' % a: d for a, d in diff.items()})
 out_en = before[0x01]
 ok = write(ser, 0x00, 1) and write(ser, 0x01, 0)
-for a, t in TARGET.items():
-    if before[a] != t: ok = write(ser, a, t) and ok
+for p in range(1, 4):
+    for a, (_, t) in diff.items():
+        if p == 1: ok = write(ser, a, t) and ok
+        else: send(ser, a, t)
+    if not ok: break
+    send(ser, 0x14, 1)
+    time.sleep(0.2)
+    print('  save pass %d sent' % p)
 if not ok:
-    print('a write failed: not saving; restoring output enable'); write(ser, 0x01, out_en); write(ser, 0x00, 506); write(ser, 0x00, 0); ser.close(); raise SystemExit(1)
-saved = False
-for attempt in range(3):
-    xfer(ser, 0x06, struct.pack('>HH', 0x14, 1))
-    for _ in range(30):
-        time.sleep(0.1); f = read(ser, 0x14)
-        if f and f[0] == 2: saved = True; break
-    print('  save attempt %d: flag %r' % (attempt + 1, f))
-    if saved: break
-write(ser, 0x01, out_en)
-xfer(ser, 0x06, struct.pack('>HH', 0x00, 506)); time.sleep(0.05)
-write(ser, 0x00, 0)
+    print('a write failed: not saving; restoring output enable and releasing Modbus control')
+    send(ser, 0x01, out_en); send(ser, 0x00, 506); time.sleep(0.05); write(ser, 0x00, 0); ser.close(); raise SystemExit(1)
+send(ser, 0x01, 1)
 after = dump(ser)
-print('after:', {('0x%02X' % k): v for k, v in after.items()})
-print('SAVED (flag reached 2)' if saved else 'NOT SAVED: flag never reached 2; values are live only')
+if after: print('after:', {('0x%02X' % k): v for k, v in after.items()})
+print('saved: Modbus control stays on (0x00=1, the drive ignores its pulse input) until the power cycle')
 print('now power-cycle the drive, then run with --verify')
 ser.close()

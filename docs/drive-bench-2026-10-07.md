@@ -101,8 +101,15 @@ before the motor does. Hub jogs at 1000 mm/s over 600 mm, 100,000 mm/s2 asked:
 | 0x00 | Modbus arm; 1 makes the drive deaf to pulses; leave by 506 then 0 | |
 
 Live writes without saving go through the output-off gate (0x00 1, 0x01 0,
-write, 0x01 back, 0x00 506, 0x00 0) and revert on power cycle; a save needs
-0x14 1 last, polled for 2. Writes made with the output live were refused.
+write, 0x01 back, 0x00 506, 0x00 0) and revert on power cycle. Writes made
+with the output live were refused. The save that survives a power cycle (bd
+val-7z2b; proven 2026-08-07 over three power cycles, held A/B on the field
+drive 2026-10-30): 0x00 1, 0x01 0, then three passes of [the values, 0x14 1,
+200 ms with no bus traffic], then 0x01 1, and no 0x00 506 release; the user
+power-cycles the drive, which clears 0x00. Polling 0x14 through the save,
+saving with the output live, or releasing with 506 before the power cycle
+reads back fine and reverts at power-on. `tools/aim/aim_program.py` and the
+site's servo setup tool run this save.
 
 ## Measurement rules
 
@@ -279,7 +286,9 @@ leg landed on the hub's count to 0.04 mm. The programmed gains are KP 3000
   word: it reads 7 with the arm off and 1 when written 7 while armed, so it is
   outside the comparison.
 - The save flag on this drive does not report 2 as the 57AIM30's does: each
-  0x14 1 write is acknowledged, the flag reads 1 for about a second, then 0.
-  `aim_program.py` therefore prints NOT SAVED here. Whether 0x02 2000
-  survives a power cycle is unconfirmed until the drive is power-cycled and
+  0x14 1 write is acknowledged, the flag reads 1 for about a second, then 0,
+  so the flag is no evidence of a save. A save through the gate with the 506
+  release reverted at power-on on the field drive (bd val-7z2b); the save
+  under the register table is the one that persists, and `aim_program.py`
+  runs it without polling the flag. After it, power-cycle the drive and
   `aim_program.py COM2 --verify` reads MATCH.
