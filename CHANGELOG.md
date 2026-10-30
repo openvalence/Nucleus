@@ -2,6 +2,16 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.78 (2026-10-30)
+
+### For users
+
+- **Barnacle: the R+D board's S2 button works.** The helper read S2 as pressed when IO23 went low, with the pull-up on; S2 drives IO23 high, so no press ever reached the machine (no PAIR line in the log, no pairing window). The helper now reads IO23 the way the stock OSSM firmware does: pull-down on, pressed when high. Flash `barnacle-shim` 0.1.78 (helper shim v4); the Stamp-P4 needs nothing new.
+
+### Technical
+
+- **S2 polarity** (barnacle_shim/src/main.cpp). `pinMode(kPinButton, INPUT_PULLDOWN)`, `kFlagButton` when `digitalRead(kPinButton) == HIGH`. Evidence: researchanddesire/OSSM `software/firmware/src/services/board.cpp` sets `pinMode(Pins::Wifi::resetPin, INPUT_PULLDOWN)` on IO23 (`Pins.h`), the operator's reading that the R+D header inputs are pulled down, and the field: no PAIR gesture in 385 s of presses while the idle level read released (a pull-up on an active-high button reads released at rest too, so the boot log could not tell the two apart). `kShimVersion` 4. FIRMWARE_VERSION 0.1.78; the P4 image is unchanged apart from the version string.
+
 ## 0.1.77 (2026-10-29)
 
 ### For users

@@ -55,7 +55,7 @@ constexpr int kPinLinkTx = 14;     // Q5 to J8 pin 9, to the P4's G26
 constexpr int kPinTrip = 27;       // Q4 to J8 pin 7: HIGH = tripped on the wire
 constexpr int kPinSpareOut = 26;   // Q3 to J8 pin 5, held off
 constexpr int kPinSpareIn = 4;     // J8 pin 4
-constexpr int kPinButton = 23;     // S2, read active low
+constexpr int kPinButton = 23;     // S2, active HIGH with the internal pull-down (the stock OSSM firmware's INPUT_PULLDOWN on IO23)
 constexpr int kPinRgb = 25;        // WS2813 data
 // ADC1 channels: IO36 CH0 motor current (CH701 through 10k over 20k), IO39
 // CH3 motor voltage (1:40), IO35 CH7 ANA1, IO34 CH6 ANA2.
@@ -68,7 +68,7 @@ constexpr uart_port_t kUart = UART_NUM_1;
 
 // ---- THE KNOBS ---------------------------------------------------------------------
 
-constexpr uint8_t kShimVersion = 3;
+constexpr uint8_t kShimVersion = 4;
 constexpr uint32_t kCpuMhz = 80;
 
 // The CH701's slope at the sensor pin (before the divider). A placeholder: the
@@ -275,7 +275,7 @@ void send(size_t n, const std::array<uint8_t, barnacle::kMaxWire>& out) {
 
 void sendStatus(int64_t now) {
     barnacle::Status s;
-    if (digitalRead(kPinButton) == LOW) s.flags |= barnacle::kFlagButton;
+    if (digitalRead(kPinButton) == HIGH) s.flags |= barnacle::kFlagButton;
     if (g_tripOut) s.flags |= barnacle::kFlagTrip;
     if (kCurrentCalibrated) s.flags |= barnacle::kFlagCalibrated;
     if (p4Silent(now)) s.flags |= barnacle::kFlagP4Silent;
@@ -375,7 +375,7 @@ void setup() {
     pinMode(kPinSpareOut, OUTPUT);
     digitalWrite(kPinSpareOut, LOW);
     setCpuFrequencyMhz(kCpuMhz);
-    pinMode(kPinButton, INPUT_PULLUP);
+    pinMode(kPinButton, INPUT_PULLDOWN);
     pinMode(kPinSpareIn, INPUT);
     countBoot();
     g_adcOk = g_adc.begin();
