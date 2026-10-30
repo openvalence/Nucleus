@@ -1572,6 +1572,7 @@ public:
         risen = risen || h;
         return h || (sticky && risen);
     }
+    const char* lost() override { return gone; }
     static bool past(float p, float stop) { return stop < 0.0f ? p <= stop : p >= stop; }
     bool level() const {
         const float p = bootMm();
@@ -1596,6 +1597,7 @@ public:
     float stop_mm;
     std::optional<float> far_mm;
     std::optional<Probe> forced;
+    const char* gone = nullptr;
     bool sticky = false;
     bool risen = false;
     MotionArbiter* arb = nullptr;
@@ -2230,6 +2232,52 @@ TEST_CASE("home: a sensed leg that runs out of search unloads the drive before i
     CHECK(std::abs(r->emitter.n - (stall + margin)) <= 2);
     CHECK(s.bootMm() > -30.0f);   // off the stop: nothing left pushing
     CHECK(r->emitter.q8 == 0);
+}
+
+// bd val-4fgu: the barnacle's helper gone stale mid-home fails the home,
+// never ESTOP. A sensed leg unloads first; a counted leg runs to its end.
+TEST_CASE("home: a lost sense fails the cycle unhomed with its reason; never ESTOP") {
+    SUBCASE("during the home approach: unloads to where the sense armed") {
+        auto r = rig();
+        FakeSense s{r->emitter, -30.0f, 170.0f};
+        isr(*r, s);
+        r->arb.setHomeSense(s);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        r->run(400'000);
+        REQUIRE(r->census().homing);
+        REQUIRE(s.bootMm() < -5.0f);
+        s.gone = "helper gone";
+        r->run(5'000'000);
+        const MotionCensus c = r->census();
+        CHECK_FALSE(c.homing);
+        CHECK_FALSE(c.homed);
+        CHECK_FALSE(c.estop);
+        CHECK(r->arb.arbMode() != ArbMode::Estop);
+        CHECK(c.home_fails == 1);
+        CHECK(c.home_fail_leg == 0);
+        REQUIRE(c.home_fail_why != nullptr);
+        CHECK(std::string(c.home_fail_why) == "helper gone");
+        CHECK(std::fabs(s.bootMm()) <= kMmPerStep);   // the approach armed at the start
+        CHECK(r->emitter.q8 == 0);
+        CHECK(r->submit(MotionSource::Manual, 10.0f));   // the rail is free again
+    }
+    SUBCASE("during the backoff: the counted leg ends off the stop, then the cycle fails") {
+        auto r = rig();
+        FakeSense s{r->emitter, -30.0f, 170.0f};
+        isr(*r, s);
+        r->arb.setHomeSense(s);
+        REQUIRE(r->arb.home() == HomeStart::started);
+        for (int t = 0; t < 5'000 && r->arb.arbMode() != ArbMode::HomeClear; ++t) r->run(1000);
+        REQUIRE(r->arb.arbMode() == ArbMode::HomeClear);
+        s.gone = "helper gone";
+        r->run(2'000'000);
+        const MotionCensus c = r->census();
+        CHECK_FALSE(c.homed);
+        CHECK_FALSE(c.estop);
+        CHECK(std::string(c.home_fail_why) == "helper gone");
+        CHECK(std::fabs(s.bootMm() - (-30.0f + kHomeSafetyMarginMm)) <= 2.0f * kDatumTol);   // a margin off the stall
+        CHECK_FALSE(s.level());
+    }
 }
 
 TEST_CASE("home: the interrupt entry does nothing while no seek is armed") {

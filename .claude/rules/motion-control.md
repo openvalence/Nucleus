@@ -100,6 +100,21 @@ approach searches `kHomeSearchRailMm` (`MAX_RAIL_MM`, configValid's 2000 mm
 max_rail bound) and the cycle's deadline is `homeCycleS()` of it, so a
 completed home's measurement is max_rail and no user value caps the search.
 
+**An ESTOP is only the operator's hand or the Flagship board monitor's
+critical failure (operator ruling 2026-10-30, bd val-4fgu).** The motor is
+closed loop, so a jam is not an ESTOP. On the barnacle the helper's current
+trip is armed only for homing (running and idle send a run trip of 0, which
+the helper's `TripDetector` reads as off), a TRIP outside a home cycle is one
+logged anomaly line, and a helper lost during a home fails the home
+(`HomeSense::lost()`: a sensed leg unloads, then the cycle fails unhomed with
+the reason logged). The operator's hand is the client `estop` op, a client's
+raw 0xE5 frame (any transport, the link port's unattached ones included), the
+RFC-053 ESTOP datagram, the E-stop input at the machine and the HOME hold's
+reboot; the board monitor's critical failure reaches the hub as the motor
+switch's EN-node fault. The other firmware-raised latches (DRV_ALM, the motor
+switch's FLT line, inrush and precharge faults) stand until the operator rules
+on each (the audit on val-4fgu); a new ESTOP source needs a ruling first.
+
 **Who may feed the planner is ONE mode (bd val-5ozv.1).** `ArbMode` in
 `MotionArbiter.h`: Run, Paused, Jog, Returning, HomeQueued, the four seek
 phases, Unpowered, Estop, written by the planner task alone and moved only by

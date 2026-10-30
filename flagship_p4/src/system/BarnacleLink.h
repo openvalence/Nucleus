@@ -6,10 +6,16 @@
 // Constraints:
 // - Barnacle only (CONFIG_NUCLEUS_BOARD_BARNACLE). BarnacleLink.cpp is the
 //   board's host of THREE existing doors, so nothing above them changes:
-//   ValenceDriveLink.h (the link's task, and TRIP while running as the drive
-//   alarm the hub latches ESTOP on), ValenceHomeSense.h (TRIP as the stall
-//   level) and this file's helper surface. BarnacleBoard.cpp hosts the doors
-//   for the parts the R+D board does not have.
+//   ValenceDriveLink.h (the link's task; driveAlarmTake() is always false
+//   here), ValenceHomeSense.h (TRIP as the stall level) and this file's
+//   helper surface. BarnacleBoard.cpp hosts the doors for the parts the R+D
+//   board does not have.
+// - NOTHING HERE LATCHES ESTOP (operator ruling 2026-10-30, bd val-4fgu: an
+//   ESTOP is only the operator's hand or the Flagship board monitor's
+//   critical failure). The helper's current trip is armed only for homing:
+//   running and idle send kRunTripMa, 0, which the helper's TripDetector
+//   reads as off. A TRIP outside a home cycle is logged as an anomaly line
+//   and nothing else.
 // - Task "DriveLnk" (the drive-link door's task, HP core 0, priority 2,
 //   kDriveLinkPeriodMs pass, kDriveLinkTaskStackBytes) owns UART
 //   BOARD_UART_LINK, the decoder and every frame. Out of it: one one-slot
@@ -21,10 +27,11 @@
 //   change of freshness, a helper restart and a TRIP line that disagrees with
 //   the helper's own report are logged at Warn or above (the 0x0008 log
 //   channel). Nothing recovers silently.
-// - A helper gone stale during a home cycle is an ESTOP (cause fault, the
-//   drive-alarm path): the stall the cycle waits on is the helper's. Stale
-//   while running is a health message only: TRIP is its own wire and the
-//   drive keeps its own overcurrent protection.
+// - A helper gone stale during a home cycle fails the home: the stall the
+//   cycle waits on is the helper's, so the home sense reports it lost
+//   (HomeSense::lost()) and the arbiter unloads a sensed leg, then fails the
+//   cycle unhomed with that reason. Stale while running is a health message
+//   only: the drive keeps its own overcurrent protection.
 // - Declarations and hardware-free policy only: the native suite compiles
 //   this file (test_barnacle_link).
 // See: lib/barnacle_link/include/barnacle_link/barnacle_link.hpp, BoardPins.h
@@ -42,10 +49,11 @@ namespace valence {
 
 // ---- THE KNOBS ------------------------------------------------------------------
 
-// The trip thresholds sent to the helper: the link's defaults
-// (barnacle_link.hpp), until a setting exists for them (bd val-omh3.5).
+// The trip thresholds sent to the helper. Homing: the link's default
+// (barnacle_link.hpp), until a setting exists for it (bd val-omh3.5).
+// Running and idle: 0, the trip off (bd val-4fgu); never a jam detector.
 inline constexpr uint16_t kHomeTripMa = barnacle::kDefaultHomeTripMa;
-inline constexpr uint16_t kRunTripMa = barnacle::kDefaultRunTripMa;
+inline constexpr uint16_t kRunTripMa = 0;
 
 // The TRIP line and the helper's own trip flag may disagree for this many
 // consecutive passes before it is logged as wiring: a trip changes between a
@@ -118,16 +126,17 @@ constexpr uint16_t homeTripFrom(uint16_t trip_ma, int16_t rest_ma) {
     return uint16_t(t < 1 ? 1 : (t > 65535 ? 65535 : t));
 }
 
-// TRIP while running, once per trip: a trip that began in another mode
-// raises when running begins under it. SINGLE OWNER: the link task.
-class RunTripWatch {
+// TRIP outside a home cycle, once per trip: an anomaly to log, never a stop.
+// A trip that began homing reports when the cycle ends under it. SINGLE
+// OWNER: the link task.
+class StrayTripWatch {
 public:
     bool sample(bool tripped, barnacle::Mode m) {
         if (!tripped) {
             _raised = false;
             return false;
         }
-        if (m != barnacle::Mode::running || _raised) return false;
+        if (m == barnacle::Mode::homing || _raised) return false;
         _raised = true;
         return true;
     }

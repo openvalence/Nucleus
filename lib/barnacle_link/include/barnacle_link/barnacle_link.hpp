@@ -94,12 +94,12 @@ inline constexpr int32_t kRefHomeTripPinMv = 6 * 3300 / 100;   // 6 % of the ass
 inline constexpr uint32_t kHomeTripDetectUs = kTripSampleUs * (kHomeAverageSamples + kTripOnSamples - 1);
 
 // The trip thresholds, in the helper's current scale (provisional mA until
-// the CH701 is calibrated, bd val-omh3.4): what the P4 sends, and what the
-// helper applies from boot until its first command. Homing is the stall
-// against the end stop (above), running a jam on the raw sample: 8000 mA is
-// 533 mV at the pin, three times the per-sample noise, so the noise argument
-// that moved the home trip does not reach it.
-// TODO(val-omh3.5): the run trip from the bench.
+// the CH701 is calibrated, bd val-omh3.4): what the helper applies from boot
+// until its first command. Homing is the stall against the end stop (above).
+// The P4 sends 0 for running and idle, the trip off (operator ruling
+// 2026-10-30, bd val-4fgu: the motor is closed loop, a jam is no ESTOP);
+// kDefaultRunTripMa is only the helper's pre-command value, on the raw sample:
+// 8000 mA is 533 mV at the pin, three times the per-sample noise.
 inline constexpr uint16_t kDefaultHomeTripMa = 2970;
 inline constexpr uint16_t kDefaultRunTripMa = 8000;
 
@@ -116,7 +116,7 @@ enum class Type : uint8_t {
 enum class Mode : uint8_t {
     idle    = 0,   // motion gate closed: the running threshold, nothing acts on TRIP
     homing  = 1,   // a home cycle: the homing threshold, TRIP is the stall
-    running = 2,   // motion gate open: the running threshold, TRIP stops motion
+    running = 2,   // motion gate open: the running threshold, nothing acts on TRIP
 };
 
 constexpr const char* modeName(Mode m) {

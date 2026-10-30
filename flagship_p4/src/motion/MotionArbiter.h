@@ -202,7 +202,10 @@ static_assert(kOscDriveHeldUs / (kOscPlanDriveTicks * kMotionTickUs) + kOscDrive
 // leg back to where its sense armed, a point it passed with the line LOW,
 // then fails. The far approach, which starts pressed on the home stop, must
 // read the line LOW within kHomeSafetyMarginMm of leaving it, or fails there:
-// a line held HIGH would leave it unarmed into the far stop.
+// a line held HIGH would leave it unarmed into the far stop. A sense that
+// reports itself lost (HomeSense::lost(): the barnacle's helper gone stale)
+// fails the cycle the same way, a sensed leg unloading first and a counted leg
+// running to its end; never ESTOP (operator ruling 2026-10-30, bd val-4fgu).
 //
 // A CYCLE PUBLISHES THE PHYSICAL FRAME: 0.0 mm is kHomeSafetyMarginMm off the
 // low stop's datum, the rail ends kHomeSafetyMarginMm short of the high one,
@@ -663,6 +666,10 @@ public:
     // Planner task, during a cycle: HIGH now, a fresh rise confirmed (the
     // board reads it twice, kHomeSenseDebounceUs apart).
     virtual bool high() = 0;
+    // Planner task, during a cycle: why the sense can no longer see a stall
+    // (static storage), or nullptr. The cycle fails with it, never ESTOP
+    // (bd val-4fgu).
+    virtual const char* lost() { return nullptr; }
 
 protected:
     ~HomeSense() = default;

@@ -501,14 +501,29 @@ TEST_CASE("mode: a home cycle is homing, an open gate without ESTOP is running, 
     CHECK(modeFor(false, false, false) == bl::Mode::idle);
 }
 
-TEST_CASE("running trip: once per trip, only while running, and a trip held into running raises") {
-    valence::RunTripWatch w;
+TEST_CASE("stray trip: an anomaly once per trip outside homing, never during a home") {
+    valence::StrayTripWatch w;
     CHECK_FALSE(w.sample(true, bl::Mode::homing));    // the stall is the home sense's
-    CHECK(w.sample(true, bl::Mode::running));         // held into running: raised once
+    CHECK(w.sample(true, bl::Mode::running));         // held past the cycle: reported once
     CHECK_FALSE(w.sample(true, bl::Mode::running));
     CHECK_FALSE(w.sample(false, bl::Mode::running));  // released
-    CHECK(w.sample(true, bl::Mode::running));         // a new trip
-    CHECK_FALSE(w.sample(true, bl::Mode::idle));
+    CHECK(w.sample(true, bl::Mode::idle));            // a new trip, idle too
+    CHECK_FALSE(w.sample(true, bl::Mode::running));
+}
+
+// bd val-4fgu: the motor is closed loop, so a jam is not an ESTOP. Running
+// and idle send a disabled trip, and the helper never asserts TRIP on any
+// current under it.
+TEST_CASE("running: the P4 sends a disabled trip, and a current spike never asserts TRIP") {
+    CHECK(valence::kRunTripMa == 0);
+    for (const bl::Mode m : {bl::Mode::running, bl::Mode::idle}) {
+        bl::TripDetector t;
+        const uint16_t threshold = bl::activeThreshold(m, valence::kHomeTripMa, valence::kRunTripMa);
+        CHECK(threshold == 0);
+        for (int i = 0; i < 1000; ++i) CHECK_FALSE(t.sample(30000, threshold));
+        CHECK(t.assertions() == 0);
+    }
+    CHECK(bl::activeThreshold(bl::Mode::homing, valence::kHomeTripMa, valence::kRunTripMa) == valence::kHomeTripMa);
 }
 
 TEST_CASE("helper restart: the boot count moved or the uptime ran backwards") {
@@ -661,8 +676,6 @@ TEST_CASE("home trip: measured from the rest current read before the home, never
     CHECK(valence::kRestFrames * bl::kStatusPeriodUs == 128000);
 }
 
-TEST_CASE("the P4 sends the link's default thresholds") {
+TEST_CASE("the P4 sends the link's default home threshold") {
     CHECK(valence::kHomeTripMa == bl::kDefaultHomeTripMa);
-    CHECK(valence::kRunTripMa == bl::kDefaultRunTripMa);
-    CHECK(valence::kHomeTripMa < valence::kRunTripMa);
 }

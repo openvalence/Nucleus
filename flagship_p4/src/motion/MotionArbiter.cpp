@@ -2360,9 +2360,14 @@ void MotionArbiter::homeStep(uint64_t now_us, float dt_s) {
         if (_unload_why != nullptr) return homeEnd(ArbEvent::HomeFail, _unload_why, now_us);
         return sensed ? homeUnload("timed out", now_us) : homeEnd(ArbEvent::HomeFail, "timed out", now_us);
     }
+    // A lost sense fails the cycle: a sensed leg unloads first, a counted leg
+    // runs to its end (it already moves off the stop). An unload counts back
+    // blind and is never interrupted.
+    const char* gone = _unload_why == nullptr ? _sense->lost() : nullptr;
     switch (mode()) {
         case ArbMode::HomeApproach:
         case ArbMode::HomeTouch: {
+            if (gone != nullptr) return homeUnload(gone, now_us);
             const bool touch = mode() == ArbMode::HomeTouch;
             const uint32_t s = _seek.load(std::memory_order_acquire);
             // The interrupt is between its park and its latch: parked, and
@@ -2404,11 +2409,13 @@ void MotionArbiter::homeStep(uint64_t now_us, float dt_s) {
             // The level at rest decides; an unload ends in its failure.
             if (!homeDrive(now_us, dt_s)) return;
             if (_unload_why != nullptr) return homeEnd(ArbEvent::HomeFail, _unload_why, now_us);
+            if (gone != nullptr) return homeEnd(ArbEvent::HomeFail, gone, now_us);
             if (_sense->high())
                 return homeEnd(ArbEvent::HomeFail, "still on the stop after the backoff (lower home_speed)", now_us);
             return homeSeek(true, true, ArbEvent::HomeCleared, now_us);
         case ArbMode::HomeFinish:
             if (!homeDrive(now_us, dt_s)) return;
+            if (gone != nullptr) return homeEnd(ArbEvent::HomeFail, gone, now_us);
             if (_sense->high())
                 return homeEnd(ArbEvent::HomeFail, "still on the far stop after the final backoff (lower home_speed)",
                                now_us);

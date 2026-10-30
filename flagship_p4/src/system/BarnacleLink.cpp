@@ -1,6 +1,6 @@
 // BarnacleLink -- the barnacle's link host: the helper UART and its task (as
-// the drive-link door), TRIP as the home sense and the running stop, and the
-// helper surface (BarnacleLink.h)
+// the drive-link door), TRIP as the home sense, and the helper surface
+// (BarnacleLink.h)
 // Constraints:
 // - Barnacle only: src/CMakeLists.txt links this file in place of
 //   ValenceDriveLink.cpp and ValenceHomeSense.cpp. See BarnacleLink.h for
@@ -12,7 +12,7 @@
 //   arbiter's park first, exactly as ValenceHomeSense.cpp's rise does; the
 //   GPIO ISR service is not in IRAM, so a flash write holds it off
 //   (TODO(val-sv6) covers both boards).
-// - high() and the running watch read the pad twice kHomeSenseDebounceUs
+// - high() and the anomaly watch read the pad twice kHomeSenseDebounceUs
 //   apart before they believe a trip; the helper filters the current before
 //   it pulls the line (barnacle::kTripOnSamples).
 // - The UART has a kRxRingBytes ring and no TX ring: a command frame is under
@@ -98,7 +98,7 @@ bool padTrippedConfirmed() {
 
 barnacle::Decoder g_decoder;
 barnacle::SeqTracker g_seq;
-RunTripWatch g_runWatch;
+StrayTripWatch g_strayWatch;
 HelperReading g_reading;        // what the task last published
 uint32_t g_lastOkMs = 0;
 bool g_wasFresh = false;
@@ -110,13 +110,11 @@ bool g_neverLogged = false;
 bool g_noCurrent = false;       // the helper's last status carried no current
 barnacle::Boxcar<kRestFrames> g_rest;   // status currents, for HelperReading::rest_ma
 barnacle::Mode g_mode = barnacle::Mode::idle;
-uint32_t g_alarms = 0;
 bool g_uartUp = false;          // written once by driveLinkBegin() before the task exists
 TaskHandle_t g_task = nullptr;
 
 // ---- the crossings ---------------------------------------------------------------
 
-std::atomic<bool> g_alarmPending{false};
 // r | g << 8 | b << 16, written by the BoardIo task (glow), read here.
 std::atomic<uint32_t> g_rgb{0};
 // The rest current the last home's probe read, written by the probing task.
@@ -240,21 +238,15 @@ void judgeFreshness(uint32_t now) {
                 "motor current, voltage and S2 unread, home refused",
           static_cast<unsigned long>(barnacle::kHelperStaleMs), static_cast<unsigned long>(rx.crc),
           static_cast<unsigned long>(rx.malformed), static_cast<unsigned long>(rx.overrun));
-    if (g_mode == barnacle::Mode::homing) {
-        GLOGE(kTag, "helper lost during a home cycle: its stall sense is gone, the hub latches ESTOP");
-        ++g_alarms;
-        g_alarmPending.store(true, std::memory_order_release);
-    }
+    if (g_mode == barnacle::Mode::homing)
+        GLOGE(kTag, "helper lost during a home cycle: its stall sense is gone, the home fails unhomed");
 }
 
 void watchTrip(bool tripped, const MotionCensus& mo) {
-    if (g_runWatch.sample(tripped, g_mode)) {
-        ++g_alarms;
-        GLOGE(kTag, "TRIP while running at %.3f mm: the helper saw motor current past %u mA "
-                    "(provisional scale until calibrated); the hub latches ESTOP",
-              double(mo.position_mm), unsigned(kRunTripMa));
-        g_alarmPending.store(true, std::memory_order_release);
-    }
+    if (g_strayWatch.sample(tripped, g_mode))
+        GLOGW(kTag, "ANOMALY: TRIP while %s at %.3f mm, but the helper's trip is armed only for homing; "
+                    "nothing stops: if it repeats, check J8 pin 7 and the shim version",
+              barnacle::modeName(g_mode), double(mo.position_mm));
     // The pad against the helper's own report: a wrong J8 pin 7 crimp or a
     // dead Q4 shows here first.
     const bool helperSays = (g_reading.status.flags & barnacle::kFlagTrip) != 0;
@@ -288,7 +280,6 @@ DriveLinkStatus compose(bool tripped) {
     s.alarm = tripped;
     s.ready = g_reading.fresh;
     s.armed = g_mode == barnacle::Mode::running;
-    s.alarms = g_alarms;
     return s;
 }
 
@@ -348,6 +339,13 @@ void onTrip(void*) {
 class TripHomeSense final : public HomeSense {
 public:
     bool present() const override { return _ready; }
+
+    // Planner task, during a cycle: the stall source is the helper, so a
+    // stale helper is a lost sense.
+    const char* lost() override {
+        if (helperReading().fresh) return nullptr;
+        return "the R+D board's helper went silent, so its stall sense is gone: check the J8 link, then home again";
+    }
 
     // The line idles high whether or not a helper drives it, so the helper's
     // freshness is what says the stall source is there.
@@ -434,12 +432,12 @@ bool driveLinkBegin() {
     xQueueOverwrite(g_readingBox, &g_reading);
     const DriveLinkStatus first = compose(false);
     xQueueOverwrite(g_status, &first);
-    // A failed UART still runs the task: TRIP while running is a pad read.
+    // A failed UART still runs the task: the TRIP anomaly watch is a pad read.
     g_uartUp = uartBegin();
     if (xTaskCreatePinnedToCore(&taskMain, "DriveLnk", kDriveLinkTaskStackBytes, nullptr, 2, &g_task, 0) !=
         pdPASS) {
         g_task = nullptr;
-        GLOGE(kTag, "helper link task did not start: no helper this boot, TRIP unwatched while running");
+        GLOGE(kTag, "helper link task did not start: no helper this boot, home refused");
         return false;
     }
     if (g_uartUp)
@@ -454,7 +452,8 @@ DriveLinkStatus driveLinkStatus() {
     return s;
 }
 
-bool driveAlarmTake() { return g_alarmPending.exchange(false, std::memory_order_acq_rel); }
+// Nothing on this board raises a drive alarm (bd val-4fgu).
+bool driveAlarmTake() { return false; }
 
 // No Modbus on this board: every read is refused at once.
 bool driveLinkRead(const DriveRead&) { return false; }
