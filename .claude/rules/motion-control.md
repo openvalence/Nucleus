@@ -100,9 +100,10 @@ approach searches `kHomeSearchRailMm` (`MAX_RAIL_MM`, configValid's 2000 mm
 max_rail bound) and the cycle's deadline is `homeCycleS()` of it, so a
 completed home's measurement is max_rail and no user value caps the search.
 
-**An ESTOP is only the operator's hand or the Flagship board monitor's
-critical failure (operator ruling 2026-10-30, bd val-4fgu).** The motor is
-closed loop, so a jam is not an ESTOP. On the barnacle the helper's current
+**An ESTOP is the operator's hand or a local hardware fault, never the motor
+pulling current (operator rulings 2026-10-30, bd val-4fgu).** The motor is
+closed loop, so a jam is not an ESTOP; a short is left to the hardware that
+clears it (the motor switch's eFuse), not to an ESTOP. On the barnacle the helper's current
 trip is armed only for homing (running and idle send a run trip of 0, which
 the helper's `TripDetector` reads as off), a TRIP outside a home cycle is one
 logged anomaly line, and a helper lost during a home fails the home
@@ -110,10 +111,10 @@ logged anomaly line, and a helper lost during a home fails the home
 the reason logged). The operator's hand is the client `estop` op, a client's
 raw 0xE5 frame (any transport, the link port's unattached ones included), the
 RFC-053 ESTOP datagram, the E-stop input at the machine and the HOME hold's
-reboot; the board monitor's critical failure reaches the hub as the motor
-switch's EN-node fault. The other firmware-raised latches (DRV_ALM, the motor
-switch's FLT line, inrush and precharge faults) stand until the operator rules
-on each (the audit on val-4fgu); a new ESTOP source needs a ruling first.
+reboot. The local faults are the motor switch's EN-node fault (the board
+monitor, bus over-voltage, the power monitor's alert), its FLT line (eFuse
+over-current or over-temperature), its inrush and precharge faults, and
+DRV_ALM (the drive's own alarm). A new ESTOP source needs a ruling first.
 
 **Who may feed the planner is ONE mode (bd val-5ozv.1).** `ArbMode` in
 `MotionArbiter.h`: Run, Paused, Jog, Returning, HomeQueued, the four seek
