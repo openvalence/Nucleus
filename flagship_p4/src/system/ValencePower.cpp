@@ -4,6 +4,7 @@
 #include "system/ValencePower.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -29,6 +30,10 @@ constexpr gpio_num_t kPinScl     = static_cast<gpio_num_t>(BOARD_GPIO_INA_SCL);
 constexpr uint16_t   kAddress    = 0x40;
 constexpr uint32_t   kSclHz      = 400000;
 constexpr int        kTimeoutMs  = 10;
+// The monitor takes a written block at its next 1 ms scan and publishes the
+// result at the end of that scan. vTaskDelay(n) waits n-1 to n ticks at
+// 1 kHz, so 3 is at least 2 ms: one full monitor scan past the write.
+constexpr uint32_t   kMonitorApplyMs = 3;
 
 // R2, the Kelvin shunt. THE CALIBRATION KNOB: a board measured against a
 // reference meter corrects its gain here.
@@ -48,6 +53,8 @@ i2c_master_dev_handle_t g_monitorDev = nullptr;
 PowerChip  g_chip  = PowerChip::none;
 ina2xx::PowerScale g_scale = {};
 BusOwner<const void*> g_owner;
+// +5V mV low half, +5V_SYS mV high half; all ones = never recorded.
+std::atomic<uint32_t> g_fiveVolt{0xFFFFFFFFu};
 
 // False, and logged, when the calling task does not own the bus.
 bool mayUseBus() {
@@ -89,6 +96,13 @@ bool powerBegin() {
     if (i2c_master_bus_add_device(g_bus, &mon, &g_monitorDev) != ESP_OK) {
         g_monitorDev = nullptr;
         GLOGE(kTag, "board monitor device add failed");
+    } else {
+        // Before any other task runs: the status pixel's +5V gate
+        // (ValenceGlow.cpp) starts from the monitor's reading.
+        std::array<uint8_t, SV_STATUS_LEN> b{};
+        SvStatus s{};
+        if (boardMonitorRead(SV_REG_STATUS, b) == ESP_OK && sv_status_decode(b.data(), b.size(), &s) == SV_OK)
+            powerNoteMonitor(s);
     }
     if (i2c_master_probe(g_bus, kAddress, kTimeoutMs) != ESP_OK) {
         GLOGW(kTag, "no power monitor at 0x%02x: current sensing absent", unsigned(kAddress));
@@ -140,6 +154,31 @@ std::optional<PowerReading> powerRead() {
 esp_err_t boardMonitorRead(uint8_t reg, std::span<uint8_t> out) {
     if (g_monitorDev == nullptr || !mayUseBus()) return ESP_ERR_INVALID_STATE;
     return i2c_master_transmit_receive(g_monitorDev, &reg, 1, out.data(), out.size(), kTimeoutMs);
+}
+
+esp_err_t boardMonitorWrite(std::span<const uint8_t> block) {
+    if (g_monitorDev == nullptr || !mayUseBus()) return ESP_ERR_INVALID_STATE;
+    return i2c_master_transmit(g_monitorDev, block.data(), block.size(), kTimeoutMs);
+}
+
+esp_err_t boardMonitorCommand(uint8_t op, uint16_t arg) {
+    std::array<uint8_t, SV_COMMAND_LEN> b{};
+    sv_command_encode(op, arg, b.data());
+    const esp_err_t err = boardMonitorWrite(b);
+    if (err == ESP_OK) vTaskDelay(pdMS_TO_TICKS(kMonitorApplyMs));
+    return err;
+}
+
+void powerNoteMonitor(const SvStatus& s) {
+    if (s.faults_live & (SV_F_BOOT | SV_F_VDD)) return;
+    g_fiveVolt.store(uint32_t(s.mv[SV_CH_5V]) | (uint32_t(s.mv[SV_CH_5V_SYS]) << 16),
+                     std::memory_order_relaxed);
+}
+
+std::optional<FiveVoltRails> powerFiveVolt() {
+    const uint32_t w = g_fiveVolt.load(std::memory_order_relaxed);
+    if (w == 0xFFFFFFFFu) return std::nullopt;
+    return FiveVoltRails{uint16_t(w), uint16_t(w >> 16)};
 }
 
 std::optional<uint16_t> powerTakeAlerts() {

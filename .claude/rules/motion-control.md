@@ -112,9 +112,11 @@ the reason logged). The operator's hand is the client `estop` op, a client's
 raw 0xE5 frame (any transport, the link port's unattached ones included), the
 RFC-053 ESTOP datagram, the E-stop input at the machine and the HOME hold's
 reboot. The local faults are the motor switch's EN-node fault (the board
-monitor, bus over-voltage, the power monitor's alert), its FLT line (eFuse
-over-current or over-temperature), its inrush and precharge faults, and
-DRV_ALM (the drive's own alarm). A new ESTOP source needs a ruling first.
+monitor, its FAULT_N carrying the switch's over-temperature; bus
+over-voltage; the power monitor's alert), its FLT line (eFuse over-current),
+its inrush and precharge faults, its motor_v fault (MOTOR_V+ gone while on
+with the bus up, set under the EN node's own floor so a sag never reaches it;
+2026-10-30 hardware review M5), and DRV_ALM (the drive's own alarm). A new ESTOP source needs a ruling first.
 
 **Who may feed the planner is ONE mode (bd val-5ozv.1).** `ArbMode` in
 `MotionArbiter.h`: Run, Paused, Jog, Returning, HomeQueued, the four seek

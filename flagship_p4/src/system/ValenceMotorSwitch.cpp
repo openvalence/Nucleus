@@ -16,10 +16,13 @@
 //   never a task of its own.
 // - The switch task is also the POWER BUS's one owner once the self-check's
 //   verdict lands (powerClaimBus(), ValencePower.h): the pre-charge window's
-//   MOTOR_V+ read, the ALERT re-arm, and once a second outside pre-charge the
-//   board monitor's +BUS and U11's V and I, handed to every other task as one
-//   word (PowerHandoff, motorSwitchPower()). A failed read hands over no
-//   reading, never a 0. A new device on that bus joins this task's poll.
+//   MOTOR_V+ read and the same read every kMotorVEveryPolls while on, the
+//   re-arm (the monitor's CLEAR_LATCHED, then the INA ALERT), the monitor's
+//   STATUS when the EN node trips the switch, and once a second outside
+//   pre-charge the board monitor's +BUS and U11's V and I, handed to every
+//   other task as one word (PowerHandoff, motorSwitchPower()). A failed read
+//   hands over no reading, never a 0. A new device on that bus joins this
+//   task's poll. None of it runs under g_mux.
 // - MOTOR_EN and PRECHARGE_EN are outputs driven low from
 //   selfCheckHoldMotorOff(); this file is the only one that drives them high.
 // - Task "MotorSw": core 0, priority 5, kMotorSwitchTaskStackBytes of
@@ -78,6 +81,10 @@ constexpr uint32_t kRearmSettleMs = 2;
 // the fan policy steps once a second.
 constexpr uint32_t kThermEveryPolls = 1000 / kPollMs;
 constexpr int kThermSamples = 4;
+// MOTOR_V+ while on: every 20 ms. U11 converts every ~6.5 ms (PowerMonitor.h
+// kAdcConfig), so a faster read sees the same value twice. Bounds how long the
+// emitter renders into a drive whose FETs let go with no kill line pulled.
+constexpr uint32_t kMotorVEveryPolls = 20 / kPollMs;
 
 constexpr gpio_num_t pin(int n) { return static_cast<gpio_num_t>(n); }
 
@@ -111,6 +118,7 @@ adc_channel_t g_chEn{};
 adc_cali_handle_t g_caliTherm = nullptr;
 adc_channel_t g_chTherm{};
 uint32_t g_thermPolls = 0;
+uint32_t g_motorVPolls = 0;
 
 // Written by the switch task, read anywhere. NaN = unreadable.
 std::atomic<float> g_thermV{kNaN};
@@ -222,10 +230,34 @@ void samplePower(bool switchOn) {
     SvStatus s{};
     // A monitor still on its first scan, or with its own supply out of window,
     // has no +BUS worth reporting.
-    if (boardMonitorRead(SV_REG_STATUS, b) == ESP_OK && sv_status_decode(b.data(), b.size(), &s) == SV_OK &&
-        (s.faults_live & (SV_F_BOOT | SV_F_VDD)) == 0)
-        busV = float(s.mv[SV_CH_BUS]) / 1000.0f;
+    if (boardMonitorRead(SV_REG_STATUS, b) == ESP_OK && sv_status_decode(b.data(), b.size(), &s) == SV_OK) {
+        powerNoteMonitor(s);
+        if ((s.faults_live & (SV_F_BOOT | SV_F_VDD)) == 0) busV = float(s.mv[SV_CH_BUS]) / 1000.0f;
+    }
     g_power.publish(pickPower(busV, powerRead(), switchOn));
+}
+
+// Which of the EN node's pullers the board monitor accounts for. The E-stop,
+// the bus OVP trip and the INA ALERT pull it too and leave no bit here.
+// TODO(val-091.57): name the cause over Valence, not only in the log.
+void logMonitorCause() {
+    std::array<uint8_t, SV_STATUS_LEN> b{};
+    SvStatus s{};
+    if (boardMonitorRead(SV_REG_STATUS, b) != ESP_OK || sv_status_decode(b.data(), b.size(), &s) != SV_OK) {
+        GLOGW(kTag, "EN node trip: board monitor STATUS unreadable, cause not named");
+        return;
+    }
+    const uint16_t f = uint16_t((s.faults_live | s.faults_latched) & SV_FAULT_MASK);
+    if (f == 0 && s.cut_live == 0) {
+        GLOGW(kTag, "EN node trip: board monitor reports no fault (E-stop, bus OVP or INA ALERT)");
+        return;
+    }
+    for (uint16_t bit = 1; bit != 0 && bit <= SV_FAULT_MASK; bit = uint16_t(bit << 1)) {
+        if (f & bit) GLOGE(kTag, "EN node trip: board monitor %s fault%s", sv_fault_name(bit),
+                           (s.faults_live & bit) ? "" : " (latched, cleared since)");
+    }
+    if (s.cut_live) GLOGE(kTag, "EN node trip: board monitor is cutting the input stage (cut 0x%02x)",
+                          unsigned(s.cut_live));
 }
 
 // ---- the task ------------------------------------------------------------------
@@ -250,6 +282,10 @@ void serviceEnable() {
     const uint32_t cutsAtRequest = g_cuts;
     portEXIT_CRITICAL(&g_mux);
 
+    // The board monitor's latched faults hold FAULT_N, so the EN node, until
+    // CLEAR_LATCHED; it clears only those whose condition is gone.
+    if (const esp_err_t err = boardMonitorCommand(SV_CMD_CLEAR_LATCHED, 0); err != ESP_OK)
+        GLOGW(kTag, "re-arm: board monitor CLEAR_LATCHED not sent (%s)", esp_err_to_name(err));
     // The INA's latched ALERT holds the EN node down until DIAG_ALRT is read
     // (ValencePower.h): that read plus this sequence's MOTOR_EN toggle is the
     // re-arm, never one alone.
@@ -306,9 +342,13 @@ void taskMain(void*) {
         const uint64_t now = uint64_t(esp_timer_get_time());
         portENTER_CRITICAL(&g_mux);
         const bool due = g_sw.windowDue(now);
+        const bool wasOn = g_sw.state() == State::on;
         portEXIT_CRITICAL(&g_mux);
-        // I2C, so only at the one moment the machine judges it.
-        if (due) {
+        // I2C, so only when the machine judges it: the window's end, and on a
+        // cadence while on.
+        g_motorVPolls = wasOn ? g_motorVPolls + 1 : 0;
+        if (due || g_motorVPolls >= kMotorVEveryPolls) {
+            g_motorVPolls = 0;
             if (const std::optional<PowerReading> p = powerRead()) r.motor_v = p->bus_v;
         }
 
@@ -321,6 +361,7 @@ void taskMain(void*) {
         portEXIT_CRITICAL(&g_mux);
 
         if (changed) logTransition(is, f, r);
+        if (changed && is == State::faulted && f == Fault::en_node && g_busOwned) logMonitorCause();
         if (++g_thermPolls >= kThermEveryPolls) {
             g_thermPolls = 0;
             g_thermV.store(readVolts(g_chTherm, g_caliTherm, kThermSamples), std::memory_order_relaxed);

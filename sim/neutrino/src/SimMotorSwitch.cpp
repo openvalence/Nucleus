@@ -41,7 +41,7 @@ constexpr float kBusV = 36.0f;
 // holding at rest. A modeled figure, not a measurement (the 0x1010 field
 // desc says so); motion does not move it.
 constexpr float kVirtualHoldW = 4.0f;
-constexpr float kEnNodeRunningV = 1.8f;
+constexpr float kEnNodeRunningV = 2.17f;
 
 bool g_model = false;
 bool g_allowed = false;

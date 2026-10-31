@@ -54,10 +54,13 @@
 // TODO(hw-kzr): every pin in this section is provisional.
 #define BOARD_GPIO_MOTOR_EN     21  // INP: main FETs
 #define BOARD_GPIO_PRECHARGE_EN 22  // INP_G: pre-charge FET through R412 100 R
-#define BOARD_GPIO_MSW_FLT_N    20  // FLT_T and FLT_I tied, active low (hw-3qf)
+// FLT_I only (over-current, short circuit), active low. FLT_T (over-temperature)
+// goes to the board monitor's PD0 and reaches the P4 as its FAULT_N on EN_NODE.
+#define BOARD_GPIO_MSW_FLT_N    20
 #define BOARD_GPIO_MSW_IMON     19  // ADC1: switch current monitor
 // ADC1: the EN/UVLO wired-OR every hardware kill pulls (INA ALERT, bus OVP
-// trip, E-stop, board monitor FAULT_N). ~1.8 V running, ~0 V tripped. Absent
+// trip, E-stop, board monitor FAULT_N). 2.17 V running at 36 V, 1.44 V at
+// 24 V, ~0 V tripped (MotorSwitch.h kEnNodeMinV). Absent
 // on the duct-tape bench: G23 is HOME_SENSE there, and an absent EN_NODE reads
 // NaN, which refuses every motor enable (MotorSwitch.h enNodeUp).
 #ifdef CONFIG_NUCLEUS_BENCH_QUAD_LP10_12
@@ -164,7 +167,9 @@
 #else
 #define BOARD_GPIO_ACC_IO3      8   // LPG8, J15
 #define BOARD_GPIO_ACC_IO4      7   // LPG7, J15
-#define BOARD_GPIO_ACC_IO5      1   // LPG1, J15
+// Dropped from J15 (Hardware SPEC 2026-10-06): R1022 is DNP and its header
+// side is no-connect. Fit R1022 and a wire to LPG1 (pad 9) to bring it back.
+#define BOARD_GPIO_ACC_IO5     -1
 #define BOARD_GPIO_PD_INT       0   // LPG0, J16 pogo; J15.12 is no-connect
 #endif
 

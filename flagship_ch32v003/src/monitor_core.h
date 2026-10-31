@@ -2,7 +2,7 @@
 
 // monitor_core -- the board monitor's decisions: scaling, window compares with
 // debounce, fault latching, the P4 heartbeat watchdog, the regen clamp trim,
-// the clamp test, and the STATUS snapshot
+// the clamp test, the input-stage cut, and the STATUS snapshot
 // Constraints:
 // - Hardware-free C that is also valid C++: the native suite
 //   test/native/test_supervisor compiles it as C++. No globals; all state is
@@ -15,6 +15,10 @@
 //   and the threshold it aims at is always the latched supply plus a margin.
 //   A mistake here lets the supply feed the regen load, so the feeding check
 //   releases the trim on its own, without the P4.
+// - The input-stage cut (mc_cut) follows its conditions: it is high while one
+//   holds, the board's hold-up carries it ~1.3-10 s past that, and a P4
+//   request holds until reset. A cut on bus power alone ends this chip's
+//   supply too, so on that board every cut is a power cycle.
 // See: docs/supervisor.md, flagship_p4/src/system/Supervisor.h, bd val-091.19
 
 #include <stdint.h>
@@ -56,6 +60,8 @@
 #define MC_STUCK_TICKS       100u
 #define MC_STABLE_TICKS      200u
 #define MC_CLAMP_WINDOW      1000u
+#define MC_FLT_T_TICKS       2u       // glitch filter only: U2 already turned its FETs off
+#define MC_CUT_VIN_TICKS     10u
 
 // ---- levels ---------------------------------------------------------------------
 
@@ -67,6 +73,13 @@
 #define MC_STABLE_BAND_MV    300u
 #define MC_CLAMP_ON_MV       1000u    // CLAMP_MON is the Q501 gate x 3.3/13.3: ~3 V on, 0 off
 #define MC_FEED_MARGIN_MV    500u
+// Input-stage cut levels (SPEC 2026-10-13 MON_CUT row). VIN_RAW: a second
+// opinion behind U16's 39.5 V. SHUNT_TEMP: 125 C on TH501 (pin mV, LOWER is
+// hotter), above the 110 C motor cut, so heat left over from regen that
+// already tripped the motor does not cut the input; only a load still heating
+// with no regen reaches it.
+#define MC_VIN_CUT_MV        40000u
+#define MC_SHUNT_CUT_MV      173u
 
 enum { MC_TRIM_RELEASED = 0, MC_TRIM_DRIVEN = 1 };
 
@@ -74,6 +87,7 @@ typedef struct {
     uint16_t raw[SV_CH_COUNT];
     uint16_t raw_vrefint;
     uint8_t  pump_flt_low;
+    uint8_t  msw_flt_t_low;       // U2 FLT_T asserted (PD0 low)
 } McInputs;
 
 typedef struct {
@@ -87,6 +101,7 @@ typedef struct {
 
     uint16_t cnt_vdd, cnt_rail[4], cnt_bus_ov, cnt_input, cnt_hot, cnt_warm;
     uint16_t cnt_feed, cnt_stuck;
+    uint16_t cnt_flt_t, cnt_cut_vin, cnt_cut_shunt;
     uint16_t faults_live, faults_latched, warns;
     uint8_t  first_fault;
     uint8_t  link_drops;
@@ -106,6 +121,9 @@ typedef struct {
 
     uint8_t  test_ms_left, test_len, test_seen, test_result, test_grace;
     uint16_t test_target_mv;
+
+    uint8_t  cut_req;             // SV_CMD_INPUT_CUT arrived; never cleared
+    uint8_t  cut_live, cut_latched;   // SV_CUT_*
 } McState;
 
 void mc_init(McState* s);
@@ -122,4 +140,9 @@ uint16_t mc_trim_permille_for(uint16_t target_mv, uint16_t vdd_mv);
 
 static inline int mc_fault_n(const McState* s) {
     return ((s->faults_live | s->faults_latched) & SV_FAULT_MASK) != 0;
+}
+
+// MON_CUT: the only thing that may drive PC5 high.
+static inline int mc_cut(const McState* s) {
+    return s->cut_live != 0;
 }

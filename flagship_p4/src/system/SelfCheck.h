@@ -8,7 +8,9 @@
 // - THE GATE IS "EVERY PRE-ENABLE ENTRY PASSED". Skipped is not passed and
 //   pending is not passed: a check the firmware cannot run yet holds motor
 //   power off and says why (Hardware SPEC.md 2026-09-23 board-monitor ruling,
-//   val-091.21). The one POST-ENABLE entry, drive_link, never gates: the
+//   val-091.21). ONE exception, skipHolds(): a SKIPPED regen_clamp does not
+//   hold, until val-091.76 makes the clamp test judgeable. The one
+//   POST-ENABLE entry, drive_link, never gates: the
 //   drive's logic rides the motor bus, so it can only be probed after the
 //   enable it would otherwise block (postEnable(), val-091.29). Its FAIL is
 //   reported, never adjudicated.
@@ -97,6 +99,14 @@ constexpr const char* resultName(Result r) {
 // header).
 constexpr bool postEnable(Check c) { return c == Check::drive_link; }
 
+// Whether a SKIPPED entry holds motor power off. Every row but regen_clamp:
+// its clamp test cannot be judged until the monitor reads CLAMP_MON on the
+// clamp's switch node (2026-10-30 hardware review, M1), so a SKIPPED there
+// would keep every Flagship's motor off with no image able to pass it. A live
+// clamp fault still records FAIL, and FAIL always holds.
+// TODO(val-091.76): drop the exception once the clamp test is sequenced.
+constexpr bool skipHolds(Check c) { return c != Check::regen_clamp; }
+
 // ---- the table --------------------------------------------------------------
 
 struct Entry {
@@ -136,8 +146,11 @@ public:
     // one-line summary gives.
     std::optional<Check> firstBlocking() const {
         for (size_t i = 0; i < kCheckCount; ++i) {
+            const Check c = Check(i);
             const Result r = _entries[i].result;
-            if (!postEnable(Check(i)) && r != Result::pass && r != Result::absent) return Check(i);
+            if (postEnable(c) || r == Result::pass || r == Result::absent) continue;
+            if (r == Result::skipped && !skipHolds(c)) continue;
+            return c;
         }
         return std::nullopt;
     }
@@ -271,7 +284,8 @@ inline void judgeBusWindow(Table& t, const SvStatus& s, const BusWindowMv& w = k
              (s.flags & SV_FLAG_BUDGET) ? " (budget fuse position)" : "");
 }
 
-// The clamp TEST is not sequenced yet; a live clamp fault still fails.
+// The clamp TEST is not sequenced yet (skipHolds()); a live clamp fault
+// still fails.
 inline void judgeRegenClamp(Table& t, const SvStatus& s) {
     if (s.faults_live & SV_F_SHUNT_HOT) {
         t.record(Check::regen_clamp, Result::fail, "regen load past its trip temperature");
@@ -282,7 +296,7 @@ inline void judgeRegenClamp(Table& t, const SvStatus& s) {
         return;
     }
     t.record(Check::regen_clamp, Result::skipped,
-             "clamp test pulse not sequenced yet (val-091.21)");
+             "clamp test not judgeable yet, not gating (val-091.76)");
 }
 
 // ---- the trust ledger (TrustStore.h's boot result) --------------------------

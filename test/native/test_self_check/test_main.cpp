@@ -4,7 +4,8 @@
 //   Supervisor.h blocks. The reads live in ValenceSelfCheck.cpp and are
 //   bench work (val-091.21); the E-stop decode is test_estop_input's.
 // - The gate under test is the ruling, not the code: motor power opens only
-//   when EVERY pre-enable entry passed; skipped and pending hold it shut.
+//   when EVERY pre-enable entry passed; skipped and pending hold it shut,
+//   except a skipped regen-clamp row (SelfCheck.h skipHolds(), val-091.76).
 //   The post-enable drive-link row never gates (val-091.29).
 // See: flagship_p4/src/system/SelfCheck.h, bd val-091.21
 
@@ -69,11 +70,27 @@ TEST_CASE("every entry passed opens the gate") {
 TEST_CASE("skipped is not passed: one skip holds motor power off") {
     Table t;
     passAll(t);
-    t.record(Check::regen_clamp, Result::skipped, "needs the bench");
+    t.record(Check::switch_fault, Result::skipped, "needs the bench");
     CHECK_FALSE(t.motorPowerAllowed());
     REQUIRE(t.firstBlocking().has_value());
-    CHECK(*t.firstBlocking() == Check::regen_clamp);
+    CHECK(*t.firstBlocking() == Check::switch_fault);
     CHECK(t.count(Result::skipped) == 1);
+}
+
+TEST_CASE("the one exception: a skipped regen clamp does not hold, a failed or pending one does") {
+    for (size_t i = 0; i < sc::kCheckCount; ++i)
+        CHECK(sc::skipHolds(Check(i)) == (Check(i) != Check::regen_clamp));
+    Table t;
+    passAll(t);
+    t.record(Check::regen_clamp, Result::skipped, "clamp test not judgeable yet");
+    CHECK(t.motorPowerAllowed());
+    t.record(Check::regen_clamp, Result::fail, "clamp conducting with no regen");
+    CHECK_FALSE(t.motorPowerAllowed());
+    CHECK(*t.firstBlocking() == Check::regen_clamp);
+    Table fresh;
+    passAll(fresh);
+    fresh.record(Check::regen_clamp, Result::pending, "not run");
+    CHECK_FALSE(fresh.motorPowerAllowed());
 }
 
 TEST_CASE("one fail holds motor power off and the FIRST non-pass is named") {
@@ -213,7 +230,8 @@ TEST_CASE("rails and bus window: a healthy STATUS passes both") {
     sc::judgeRegenClamp(t, s);
     CHECK(t.entry(Check::rails).result == Result::pass);
     CHECK(t.entry(Check::bus_window).result == Result::pass);
-    // The clamp TEST is not sequenced, so a quiet clamp is still not a pass.
+    // The clamp TEST is not sequenced, so a quiet clamp is still not a pass,
+    // and that skip alone does not hold motor power off.
     CHECK(t.entry(Check::regen_clamp).result == Result::skipped);
 }
 

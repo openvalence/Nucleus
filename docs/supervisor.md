@@ -24,7 +24,9 @@ Its job (SPEC L89): prove and watch the rails, the input stage and the regen
 clamp so the P4 polls less, and hold a cut on the motor switch. It **can cut
 motor power, never enable it**: FAULT_N is open-drain into the motor-switch EN
 wired-OR, the same node the INA ALERT, the bus OVP trip and the E-stop pull
-(SPEC L74, L81). It **can only lower the clamp threshold** (SPEC L89).
+(SPEC L74, L81). It **can cut the input stage** (MON_CUT, SPEC 2026-10-13
+row): PC5 holds the LTC4364's SHDN low through a hold-up it cannot discharge.
+It **can only lower the clamp threshold** (SPEC L89).
 
 It does not own, and the schematic gives it no path to:
 
@@ -33,18 +35,20 @@ It does not own, and the schematic gives it no path to:
   TPS48111 has its own over-current and short-circuit trips (SPEC L49).
 - **The fan.** FAN_PWM and FAN_TACH are P4 pins (SPEC L78, L84).
 - **MOTOR_V+ and MOTOR_EN.** Its former MOTOR_V+ channel reads +BUS since
-  SPEC L92; switch-stuck-on detection is the P4's (val-091.21 step 5). Filed as
-  Hardware `hw-c7j`.
-- **Stopping a stuck-on clamp.** If Q501 fails short, the regen load sits
-  across the supply and nothing on the board can open it. Filed as Hardware
-  `hw-cjn` (P1, safety).
+  SPEC L92; a welded motor switch is the P4's to detect (val-091.21 step 5),
+  and the P4 then asks this monitor to cut the input stage (`INPUT_CUT`, SPEC
+  2026-10-13 welded-switch row; the P4's decision is val-091.77).
+- **Seeing a stuck-on clamp directly.** CLAMP_MON taps the Q501 gate, so a
+  drain-source short reads "off"; only SHUNT_TEMP witnesses it, and the
+  input-stage cut on it is the remedy (section 3). The move of CLAMP_MON to
+  the clamp switch node is val-091.76.
 
 ## 2. Pins (schematic, U12)
 
 | U12 pin | Function | Net / network |
 |---|---|---|
 | 1 PD7 | NRST | 10k to +3V3_SYS, 100 nF; never reconfigured |
-| 15 PD1 | SWIO | 10k to +3V3_SYS, TP1101; 100 R to P4 G50 (`MON.MON_SWIO`) |
+| 15 PD1 | SWIO | 10k to +3V3_SYS; 100 R (R1102, whose pad takes the WCH-LinkE clip) to P4 G50 (`MON.MON_SWIO`) |
 | 16 PD2 | A3 VIN_RAW | 160k / 10k, 100 nF |
 | 17 PD3 | A4 +BUS | 160k / 10k, 100 nF |
 | 18 PD4 | A7 +12V | 39k / 10k, 100 nF |
@@ -52,13 +56,14 @@ It does not own, and the schematic gives it no path to:
 | 2 PA1 | A1 +5V_SYS | 10k / 10k, 100 nF |
 | 20 PD6 | A6 +3V3_ACC | 10k / 10k, 100 nF |
 | 3 PA2 | A0 SHUNT_TEMP | 1k tap of TH501 (10k B3435 to GND) under R512 10k to +3V3_SYS (SPEC L120) |
-| 11 PC4 | A2 CLAMP_MON | 1k tap of the Q501 gate divider 10k / 3.3k: ~3 V on, 0 off |
+| 11 PC4 | A2 CLAMP_MON | 1k tap of the Q501 gate divider 10k / 3.3k: ~3 V on, 0 off (moves to the switch node, val-091.76) |
 | 10 PC3 | CLAMP_TRIM (TIM1_CH3) | 10k pull-down at the pin, 10k, 1 uF, 47k into U3 +IN |
 | 14 PC7 | FAULT_N | 1k into `MSW.EN_NODE` |
 | 7 PC0 | PUMP_FLT | U14 FLT, 10k to +3V3_SYS, active low (SPEC L93) |
 | 8 PC1 / 9 PC2 | I2C1 SDA / SCL | INA bus: P4 G34 / G36, 4.7k pull-ups, U11 at 0x40 (SPEC L84) |
 | 13 PC6 | MON_LED | 100 R into the 10-LED bank (SPEC L143, L149) |
-| 5 PD0, 12 PC5 | spare | NC; both wanted by `hw-cjn` / `hw-c7j` |
+| 5 PD0 | MSW_FLT_T | U2 FLT_T, open-drain, active low, R1125 10k to +3V3_SYS; a floating input, no internal pull |
+| 12 PC5 | MON_CUT | R1123 1k, D1111 into C1118 1 uF / R1124 10M on Q1101's gate, drain on the LTC4364's SHDN; push-pull, low from the first instruction, never an input with the pull-up |
 
 The ADC is 10-bit and referenced to VDD (+3V3_SYS, the stamp's buck). VDD is
 measured through the internal ~1.2 V reference every scan and every rail is
@@ -77,8 +82,8 @@ the filter. Every compare is a window with a consecutive-sample debounce.
 | Boot | first 100 ms | n/a | FAULT_N held | NOT FIRM |
 | VDD | 3.0-3.6 V | 10 ms | cut (readings untrusted) | NOT FIRM |
 | +12V | 10.8-13.2 V | 10 ms | cut: it supplies the clamp comparator U3 | rail: SPEC L89; window NOT FIRM |
-| +5V_SYS | 4.5-5.5 V | 10 ms | cut: quadrature buffer, drive 485_5V | NOT FIRM |
-| +5V | 4.5-5.5 V | 10 ms | warn | NOT FIRM (val-091.21 gates on it at boot) |
+| +5V_SYS | 4.5-5.5 V | 10 ms | cut: quadrature and pixel buffer U10 | NOT FIRM |
+| +5V | 4.5-5.5 V | 10 ms | warn: status pixel VDD, and the drive's 485_5V since F601 moved to it (SPEC 2026-10-13) | NOT FIRM (val-091.21 gates on it at boot; warn or cut is owed, section 8) |
 | +3V3_ACC | 3.0-3.6 V | 10 ms | warn: accessory rail | SPEC L89 ("accessory rails only warn", val-091.19) |
 | Input stage | VIN_RAW >= 20 V and +BUS < VIN_RAW - 3 V | 200 ms | cut | check: SPEC L92; 20 V: SPEC L46; timing NOT FIRM (LTC ramp ~40 ms, SPEC L54) |
 | Bus over-voltage | +BUS > 47 V | 5 ms | cut | NOT FIRM; sits above the 44.5 V clamp and below the ~49 V hardware trip and the ~50 V INA alert (SPEC L61, L74) |
@@ -88,14 +93,36 @@ the filter. Every compare is a window with a consecutive-sample debounce.
 | Clamp stuck | the same, with the trim already at the ceiling | 100 ms | cut and report | NOT FIRM |
 | P4 heartbeat | silent past 500 ms once armed | n/a | cut | NOT FIRM; not in SPEC |
 | Pump fault | PUMP_FLT low | none | warn | SPEC L93 |
+| Motor switch over-temperature | FLT_T (PD0) low | 2 ms | cut | SPEC 2026-10-13 FLT_T/FLT_I row; fault rather than warn NOT FIRM |
+| Input-stage cut: VIN_RAW | > 40 V | 10 ms | MON_CUT while it holds | SPEC 2026-10-13 MON_CUT row (a second opinion behind U16's 39.5 V); level NOT FIRM |
+| Input-stage cut: regen load | SHUNT_TEMP pin <= 173 mV (125 C) with +BUS not above the supply | 100 ms | MON_CUT while it holds | same row; level NOT FIRM |
+| Input-stage cut: P4 | `INPUT_CUT` | none | MON_CUT until the monitor resets | same row |
 
 Every cut LATCHES: FAULT_N stays pulled until the P4 sends CLEAR_LATCHED and
 the live condition is gone. This mirrors the INA ALERT latch the P4 already
-re-arms (`ValencePower.h`). The first fault since the last clear is recorded.
+re-arms (`ValencePower.h`), and the P4 sends CLEAR_LATCHED in the same re-arm,
+before every enable. The first fault since the last clear is recorded.
+
+FLT_T reaches the P4 only this way: the monitor pulls FAULT_N, the EN node
+falls and the P4's switch faults `en_node`. That same EN/UVLO pull resets the
+TPS48111's own thermal latch, so FLT_T lets go soon after; the monitor's latch
+keeps the report until CLEAR_LATCHED.
+
+MON_CUT does not latch in the monitor: PC5 follows its conditions (a P4
+request holds until reset), and the hold-up (C1118 / R1124, tau 10 s) carries
+each cut ~1.3-10 s past them; D1111 means the monitor cannot end one early.
+On bus power alone the cut takes the monitor's own supply with it, so every
+cut is a power cycle; with USB powering the stamp the monitor stays up and
+holds PC5 while the condition holds. STATUS reports the conditions holding
+(`cut_live`) and those seen since the last CLEAR_LATCHED (`cut_latched`). The
+regen-load cut sits above the 110 C motor cut so heat left over from regen
+that already tripped the motor does not cut the input; only a load still
+heating with no regen reaches it.
 
 NTC levels: TH501 is 10k at 25 C with B = 3435 K (SPEC L98); R(85 C) = 1.45k,
-R(110 C) = 0.78k, pin = 3.3 V x R / (10k + R). An open NTC reads cold and never
-trips; a shorted one reads hot and cuts.
+R(110 C) = 0.78k, R(125 C) = 0.55k, pin = 3.3 V x R / (10k + R). An open NTC
+reads cold and never trips; a shorted one reads hot, cuts the motor and, with
+no regen, the input stage.
 
 ## 4. Regen clamp trim
 
@@ -125,7 +152,7 @@ duty DOWN, so the threshold lands at or above the target, never below.
   reset level, 43.5 V); on a warm regen load or after a feeding event it is
   driven at duty 0 (44.5 V, the ceiling); otherwise it is driven at the
   target duty.
-- **Clamp test** (val-091.19, val-091.21 step 6): on command, threshold to
+- **Clamp test** (val-091.19, val-091.76): on command, threshold to
   +BUS - 2 V for 30-50 ms; PASS if CLAMP_MON is seen on in the second half of
   the pulse (the trim filter's ~8 ms time constant has settled by then). The
   feeding and stuck checks are suspended for the pulse and 50 ms after.
@@ -150,7 +177,7 @@ drops and raises `SV_W_LINK_DROP`.
 | Id | Block | Dir | Len | Content |
 |---|---|---|---|---|
 | 0x00 | IDENT | read | 14 | magic "NM", link version, fw major/minor/patch, image CRC-32, reset cause (RCC_RSTSCKR 31:24) |
-| 0x10 | STATUS | read | 37 | seq, flags, faults live/latched, warnings, first fault, clamp test result, 8 readings (mV), VDD, trim target, trim duty, clamp-on fraction |
+| 0x10 | STATUS | read | 39 | seq, flags, faults live/latched, warnings, first fault, clamp test result, 8 readings (mV), VDD, trim target, trim duty, clamp-on fraction, input cut live/latched |
 | 0x20 | LIMITS | read/write | 27 | four rail windows, bus OV, NTC warm/trip, heartbeat timeout |
 | 0x30 | HEARTBEAT | write | 4 | counter |
 | 0x31 | COMMAND | write | 6 | op, 16-bit arg |
@@ -168,13 +195,19 @@ drops and raises `SV_W_LINK_DROP`.
   monitor watches the P4 at all, the 500 ms, and arming-by-first-heartbeat. A
   dedicated heartbeat line is not an option: the P4 has no free pin (SPEC L151).
 - **COMMAND**: `CLEAR_LATCHED`, `CLAMP_TEST` (ms), `TRIM_RELEASE` (float the
-  trim pin and hold it), `TRIM_RELATCH`.
+  trim pin and hold it), `TRIM_RELATCH`, `INPUT_CUT` (MON_CUT until reset).
+- **Writes are one at a time.** The monitor holds one written block until its
+  next 1 ms scan takes it; a second write inside that window is dropped and
+  counted. `boardMonitorCommand()` (`ValencePower.h`) waits out one full scan
+  after each write.
 
-The P4 side, for val-091.21: read IDENT at boot (section 6); heartbeat and
-STATUS poll from the motor-switch task, the power bus's one owner after the
-self-check's verdict (val-9hr; it reads STATUS once a second today, for
-+BUS on 0x1010); on an EN-node drop (G23) read STATUS, publish
-the latched faults over Valence, clear once the cause is gone.
+The P4 side: IDENT and STATUS at boot (the self-check, section 6, and one
+STATUS in `powerBegin()`); from the self-check's verdict on, the motor-switch
+task owns the bus (val-9hr): STATUS once a second (+BUS on 0x1010, +5V for
+the status pixel's gate), CLEAR_LATCHED in every enable's re-arm, and STATUS
+on an EN-node trip with the monitor's faults named in the log (val-091.57 owes
+the Valence report). No heartbeat is sent, so the monitor's watchdog stays
+unarmed.
 
 **Shared-bus risk.** SPEC L87 put Qwiic on its own bus so that a hung
 accessory cannot stall sensorless homing. The monitor is a new target on the
@@ -186,8 +219,8 @@ link. Listed as a ruling owed.
 ## 6. Programming from the P4 over SWIO (val-091.20)
 
 **Wiring** (SPEC L89, schematic): P4 G50 -> R1102 100 R -> PD1 (SWIO), R1101
-10k pull-up to +3V3_SYS. Rescue pads TP1101 SWIO, TP1102 3V3, TP1103 GND for
-a WCH-LinkE. The pins are firm. The bit timing is not: nothing in SPEC sets
+10k pull-up to +3V3_SYS. A WCH-LinkE clips onto R1102's pad (SWIO) and the
+rescue pads TP1102 3V3 and TP1103 GND (SPEC 2026-10-29). The pins are firm. The bit timing is not: nothing in SPEC sets
 it, so the bit-level driver waits for a scope session (below). No SWIO code is
 written yet.
 
@@ -255,6 +288,10 @@ because the link is versioned with the P4.
 | Warm load, feeding seen | by state | duty 0 | 44.5 V |
 | Monitor hung | held as it was | held as it was | IWDG resets within 100 ms -> first row |
 
+MON_CUT floats while the monitor is in reset, blank or halted, and R1124
+holds Q1101 off; from the first instruction it is driven low, and high only
+while a cut condition holds.
+
 A blank or dead monitor cannot cut, so the P4 refuses motor enable without a
 verified monitor (SPEC L89, val-091.21 step 1). The motor switch EN pull-down
 covers the P4's own boot and reset (DC L144-146).
@@ -267,7 +304,7 @@ covers the P4's own boot and reset (DC L144-146).
 3. Regen load temperatures: 85 C releases the trim, 110 C cuts, or no cut.
 4. P4 heartbeat: watch it at all (not in SPEC), 500 ms, armed by the first
    heartbeat, latched.
-5. I2C address 0x2C.
+5. I2C address 0x2C (`SV_I2C_ADDR`); the Hardware SPEC has no row naming it.
 6. Boot: FAULT_N held for the first 100 ms of every monitor boot, so a monitor
    reset mid-session drops the motor.
 7. Budget build detected by the monitor, or declared by the P4.
@@ -280,8 +317,11 @@ covers the P4's own boot and reset (DC L144-146).
     once the trim network's 57k is counted. The firmware uses 44.62 V, which
     costs at most 0.12 V of the 3 V margin if the real value is lower.
 12. MON_LED bank colors: see the flag below. The bank is held dark until then.
-13. Hardware: `hw-cjn` (P1, a stuck-on clamp has no actuator) and `hw-c7j`
-    (the monitor no longer sees the motor switch).
+13. Input-stage cut levels: VIN_RAW over 40 V for 10 ms; the regen load past
+    125 C for 100 ms with no regen; a P4 request held until reset.
+14. FLT_T (motor switch over-temperature) cuts motor power as a fault, not a
+    warning.
+15. +5V: warn, or cut now that it also feeds the drive's 485_5V.
 
 ```
 CANON FLAG -- the monitor's LED bank vs the fleet-wide LED grammar

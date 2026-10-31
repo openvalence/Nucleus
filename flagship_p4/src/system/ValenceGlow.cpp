@@ -8,6 +8,14 @@
 //   internal heap once, at glowBegin().
 // - The frame buffer is rewritten only after rmt_tx_wait_all_done() says the
 //   last frame left: the encoder reads it during the transmission.
+// - NO FRAME WHILE +5V IS DOWN (Hardware SPEC 2026-10-13). The pixel's VDD is
+//   +5V; its DIN comes from U10 on +5V_SYS, which a USB-only boot powers
+//   alone. A frame then lifts DIN past VDD + 0.5 V and feeds +5V through the
+//   pixel's input clamp. show() skips the transmit while the board monitor's
+//   last reading (powerFiveVolt()) has +5V more than kDinOverVddMv under
+//   +5V_SYS; the RMT channel idles low between frames and R601 pulls G26
+//   low, so a skipped frame leaves DIN low. No reading at all (no monitor, a
+//   blank one, a devkit) sends frames.
 // - On the barnacle (CONFIG_NUCLEUS_BOARD_BARNACLE) the status pixel is the
 //   R+D board's WS2813, an RGB pixel on the helper: the frame goes out as the
 //   helper link's color word (helperSetRgb(), BarnacleLink.h) and no RMT
@@ -21,6 +29,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include <driver/gpio.h>
 #include <driver/rmt_tx.h>
@@ -38,6 +47,7 @@
 #endif
 #include "system/ValenceMotorSwitch.h"
 #include "system/ValenceOta.h"
+#include "system/ValencePower.h"
 
 namespace valence {
 
@@ -67,6 +77,8 @@ constexpr uint16_t kT0High = 3;
 constexpr uint16_t kT0Low = 9;
 constexpr uint16_t kT1High = 9;
 constexpr uint16_t kT1Low = 3;
+// The pixel's DIN limit over its VDD (WS2812-class abs max VDD + 0.5 V).
+constexpr uint16_t kDinOverVddMv = 500;
 
 // ---- the pixel --------------------------------------------------------------
 
@@ -122,7 +134,7 @@ public:
     // Every frame is sent, changed or not: a pixel knocked to a wrong color
     // by a transient is repainted within one frame.
     void show() override {
-        if (!_ok) return;
+        if (!_ok || fiveVoltDown()) return;
         // A frame still on the wire keeps its buffer; this one waits a pass.
         if (rmt_tx_wait_all_done(_chan, 0) != ESP_OK) return;
         uint8_t r = flux::gamma8(_pending.r);
@@ -138,6 +150,11 @@ public:
     }
 
 private:
+    static bool fiveVoltDown() {
+        const std::optional<FiveVoltRails> r = powerFiveVolt();
+        return r && uint32_t(r->v5_mv) + kDinOverVddMv < r->v5sys_mv;
+    }
+
     rmt_channel_handle_t _chan = nullptr;
     rmt_encoder_handle_t _enc = nullptr;
     std::array<uint8_t, 4> _frame{};

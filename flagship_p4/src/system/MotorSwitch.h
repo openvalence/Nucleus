@@ -11,7 +11,8 @@
 //   serializes them (the board under one spinlock, ValenceMotorSwitch.cpp).
 // - MOTOR_EN goes high only in `on`, and only a completed pre-charge window
 //   with the fault line clear, the EN node up and the inrush under its
-//   ceiling reaches `on`.
+//   ceiling reaches `on`. `on` is left on the fault line, the EN node, or
+//   MOTOR_V+ read under kMotorVLostV.
 // - A FAULT LATCHES. faulted holds both lines low until requestEnable() finds
 //   the fault line clear and the EN node up; cut() never leaves faulted.
 // - State and Fault ordinals are wire values: hub-status 0x0006
@@ -62,10 +63,22 @@ inline constexpr float kPrechargeMinV = 19.6f;
 
 // The EN/UVLO wired-OR node on G23 (every hardware kill pulls it). 19.6 V on
 // +BUS through 470k/30.1k puts the controller's turn-on point at 1.18 V; the
-// node reads ~1.8 V running and ~0 V tripped (Hardware SPEC.md 2026-09-23
-// bus-OVP row). Under this the switch is held off by hardware.
+// node reads 2.17 V running at 36 V, 1.44 V at 24 V, and ~0 V tripped
+// (Hardware SPEC.md 2026-09-23 bus-OVP row). Under this the switch is held
+// off by hardware.
 // TODO(val-091.56): measure running and tripped at 24 V and 36 V.
 inline constexpr float kEnNodeMinV = 1.1f;
+inline constexpr float kEnDividerGain = (470e3f + 30.1e3f) / 30.1e3f;   // R407 + R408 over R408
+
+// MOTOR_V+ in `on`, whenever the host read it: 10 % under the bus at which
+// the EN node itself reads kEnNodeMinV (~16.4 V). A bus that sags that far
+// has already dropped the EN node, so this check never stops a run the EN
+// node would not (an ESTOP is never the motor pulling current,
+// motion-control.md). What it adds is FETs that let go with the bus up and
+// every kill line clear: an over-temperature shutdown the board monitor did
+// not report, or a gate drive that failed.
+inline constexpr float kMotorVLostV = 0.9f * kEnNodeMinV * kEnDividerGain;
+static_assert(kMotorVLostV < kPrechargeMinV, "a sag the controller still runs on never trips motor_v");
 
 // ---- vocabulary ---------------------------------------------------------------
 
@@ -74,10 +87,12 @@ enum class State : uint8_t { off, precharging, on, faulted };
 // Why the switch last latched faulted. Wire ordinals (file header).
 enum class Fault : uint8_t {
     none,         // never faulted since boot
-    fault_line,   // MSW_FLT_N low: the controller latched over-current or over-temperature
+    fault_line,   // MSW_FLT_N low: the controller latched over-current or short circuit (FLT_I)
     en_node,      // EN/UVLO node fell: E-stop, bus OVP, INA ALERT or the board monitor
+                  // (its FAULT_N carries the switch's over-temperature, FLT_T)
     inrush,       // MSW_IMON over its ceiling at the end of the window, or unread
     precharge,    // MOTOR_V+ did not reach kPrechargeMinV in the window
+    motor_v,      // MOTOR_V+ fell under kMotorVLostV in `on`
 };
 
 // Why an enable request was refused. none = accepted, or already under way.
@@ -107,6 +122,7 @@ constexpr const char* faultName(Fault f) {
         case Fault::en_node:    return "EN node low";
         case Fault::inrush:     return "inrush over ceiling";
         case Fault::precharge:  return "MOTOR_V+ did not rise";
+        case Fault::motor_v:    return "MOTOR_V+ lost while on";
     }
     return "?";
 }
@@ -124,7 +140,8 @@ constexpr const char* refusalName(Refusal r) {
 }
 
 // NaN means "not read". An unread EN node or IMON never passes; an unread
-// MOTOR_V+ (no power monitor fitted) skips its check.
+// MOTOR_V+ (no power monitor fitted, or a poll the host did not read it on)
+// skips its check.
 struct Readings {
     bool  fault_line = false;   // MSW_FLT_N reads low
     float en_node_v  = std::numeric_limits<float>::quiet_NaN();
@@ -209,6 +226,7 @@ public:
             case State::on:
                 if (r.fault_line) return trip(Fault::fault_line);
                 if (!enNodeUp(r.en_node_v)) return trip(Fault::en_node);
+                if (std::isfinite(r.motor_v) && r.motor_v < kMotorVLostV) return trip(Fault::motor_v);
                 return false;
         }
         return false;

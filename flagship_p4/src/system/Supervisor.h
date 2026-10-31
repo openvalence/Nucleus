@@ -16,8 +16,12 @@
 //   Every block, in either direction, is [id][len][payload][crc8], len counts
 //   all of it, and the CRC covers every byte before it. A block whose id,
 //   len or CRC is wrong is dropped whole and never partly applied.
-// - The monitor can cut motor power (FAULT_N), never enable it. The P4 can
-//   tighten a limit, never loosen one past the monitor's compiled default.
+// - The monitor can cut motor power (FAULT_N) and the input stage (MON_CUT),
+//   never enable either. The P4 can tighten a limit, never loosen one past
+//   the monitor's compiled default.
+// - Writes: the monitor holds ONE written block until its next 1 ms scan
+//   takes it; a second write inside that window is dropped and counted
+//   (SV_W_LINK_DROP). Space writes at least 2 ms apart.
 // - Units: millivolts at the rail for rails, millivolts at the monitor pin
 //   for SHUNT_TEMP and CLAMP_MON, permille for duties, milliseconds for time.
 // See: docs/supervisor.md, Hardware flagship/SPEC.md (2026-09-23
@@ -27,10 +31,13 @@
 
 // ---- addressing ------------------------------------------------------------
 
-// TODO(val-091.19): operator ruling on the address; it must stay outside the
-// INA228/INA237 range 0x40-0x4F.
+// The monitor's 7-bit address on the private bus, which it shares with U11
+// at 0x40: it must stay outside the INA228/INA237 range 0x40-0x4F.
+// TODO(val-091.19): the Hardware SPEC records no address; 0x2C waits on that row.
 #define SV_I2C_ADDR 0x2C
-#define SV_LINK_VERSION 1
+// Any change to a block's layout or a bit's meaning moves this; the P4
+// refuses a monitor on another version (sv_needs_flash, judgeMonitorIdent).
+#define SV_LINK_VERSION 2
 
 #define SV_REG_IDENT     0x00   // read
 #define SV_REG_STATUS    0x10   // read
@@ -39,7 +46,7 @@
 #define SV_REG_COMMAND   0x31   // write
 
 #define SV_IDENT_LEN     14
-#define SV_STATUS_LEN    37
+#define SV_STATUS_LEN    39
 #define SV_LIMITS_LEN    27
 #define SV_HEARTBEAT_LEN 4
 #define SV_COMMAND_LEN   6
@@ -70,16 +77,17 @@ enum {
 #define SV_F_BOOT          (1u << 0)    // first full scan not complete
 #define SV_F_VDD           (1u << 1)    // monitor supply out of window: readings untrusted
 #define SV_F_12V           (1u << 2)    // +12V out of window (clamp comparator supply)
-#define SV_F_5V_SYS        (1u << 3)    // +5V_SYS out of window (quadrature buffer, drive comms)
+#define SV_F_5V_SYS        (1u << 3)    // +5V_SYS out of window (quadrature and pixel buffer U10)
 #define SV_F_INPUT_STAGE   (1u << 4)    // VIN_RAW present, +BUS not following
 #define SV_F_BUS_OV        (1u << 5)    // +BUS above the clamp's reach
 #define SV_F_SHUNT_HOT     (1u << 6)    // regen load past its trip temperature
 #define SV_F_CLAMP_STUCK   (1u << 7)    // clamp conducting with the trim released and no regen
 #define SV_F_HEARTBEAT     (1u << 8)    // armed P4 heartbeat went silent
+#define SV_F_MSW_OT        (1u << 9)    // motor switch over-temperature: U2 FLT_T low on PD0
 // Every fault bit pulls FAULT_N; a warning never does.
-#define SV_FAULT_MASK      0x01FFu
+#define SV_FAULT_MASK      0x03FFu
 
-#define SV_W_5V            (1u << 0)
+#define SV_W_5V            (1u << 0)    // +5V out of window (status pixel VDD, drive 485_5V)
 #define SV_W_3V3_ACC       (1u << 1)
 #define SV_W_PUMP_FLT      (1u << 2)    // U14 FLT low (auto-retrying eFuse)
 #define SV_W_SHUNT_WARM    (1u << 3)    // trim released for temperature
@@ -95,13 +103,24 @@ enum {
 
 enum { SV_TEST_NONE = 0, SV_TEST_PASS = 1, SV_TEST_FAIL = 2 };
 
+// ---- input-stage cut (MON_CUT) ----------------------------------------------
+
+// Why MON_CUT (PC5) is high, one bit per condition. PC5 charges Q1101's gate,
+// which pulls the LTC4364's SHDN, through a diode into a 1 uF / 10M hold-up:
+// the cut outlasts the pin by about 1.3-10 s, and the monitor cannot end it
+// early.
+#define SV_CUT_SHUNT  (1u << 0)   // regen load past the cut level with no regen to heat it
+#define SV_CUT_VIN_OV (1u << 1)   // VIN_RAW above the cut level
+#define SV_CUT_P4     (1u << 2)   // SV_CMD_INPUT_CUT; held until the monitor resets
+
 // ---- commands ---------------------------------------------------------------
 
 enum {
     SV_CMD_CLEAR_LATCHED = 1,   // clear latched faults whose live condition is gone
     SV_CMD_CLAMP_TEST    = 2,   // arg: pulse ms, clamped to 30-50
     SV_CMD_TRIM_RELEASE  = 3,   // duty 0 and the trim pin released; held
-    SV_CMD_TRIM_RELATCH  = 4    // latch the trim again from the current stable supply
+    SV_CMD_TRIM_RELATCH  = 4,   // latch the trim again from the current stable supply
+    SV_CMD_INPUT_CUT     = 5    // pull MON_CUT and hold it until the monitor resets
 };
 
 // ---- block contents ---------------------------------------------------------
@@ -126,6 +145,8 @@ typedef struct {
     uint16_t trim_target_mv;       // +BUS clamp threshold the trim aims at; 0 released
     uint16_t trim_permille;
     uint16_t clamp_on_permille;    // CLAMP_MON high fraction over the last second
+    uint8_t  cut_live;             // SV_CUT_*: MON_CUT is driven high while nonzero
+    uint8_t  cut_latched;          // SV_CUT_* seen since the last CLEAR_LATCHED
 } SvStatus;
 
 typedef struct {
@@ -230,6 +251,8 @@ static inline void sv_status_encode(const SvStatus* s, uint8_t out[SV_STATUS_LEN
     sv_put16(out + 30, s->trim_target_mv);
     sv_put16(out + 32, s->trim_permille);
     sv_put16(out + 34, s->clamp_on_permille);
+    out[36] = s->cut_live;
+    out[37] = s->cut_latched;
     sv_seal(out, SV_REG_STATUS, SV_STATUS_LEN);
 }
 
@@ -248,7 +271,26 @@ static inline int sv_status_decode(const uint8_t* in, uint32_t n, SvStatus* s) {
     s->trim_target_mv = sv_get16(in + 30);
     s->trim_permille = sv_get16(in + 32);
     s->clamp_on_permille = sv_get16(in + 34);
+    s->cut_live = in[36];
+    s->cut_latched = in[37];
     return SV_OK;
+}
+
+// Log text for one SV_F_* bit; "?" for anything else.
+static inline const char* sv_fault_name(uint16_t bit) {
+    switch (bit) {
+        case SV_F_BOOT:        return "boot";
+        case SV_F_VDD:         return "monitor VDD";
+        case SV_F_12V:         return "+12V";
+        case SV_F_5V_SYS:      return "+5V_SYS";
+        case SV_F_INPUT_STAGE: return "input stage";
+        case SV_F_BUS_OV:      return "+BUS over-voltage";
+        case SV_F_SHUNT_HOT:   return "regen load hot";
+        case SV_F_CLAMP_STUCK: return "clamp stuck";
+        case SV_F_HEARTBEAT:   return "P4 heartbeat";
+        case SV_F_MSW_OT:      return "motor switch over-temperature";
+        default:               return "?";
+    }
 }
 
 // ---- LIMITS -----------------------------------------------------------------

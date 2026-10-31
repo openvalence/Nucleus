@@ -125,6 +125,7 @@ void mc_tick(McState* s, const McInputs* in) {
     const int warm = debounce(&s->cnt_warm, ntc <= s->active.shunt_warm_mv, MC_SHUNT_TICKS);
     if (warm) warn |= SV_W_SHUNT_WARM;
     if (in->pump_flt_low) warn |= SV_W_PUMP_FLT;
+    if (debounce(&s->cnt_flt_t, in->msw_flt_t_low, MC_FLT_T_TICKS)) live |= SV_F_MSW_OT;
 
     // ---- heartbeat ----
     if (s->hb_armed) {
@@ -172,6 +173,18 @@ void mc_tick(McState* s, const McInputs* in) {
     if (debounce(&s->cnt_stuck, clamp_on && no_regen && !testing && at_ceiling, MC_STUCK_TICKS))
         live |= SV_F_CLAMP_STUCK;
     if (s->trim_backoff) warn |= SV_W_CLAMP_FEEDING;
+
+    // ---- input-stage cut ----
+    // A regen load past the cut level with no regen to heat it is a clamp that
+    // will not let go (a shorted Q501 or a stuck U3): only the input stage can
+    // take its supply away.
+    uint8_t cut = 0;
+    if (s->cut_req) cut |= SV_CUT_P4;
+    if (debounce(&s->cnt_cut_vin, vin > MC_VIN_CUT_MV, MC_CUT_VIN_TICKS)) cut |= SV_CUT_VIN_OV;
+    if (debounce(&s->cnt_cut_shunt, ntc <= MC_SHUNT_CUT_MV && no_regen && !testing, MC_SHUNT_TICKS))
+        cut |= SV_CUT_SHUNT;
+    s->cut_live = cut;
+    s->cut_latched |= cut;
 
     // ---- clamp test ----
     if (s->test_ms_left) {
@@ -224,6 +237,7 @@ void mc_on_command(McState* s, uint8_t op, uint16_t arg) {
         case SV_CMD_CLEAR_LATCHED:
             s->faults_latched &= s->faults_live;
             if (!s->faults_latched) s->first_fault = 0;
+            s->cut_latched = s->cut_live;
             s->link_drops = 0;
             break;
         case SV_CMD_CLAMP_TEST: {
@@ -258,6 +272,11 @@ void mc_on_command(McState* s, uint8_t op, uint16_t arg) {
             s->cnt_feed = 0;
             s->cnt_stuck = 0;
             break;
+        case SV_CMD_INPUT_CUT:
+            s->cut_req = 1;
+            s->cut_live |= SV_CUT_P4;
+            s->cut_latched |= SV_CUT_P4;
+            break;
         default:
             mc_on_link_drop(s);
             break;
@@ -291,4 +310,6 @@ void mc_status(const McState* s, SvStatus* o) {
                       : s->test_ms_left ? s->test_target_mv : s->trim_target_mv;
     o->trim_permille = s->trim_permille;
     o->clamp_on_permille = s->clamp_on_permille;
+    o->cut_live = s->cut_live;
+    o->cut_latched = s->cut_latched;
 }

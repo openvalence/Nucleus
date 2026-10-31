@@ -553,7 +553,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                      {"off", "precharging", "on", "faulted"});
     c.addSelectField({.name = "motor_fault", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .desc = "Reason the motor switch last latched off"},
-                     {"none", "switch_fault", "en_node", "inrush", "precharge"});
+                     {"none", "switch_fault", "en_node", "inrush", "precharge", "motor_v_lost"});
     // `resent` (field 8, appended 16 -> 18 B): the share of the WebSocket
     // binding's TCP segments the hub sent again over the last 10 s, every
     // session together, in hundredths of a percent; 65535 = nothing sent in

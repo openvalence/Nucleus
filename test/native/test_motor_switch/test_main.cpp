@@ -30,7 +30,7 @@ constexpr uint64_t kT0 = 1'000'000;
 Readings healthy() {
     Readings r;
     r.fault_line = false;
-    r.en_node_v = 1.8f;
+    r.en_node_v = 2.17f;   // 36 V through R407/R408 470k/30.1k
     r.imon_a = 0.002f;
     r.motor_v = 35.9f;
     return r;
@@ -185,6 +185,25 @@ TEST_CASE("end of window: inrush over the ceiling, unread IMON, MOTOR_V+ short a
     }
 }
 
+TEST_CASE("on: MOTOR_V+ under the floor with every kill line clear is a fault; unread is not") {
+    ms::Switch s;
+    uint64_t now = kT0;
+    enable(s, now);
+    Readings r = healthy();
+    r.motor_v = std::nanf("");   // a poll the host did not read MOTOR_V+ on
+    CHECK_FALSE(s.step(r, now + 5000));
+    CHECK(s.state() == State::on);
+    r.motor_v = 18.5f;           // a sag the controller still runs on (EN node over 1.1 V)
+    CHECK_FALSE(s.step(r, now + 10000));
+    // The floor sits under the bus at which the EN node reads its own minimum.
+    CHECK(ms::kMotorVLostV < 18.27f * 0.95f);
+    CHECK(ms::kMotorVLostV > 12.0f);
+    r.motor_v = 12.0f;           // FETs off, the drive's bank draining
+    CHECK(s.step(r, now + 15000));
+    CHECK(s.lastFault() == Fault::motor_v);
+    checkOff(s);
+}
+
 TEST_CASE("no power monitor: MOTOR_V+ unread skips its check, IMON still judges") {
     ms::Switch s;
     REQUIRE(s.requestEnable(true, healthy(), kT0) == Refusal::none);
@@ -248,6 +267,7 @@ TEST_CASE("fault ordinals are wire values: append-only") {
     CHECK(uint8_t(Fault::en_node) == 2);
     CHECK(uint8_t(Fault::inrush) == 3);
     CHECK(uint8_t(Fault::precharge) == 4);
+    CHECK(uint8_t(Fault::motor_v) == 5);
     CHECK(uint8_t(State::off) == 0);
     CHECK(uint8_t(State::precharging) == 1);
     CHECK(uint8_t(State::on) == 2);

@@ -94,6 +94,7 @@ void checkBoardMonitor(const selfcheck::BusWindowMv& busWindow) {
                            esp_err_to_name(err), e);
         return;
     }
+    powerNoteMonitor(s);
     selfcheck::judgeRails(g_table, s);
     selfcheck::judgeBusWindow(g_table, s, busWindow);
     selfcheck::judgeRegenClamp(g_table, s);
@@ -156,7 +157,7 @@ void checkMotorRailOff(const std::optional<PowerReading>& reading) {
 void checkSwitchFault() {
     if (motorSwitchFaultLine()) {
         g_table.record(Check::switch_fault, Verdict::fail,
-                       "MSW_FLT_N low: over-current or over-temperature latched");
+                       "MSW_FLT_N low: over-current or short circuit latched");
         return;
     }
     g_table.record(Check::switch_fault, Verdict::pass, "MSW_FLT_N high");

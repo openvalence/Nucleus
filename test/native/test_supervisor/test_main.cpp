@@ -91,6 +91,8 @@ TEST_CASE("every block round-trips, and a damaged block is refused whole") {
     st.trim_target_mv = 39000;
     st.trim_permille = 279;
     st.clamp_on_permille = 48;
+    st.cut_live = SV_CUT_VIN_OV;
+    st.cut_latched = SV_CUT_VIN_OV | SV_CUT_SHUNT;
 
     uint8_t b[SV_STATUS_LEN];
     sv_status_encode(&st, b);
@@ -155,6 +157,21 @@ TEST_CASE("limits: a request can tighten but never loosen") {
     CHECK(s.active.bus_ov_mv == s.base.bus_ov_mv);
     CHECK(s.active.shunt_trip_mv == 300);
     CHECK(s.active.heartbeat_timeout_ms == s.base.heartbeat_timeout_ms);
+}
+
+TEST_CASE("the new link: v2, MSW over-temperature pulls FAULT_N, INPUT_CUT round-trips") {
+    CHECK(SV_LINK_VERSION == 2);
+    CHECK((SV_FAULT_MASK & SV_F_MSW_OT) != 0);
+    CHECK(SV_BLOCK_MAX >= SV_STATUS_LEN);
+    uint8_t cb[SV_COMMAND_LEN], op = 0;
+    uint16_t arg = 1;
+    sv_command_encode(SV_CMD_INPUT_CUT, 0, cb);
+    REQUIRE(sv_command_decode(cb, sizeof cb, &op, &arg) == SV_OK);
+    CHECK(op == SV_CMD_INPUT_CUT);
+    CHECK(arg == 0);
+    for (uint16_t bit = 1; bit <= SV_FAULT_MASK; bit = (uint16_t)(bit << 1))
+        CHECK(std::strcmp(sv_fault_name(bit), "?") != 0);
+    CHECK(std::strcmp(sv_fault_name(SV_FAULT_MASK + 1u), "?") == 0);
 }
 
 // ---- monitor core -------------------------------------------------------------------
@@ -342,6 +359,109 @@ TEST_CASE("TRIM_RELEASE holds the reset level; TRIM_RELATCH takes the trim back"
     b.run(MC_STABLE_TICKS + 2);
     CHECK(b.s.trim_mode == MC_TRIM_DRIVEN);
     CHECK(b.s.trim_permille > 0);
+}
+
+TEST_CASE("motor switch over-temperature: FLT_T low pulls FAULT_N after its glitch filter, then latches") {
+    Bench b;
+    b.settle();
+    b.in.msw_flt_t_low = 1;
+    b.run(MC_FLT_T_TICKS - 1);
+    CHECK_FALSE(mc_fault_n(&b.s));
+    b.run(1);
+    CHECK(mc_fault_n(&b.s));
+    CHECK((b.s.faults_live & SV_F_MSW_OT) != 0);
+    // FAULT_N on EN/UVLO is what resets U2's own latch, so FLT_T lets go
+    // while the monitor's latch keeps the report.
+    b.in.msw_flt_t_low = 0;
+    b.run(5);
+    CHECK((b.s.faults_latched & SV_F_MSW_OT) != 0);
+    CHECK(mc_fault_n(&b.s));
+    CHECK_FALSE(mc_cut(&b.s));   // the switch is already off; the input stays up
+    mc_on_command(&b.s, SV_CMD_CLEAR_LATCHED, 0);
+    CHECK_FALSE(mc_fault_n(&b.s));
+}
+
+TEST_CASE("MON_CUT stays low through boot, a clean run and every fault that is not a cut condition") {
+    Bench b;
+    for (int i = 0; i < (int)(MC_BOOT_TICKS + MC_STABLE_TICKS + 5); i++) {
+        b.run(1);
+        REQUIRE_FALSE(mc_cut(&b.s));
+    }
+    b.run(2000);
+    CHECK_FALSE(mc_cut(&b.s));
+
+    b.set(SV_CH_12V, 9000);                        // a cutting rail fault
+    b.in.msw_flt_t_low = 1;                        // motor switch over-temperature
+    b.in.raw[SV_CH_SHUNT_TEMP] = rawFor(200, 1);   // past the 110 C motor cut, short of 125 C
+    b.set(SV_CH_VIN_RAW, 39500);                   // at U16's trip, under the 40 V cut
+    b.run(MC_SHUNT_TICKS + MC_INPUT_TICKS);
+    CHECK(mc_fault_n(&b.s));
+    CHECK_FALSE(mc_cut(&b.s));
+    CHECK(b.s.cut_latched == 0);
+
+    Bench stuck;                                   // a clamp stuck on, regen load still cool
+    stuck.settle();
+    stuck.clamp(true);
+    stuck.run(MC_STUCK_TICKS + 5);
+    CHECK((stuck.s.faults_latched & SV_F_CLAMP_STUCK) != 0);
+    CHECK_FALSE(mc_cut(&stuck.s));
+}
+
+TEST_CASE("MON_CUT on VIN_RAW over 40 V: held while it holds, then released; reported until cleared") {
+    Bench b;
+    b.settle();
+    b.set(SV_CH_VIN_RAW, 41000);
+    b.run(MC_CUT_VIN_TICKS - 1);
+    CHECK_FALSE(mc_cut(&b.s));
+    b.run(1);
+    CHECK(mc_cut(&b.s));
+    CHECK(b.s.cut_live == SV_CUT_VIN_OV);
+    b.run(500);
+    CHECK(mc_cut(&b.s));
+    b.set(SV_CH_VIN_RAW, 36000);
+    b.run(1);
+    CHECK_FALSE(mc_cut(&b.s));   // the board's hold-up carries the cut from here
+    SvStatus st{};
+    mc_status(&b.s, &st);
+    CHECK(st.cut_live == 0);
+    CHECK(st.cut_latched == SV_CUT_VIN_OV);
+    mc_on_command(&b.s, SV_CMD_CLEAR_LATCHED, 0);
+    CHECK(b.s.cut_latched == 0);
+}
+
+TEST_CASE("MON_CUT on a regen load past 125 C with no regen; real regen does not cut") {
+    Bench b;
+    b.settle();
+    b.in.raw[SV_CH_SHUNT_TEMP] = rawFor(150, 1);   // past 125 C (173 mV)
+    b.run(MC_SHUNT_TICKS - 1);
+    CHECK_FALSE(mc_cut(&b.s));
+    b.run(1);
+    CHECK(mc_cut(&b.s));
+    CHECK((b.s.cut_live & SV_CUT_SHUNT) != 0);
+
+    Bench regen;
+    regen.settle();
+    regen.set(SV_CH_BUS, 39500);                   // the bus above the supply: regen is heating it
+    regen.in.raw[SV_CH_SHUNT_TEMP] = rawFor(150, 1);
+    regen.run(MC_SHUNT_TICKS + 50);
+    CHECK_FALSE(mc_cut(&regen.s));
+    CHECK((regen.s.faults_latched & SV_F_SHUNT_HOT) != 0);   // the motor is cut instead
+}
+
+TEST_CASE("MON_CUT on a P4 request: at once, held until the monitor resets") {
+    Bench b;
+    b.settle();
+    mc_on_command(&b.s, SV_CMD_INPUT_CUT, 0);
+    CHECK(mc_cut(&b.s));
+    b.run(3000);
+    CHECK(b.s.cut_live == SV_CUT_P4);
+    mc_on_command(&b.s, SV_CMD_CLEAR_LATCHED, 0);
+    b.run(1);
+    CHECK(mc_cut(&b.s));
+    CHECK(b.s.cut_latched == SV_CUT_P4);
+    mc_init(&b.s);               // what a monitor reset does
+    b.run(1);
+    CHECK_FALSE(mc_cut(&b.s));
 }
 
 TEST_CASE("the core's status survives the wire") {

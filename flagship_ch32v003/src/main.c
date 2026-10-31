@@ -1,10 +1,14 @@
 // main -- board monitor (U12, CH32V003F4U6) glue: pins, safe state at boot,
-// the 1 kHz ADC scan, the CLAMP_TRIM PWM, FAULT_N, the I2C target, the
-// independent watchdog
+// the 1 kHz ADC scan, the CLAMP_TRIM PWM, FAULT_N, MON_CUT, the I2C target,
+// the independent watchdog
 // Constraints:
-// - The first thing after SystemInit is the safe state: FAULT_N pulled (motor
-//   cannot enable), CLAMP_TRIM released to its reset level (43.5 V). Nothing
-//   runs before it.
+// - The first thing after SystemInit is the safe state: MON_CUT driven low,
+//   FAULT_N pulled (motor cannot enable), CLAMP_TRIM released to its reset
+//   level (43.5 V). Nothing runs before it.
+// - MON_CUT (PC5) is a push-pull output, low unless mc_cut(). Never an input
+//   with the pull-up: ~40k into the hold-up's 10M charges Q1101's gate to
+//   ~2.9 V, past its 2.5 V maximum threshold, and cuts the input stage on
+//   every boot. MSW_FLT_T (PD0) is a floating input: R1125 is its pull-up.
 // - PD1 is SWIO and PD7 is NRST. Never reconfigure either: SWIO is the only
 //   way the P4 can reprogram this chip (val-091.20).
 // - The IWDG runs from boot. A hang must not leave the trim PWM driving a
@@ -28,8 +32,8 @@
 #define PIN_MON_LED    PC6   // 10 x WS2812-class status bank
 #define PIN_SDA        PC1   // I2C1, INA bus
 #define PIN_SCL        PC2
-#define PIN_SPARE_A    PD0   // NC
-#define PIN_SPARE_B    PC5   // NC
+#define PIN_MSW_FLT_T  PD0   // U2 FLT_T, open-drain, active low, R1125 10k pull-up
+#define PIN_MON_CUT    PC5   // high cuts: R1123, D1111 into C1118 / R1124 on Q1101 (LTC4364 SHDN)
 
 // ADC channel per SV_CH_* index, then Vrefint.
 static const uint8_t kAdcCh[SV_CH_COUNT] = {
@@ -82,18 +86,22 @@ static void trimDrive(uint16_t permille) {
     funPinMode(PIN_CLAMP_TRIM, GPIO_CFGLR_OUT_10Mhz_AF_PP);
 }
 
+static void monCut(int cut) {
+    funDigitalWrite(PIN_MON_CUT, cut ? FUN_HIGH : FUN_LOW);
+}
+
 static void safeState(void) {
     funGpioInitAll();
+    // Level before mode: the pin is low from the instant it becomes an output.
+    monCut(0);
+    funPinMode(PIN_MON_CUT, GPIO_CFGLR_OUT_10Mhz_PP);
     funPinMode(PIN_FAULT_N, GPIO_CFGLR_OUT_10Mhz_OD);
     faultN(1);
     funPinMode(PIN_CLAMP_TRIM, GPIO_CFGLR_IN_FLOAT);
     funPinMode(PIN_MON_LED, GPIO_CFGLR_OUT_10Mhz_PP);
     funDigitalWrite(PIN_MON_LED, FUN_LOW);
     funPinMode(PIN_PUMP_FLT, GPIO_CFGLR_IN_FLOAT);
-    funPinMode(PIN_SPARE_A, GPIO_CFGLR_IN_PUPD);
-    funDigitalWrite(PIN_SPARE_A, FUN_HIGH);
-    funPinMode(PIN_SPARE_B, GPIO_CFGLR_IN_PUPD);
-    funDigitalWrite(PIN_SPARE_B, FUN_HIGH);
+    funPinMode(PIN_MSW_FLT_T, GPIO_CFGLR_IN_FLOAT);
 }
 
 // ---- peripherals ------------------------------------------------------------------
@@ -330,10 +338,12 @@ int main(void) {
         for (int i = 0; i < SV_CH_COUNT; i++) in.raw[i] = adcRead(kAdcCh[i]);
         in.raw_vrefint = adcRead(ADC_CH_VREFINT);
         in.pump_flt_low = !funDigitalRead(PIN_PUMP_FLT);
+        in.msw_flt_t_low = !funDigitalRead(PIN_MSW_FLT_T);
 
         drainMailbox();
         mc_tick(&g_mc, &in);
 
+        monCut(mc_cut(&g_mc));
         faultN(mc_fault_n(&g_mc));
         if (g_mc.trim_mode == MC_TRIM_DRIVEN) trimDrive(g_mc.trim_permille);
         else trimRelease();
