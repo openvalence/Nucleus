@@ -12,6 +12,7 @@
 //     POST /ota/arm          202 {"id":"<hex>","window_s":N}; 409 + reason
 //     GET  /ota/arm?id=<hex> 200 {"state":"pending|approved|expired"}
 //     POST /ota?id=<hex>     the raw image; 403 unless approved, 409 unless idle
+//                            and the image is this board's
 // - A PENDING REQUEST OWNS THE DOUBLE PRESS. The hub task offers every PAIR
 //   double press here first (otaPressTake()); one that approves a request
 //   never also approves a Valence configure request. A press and a hold keep
@@ -27,6 +28,11 @@
 // - RAW BODY, NEVER MULTIPART. The handler streams straight into
 //   esp_ota_write; integrity is esp_ota's (image header, chip id and
 //   revision, SHA-256). There is no signature check.
+// - THIS BOARD'S IMAGE OR NOTHING (bd val-3yls). The image's first bytes
+//   name its board (OtaArm.h imageFit()); another board's image, or one
+//   naming none, is refused 409 before esp_ota_begin, so neither slot is
+//   touched. Another board's pin map would boot, take the wrong PAIR pin and
+//   leave USB as the only way back.
 // - THE TRANSPORT CARRYING THE BYTES IS NEVER SUSPENDED (T31). The hub task
 //   and the :82 WS port keep running for the whole transfer; the bytes arrive
 //   on the :80 task, which is the one that blocks. PSRAM is unreachable while
@@ -50,7 +56,8 @@
 //   watchdog) before its first rest.
 // - Declarations only, no IDF: the hardware-free hub delegate calls
 //   otaPressTake() and otaInFlight(), so the host twins link their own.
-// See: OtaArm.h, .claude/rules/build-test-deploy.md, bd val-091.16, val-ktal
+// See: OtaArm.h, .claude/rules/build-test-deploy.md, bd val-091.16, val-ktal,
+// val-3yls
 
 namespace valence {
 

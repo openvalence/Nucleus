@@ -25,8 +25,9 @@ Constraints:
 - A firmware answering 404 to /ota/arm predates the press; it takes the token,
   and the tool falls back to it. Remove the fallback once no board runs a
   pre-0.1.58 image.
-- 409 is the machine refusing because it is not idle: motion running or
-  motor power on. The reason is printed; stop the machine and run again.
+- 409 is the machine refusing: not idle (motion running or motor power on),
+  or an image of another board or naming none (OtaArm.h imageFit()). The
+  reason is printed; stop the machine and run again, or flash over USB.
 - THE IMAGE IS CHECKED BEFORE IT LEAVES THE HOST. --image and --expect are
   both required, and the FIRMWARE_VERSION string compiled into the .bin must
   equal --expect or nothing is sent. There is no default image: two build

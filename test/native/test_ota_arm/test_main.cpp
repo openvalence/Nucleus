@@ -1,15 +1,17 @@
 // test_ota_arm -- native doctest suite for the update request a PAIR double
-// press approves, and the idle gate
+// press approves, the idle gate and the board gate
 // Constraints:
 // - Hardware-free: OtaArm.h alone, on a synthetic millisecond clock. The
 //   routes, the lock and the flash writes are ValenceOta.cpp and are bench
 //   work; which press the request owns is test_valence_device's VD-PAIR-11/12.
-// See: flagship_p4/src/system/OtaArm.h, bd val-ktal
+// See: flagship_p4/src/system/OtaArm.h, bd val-ktal, val-3yls
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cstdint>
+#include <cstring>
 #include <string_view>
 
 #include "../../../flagship_p4/src/system/OtaArm.h"
@@ -127,4 +129,103 @@ TEST_CASE("OA-12: a live image already at rest buys at once") {
     ota::BuyGate g;
     CHECK(g.take(true, true) == ota::Buy::now);
     CHECK(g.take(true, true) == ota::Buy::wait);
+}
+
+// ---- the board gate ---------------------------------------------------------
+
+namespace {
+
+// An image head as IDF lays it out: the header's magic, the first segment's
+// esp_app_desc_t at 32 and its version at 48.
+std::array<uint8_t, 4096> imageHead(const char* version, uint8_t magic = 0xE9) {
+    std::array<uint8_t, 4096> b{};
+    b[0] = magic;
+    b[12] = 0x12;   // chip id: ESP32-P4
+    const uint32_t descMagic = 0xABCD5432;
+    std::memcpy(b.data() + 32, &descMagic, 4);
+    std::strncpy(reinterpret_cast<char*>(b.data() + 48), version, 32);
+    std::strncpy(reinterpret_cast<char*>(b.data() + 80), "flagship_p4", 32);
+    return b;
+}
+
+constexpr std::string_view kFlagship = "nucleus-p4/ccc6f2f";
+constexpr std::string_view kBarnacle = "nucleus-p4b/ccc6f2f-dirty";
+
+struct FitCase {
+    const char* name;
+    const char* image;           // the image's esp_app_desc version
+    std::string_view running;    // the running image's
+    size_t n;                    // bytes of the head read
+    ota::ImageFit fit;
+    const char* why;             // nullptr when it fits
+};
+
+}  // namespace
+
+TEST_CASE("OA-13: the board gate, case by case") {
+    using F = ota::ImageFit;
+    const size_t head = ota::kImageHeadBytes;
+    const FitCase cases[] = {
+        {"same board, Flagship", "nucleus-p4/abc1234", kFlagship, head, F::fits, nullptr},
+        {"same board, barnacle", "nucleus-p4b/abc1234", kBarnacle, head, F::fits, nullptr},
+        {"bench build on a Flagship", "nucleus-p4/57716f1-dirty", kFlagship, 4096, F::fits, nullptr},
+        {"barnacle image on a Flagship", "nucleus-p4b/abc1234", kFlagship, head, F::otherBoard,
+         "image is for the barnacle, this machine is a Flagship"},
+        {"Flagship image on the barnacle", "nucleus-p4/abc1234", kBarnacle, head, F::otherBoard,
+         "image is for a Flagship, this machine is the barnacle"},
+        {"an unknown product names itself", "nucleus-p4c/abc1234", kFlagship, head, F::otherBoard,
+         "image is for nucleus-p4c, this machine is a Flagship"},
+        {"no board: the git label alone", "ccc6f2f-dirty", kFlagship, head, F::noBoard,
+         "image names no board (an older build): flash it over USB"},
+        {"no board: a git describe", "v0.1-12-gabc1234", kBarnacle, head, F::noBoard,
+         "image names no board (an older build): flash it over USB"},
+        {"no board: the family alone", "nucleus-/abc", kFlagship, head, F::noBoard,
+         "image names no board (an older build): flash it over USB"},
+        {"no board: an empty version", "", kFlagship, head, F::noBoard,
+         "image names no board (an older build): flash it over USB"},
+        {"short first chunk", "nucleus-p4/abc1234", kFlagship, head - 1, F::notImage,
+         "body too short to be an app image"},
+        {"nothing read", "nucleus-p4/abc1234", kFlagship, 0, F::notImage, "body too short to be an app image"},
+    };
+    for (const FitCase& c : cases) {
+        CAPTURE(c.name);
+        const auto b = imageHead(c.image);
+        char why[96] = "untouched";
+        CHECK(ota::imageFit(b.data(), c.n, c.running, why, sizeof(why)) == c.fit);
+        CHECK(std::string_view(why) == (c.why ? c.why : "untouched"));
+    }
+}
+
+TEST_CASE("OA-14: garbage never fits") {
+    char why[96];
+    auto b = imageHead("nucleus-p4/abc1234", 0x7F);   // not the image magic
+    CHECK(ota::imageFit(b.data(), b.size(), kFlagship, why, sizeof(why)) == ota::ImageFit::notImage);
+    CHECK(std::string_view(why) == "not an app image");
+    b = imageHead("nucleus-p4/abc1234");
+    b[32] ^= 0xFF;                                     // no app description
+    CHECK(ota::imageFit(b.data(), b.size(), kFlagship, why, sizeof(why)) == ota::ImageFit::notImage);
+    std::array<uint8_t, 4096> noise{};
+    uint32_t x = 0x12345678;
+    for (uint8_t& v : noise) v = uint8_t((x = x * 1664525u + 1013904223u) >> 24);
+    noise[0] = 0xE9;                                   // the magic alone is not an image
+    CHECK(ota::imageFit(noise.data(), noise.size(), kFlagship, why, sizeof(why)) == ota::ImageFit::notImage);
+}
+
+TEST_CASE("OA-15: a version that fills its field, unterminated, still reads") {
+    // IDF cuts PROJECT_VER to 31 characters; an image whose 32 bytes carry no
+    // NUL must neither read past the field nor lose its product.
+    auto b = imageHead("");
+    std::memcpy(b.data() + 48, "nucleus-p4b/ccc6f2f-dirty-kinet", 31);
+    b[48 + 31] = 'x';
+    b[80] = 'f';
+    char why[96];
+    CHECK(ota::imageFit(b.data(), b.size(), kBarnacle, why, sizeof(why)) == ota::ImageFit::fits);
+    CHECK(ota::productOf("nucleus-p4b/ccc6f2f-dirty-kinetic-unpinned") == "nucleus-p4b");
+}
+
+TEST_CASE("OA-16: a refusal never overruns its buffer") {
+    const auto b = imageHead("nucleus-p4b/abc1234");
+    char why[16];
+    CHECK(ota::imageFit(b.data(), b.size(), kFlagship, why, sizeof(why)) == ota::ImageFit::otherBoard);
+    CHECK(std::strlen(why) == sizeof(why) - 1);
 }

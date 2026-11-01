@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <esp_app_desc.h>
 #include <esp_heap_caps.h>
 #include <esp_http_server.h>
 #include <esp_ota_ops.h>
@@ -31,6 +32,12 @@
 
 #include "secrets.h"
 #include "valence/core/crypto.hpp"
+#endif
+
+// The product in PROJECT_VER comes from the env's Kconfig overlay
+// (CMakeLists.txt), the pins from the sdkconfig; they must name one board.
+#if defined(CONFIG_NUCLEUS_BOARD_BARNACLE) != defined(NUCLEUS_IMAGE_BARNACLE)
+#error "PROJECT_VER and the sdkconfig name different boards: delete sdkconfig.<env> to re-seed it from its defaults"
 #endif
 
 namespace valence {
@@ -182,6 +189,28 @@ esp_err_t handlePost(httpd_req_t* req) {
     auto* buf = static_cast<uint8_t*>(heap_caps_malloc(kChunkBytes, MALLOC_CAP_INTERNAL));
     if (buf == nullptr) return refuseClaimed(req, "503 Service Unavailable", "no internal buffer");
 
+    // The board gate reads the head before esp_ota_begin erases anything
+    // (OtaArm.h imageFit()). kMinImageBytes > kChunkBytes, so no read here
+    // passes the body's end.
+    static_assert(ota::kImageHeadBytes <= kChunkBytes && kChunkBytes <= kMinImageBytes);
+    size_t have = 0;
+    while (have < ota::kImageHeadBytes) {
+        const int n = httpd_req_recv(req, reinterpret_cast<char*>(buf + have), kChunkBytes - have);
+        if (n <= 0) {
+            heap_caps_free(buf);
+            return refuseClaimed(req, "400 Bad Request", "body ended early");
+        }
+        have += size_t(n);
+    }
+    const esp_app_desc_t* self = esp_app_get_description();
+    char why[96];
+    const ota::ImageFit fit = ota::imageFit(
+        buf, have, std::string_view(self->version, strnlen(self->version, sizeof(self->version))), why, sizeof(why));
+    if (fit != ota::ImageFit::fits) {
+        heap_caps_free(buf);
+        return refuseClaimed(req, fit == ota::ImageFit::notImage ? "400 Bad Request" : "409 Conflict", why);
+    }
+
     GLOGW(kTag, "update starting (%s): %u B -> %s at 0x%06lx", bench ? "bench token" : "PAIR approved",
           unsigned(total), target->label, static_cast<unsigned long>(target->address));
 
@@ -195,8 +224,13 @@ esp_err_t handlePost(httpd_req_t* req) {
     const int64_t t0 = esp_timer_get_time();
     size_t got = 0;
     while (got < total) {
-        const size_t want = (total - got < kChunkBytes) ? (total - got) : kChunkBytes;
-        const int n = httpd_req_recv(req, reinterpret_cast<char*>(buf), want);
+        // The first pass writes the head the board gate already read.
+        int n = int(have);
+        have = 0;
+        if (n == 0) {
+            const size_t want = (total - got < kChunkBytes) ? (total - got) : kChunkBytes;
+            n = httpd_req_recv(req, reinterpret_cast<char*>(buf), want);
+        }
         if (n <= 0) {
             esp_ota_abort(handle);
             heap_caps_free(buf);

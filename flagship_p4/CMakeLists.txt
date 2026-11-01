@@ -14,10 +14,26 @@ if(NUCLEUS_BENCH_NO_MOTOR)
     idf_build_set_property(COMPILE_DEFINITIONS "NUCLEUS_BENCH_NO_MOTOR=1" APPEND)
     message(WARNING "NUCLEUS_BENCH_NO_MOTOR: bench profile, the motor-power gate is advisory")
 endif()
-# PROJECT_VER (esp_app_desc.version) is the label git_label.py writes on every
-# pio run. IDF's fallback, git describe at configure time, goes stale under
-# pio (bd val-73g); it applies only to a build that bypasses pio.
+# PROJECT_VER (esp_app_desc.version) is "<product>/<git label>": the board,
+# then the label git_label.py writes on every pio run (IDF's configure-time git
+# describe goes stale under pio, bd val-73g). The OTA board gate reads the
+# product from an incoming image (system/OtaArm.h imageFit(), bd val-3yls), so
+# it leads: IDF cuts the field to 31 characters from the end. The board's home
+# is its Kconfig overlay in SDKCONFIG_DEFAULTS; NUCLEUS_IMAGE_BARNACLE lets
+# ValenceOta.cpp refuse to build when the sdkconfig names another board.
+set(NUCLEUS_PRODUCT "nucleus-p4")
+foreach(_defaults ${SDKCONFIG_DEFAULTS})
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/${_defaults}")
+        file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/${_defaults}" _barnacle REGEX "^CONFIG_NUCLEUS_BOARD_BARNACLE=y")
+        if(_barnacle)
+            set(NUCLEUS_PRODUCT "nucleus-p4b")
+            idf_build_set_property(COMPILE_DEFINITIONS "NUCLEUS_IMAGE_BARNACLE=1" APPEND)
+        endif()
+    endif()
+endforeach()
+set(_label "unknown")
 if(EXISTS "${CMAKE_BINARY_DIR}/git_label.txt")
-    file(READ "${CMAKE_BINARY_DIR}/git_label.txt" PROJECT_VER)
+    file(READ "${CMAKE_BINARY_DIR}/git_label.txt" _label)
 endif()
+set(PROJECT_VER "${NUCLEUS_PRODUCT}/${_label}")
 project(flagship_p4)
