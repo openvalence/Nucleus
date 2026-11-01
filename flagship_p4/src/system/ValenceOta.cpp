@@ -103,7 +103,7 @@ uint32_t queryId(httpd_req_t* req) {
 
 const char* idleRefusalNow() {
     const MotionCensus c = motionCensus();
-    return ota::idleRefusal(c.busy || c.step_q8 != 0, motorSwitchStatus().state);
+    return ota::idleRefusal(motionRuns(c), motorSwitchStatus().state);
 }
 
 // Every answer closes its socket: the :80 budget is three (ValenceHttp.cpp).
