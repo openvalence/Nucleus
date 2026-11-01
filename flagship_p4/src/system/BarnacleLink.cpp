@@ -15,11 +15,18 @@
 // - high() and the anomaly watch read the pad twice kHomeSenseDebounceUs
 //   apart before they believe a trip; the helper filters the current before
 //   it pulls the line (barnacle::kTripOnSamples).
-// - The UART has a kRxRingBytes ring and no TX ring: a command frame is under
-//   barnacle::kMaxWire bytes, far inside the 128-byte TX FIFO, so
-//   uart_write_bytes() copies and returns.
-// - BSS only: the decoder (~40 B), the reading (~90 B), the queue storage and
-//   a few words. Nothing allocates after begin.
+// - The UART has a kRxRingBytes ring and a kTxRingBytes ring: an update
+//   chunk (barnacle::kMaxWire) outgrows the 128-byte TX FIFO, and the ring
+//   lets uart_write_bytes() copy and return inside the pass.
+// - THE HELPER'S UPDATE (bd val-omh3.7) runs on this task: the image is
+//   embedded in this firmware (src/CMakeLists.txt), barnacle::UpdateSender is
+//   the machine, this file the glue and every log line. The idle rule is
+//   helperUpdateRefusal(): the P4 update's own (OtaArm.h idleRefusal()),
+//   never a second copy. While a transfer owns the link, commands go out
+//   every barnacle::kUpdateCommandMs, not every pass.
+// - BSS only: the decoder (~260 B), the reading (~90 B), the sender (~80 B),
+//   one wire frame (g_out), the queue storage and a few words. Nothing
+//   allocates after begin.
 // See: BarnacleLink.h, lib/barnacle_link, ValenceDriveLink.h,
 // ValenceHomeSense.h, BoardPins.h
 
@@ -41,17 +48,25 @@
 #include <freertos/task.h>
 #include <sdkconfig.h>
 
+#include "barnacle_link/barnacle_update.hpp"
+#include "barnacle_shim_image.h"
 #include "geiger/geiger.h"
 #include "motion/MotionArbiter.h"
 #include "motion/ValenceMotion.h"
 #include "system/BoardPins.h"
+#include "system/OtaArm.h"
 #include "system/ValenceDriveLink.h"
 #include "system/ValenceHomeSense.h"
 #include "system/ValenceMotorSwitch.h"
+#include "system/ValenceOta.h"
 
 #ifndef CONFIG_NUCLEUS_BOARD_BARNACLE
 #error "BarnacleLink.cpp is the barnacle's host; src/CMakeLists.txt links it only there"
 #endif
+
+// The helper's image (src/CMakeLists.txt target_add_binary_data), in flash.
+extern "C" const uint8_t kShimImageStart[] asm("_binary_barnacle_shim_bin_start");
+extern "C" const uint8_t kShimImageEnd[] asm("_binary_barnacle_shim_bin_end");
 
 namespace valence {
 
@@ -64,6 +79,9 @@ static_assert(BOARD_UART_LINK >= 1 && BOARD_UART_LINK < SOC_UART_HP_NUM, "an HP 
 // Two passes of status frames at 500 Hz is ~70 B; the ring holds an outage of
 // the task several times that long.
 constexpr int kRxRingBytes = 1024;
+// Two update chunks' room: the pass never waits on the FIFO.
+constexpr int kTxRingBytes = 512;
+static_assert(kTxRingBytes >= int(2 * barnacle::kMaxWire), "a chunk and a command fit the TX ring");
 // Bytes read per uart_read_bytes() call; the pass loops until the ring is dry.
 constexpr size_t kRxChunk = 128;
 // The counters' Info line in /diag.
@@ -74,7 +92,7 @@ constexpr uint32_t kNeverHeardMs = 3000;
 static_assert(barnacle::kHomeTripDetectUs <= kStallDetectUs,
               "the helper's home stall detect must fit the arbiter's contact-to-park budget");
 static_assert(barnacle::kCommandPeriodMs == kDriveLinkPeriodMs,
-              "one command frame per link pass");
+              "one command frame per link pass, outside a helper update");
 static_assert(std::is_trivially_copyable_v<HelperReading>, "the mailbox copies it bytewise");
 static_assert(std::is_trivially_copyable_v<DriveLinkStatus>, "the mailbox copies it bytewise");
 
@@ -112,6 +130,15 @@ barnacle::Boxcar<kRestFrames> g_rest;   // status currents, for HelperReading::r
 barnacle::Mode g_mode = barnacle::Mode::idle;
 bool g_uartUp = false;          // written once by driveLinkBegin() before the task exists
 TaskHandle_t g_task = nullptr;
+std::array<uint8_t, barnacle::kMaxWire> g_out{};   // one frame being sent
+
+// The helper's update. g_updateOn is written once by driveLinkBegin() before
+// the task exists: false when the embedded image fails its check.
+barnacle::UpdateSender g_sender(std::span<const uint8_t>(kShimImageStart, size_t(kShimImageEnd - kShimImageStart)));
+bool g_updateOn = false;
+const char* g_idleWhy = nullptr;   // this pass's helperUpdateRefusal()
+uint32_t g_lastCommandMs = 0;
+uint32_t g_progressQuarter = 0;    // the last 25 % step logged
 
 // ---- the crossings ---------------------------------------------------------------
 
@@ -140,7 +167,7 @@ bool uartBegin() {
     cfg.stop_bits = UART_STOP_BITS_1;
     cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
     cfg.source_clk = UART_SCLK_DEFAULT;
-    esp_err_t err = uart_driver_install(kUart, kRxRingBytes, 0, 0, nullptr, 0);
+    esp_err_t err = uart_driver_install(kUart, kRxRingBytes, kTxRingBytes, 0, nullptr, 0);
     if (err == ESP_OK) err = uart_param_config(kUart, &cfg);
     if (err == ESP_OK)
         err = uart_set_pin(kUart, BOARD_GPIO_LINK_TX, BOARD_GPIO_LINK_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
@@ -152,6 +179,150 @@ bool uartBegin() {
         return false;
     }
     return true;
+}
+
+// ---- the helper's update -----------------------------------------------------------------
+
+// Why the helper may not be updated now, or nullptr. The P4 update's idle
+// rule, word for word (OtaArm.h idleRefusal()), with homing and RETURN read
+// as motion (motionRuns()), and never while this machine's own update runs.
+// No PAIR press: the P4 update that brought this image's copy had one.
+const char* helperUpdateRefusal(const MotionCensus& mo, motorswitch::State power) {
+    if (otaInFlight()) return "the machine's own firmware update is running: wait for it to finish";
+    return ota::idleRefusal(motionRuns(mo), power);
+}
+
+unsigned helperVersion() {
+    return g_sender.haveHelper() ? unsigned(g_sender.helper().shim_version) : unsigned(g_reading.slow.shim_version);
+}
+
+unsigned percentSent() {
+    return g_sender.chunks() != 0 ? unsigned(g_sender.next() * 100 / g_sender.chunks()) : 0;
+}
+
+// The seconds the image takes on the wire alone, at kBaud 8N1.
+unsigned wireSeconds() {
+    const uint32_t bytes = g_sender.chunks() * uint32_t(barnacle::kMaxWire);
+    return unsigned(bytes * 10 / barnacle::kBaud);
+}
+
+const char* failReason(const barnacle::SendStep& s) {
+    using barnacle::SendEvent;
+    using barnacle::SendState;
+    if (s.ev == SendEvent::ack_error) return barnacle::ackCodeText(g_sender.lastCode());
+    const bool otherImage = s.ev == SendEvent::ident_other || s.ev == SendEvent::ident_other_trial;
+    if (s.from == SendState::restarting)
+        return otherImage ? "the helper came back on its old firmware: the new image did not start"
+                          : "the helper did not come back after restarting";
+    if (s.from == SendState::keeping)
+        return otherImage ? "the new firmware failed its link check, and the helper went back to its old one"
+                          : "the helper went silent before confirming its new firmware";
+    return "the helper stopped answering";
+}
+
+void logUpdateStep(const barnacle::SendStep& s, uint32_t now) {
+    using barnacle::SendAct;
+    using barnacle::SendEvent;
+    using barnacle::SendState;
+    if (s.ignored) {
+        GLOGW_EVERY_MS(10000, kTag, "helper update: unexpected %s while %s, ignored (%lu so far)",
+                       barnacle::sendEventName(s.ev), barnacle::sendStateName(s.from),
+                       static_cast<unsigned long>(g_sender.ignored()));
+        return;
+    }
+    if (s.ev == SendEvent::retry)
+        GLOGW_EVERY_MS(5000, kTag, "helper update: no reply at %u %%, retransmitting (try %lu of %lu)", percentSent(),
+                       static_cast<unsigned long>(g_sender.tries()), static_cast<unsigned long>(barnacle::kMaxTries));
+    if (s.to == SendState::sending && s.act == SendAct::chunk && percentSent() / 25 > g_progressQuarter) {
+        g_progressQuarter = percentSent() / 25;
+        GLOGI(kTag, "helper update %u %%", g_progressQuarter * 25);
+    }
+    if (!s.changed()) return;
+    const unsigned mine = unsigned(BARNACLE_SHIM_VERSION);
+    switch (s.to) {
+        case SendState::listen:
+            break;
+        case SendState::legacy:
+            GLOGW(kTag, "helper firmware v%u cannot take updates over the link: flash helper firmware v%u once over "
+                        "the R+D board's USB (pio run -d barnacle_shim -t upload); the helper works as before",
+                  unsigned(g_reading.slow.shim_version), mine);
+            break;
+        case SendState::current:
+            if (s.act == SendAct::done && g_sender.startedMs())
+                GLOGW(kTag, "helper firmware updated to v%u in %lu s", helperVersion(),
+                      static_cast<unsigned long>((now - *g_sender.startedMs()) / 1000));
+            else if (s.act == SendAct::done)
+                GLOGI(kTag, "helper firmware v%u confirmed: it matches the copy this machine carries", helperVersion());
+            else
+                GLOGI(kTag, "helper firmware v%u matches the copy this machine carries", helperVersion());
+            break;
+        case SendState::waiting:
+            if (s.act == SendAct::abort)
+                GLOGW(kTag, "helper update stopped at %u %%: %s; the helper keeps v%u, and the update starts over "
+                            "once the machine is idle",
+                      percentSent(), g_idleWhy != nullptr ? g_idleWhy : "the machine left idle", helperVersion());
+            else if (s.ev == SendEvent::backoff_over)
+                GLOGI(kTag, "helper update: retrying (attempt %lu of %lu)",
+                      static_cast<unsigned long>(g_sender.attempts() + 1),
+                      static_cast<unsigned long>(barnacle::kMaxAttempts));
+            else
+                GLOGW(kTag, "helper firmware v%u ready to install (the helper runs v%u): installs over the link "
+                            "while the machine is idle and takes at least %u s; %s",
+                      mine, helperVersion(), wireSeconds(),
+                      g_idleWhy != nullptr ? g_idleWhy : "starting now");
+            break;
+        case SendState::held:
+            GLOGW(kTag, "the helper runs unconfirmed firmware v%u: its update waits until the helper confirms or "
+                        "reverts it",
+                  helperVersion());
+            break;
+        case SendState::beginning:
+            g_progressQuarter = 0;
+            GLOGW(kTag, "helper update started: v%u to v%u, %u KB in %lu chunks; keep the machine idle",
+                  helperVersion(), mine, unsigned(g_sender.imageBytes() / 1024),
+                  static_cast<unsigned long>(g_sender.chunks()));
+            break;
+        case SendState::sending:
+            break;
+        case SendState::ending:
+            GLOGI(kTag, "helper update: all chunks sent, the helper is checking the image");
+            break;
+        case SendState::restarting:
+            GLOGW(kTag, "helper image verified: the helper restarts on v%u", mine);
+            break;
+        case SendState::keeping:
+            GLOGI(kTag, "helper firmware runs unconfirmed: confirming the link so the helper keeps it");
+            break;
+        case SendState::failed:
+            if (g_sender.attempts() < barnacle::kMaxAttempts)
+                GLOGE(kTag, "helper update failed: %s; it keeps v%u, trying again in %lu s", failReason(s),
+                      helperVersion(), static_cast<unsigned long>(barnacle::kRetryBackoffMs / 1000));
+            else
+                GLOGE(kTag, "helper update failed: %s; it keeps v%u", failReason(s), helperVersion());
+            break;
+        case SendState::gave_up:
+            GLOGE(kTag, "helper update stopped after %lu failed attempts: the helper keeps v%u and works as "
+                        "before; reboot the machine to try again, or flash the helper firmware over the R+D "
+                        "board's USB",
+                  static_cast<unsigned long>(g_sender.attempts()), helperVersion());
+            break;
+    }
+}
+
+// Sends what the step's action sends, then logs it. Link task only.
+void onUpdateStep(const barnacle::SendStep& s, uint32_t now) {
+    const size_t n = g_sender.frameFor(s.act, g_txSeq, g_out);
+    if (n > 0 && g_uartUp) {
+        ++g_txSeq;
+        uart_write_bytes(kUart, g_out.data(), n);
+    }
+    logUpdateStep(s, now);
+}
+
+// The embedded copy against the header the build wrote beside it.
+bool shimImageSound() {
+    constexpr std::array<uint8_t, barnacle::kDigestBytes> kDigest = BARNACLE_SHIM_DIGEST;
+    return g_sender.valid() && g_sender.imageBytes() == size_t(BARNACLE_SHIM_BYTES) && g_sender.digest() == kDigest;
 }
 
 // ---- the helper's frames --------------------------------------------------------------
@@ -171,7 +342,11 @@ void onSlow(const barnacle::Slow& s) {
 }
 
 void onFrame(const barnacle::Frame& f, uint32_t now) {
-    if (const std::optional<barnacle::Status> s = barnacle::asStatus(f)) {
+    if (const std::optional<barnacle::Ident> d = barnacle::asIdent(f)) {
+        if (g_updateOn) onUpdateStep(g_sender.onIdent(*d, now), now);
+    } else if (const std::optional<barnacle::UpdateAck> a = barnacle::asUpdateAck(f)) {
+        if (g_updateOn) onUpdateStep(g_sender.onAck(*a, now), now);
+    } else if (const std::optional<barnacle::Status> s = barnacle::asStatus(f)) {
         g_reading.status = *s;
         const bool none = s->current_ma == barnacle::kNoCurrent;
         if (none) {
@@ -187,6 +362,8 @@ void onFrame(const barnacle::Frame& f, uint32_t now) {
         }
     } else if (const std::optional<barnacle::Slow> s = barnacle::asSlow(f)) {
         onSlow(*s);
+        if (g_updateOn)
+            if (const std::optional<barnacle::SendStep> st = g_sender.onSlow(now)) onUpdateStep(*st, now);
     } else {
         GLOGW_EVERY_MS(10000, kTag, "frame type 0x%02x, %u B: not a helper frame of this version",
                        unsigned(f.type), unsigned(f.len));
@@ -225,6 +402,17 @@ void judgeFreshness(uint32_t now) {
     if (fresh == g_wasFresh) return;
     g_wasFresh = fresh;
     const barnacle::RxStats& rx = g_decoder.stats();
+    // Its own flash erases and its restart quiet the helper during an update:
+    // the update's lines say how it goes.
+    if (g_sender.updating()) {
+        if (!fresh) {
+            g_seq.reset();
+            g_rest.reset();
+            g_reading.rest_ma = barnacle::kNoCurrent;
+        }
+        GLOGI(kTag, "helper link %s during its update", fresh ? "back" : "quiet");
+        return;
+    }
     if (fresh) {
         GLOGW(kTag, "helper link UP: frames %lu, crc %lu, lost %lu",
               static_cast<unsigned long>(rx.frames), static_cast<unsigned long>(rx.crc),
@@ -259,7 +447,9 @@ void watchTrip(bool tripped, const MotionCensus& mo) {
               tripped ? "tripped" : "clear", helperSays ? "tripped" : "clear");
 }
 
-void sendCommand() {
+void sendCommand(uint32_t now) {
+    if (g_sender.transferring() && now - g_lastCommandMs < barnacle::kUpdateCommandMs) return;
+    g_lastCommandMs = now;
     const uint32_t rgb = g_rgb.load(std::memory_order_relaxed);
     barnacle::Command c;
     c.mode = g_mode;
@@ -268,9 +458,8 @@ void sendCommand() {
     c.b = uint8_t(rgb >> 16);
     c.home_trip_ma = homeTripFrom(kHomeTripMa, int16_t(g_homeRestMa.load(std::memory_order_relaxed)));
     c.run_trip_ma = kRunTripMa;
-    std::array<uint8_t, barnacle::kMaxWire> out{};
-    const size_t n = barnacle::encode(c, g_txSeq++, out);
-    if (n > 0) uart_write_bytes(kUart, out.data(), n);
+    const size_t n = barnacle::encode(c, g_txSeq++, g_out);
+    if (n > 0) uart_write_bytes(kUart, g_out.data(), n);
 }
 
 DriveLinkStatus compose(bool tripped) {
@@ -287,9 +476,10 @@ void census(uint32_t now) {
     if (int32_t(now - g_nextCensusMs) < 0) return;
     g_nextCensusMs = now + kCensusEveryMs;
     const barnacle::RxStats& rx = g_decoder.stats();
-    GLOGI(kTag, "%s mode=%s frames=%lu crc=%lu malformed=%lu version=%lu overrun=%lu lost=%lu "
+    GLOGI(kTag, "%s mode=%s upd=%s frames=%lu crc=%lu malformed=%lu version=%lu overrun=%lu lost=%lu "
                 "restarts=%lu I=%d V=%u mV trips=%u p4bad=%u",
           g_reading.fresh ? "fresh" : "STALE", barnacle::modeName(g_mode),
+          g_updateOn ? barnacle::sendStateName(g_sender.state()) : "off",
           static_cast<unsigned long>(rx.frames), static_cast<unsigned long>(rx.crc),
           static_cast<unsigned long>(rx.malformed), static_cast<unsigned long>(rx.version),
           static_cast<unsigned long>(rx.overrun), static_cast<unsigned long>(g_seq.lost()),
@@ -307,10 +497,16 @@ void taskMain(void*) {
         if (g_uartUp) drainUart(now);
         judgeFreshness(now);
         const MotionCensus mo = motionCensus();
-        g_mode = modeFor(mo.homing, motorSwitchStatus().state == motorswitch::State::on, mo.estop);
+        const motorswitch::State power = motorSwitchStatus().state;
+        g_mode = modeFor(mo.homing, power == motorswitch::State::on, mo.estop);
         const bool tripped = padTrippedConfirmed();
         watchTrip(tripped, mo);
-        if (g_uartUp) sendCommand();
+        if (g_updateOn) {
+            g_idleWhy = helperUpdateRefusal(mo, power);
+            if (const std::optional<barnacle::SendStep> st = g_sender.tick(now, g_idleWhy == nullptr, g_reading.fresh))
+                onUpdateStep(*st, now);
+        }
+        if (g_uartUp) sendCommand(now);
         g_reading.rx = g_decoder.stats();
         g_reading.lost = g_seq.lost();
         g_publishedOkMs.store(g_lastOkMs, std::memory_order_relaxed);
@@ -434,6 +630,15 @@ bool driveLinkBegin() {
     xQueueOverwrite(g_status, &first);
     // A failed UART still runs the task: the TRIP anomaly watch is a pad read.
     g_uartUp = uartBegin();
+    g_updateOn = g_uartUp && shimImageSound();
+    if (g_updateOn)
+        GLOGI(kTag, "helper firmware copy: v%u, %u B, SHA-256 %02x%02x%02x%02x", unsigned(BARNACLE_SHIM_VERSION),
+              unsigned(g_sender.imageBytes()), g_sender.digest()[0], g_sender.digest()[1], g_sender.digest()[2],
+              g_sender.digest()[3]);
+    else if (g_uartUp)
+        GLOGE(kTag, "helper firmware copy in this image failed its check (%u B, expected %u): the helper is "
+                    "not updated this boot; rebuild the barnacle image",
+              unsigned(g_sender.imageBytes()), unsigned(BARNACLE_SHIM_BYTES));
     if (xTaskCreatePinnedToCore(&taskMain, "DriveLnk", kDriveLinkTaskStackBytes, nullptr, 2, &g_task, 0) !=
         pdPASS) {
         g_task = nullptr;

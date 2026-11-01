@@ -32,6 +32,9 @@
 //   (HomeSense::lost()) and the arbiter unloads a sensed leg, then fails the
 //   cycle unhomed with that reason. Stale while running is a health message
 //   only: the drive keeps its own overcurrent protection.
+// - The helper's firmware update runs on the same task, idle only
+//   (BarnacleLink.cpp helperUpdateRefusal(), lib/barnacle_link
+//   barnacle_update.hpp): this firmware carries the helper's image.
 // - Declarations and hardware-free policy only: the native suite compiles
 //   this file (test_barnacle_link).
 // See: lib/barnacle_link/include/barnacle_link/barnacle_link.hpp, BoardPins.h
