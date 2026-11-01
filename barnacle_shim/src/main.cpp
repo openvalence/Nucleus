@@ -25,9 +25,19 @@
 //   and none until barnacle::CurrentZero has measured the 0 A output in idle
 //   (bd val-hjf7): no current, no TRIP. Homing trips on the
 //   kHomeAverageSamples mean, running on the raw sample (tripInput()).
+// - THE P4 UPDATES THIS IMAGE over the link (barnacle_update.hpp, bd
+//   val-omh3.7): into the spare OTA slot, esp_ota_end() checking it, then a
+//   restart onto it ON TRIAL. verifyRollbackLater() keeps the core from
+//   keeping a new image at boot: only the P4's KEEP does, and a trial
+//   unkept inside barnacle::kTrialMs reverts. The loop task is on the task
+//   watchdog, so a hung image resets, and a reset on trial boots the
+//   previous image. The update frames are FROZEN: this image must always
+//   answer them, or the next shim needs USB.
+// - Samples run late while an update writes flash (a sector erase holds the
+//   loop); the P4 sends an update only while the machine is idle.
 // See: ../lib/barnacle_link/include/barnacle_link/barnacle_link.hpp,
-// openvalence.github.io guides/barnacle (the WROOM helper pin map), bd
-// val-omh3.3
+// barnacle_update.hpp, openvalence.github.io guides/barnacle (the WROOM
+// helper pin map), bd val-omh3.3
 
 #include <Arduino.h>
 
@@ -40,11 +50,19 @@
 #include <esp_adc/adc_cali_scheme.h>
 #include <esp_adc/adc_oneshot.h>
 #include <esp_attr.h>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <esp_timer.h>
 
 #include "barnacle_link/barnacle_link.hpp"
+#include "barnacle_link/barnacle_update.hpp"
 #include "flux/flux_core.hpp"
+
+// The core keeps a PENDING_VERIFY image at boot unless this says later
+// (esp32-hal-misc.c initArduino()). Always later: the P4's KEEP decides.
+extern "C" bool verifyRollbackLater() { return true; }
 
 namespace {
 
@@ -68,7 +86,8 @@ constexpr uart_port_t kUart = UART_NUM_1;
 
 // ---- THE KNOBS ---------------------------------------------------------------------
 
-constexpr uint8_t kShimVersion = 4;
+// 5: the first that takes updates over the link.
+constexpr uint8_t kShimVersion = 5;
 constexpr uint32_t kCpuMhz = 80;
 
 // The CH701's slope at the sensor pin (before the divider). A placeholder: the
@@ -167,6 +186,41 @@ private:
     flux::Rgb _shown{};
 };
 
+// ---- the update's sink: the spare OTA slot ----------------------------------
+
+// Sequential writes erase each sector as the image reaches it, so no erase
+// holds the loop longer than one sector.
+class OtaSink final : public barnacle::UpdateSink {
+public:
+    uint32_t capacity() const override {
+        const esp_partition_t* p = esp_ota_get_next_update_partition(nullptr);
+        return p != nullptr ? uint32_t(p->size) : 0;
+    }
+    bool begin(uint32_t) override {
+        _part = esp_ota_get_next_update_partition(nullptr);
+        _open = _part != nullptr && esp_ota_begin(_part, OTA_WITH_SEQUENTIAL_WRITES, &_handle) == ESP_OK;
+        return _open;
+    }
+    bool write(std::span<const uint8_t> bytes) override {
+        return _open && esp_ota_write(_handle, bytes.data(), bytes.size()) == ESP_OK;
+    }
+    // esp_ota_end() frees the handle whatever it returns.
+    bool finish() override {
+        if (!_open) return false;
+        _open = false;
+        return esp_ota_end(_handle) == ESP_OK && esp_ota_set_boot_partition(_part) == ESP_OK;
+    }
+    void abort() override {
+        if (_open) esp_ota_abort(_handle);
+        _open = false;
+    }
+
+private:
+    const esp_partition_t* _part = nullptr;
+    esp_ota_handle_t _handle = 0;
+    bool _open = false;
+};
+
 // ---- state: the loop task's alone ----------------------------------------------------
 
 Adc1 g_adc;
@@ -203,6 +257,11 @@ uint32_t g_slowTurn = 0;
 bool g_tripOut = false;
 uint8_t g_resetReason = 0;
 
+OtaSink g_sink;
+barnacle::UpdateReceiver g_update(g_sink);
+std::optional<barnacle::TrialGate> g_trial;   // set by readIdentity() in setup()
+barnacle::Ident g_ident;                      // shim_version and digest set there too
+
 ShimPixel g_pixel;
 flux::GlowEngine g_engine(g_pixel);
 flux::Rgb g_ledNow{1, 1, 1};   // never a real color: forces the first write
@@ -211,6 +270,20 @@ uint32_t g_ledAtMs = 0;
 uint32_t nowMs() { return uint32_t(esp_timer_get_time() / 1000); }
 
 // ---- boot ----------------------------------------------------------------------------
+
+// The running image's digest (the SHA-256 esptool appended, checked against
+// the flash here) and whether it is on trial.
+void readIdentity() {
+    g_ident.shim_version = kShimVersion;
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    std::array<uint8_t, barnacle::kDigestBytes> sha{};
+    if (running != nullptr && esp_partition_get_sha256(running, sha.data()) == ESP_OK)
+        for (size_t k = 0; k < barnacle::kIdentDigestBytes; ++k) g_ident.digest[k] = sha[k];
+    esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
+    const bool onTrial = running != nullptr && esp_ota_get_state_partition(running, &st) == ESP_OK &&
+                         st == ESP_OTA_IMG_PENDING_VERIFY;
+    g_trial.emplace(onTrial, g_ident.digest);
+}
 
 void countBoot() {
     const esp_reset_reason_t why = esp_reset_reason();
@@ -239,7 +312,38 @@ bool uartBegin() {
 
 // ---- the link ------------------------------------------------------------------------
 
-void onCommand(const barnacle::Frame& f, int64_t now) {
+void send(size_t n, const std::array<uint8_t, barnacle::kMaxWire>& out) {
+    if (g_uartOk && n > 0) uart_write_bytes(kUart, out.data(), n);
+}
+
+void onTrialStep(const barnacle::TrialStep& s) {
+    if (s.act == barnacle::TrialAct::mark_valid) esp_ota_mark_app_valid_cancel_rollback();
+    // Restarts into the previous image; returns only when there is none.
+    if (s.act == barnacle::TrialAct::revert) esp_ota_mark_app_invalid_rollback_and_reboot();
+}
+
+// The verified image is set to boot: the ack goes out, then the restart.
+void restartIntoUpdate() {
+    uart_wait_tx_done(kUart, pdMS_TO_TICKS(100));
+    esp_restart();
+}
+
+void onFrame(const barnacle::Frame& f, int64_t now) {
+    if (f.version == barnacle::kUpdateVersion) {
+        if (const std::optional<barnacle::UpdateKeep> k = barnacle::asUpdateKeep(f)) {
+            onTrialStep(g_trial->onKeep(*k));
+            return;
+        }
+        const std::optional<barnacle::UpdateAck> a = g_update.onFrame(f, uint32_t(now / 1000), g_trial->onTrial());
+        if (!a) {
+            ++g_badCommands;
+            return;
+        }
+        std::array<uint8_t, barnacle::kMaxWire> out{};
+        send(barnacle::encode(*a, g_txSeq++, out), out);
+        if (g_update.state() == barnacle::RecvState::done) restartIntoUpdate();
+        return;
+    }
     const std::optional<barnacle::Command> c = barnacle::asCommand(f);
     if (!c) {
         ++g_badCommands;
@@ -257,7 +361,7 @@ void drainUart(int64_t now) {
     if (uart_get_buffered_data_len(kUart, &waiting) != ESP_OK || waiting == 0) return;
     const int n = uart_read_bytes(kUart, chunk.data(), uint32_t(waiting < chunk.size() ? waiting : chunk.size()), 0);
     for (int i = 0; i < n; ++i)
-        if (const std::optional<barnacle::Frame> f = g_decoder.feed(chunk[size_t(i)])) onCommand(*f, now);
+        if (const std::optional<barnacle::Frame> f = g_decoder.feed(chunk[size_t(i)])) onFrame(*f, now);
 }
 
 bool p4Silent(int64_t now) {
@@ -267,10 +371,6 @@ bool p4Silent(int64_t now) {
 uint16_t badFrames() {
     const barnacle::RxStats& s = g_decoder.stats();
     return uint16_t(s.crc + s.version + s.malformed + s.overrun + g_badCommands);
-}
-
-void send(size_t n, const std::array<uint8_t, barnacle::kMaxWire>& out) {
-    if (g_uartOk && n > 0) uart_write_bytes(kUart, out.data(), n);
 }
 
 void sendStatus(int64_t now) {
@@ -302,6 +402,8 @@ void sendStatus(int64_t now) {
     w.late_samples = g_late;
     w.shim_version = kShimVersion;
     send(barnacle::encode(w, g_txSeq++, out), out);
+    g_ident.flags = g_trial->onTrial() ? barnacle::kIdentTrial : 0;
+    send(barnacle::encode(g_ident, g_txSeq++, out), out);
 }
 
 // ---- the samples ----------------------------------------------------------------------
@@ -378,6 +480,7 @@ void setup() {
     pinMode(kPinButton, INPUT_PULLDOWN);
     pinMode(kPinSpareIn, INPUT);
     countBoot();
+    readIdentity();
     g_adcOk = g_adc.begin();
     g_uartOk = uartBegin();
     g_engine.setBrightness(kOwnBrightness);
@@ -385,6 +488,9 @@ void setup() {
     // No ADC is a fault the P4 must see at once: current reads none, and the
     // pixel says Safety until a P4 color replaces it.
     if (!g_adcOk) g_engine.set(flux::System::Safety, flux::Status::Urgent);
+    // Fed every status period (loop()): a hang past the watchdog's timeout
+    // panics and resets, and a reset on trial reverts.
+    esp_task_wdt_add(nullptr);
     const int64_t now = esp_timer_get_time();
     g_nextSampleUs = now;
     g_nextStatusUs = now;
@@ -407,6 +513,10 @@ void loop() {
         g_nextStatusUs += barnacle::kStatusPeriodUs;
         if (now - g_nextStatusUs > int64_t(barnacle::kStatusPeriodUs)) g_nextStatusUs = now + barnacle::kStatusPeriodUs;
         sendStatus(now);
+        esp_task_wdt_reset();
+        const uint32_t ms = uint32_t(now / 1000);
+        g_update.tick(ms);
+        if (const std::optional<barnacle::TrialStep> t = g_trial->tick(ms)) onTrialStep(*t);
     }
     serviceLed(now);
 }

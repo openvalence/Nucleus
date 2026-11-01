@@ -210,5 +210,8 @@ Quadrature on LPG1/LPG0, TRIP on LPG8 (the home sense and the running stop),
 the helper link on G27/G26 (`system/BarnacleLink.h`, frames in
 `lib/barnacle_link`), and no motor switch, monitors, E-stop input or Modbus
 (`system/BarnacleBoard.cpp`; those self-check rows read ABSENT). The helper
-firmware is `barnacle_shim/`. Wiring, power and the J8 pinout:
-openvalence.github.io `guides/barnacle`.
+firmware is `barnacle_shim/`; the barnacle image carries a copy and installs
+it over the helper link while the machine is idle
+(`lib/barnacle_link/include/barnacle_link/barnacle_update.hpp`), so from
+helper v5 on the R+D board's USB is the recovery path only. Wiring, power and
+the J8 pinout: openvalence.github.io `guides/barnacle`.

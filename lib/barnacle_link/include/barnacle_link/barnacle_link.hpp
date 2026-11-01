@@ -6,7 +6,8 @@
 // - Header-only, hardware-free, allocation-free, no exceptions. The P4 (IDF),
 //   the shim (Arduino ESP32) and the native suite compile this one file.
 // - THE ONE HOME of every link number: baud, rates, timeouts, frame layouts
-//   and the trip detector's timing. Neither firmware restates one.
+//   and the trip detector's timing; the update layer's timing and state
+//   machines are barnacle_update.hpp's. Neither firmware restates one.
 // - On the wire a frame is COBS(payload) then one 0x00. The payload is
 //   version, type, seq, body, then CRC-16/CCITT-FALSE (poly 0x1021, init
 //   0xFFFF) over version..body, low byte first. Every multi-byte field is
@@ -14,10 +15,12 @@
 // - Each sender keeps ONE sequence counter across all of its frame types;
 //   the receiver counts the gaps as lost frames.
 // - A layout change bumps kVersion: a receiver drops every frame of another
-//   version and counts it, never guesses at its fields.
+//   version and counts it, never guesses at its fields. The update layer's
+//   frames carry kUpdateVersion instead and are FROZEN (below).
 // - Bandwidth: a status frame is 14 bytes on the wire, 70 kbit/s at 500 Hz,
-//   with the slow frame's 3 kbit/s beside it, inside 115200 baud. A field
-//   added to the status frame costs 5 kbit/s per byte.
+//   with the slow frame's 3 kbit/s and the ident frame's 1.3 kbit/s beside
+//   it, inside 115200 baud. A field added to the status frame costs 5 kbit/s
+//   per byte.
 // See: Nucleus flagship_p4/src/system/BarnacleLink.h (the P4 side),
 // barnacle_shim/src/main.cpp (the helper side), openvalence.github.io
 // guides/barnacle (the wiring)
@@ -35,6 +38,15 @@ namespace barnacle {
 // ---- the link's numbers ----------------------------------------------------
 
 inline constexpr uint8_t  kVersion = 1;
+// THE UPDATE LAYER IS FROZEN: the ident and update frames carry this version
+// byte, and it, their types, their layouts and their ack codes never change,
+// so any P4 can update any shim from v5 on, whatever kVersion either speaks.
+// A change here strands every helper in the field on USB.
+inline constexpr uint8_t  kUpdateVersion = 0xF0;
+static_assert(kVersion < kUpdateVersion, "kVersion counts up under the update layer's byte");
+// 115200 is the floor every barnacle has run. A faster baud needs a bench
+// A/B first: the helper's TX reaches the P4 through Q5's open collector and a
+// 10k pull-up, so a faster edge is the board's to prove.
 inline constexpr uint32_t kBaud = 115200;
 
 // Helper to P4: one status frame every kStatusPeriodUs, one slow frame every
@@ -109,6 +121,14 @@ enum class Type : uint8_t {
     status  = 0x01,   // helper to P4, kStatusPeriodUs
     slow    = 0x02,   // helper to P4, every kSlowEvery status frames
     command = 0x81,   // P4 to helper, kCommandPeriodMs
+    // The update layer, kUpdateVersion only (FROZEN, below).
+    ident        = 0x10,   // helper to P4, after every slow frame
+    update_ack   = 0x11,   // helper to P4, one per update frame it answers
+    update_begin = 0x90,   // P4 to helper: size and digest of the image
+    update_data  = 0x91,   // P4 to helper: one chunk
+    update_end   = 0x92,   // P4 to helper: every chunk sent, verify and boot it
+    update_abort = 0x93,   // P4 to helper: drop the update
+    update_keep  = 0x94,   // P4 to helper: keep the image on trial
 };
 
 // What the P4 is doing, which picks the helper's active threshold. Wire
@@ -183,13 +203,17 @@ struct Command {
 
 inline constexpr size_t kHeaderBytes = 3;   // version, type, seq
 inline constexpr size_t kCrcBytes = 2;
-inline constexpr size_t kMaxBody = 24;
+// The update layer's chunk (FROZEN): one data frame is a u16 index and this
+// many image bytes, one COBS block on the wire (under 254 bytes).
+inline constexpr size_t kChunkBytes = 240;
+inline constexpr size_t kMaxBody = 2 + kChunkBytes;
 inline constexpr size_t kMaxPayload = kHeaderBytes + kMaxBody + kCrcBytes;
 // COBS adds one byte per 254 and the delimiter one more.
 inline constexpr size_t kMaxWire = kMaxPayload + kMaxPayload / 254 + 2;
 
 static_assert(Status::kBytes <= kMaxBody && Slow::kBytes <= kMaxBody && Command::kBytes <= kMaxBody,
               "a body outgrew kMaxBody");
+static_assert(kMaxPayload < 254, "a data frame is one COBS block");
 
 // ---- CRC ---------------------------------------------------------------------
 
@@ -303,10 +327,11 @@ constexpr bool validMode(uint8_t m) { return m <= uint8_t(Mode::running); }
 
 // One frame onto the wire form, delimiter included. Returns its length, 0 when
 // `out` is too small or the body too long.
-inline size_t encodeFrame(Type type, uint8_t seq, std::span<const uint8_t> body, std::span<uint8_t> out) {
+inline size_t encodeFrame(Type type, uint8_t seq, std::span<const uint8_t> body, std::span<uint8_t> out,
+                          uint8_t version = kVersion) {
     if (body.size() > kMaxBody) return 0;
     std::array<uint8_t, kMaxPayload> p{};
-    p[0] = kVersion;
+    p[0] = version;
     p[1] = uint8_t(type);
     p[2] = seq;
     for (size_t k = 0; k < body.size(); ++k) p[kHeaderBytes + k] = body[k];
@@ -336,8 +361,10 @@ inline size_t encode(const Command& c, uint8_t seq, std::span<uint8_t> out) {
 
 // ---- decoding ----------------------------------------------------------------
 
-// One verified frame: the version matched, the CRC held.
+// One verified frame: the CRC held, the version is kVersion or the update
+// layer's kUpdateVersion.
 struct Frame {
+    uint8_t version = kVersion;
     Type type = Type::status;
     uint8_t seq = 0;
     std::array<uint8_t, kMaxBody> body{};
@@ -347,7 +374,7 @@ struct Frame {
 };
 
 inline std::optional<Status> asStatus(const Frame& f) {
-    if (f.type != Type::status || f.len != Status::kBytes) return std::nullopt;
+    if (f.version != kVersion || f.type != Type::status || f.len != Status::kBytes) return std::nullopt;
     const std::span<const uint8_t> b = f.bytes();
     Status s;
     s.flags = b[0];
@@ -357,7 +384,8 @@ inline std::optional<Status> asStatus(const Frame& f) {
     return s;
 }
 inline std::optional<Slow> asSlow(const Frame& f) {
-    if (f.type != Type::slow || f.len != Slow::kBytes || !validMode(f.body[7])) return std::nullopt;
+    if (f.version != kVersion || f.type != Type::slow || f.len != Slow::kBytes || !validMode(f.body[7]))
+        return std::nullopt;
     const std::span<const uint8_t> b = f.bytes();
     Slow s;
     s.uptime_ms = getU32(b, 0);
@@ -375,7 +403,8 @@ inline std::optional<Slow> asSlow(const Frame& f) {
     return s;
 }
 inline std::optional<Command> asCommand(const Frame& f) {
-    if (f.type != Type::command || f.len != Command::kBytes || !validMode(f.body[0])) return std::nullopt;
+    if (f.version != kVersion || f.type != Type::command || f.len != Command::kBytes || !validMode(f.body[0]))
+        return std::nullopt;
     const std::span<const uint8_t> b = f.bytes();
     Command c;
     c.mode = Mode(b[0]);
@@ -387,11 +416,179 @@ inline std::optional<Command> asCommand(const Frame& f) {
     return c;
 }
 
+// ---- the update layer's frames (FROZEN, kUpdateVersion) ---------------------
+// The image is the shim's app .bin as esptool writes it: its last
+// kDigestBytes are the SHA-256 of everything before them, and that digest
+// names the build. The helper reports the first kIdentDigestBytes of its
+// running image's digest; the P4 begins with all of it, and the helper
+// accepts the image only when the image's own tail is that digest and
+// esp_ota_end() has checked the bytes in flash against it.
+
+inline constexpr size_t kDigestBytes = 32;
+inline constexpr size_t kIdentDigestBytes = 8;
+using Digest = std::array<uint8_t, kDigestBytes>;
+using IdentDigest = std::array<uint8_t, kIdentDigestBytes>;
+
+inline constexpr uint8_t kIdentTrial = 0x01;   // the running image is on trial (not yet kept)
+
+// Helper to P4, after every slow frame.
+struct Ident {
+    uint8_t shim_version = 0;
+    IdentDigest digest{};
+    uint8_t flags = 0;
+
+    static constexpr size_t kBytes = 10;
+    bool operator==(const Ident&) const = default;
+};
+
+struct UpdateBegin {
+    uint32_t size = 0;   // image bytes, its digest included
+    Digest digest{};
+
+    static constexpr size_t kBytes = 36;
+    bool operator==(const UpdateBegin&) const = default;
+};
+
+// A data frame's body: the chunk index, then kChunkBytes of image (fewer only
+// in the last chunk). Chunk i starts at byte i * kChunkBytes.
+struct UpdateData {
+    uint16_t index = 0;
+    std::span<const uint8_t> bytes;
+};
+
+struct UpdateKeep {
+    IdentDigest digest{};   // the image to keep: one on trial with another digest is not kept
+
+    static constexpr size_t kBytes = 8;
+};
+
+// The helper's answer to an update frame. Wire ordinals.
+enum class AckCode : uint8_t {
+    ok          = 0,   // begun, or a chunk stored: `next` is the chunk wanted
+    done        = 1,   // the image verified and set to boot: the helper restarts on it
+    no_session  = 2,   // a data or end frame with no update open (the helper restarted)
+    on_trial    = 3,   // the running image is on trial: no update until it is kept or reverted
+    too_big     = 4,   // the image does not fit the helper's spare slot
+    flash       = 5,   // the spare slot would not erase or write
+    malformed   = 6,   // a size, chunk length or index that cannot be the image's
+    short_image = 7,   // end before every byte arrived
+    digest      = 8,   // the image's own digest is not the one begun
+    image       = 9,   // the helper's image check refused it (header, chip, SHA-256)
+};
+inline constexpr uint8_t kAckCodes = 10;
+
+constexpr const char* ackCodeText(AckCode c) {
+    switch (c) {
+        case AckCode::ok:          return "ok";
+        case AckCode::done:        return "verified";
+        case AckCode::no_session:  return "the helper had no update open (it restarted mid-transfer)";
+        case AckCode::on_trial:    return "the helper's running firmware is not yet confirmed";
+        case AckCode::too_big:     return "the image is larger than the helper's spare firmware space";
+        case AckCode::flash:       return "the helper's flash would not erase or write";
+        case AckCode::malformed:   return "the helper received a chunk that cannot be part of the image";
+        case AckCode::short_image: return "the helper was missing part of the image";
+        case AckCode::digest:      return "the image's SHA-256 did not match the one announced";
+        case AckCode::image:       return "the helper's image check refused it";
+    }
+    return "an unknown answer";
+}
+
+struct UpdateAck {
+    AckCode code = AckCode::ok;
+    uint16_t next = 0;
+
+    static constexpr size_t kBytes = 3;
+    bool operator==(const UpdateAck&) const = default;
+};
+
+// The number of chunks an image of `size` bytes takes.
+constexpr uint32_t chunkCount(uint32_t size) {
+    return (size + uint32_t(kChunkBytes) - 1) / uint32_t(kChunkBytes);
+}
+// The largest image the update layer can carry: the index is a u16.
+inline constexpr uint32_t kMaxImageBytes = 65535u * uint32_t(kChunkBytes);
+
+inline size_t encode(const Ident& d, uint8_t seq, std::span<uint8_t> out) {
+    std::array<uint8_t, Ident::kBytes> b{};
+    b[0] = d.shim_version;
+    for (size_t k = 0; k < kIdentDigestBytes; ++k) b[1 + k] = d.digest[k];
+    b[9] = d.flags;
+    return encodeFrame(Type::ident, seq, b, out, kUpdateVersion);
+}
+inline size_t encode(const UpdateAck& a, uint8_t seq, std::span<uint8_t> out) {
+    std::array<uint8_t, UpdateAck::kBytes> b{};
+    b[0] = uint8_t(a.code);
+    putU16(b, 1, a.next);
+    return encodeFrame(Type::update_ack, seq, b, out, kUpdateVersion);
+}
+inline size_t encode(const UpdateBegin& u, uint8_t seq, std::span<uint8_t> out) {
+    std::array<uint8_t, UpdateBegin::kBytes> b{};
+    putU32(b, 0, u.size);
+    for (size_t k = 0; k < kDigestBytes; ++k) b[4 + k] = u.digest[k];
+    return encodeFrame(Type::update_begin, seq, b, out, kUpdateVersion);
+}
+inline size_t encode(const UpdateData& u, uint8_t seq, std::span<uint8_t> out) {
+    if (u.bytes.size() > kChunkBytes) return 0;
+    std::array<uint8_t, kMaxBody> b{};
+    putU16(b, 0, u.index);
+    for (size_t k = 0; k < u.bytes.size(); ++k) b[2 + k] = u.bytes[k];
+    return encodeFrame(Type::update_data, seq, std::span<const uint8_t>(b.data(), 2 + u.bytes.size()), out,
+                       kUpdateVersion);
+}
+inline size_t encode(const UpdateKeep& u, uint8_t seq, std::span<uint8_t> out) {
+    return encodeFrame(Type::update_keep, seq, u.digest, out, kUpdateVersion);
+}
+// END and ABORT carry no body.
+inline size_t encodeBare(Type t, uint8_t seq, std::span<uint8_t> out) {
+    if (t != Type::update_end && t != Type::update_abort) return 0;
+    return encodeFrame(t, seq, std::span<const uint8_t>(), out, kUpdateVersion);
+}
+
+inline bool isUpdateFrame(const Frame& f, Type t) { return f.version == kUpdateVersion && f.type == t; }
+
+inline std::optional<Ident> asIdent(const Frame& f) {
+    if (!isUpdateFrame(f, Type::ident) || f.len != Ident::kBytes) return std::nullopt;
+    Ident d;
+    d.shim_version = f.body[0];
+    for (size_t k = 0; k < kIdentDigestBytes; ++k) d.digest[k] = f.body[1 + k];
+    d.flags = f.body[9];
+    return d;
+}
+inline std::optional<UpdateAck> asUpdateAck(const Frame& f) {
+    if (!isUpdateFrame(f, Type::update_ack) || f.len != UpdateAck::kBytes || f.body[0] >= kAckCodes)
+        return std::nullopt;
+    UpdateAck a;
+    a.code = AckCode(f.body[0]);
+    a.next = getU16(f.bytes(), 1);
+    return a;
+}
+inline std::optional<UpdateBegin> asUpdateBegin(const Frame& f) {
+    if (!isUpdateFrame(f, Type::update_begin) || f.len != UpdateBegin::kBytes) return std::nullopt;
+    UpdateBegin u;
+    u.size = getU32(f.bytes(), 0);
+    for (size_t k = 0; k < kDigestBytes; ++k) u.digest[k] = f.body[4 + k];
+    return u;
+}
+// The view points into `f`: it lives as long as the frame.
+inline std::optional<UpdateData> asUpdateData(const Frame& f) {
+    if (!isUpdateFrame(f, Type::update_data) || f.len < 2) return std::nullopt;
+    UpdateData u;
+    u.index = getU16(f.bytes(), 0);
+    u.bytes = f.bytes().subspan(2);
+    return u;
+}
+inline std::optional<UpdateKeep> asUpdateKeep(const Frame& f) {
+    if (!isUpdateFrame(f, Type::update_keep) || f.len != UpdateKeep::kBytes) return std::nullopt;
+    UpdateKeep u;
+    for (size_t k = 0; k < kIdentDigestBytes; ++k) u.digest[k] = f.body[k];
+    return u;
+}
+
 // What the receiver threw away, by cause. Each wraps.
 struct RxStats {
     uint32_t frames = 0;      // verified frames handed out
     uint32_t crc = 0;         // decoded, CRC wrong: noise, or a frame joined mid-way
-    uint32_t version = 0;     // CRC held, another kVersion
+    uint32_t version = 0;     // CRC held, neither kVersion nor kUpdateVersion
     uint32_t malformed = 0;   // not COBS, or shorter than a header and a CRC
     uint32_t overrun = 0;     // longer than kMaxWire before a delimiter
 };
@@ -439,11 +636,12 @@ private:
             ++_stats.crc;
             return std::nullopt;
         }
-        if (p[0] != kVersion) {
+        if (p[0] != kVersion && p[0] != kUpdateVersion) {
             ++_stats.version;
             return std::nullopt;
         }
         Frame f;
+        f.version = p[0];
         f.type = Type(p[1]);
         f.seq = p[2];
         f.len = uint8_t(covered - kHeaderBytes);

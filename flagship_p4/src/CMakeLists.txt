@@ -17,8 +17,16 @@
 # (CONFIG_NUCLEUS_BOARD_BARNACLE, BoardPins.h) the helper link's
 # (system/BarnacleLink.cpp) and the absent parts' (system/BarnacleBoard.cpp).
 # lib/barnacle_link is the link's frames, header-only, shared with the shim.
+# The barnacle also carries the shim's image, which shim_image.py (a pre-script
+# of that env alone) builds into $BUILD_DIR/barnacle_shim with its header;
+# both are build products, never sources.
 if(CONFIG_NUCLEUS_BOARD_BARNACLE)
     set(board_io_srcs "system/BarnacleLink.cpp" "system/BarnacleBoard.cpp")
+    set(shim_image_dir "${CMAKE_BINARY_DIR}/barnacle_shim")
+    if(NOT EXISTS "${shim_image_dir}/barnacle_shim.bin" OR NOT EXISTS "${shim_image_dir}/barnacle_shim_image.h")
+        message(FATAL_ERROR "no helper shim image in ${shim_image_dir}: build with "
+                            "pio run -d flagship_p4 -e flagship_p4_barnacle, whose shim_image.py makes it")
+    endif()
 else()
     set(board_io_srcs "system/ValenceMotorSwitch.cpp" "system/ValenceDriveLink.cpp"
                       "system/ValenceEstopInput.cpp" "system/ValenceFan.cpp"
@@ -71,6 +79,12 @@ idf_component_register(SRCS "main.cpp"
 # emits fmadd.s, and the planner must match kinetic.wasm and the native suite,
 # both built -ffp-contract=off, bit for bit. Do not drop it for speed.
 target_compile_options(${COMPONENT_LIB} PRIVATE -ffp-contract=off)
+
+# The helper's image, as _binary_barnacle_shim_bin_start/_end (BarnacleLink.cpp).
+if(CONFIG_NUCLEUS_BOARD_BARNACLE)
+    target_add_binary_data(${COMPONENT_LIB} "${shim_image_dir}/barnacle_shim.bin" BINARY)
+    target_include_directories(${COMPONENT_LIB} PRIVATE "${shim_image_dir}")
+endif()
 
 # lwIP's segment output hook (system/ValenceTcpHook.h): IDF includes the file
 # named by ESP_IDF_LWIP_HOOK_FILENAME from lwip_default_hooks.h, so only the
