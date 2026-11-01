@@ -15,6 +15,9 @@ include path. Geiger's IDF glue is live; Flux's is
 - `GLOGT/D/I/W/E/F("tag", fmt, ...)` from any task, either core. Bounded
   format plus spinlock slot copy; never blocks, never allocates, NOT ISR-safe.
 - Throttle with `GLOGx_EVERY_MS`. Compile floor `GEIGER_COMPILE_LEVEL`.
+- A log line's wording follows `strings.md` (the user-visible string
+  standard and its string pass); this file rules the macros, tags, levels
+  and sinks.
 - **ONE drain point**, on one task, with sinks implementing `geiger::ISink`
   registered in one place. The hub task is that task
   (`geiger::drainToSinks`); the archive sink is

@@ -15,6 +15,7 @@ This file is documentation, not policy: the Canon and the repo's rules files rul
 | `.claude/rules/navigation.md` | code navigation: discovery, then ground truth |
 | `.claude/rules/repo-layout.md` | where files go |
 | `.claude/rules/serena.md` | Serena and clangd navigation upkeep |
+| `.claude/rules/strings.md` | the user-visible string standard and the string pass, one home for every repo and the site |
 | `.claude/rules/subsystem-map.md` | where things already are |
 | `.claude/rules/transport.md` | transport and the Valence boundary |
 | Lint (zero findings is the bar) | `python tools/canon_lint.py` (Python 3.10 with codespell) |
