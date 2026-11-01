@@ -202,7 +202,8 @@ esp_err_t handleGet(httpd_req_t* req) {
     // route of its own: "the new version answers" only proves the image
     // booted, and one that boots but never buys itself is a single reset from
     // being gone. The deploy tool reads this line.
-    // git= is the commit the image was built from (flagship_p4/git_label.py);
+    // git= is esp_app_desc's version: the board's product, then the commit the
+    // image was built from (flagship_p4/CMakeLists.txt, git_label.py);
     // FIRMWARE_VERSION stays the second field, the one ota.py parses.
     out.emit("# %s %s git=%s slot=%s img=%s boot=%lu reset=%s up=%lus\n",
              VALENCE_HUB_NAME, FIRMWARE_VERSION, esp_app_get_description()->version,

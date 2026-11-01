@@ -159,8 +159,16 @@ live in `flagship_p4/src/system/ValenceOta.h` (C-1); in short:
 - **`ota.py` reporting the old version back is the ROLLBACK WORKING**, not a
   broken tool. Read `/diag` for `reset=TASK-WDT` and the previous boot's
   breadcrumbs before blaming the transfer.
-- The running slot is never written, so a truncated body or a wrong magic
-  costs an unusable spare slot and nothing else. Both are refused with 400.
+- **This board's image or nothing** (bd val-3yls). The image's app
+  descriptor names its board (`<product>/<git label>`: `nucleus-p4` the
+  Flagship, `nucleus-p4b` the barnacle; `flagship_p4/CMakeLists.txt`). The
+  hub reads it from the first chunk and answers 409 with a plain reason
+  before anything is erased when it is another board's or names none (an
+  image built before the board went in): those go over USB. A bench image
+  is a Flagship image.
+- The running slot is never written, so a truncated body costs an unusable
+  spare slot and nothing else; it is refused with 400. A body that is not an
+  app image is refused with 400 before the spare slot is erased.
 - **Serial is the rescue path**, and the one case that REQUIRES it is a
   partition-table change: the table is flashed only by
   `pio run -d flagship_p4 -t upload`.

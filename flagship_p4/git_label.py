@@ -1,5 +1,6 @@
 # PlatformIO pre-script, run on every `pio run`: the git label that lands in
-# esp_app_desc.version (the boot log's "App version", /diag's git=).
+# esp_app_desc.version after the board's product (CMakeLists.txt; the boot
+# log's "App version", /diag's git=).
 #
 # pio re-runs CMake only when a CMakeLists, sdkconfig or the framework
 # changes (espidf.py is_cmake_reconfigure_required), never when HEAD moves,
