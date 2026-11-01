@@ -1,6 +1,20 @@
 # Changelog
 
-Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
+Newest first. Each entry has two parts: what you will notice, and what changed in the code. Release images are published as prereleases on the web flasher (https://openvalence.org/flash/); versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
+
+## 0.1.81 (2026-11-01)
+
+### For users
+
+- **An update for another board is refused before anything is written.** A Flagship image sent to a barnacle (or a barnacle image to a Flagship) used to install, boot with the wrong pins and read the wrong PAIR button, so only USB could bring it back. The machine now reads the image's board from its first bytes and answers "image is for the barnacle, this machine is a Flagship" (or the reverse); both slots stay as they were. A bench image is a Flagship image.
+- **Images built before 0.1.81 no longer install over the network.** They name no board, so the machine answers "image names no board (an older build): flash it over USB". Going back to 0.1.80 or earlier is a USB flash.
+- **The PAIR press is spent even when the image is refused:** press again for the next try.
+- Phosphor shows each image's board ("Flagship image", "Barnacle image") and says before asking for PAIR when the machine will refuse it.
+
+### Technical
+
+- val-3yls, commit e62cf4c (merged c1046be): `esp_app_desc.version` is `<product>/<git label>` (`nucleus-p4`, `nucleus-p4b`), set in `flagship_p4/CMakeLists.txt` from the env's Kconfig overlay; `ValenceOta.cpp` refuses to build when the sdkconfig names another board. `POST /ota` reads the first 288 B and `OtaArm.h imageFit()` decides before `esp_ota_begin`: 409 for another board or none, 400 for a body that is not an app image (before, that 400 came after the spare slot was erased). `/diag` `git=` carries the product. Suite `test_ota_arm` OA-13..OA-16.
+- The first image with the gate must arrive the old way (0.1.80 accepts any image); from then on, every network update is checked.
 
 ## 0.1.80 (2026-10-31)
 
