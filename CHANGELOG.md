@@ -2,6 +2,20 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. No release images are published yet; versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.80 (2026-10-31)
+
+### For users
+
+- **Flagship: the board monitor no longer cuts the input stage at every boot.** Its cut line now starts low and goes high only on a cut: input over 40 V for 10 ms, the shunt past 125 C for 100 ms with no regen, or a commanded cut. Levels are not final.
+- **Flagship: motor voltage lost while the motor switch is on is a fault.** MOTOR_V+ under about 16.4 V latches ESTOP like the switch's other local faults (motion-control.md). A sag the drive still runs on never reaches it.
+- **Flagship: a USB-only boot no longer drives the LED** while +5V reads more than 0.5 V under +5V_SYS.
+- Barnacle and bench: no intended change; `nucleus-p4b` 0.1.79 stands for the barnacle.
+
+### Technical
+
+- The 2026-10-30 Flagship review's firmware fixes (B7, M5, M6, the LED gate, minors), commit 1116bb6: `flagship_ch32v003` PC5 is MON_CUT (low, push-pull, before anything else), PD0 MSW_FLT_T floating; SV_F_MSW_OT; STATUS 37 -> 39 B, SV_LINK_VERSION 2. P4: `boardMonitorWrite()`/`boardMonitorCommand()`, CLEAR_LATCHED in every enable's re-arm, the monitor's faults named on an en_node fault; `Fault::motor_v`; the regen-clamp self-check row may stay SKIPPED until val-091.76; ACC_IO5 -1; PIN_SPARE_A/B removed.
+- Not yet run on a Flagship. Bench OTA 2026-10-31 is the first run of these shared paths on silicon.
+
 ## 0.1.79 (2026-10-30)
 
 ### For users
