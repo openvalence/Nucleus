@@ -392,6 +392,7 @@ void motionEstop() {
 }
 void motionEstopClear() { g_motion.arbiter().estop(false); }
 void motionSetMotorPowered(bool on) { g_motion.arbiter().setMotorPowered(on); }
+void motionUnhome() { g_motion.arbiter().unhome(); }
 void motionSetCommissioned(bool on) { g_motion.arbiter().setCommissioned(on); }
 void motionPause(bool on) { g_motion.pause(on); }
 bool motionAcquireRail(MotionSource g) { return g_motion.arbiter().acquireRail(g); }

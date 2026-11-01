@@ -351,6 +351,9 @@ void motionEstopClear();
 // The motor switch's host pushes `on` here (MotionArbiter::setMotorPowered()).
 // Any task, never blocks; a loss parks the emitter before it returns.
 void motionSetMotorPowered(bool on);
+// The unhome a power loss runs, power kept (MotionArbiter::unhome()). Any
+// task, never blocks; only while no motion runs (motionRuns()).
+void motionUnhome();
 // The hub pushes its first-run record here (MotionArbiter::setCommissioned()).
 // Any task, never blocks.
 void motionSetCommissioned(bool on);

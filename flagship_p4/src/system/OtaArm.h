@@ -91,11 +91,18 @@ private:
     ArmState _state = ArmState::expired;
 };
 
+// Why an update may not start while `moving`, or nullptr: the motion half
+// of idleRefusal(), and the whole motion rule of the barnacle's helper update
+// (BarnacleLink.h helperUpdateRefusal()).
+constexpr const char* motionRefusal(bool moving) {
+    return moving ? "motion is running: stop the machine first" : nullptr;
+}
+
 // Why the machine may not take an update now, or nullptr. Halted means the
 // emitter parked and no plan running; motor power off means the switch is
 // off or faulted (precharging is on its way to on).
 constexpr const char* idleRefusal(bool moving, motorswitch::State power) {
-    if (moving) return "motion is running: stop the machine first";
+    if (const char* why = motionRefusal(moving)) return why;
     if (power == motorswitch::State::on || power == motorswitch::State::precharging)
         return "motor power is on: latch the E-stop first";
     return nullptr;

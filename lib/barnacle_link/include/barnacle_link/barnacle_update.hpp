@@ -16,8 +16,14 @@
 //   while it erases or writes flash only the 128-byte RX FIFO takes what
 //   arrives: nothing but a command frame may be in flight then.
 // - THE IDLE RULE IS THE CALLER'S, never restated here: the P4's glue says
-//   idle or busy every pass (OtaArm.h idleRefusal(), otaInFlight()). Busy
-//   stops a transfer with ABORT and the helper keeps the image it runs.
+//   idle or busy every pass (BarnacleLink.h helperUpdateRefusal(): no motion
+//   runs and no P4 update is in flight; motor power and the E-stop never gate
+//   it). Busy stops a transfer with ABORT and the helper keeps the image it
+//   runs.
+// - AN ATTEMPT STARTS WITH start, never begin: the caller unhomes the machine
+//   (MotionArbiter::unhome(), operator ruling 2026-11-01), then sends BEGIN.
+//   The helper's stall sense is gone until it is back, so no home survives
+//   the update. A resent BEGIN is begin and unhomes nothing.
 // - NO PAIR PRESS: the P4 OTA that brought this image's copy of the shim
 //   already had one (ValenceOta.h). Nothing here asks the operator.
 // - THE ROLLBACK IS THE HELPER BOOTLOADER'S (CONFIG_BOOTLOADER_APP_ROLLBACK_
@@ -121,7 +127,7 @@ enum class SendState : uint8_t {
     listen,       // no ident from the helper yet
     legacy,       // slow frames and no ident: a shim before v5, never updated over the link
     current,      // the helper runs this firmware's copy
-    waiting,      // the helper runs another image: the transfer waits for idle
+    waiting,      // the helper runs another image: the transfer waits for idle (no motion)
     held,         // the helper runs another image ON TRIAL: it is kept or reverts first
     beginning,    // BEGIN sent, its ack awaited
     sending,      // a chunk sent, its ack awaited
@@ -155,7 +161,8 @@ inline constexpr size_t kSendEvents = 16;
 
 enum class SendAct : uint8_t {
     none,
-    begin,        // send BEGIN
+    start,        // the caller unhomes the machine, then BEGIN: an attempt's first
+    begin,        // send BEGIN again
     chunk,        // send the chunk next() names
     end,          // send END
     abort,        // send ABORT: the helper keeps the image it runs
@@ -248,7 +255,7 @@ inline constexpr std::array kRules = std::to_array<R>({
     R{S::waiting, E::ident_other, S::waiting, A::none},
     R{S::waiting, E::ident_other_trial, S::held, A::none},
     R{S::waiting, E::legacy_seen, S::legacy, A::none},
-    R{S::waiting, E::idle, S::beginning, A::begin},
+    R{S::waiting, E::idle, S::beginning, A::start},
     R{S::waiting, E::busy, S::waiting, A::none},
     // beginning: mid-transfer an ident changes nothing, the acks carry it.
     R{S::beginning, E::ident_ours, S::beginning, A::none},
@@ -421,6 +428,7 @@ public:
     // nothing.
     size_t frameFor(SendAct act, uint8_t seq, std::span<uint8_t> out) const {
         switch (act) {
+            case SendAct::start:
             case SendAct::begin: {
                 UpdateBegin b;
                 b.size = uint32_t(_image.size());
@@ -498,13 +506,13 @@ private:
         if (c.to != _state) _armed = false;
         _state = c.to;
         switch (c.act) {
+            case SendAct::start:
+                _started = true;
+                _startedMs = nowMs;
+                _next = 0;
+                _tries = 0;
+                [[fallthrough]];
             case SendAct::begin:
-                if (s.from != SendState::beginning) {
-                    _started = true;
-                    _startedMs = nowMs;
-                    _next = 0;
-                    _tries = 0;
-                }
                 ++_tries;
                 arm(nowMs, kAckTimeoutMs);
                 break;

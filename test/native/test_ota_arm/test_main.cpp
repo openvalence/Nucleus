@@ -102,6 +102,9 @@ TEST_CASE("OA-9: the idle gate: parked and motor power off, nothing else") {
     CHECK(ota::idleRefusal(false, State::precharging) != nullptr);
     CHECK(ota::idleRefusal(true, State::off) != nullptr);
     CHECK(ota::idleRefusal(true, State::on) != nullptr);
+    // The motion half is motionRefusal(), the same words.
+    CHECK(ota::motionRefusal(false) == nullptr);
+    CHECK(std::string_view(ota::idleRefusal(true, State::off)) == ota::motionRefusal(true));
 }
 
 TEST_CASE("OA-10: the reported words") {

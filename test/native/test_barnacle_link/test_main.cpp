@@ -494,11 +494,38 @@ TEST_CASE("rest current: half the home trip or more refuses a home (the field's 
 
 TEST_CASE("mode: a home cycle is homing, an open gate without ESTOP is running, else idle") {
     using valence::modeFor;
-    CHECK(modeFor(true, false, false) == bl::Mode::homing);
-    CHECK(modeFor(true, true, true) == bl::Mode::homing);
-    CHECK(modeFor(false, true, false) == bl::Mode::running);
-    CHECK(modeFor(false, true, true) == bl::Mode::idle);
-    CHECK(modeFor(false, false, false) == bl::Mode::idle);
+    CHECK(modeFor(true, false, false, false) == bl::Mode::homing);
+    CHECK(modeFor(true, true, true, false) == bl::Mode::homing);
+    CHECK(modeFor(true, true, false, true) == bl::Mode::homing);
+    CHECK(modeFor(false, true, false, false) == bl::Mode::running);
+    CHECK(modeFor(false, true, true, false) == bl::Mode::idle);
+    CHECK(modeFor(false, false, false, false) == bl::Mode::idle);
+}
+
+TEST_CASE("mode: a helper owing its 0 A zero at rest gets idle with the gate open, so it can take one") {
+    using valence::modeFor;
+    CHECK(modeFor(false, true, false, true) == bl::Mode::idle);
+    CHECK(modeFor(false, false, false, true) == bl::Mode::idle);
+    // Its zero counts idle samples only: the first running sample after the
+    // gate opens discards the window, and an idle stretch takes it.
+    bl::CurrentZero z;
+    for (uint32_t i = 0; i < bl::kZeroSettleSamples; ++i) z.sample(2500, modeFor(false, true, false, false));
+    bool taken = false;
+    for (uint32_t i = 0; i < bl::kZeroSamples * bl::kZeroAgreeWindows * 2 && !taken; ++i)
+        taken = z.sample(2500, modeFor(false, true, false, false));
+    CHECK_FALSE(taken);
+    for (uint32_t i = 0; i < bl::kZeroSamples * bl::kZeroAgreeWindows * 2 && !taken; ++i)
+        taken = z.sample(2500, modeFor(false, true, false, true));
+    CHECK(taken);
+}
+
+TEST_CASE("helper update gate: motion or the machine's own update refuses it, motor power never does") {
+    using valence::helperUpdateRefusal;
+    CHECK(helperUpdateRefusal(false, false) == nullptr);
+    CHECK(helperUpdateRefusal(true, false) != nullptr);
+    CHECK(helperUpdateRefusal(false, true) != nullptr);
+    CHECK(helperUpdateRefusal(true, true) != nullptr);
+    CHECK(std::string(helperUpdateRefusal(true, false)) == valence::ota::motionRefusal(true));
 }
 
 TEST_CASE("stray trip: an anomaly once per trip outside homing, never during a home") {

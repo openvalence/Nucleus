@@ -32,9 +32,10 @@
 //   (HomeSense::lost()) and the arbiter unloads a sensed leg, then fails the
 //   cycle unhomed with that reason. Stale while running is a health message
 //   only: the drive keeps its own overcurrent protection.
-// - The helper's firmware update runs on the same task, idle only
-//   (BarnacleLink.cpp helperUpdateRefusal(), lib/barnacle_link
-//   barnacle_update.hpp): this firmware carries the helper's image.
+// - The helper's firmware update runs on the same task while no motion runs
+//   (helperUpdateRefusal() below, lib/barnacle_link barnacle_update.hpp):
+//   this firmware carries the helper's image. Its start unhomes the machine
+//   (motionUnhome()).
 // - Declarations and hardware-free policy only: the native suite compiles
 //   this file (test_barnacle_link).
 // See: lib/barnacle_link/include/barnacle_link/barnacle_link.hpp, BoardPins.h
@@ -47,6 +48,7 @@
 #include <span>
 
 #include "barnacle_link/barnacle_link.hpp"
+#include "system/OtaArm.h"
 
 namespace valence {
 
@@ -111,10 +113,13 @@ void helperAwaitZero();
 // ---- hardware-free policy ---------------------------------------------------------
 
 // The mode the helper applies: homing through a home cycle, running while the
-// motion gate is open and no ESTOP holds, else idle.
-constexpr barnacle::Mode modeFor(bool homing, bool gateOpen, bool estop) {
+// motion gate is open and no ESTOP holds, else idle. `zeroOwed` (the helper
+// reads no current and no motion runs) is idle too: a helper that restarted
+// with the gate open, as after its firmware update, takes its 0 A zero only
+// in idle (barnacle::CurrentZero), and without it every home is refused.
+constexpr barnacle::Mode modeFor(bool homing, bool gateOpen, bool estop, bool zeroOwed) {
     if (homing) return barnacle::Mode::homing;
-    if (gateOpen && !estop) return barnacle::Mode::running;
+    if (gateOpen && !estop && !zeroOwed) return barnacle::Mode::running;
     return barnacle::Mode::idle;
 }
 
@@ -147,6 +152,17 @@ public:
 private:
     bool _raised = false;
 };
+
+// Why the helper may not be updated now, or nullptr: motion runs (motionRuns(),
+// homing and RETURN included), or this machine's own update is in flight.
+// Motor power and the E-stop never gate it (operator ruling 2026-11-01): the
+// transfer's start unhomes the machine instead (barnacle::SendAct::start). The
+// P4 update's own rule (OtaArm.h idleRefusal()) is not this one. No PAIR press:
+// the P4 update that brought this image's copy had one.
+constexpr const char* helperUpdateRefusal(bool motionRuns, bool p4UpdateInFlight) {
+    if (p4UpdateInFlight) return "the machine's own firmware update is running: wait for it to finish";
+    return ota::motionRefusal(motionRuns);
+}
 
 // A helper restart: its boot count moved, or its uptime ran backwards.
 constexpr bool helperRestarted(const barnacle::Slow& was, const barnacle::Slow& now) {

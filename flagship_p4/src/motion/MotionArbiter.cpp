@@ -309,13 +309,18 @@ void MotionArbiter::releaseRail(MotionSource generator) {
 
 void MotionArbiter::setMotorPowered(bool on) {
     if (!_powered.exchange(on) || on) return;
-    // A loss, not a boot: no plan renders into the dead drive, and no return
-    // queued before it starts when power comes back.
-    _return_req.store(false);
+    // A loss, not a boot: the abandoned plan is reset once power returns.
     _power_settled.store(false);
+    unhome();
+    GLOGW(kTag, "MOTOR POWER LOST: emitter parked at %.3f mm, unhomed", double(positionMm()));
+}
+
+void MotionArbiter::unhome() {
+    // No plan renders into the parked emitter, and no return queued before
+    // it starts later.
+    _return_req.store(false);
     _emitter.park();
     _homed = false;
-    GLOGW(kTag, "MOTOR POWER LOST: emitter parked at %.3f mm, unhomed", double(positionMm()));
 }
 
 void MotionArbiter::pause(bool on) {

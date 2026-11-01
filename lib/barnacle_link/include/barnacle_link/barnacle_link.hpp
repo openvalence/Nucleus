@@ -771,7 +771,9 @@ constexpr int32_t tripInput(Mode m, int32_t raw_ma, std::optional<int32_t> home_
 // - NEVER IN MOTION: only Mode::idle samples count (the motion gate closed,
 //   the emitter parked). A sample in another mode discards the window and the
 //   run; a sample that takes a window's spread past kZeroSpreadMaxMv does too.
-//   The P4 holds its gate closed until a zero is taken (helperAwaitZero()).
+//   The P4 holds its gate closed until a zero is taken (helperAwaitZero()),
+//   and sends idle while the helper reads no current and no motion runs
+//   (BarnacleLink.h modeFor()): a helper restarted later zeroes at rest.
 // - A window is kZeroSamples consecutive samples; its mean outside
 //   kZeroMinMv..kZeroMaxMv is no zero (a rail out of the CH701's 4.5 to 5.5 V
 //   range, or a sensor unpowered, shorted or open), counted in refused(), and

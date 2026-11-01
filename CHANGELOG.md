@@ -2,6 +2,24 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. Release images are published as prereleases on the web flasher (https://openvalence.org/flash/); versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.82 (2026-11-01)
+
+### For users
+
+- **Barnacle: the machine keeps the R+D board's helper firmware up to date.** The barnacle image carries helper firmware v5 and installs it over the J8 link by itself, in about 40 s (an estimate, not yet measured). The new helper firmware runs on trial until the machine confirms it; without that confirmation the helper goes back to its old firmware by itself within 30 s. After this, the R+D board needs USB only for recovery.
+- **The helper update starts whenever no motion runs, and starting it unhomes the machine.** The E-stop no longer has to be latched first. The log says "the machine is unhomed, so home it again once the update finishes". Motion that starts during the transfer stops the update, the helper keeps its old firmware, and the update starts over once motion stops. A few seconds after the helper restarts it measures its 0 A reading with the machine at rest, and homing works again.
+- **Flash helper firmware v5 once over USB.** Helper firmware v4 cannot take updates over J8. Disconnect the wires from J8, flash `barnacle-shim` 0.1.82 over the R+D board's USB-C, reconnect the wires, then flash `nucleus-p4b` 0.1.82. Until then the machine logs that the helper cannot take updates and works as before.
+- **A firmware update now also waits for homing and a return to the paused position to finish.** Before, the machine accepted an update during either.
+
+### Technical
+
+- **The helper update** (val-omh3.7, commit 125a3a4, merged 0d02ea4). `lib/barnacle_link`: a frozen update layer (version byte `kUpdateVersion` 0xF0; ident, update_ack, update_begin/data/end/abort/keep; 240-byte chunks with a u16 index and the frame's CRC-16, per-chunk ack and resend; `kVersion` stays 1). `barnacle_update.hpp`: the P4's `UpdateSender`, the helper's `UpdateReceiver` and `TrialGate`, each an explicit enum and transition table, stop-and-wait. `barnacle_shim` v5 (`kShimVersion` 5) writes its spare OTA slot, `esp_ota_end()` checks the image against its appended SHA-256, and it restarts on trial; only the P4's KEEP keeps it, `kTrialMs` (30 s) unkept reverts it, and a hung image resets into the previous one under the task watchdog. `flagship_p4_barnacle` only: `shim_image.py` builds `../barnacle_shim`, checks the image and embeds it (never committed); `BarnacleLink.cpp` runs the sender on the DriveLnk task, no PAIR press. Gate: the pioarduino 55.03.39 core ships `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` and its esp32dev bootloader writes otadata ABORTED and PENDING_VERIFY (objdump). Transfer time is an estimate (about 40 s); not yet run on barnacle hardware.
+- **The update's start unhomes; motor power no longer gates it** (operator ruling 2026-11-01). `BarnacleLink.h helperUpdateRefusal(motionRuns, p4UpdateInFlight)`: refused only while `motionRuns()` or `otaInFlight()`; its motion words are `OtaArm.h motionRefusal()`, the motion half of `idleRefusal()`, which is unchanged for the P4's own OTA. Sender table: `waiting x idle -> beginning` acts `SendAct::start` (was `begin`); a resent BEGIN stays `begin`. On `start` the glue calls `motionUnhome()` before BEGIN leaves: `MotionArbiter::unhome()`, the power-loss unhome (`setMotorPowered()`'s body, factored out: clear the queued return, park the emitter, drop homed), one log line. Motion mid-transfer still aborts with ABORT.
+- **The helper's 0 A zero after its restart.** `modeFor()` gains `zeroOwed` (the helper reads no current and no motion runs): idle with the gate open, so a helper that restarts after its update takes `CurrentZero` at rest instead of leaving every home refused until the next E-stop latch. A running sample still discards the zero's window.
+- **OTA idle rule** (commit 99315c7): `ValenceOta.cpp idleRefusalNow()` reads `motionRuns()` (busy, homing, returning, a step in flight), the definition the helper update and the WiFi scan use; it was `busy || step_q8 != 0`.
+- **Tests.** `test_barnacle_update` (37): every start cell is `waiting x idle` and every `begin` is a resend; a lost BEGIN is resent as `begin` with one `start`; each attempt after an abort starts again; `start` and `begin` encode the same frame. `test_barnacle_link` (43): the update gate (motion or the P4's update refuses, power never does), `modeFor()` with `zeroOwed`, a zero taken in that idle. `test_ota_arm` OA-9: `motionRefusal()`.
+- FIRMWARE_VERSION 0.1.82; helper firmware stays v5.
+
 ## 0.1.81 (2026-11-01)
 
 ### For users

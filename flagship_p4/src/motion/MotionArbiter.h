@@ -35,13 +35,13 @@
 // - Every conversion between this interface and Kinetic²'s knots lives in
 //   MotionArbiter.cpp's Kinetic² boundary section, nowhere else.
 // - CROSS-TASK methods (estop, pause, override, returnToPause, acquireRail,
-//   releaseRail, setEstopCutsPower, setMotorPowered, setCommissioned, the limit and window setters,
+//   releaseRail, setEstopCutsPower, setMotorPowered, unhome, setCommissioned, the limit and window setters,
 //   setOscillator, forceHome, home, noteStream) never touch the engine.
 //   They write flags and scalars the owning tasks read on their next pass,
 //   which the planner applies as events of the ownership table (ArbMode);
 //   setWindow() and setOscillator() post requests the planner applies
 //   (takeWindow(), takeOscillator());
-//   estop() and a power loss also park the emitter on the CALLING task,
+//   estop(), a power loss and unhome() also park the emitter on the CALLING task,
 //   because an e-stop that waits for a tick is not one.
 // - homeSenseRose() is the one INTERRUPT-CONTEXT method; its own comment
 //   says what it may touch.
@@ -835,6 +835,13 @@ public:
     // ADVISORY: off still reads off in the census, but admits motion, and the
     // first intent it admits logs "BENCH: motor power gate bypassed" once.
     void setMotorPowered(bool on);
+    // The unhome a power loss runs (setMotorPowered()), power kept: parks the
+    // emitter on the CALLING task and drops homed. Its one other caller is
+    // the barnacle's helper update start (BarnacleLink.cpp), which takes the
+    // helper's stall sense away. Call only while no motion runs (motionRuns()):
+    // a park mid-plan stops it where it stands, as ESTOP's does. Logs nothing;
+    // the caller says why.
+    void unhome();
     // The hub's first-run record (RFC-079 setup, StoredState.h): false until
     // the owner has written every required setup field once. False refuses
     // Stream and Pattern; Manual still moves, exactly as unhomed, because an

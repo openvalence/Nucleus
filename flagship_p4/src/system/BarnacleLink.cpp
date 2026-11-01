@@ -20,10 +20,11 @@
 //   lets uart_write_bytes() copy and return inside the pass.
 // - THE HELPER'S UPDATE (bd val-omh3.7) runs on this task: the image is
 //   embedded in this firmware (src/CMakeLists.txt), barnacle::UpdateSender is
-//   the machine, this file the glue and every log line. The idle rule is
-//   helperUpdateRefusal(): the P4 update's own (OtaArm.h idleRefusal()),
-//   never a second copy. While a transfer owns the link, commands go out
-//   every barnacle::kUpdateCommandMs, not every pass.
+//   the machine, this file the glue and every log line. The gate is
+//   BarnacleLink.h helperUpdateRefusal() (no motion, no P4 update in flight);
+//   the start act unhomes through motionUnhome() before BEGIN goes out, never
+//   a second unhome. While a transfer owns the link, commands go out every
+//   barnacle::kUpdateCommandMs, not every pass.
 // - BSS only: the decoder (~260 B), the reading (~90 B), the sender (~80 B),
 //   one wire frame (g_out), the queue storage and a few words. Nothing
 //   allocates after begin.
@@ -54,7 +55,6 @@
 #include "motion/MotionArbiter.h"
 #include "motion/ValenceMotion.h"
 #include "system/BoardPins.h"
-#include "system/OtaArm.h"
 #include "system/ValenceDriveLink.h"
 #include "system/ValenceHomeSense.h"
 #include "system/ValenceMotorSwitch.h"
@@ -183,15 +183,6 @@ bool uartBegin() {
 
 // ---- the helper's update -----------------------------------------------------------------
 
-// Why the helper may not be updated now, or nullptr. The P4 update's idle
-// rule, word for word (OtaArm.h idleRefusal()), with homing and RETURN read
-// as motion (motionRuns()), and never while this machine's own update runs.
-// No PAIR press: the P4 update that brought this image's copy had one.
-const char* helperUpdateRefusal(const MotionCensus& mo, motorswitch::State power) {
-    if (otaInFlight()) return "the machine's own firmware update is running: wait for it to finish";
-    return ota::idleRefusal(motionRuns(mo), power);
-}
-
 unsigned helperVersion() {
     return g_sender.haveHelper() ? unsigned(g_sender.helper().shim_version) : unsigned(g_reading.slow.shim_version);
 }
@@ -259,15 +250,15 @@ void logUpdateStep(const barnacle::SendStep& s, uint32_t now) {
         case SendState::waiting:
             if (s.act == SendAct::abort)
                 GLOGW(kTag, "helper update stopped at %u %%: %s; the helper keeps v%u, and the update starts over "
-                            "once the machine is idle",
-                      percentSent(), g_idleWhy != nullptr ? g_idleWhy : "the machine left idle", helperVersion());
+                            "once that stops",
+                      percentSent(), g_idleWhy != nullptr ? g_idleWhy : "motion started", helperVersion());
             else if (s.ev == SendEvent::backoff_over)
                 GLOGI(kTag, "helper update: retrying (attempt %lu of %lu)",
                       static_cast<unsigned long>(g_sender.attempts() + 1),
                       static_cast<unsigned long>(barnacle::kMaxAttempts));
             else
                 GLOGW(kTag, "helper firmware v%u ready to install (the helper runs v%u): installs over the link "
-                            "while the machine is idle and takes at least %u s; %s",
+                            "when no motion runs, takes at least %u s and unhomes the machine; %s",
                       mine, helperVersion(), wireSeconds(),
                       g_idleWhy != nullptr ? g_idleWhy : "starting now");
             break;
@@ -278,7 +269,8 @@ void logUpdateStep(const barnacle::SendStep& s, uint32_t now) {
             break;
         case SendState::beginning:
             g_progressQuarter = 0;
-            GLOGW(kTag, "helper update started: v%u to v%u, %u KB in %lu chunks; keep the machine idle",
+            GLOGW(kTag, "helper update started: v%u to v%u, %u KB in %lu chunks; the machine is unhomed, so home "
+                        "it again once the update finishes",
                   helperVersion(), mine, unsigned(g_sender.imageBytes() / 1024),
                   static_cast<unsigned long>(g_sender.chunks()));
             break;
@@ -309,8 +301,10 @@ void logUpdateStep(const barnacle::SendStep& s, uint32_t now) {
     }
 }
 
-// Sends what the step's action sends, then logs it. Link task only.
+// Sends what the step's action sends, then logs it. Link task only. An
+// attempt's start unhomes before its BEGIN leaves.
 void onUpdateStep(const barnacle::SendStep& s, uint32_t now) {
+    if (s.act == barnacle::SendAct::start) motionUnhome();
     const size_t n = g_sender.frameFor(s.act, g_txSeq, g_out);
     if (n > 0 && g_uartUp) {
         ++g_txSeq;
@@ -498,11 +492,12 @@ void taskMain(void*) {
         judgeFreshness(now);
         const MotionCensus mo = motionCensus();
         const motorswitch::State power = motorSwitchStatus().state;
-        g_mode = modeFor(mo.homing, power == motorswitch::State::on, mo.estop);
+        const bool zeroOwed = g_reading.status.current_ma == barnacle::kNoCurrent && !motionRuns(mo);
+        g_mode = modeFor(mo.homing, power == motorswitch::State::on, mo.estop, zeroOwed);
         const bool tripped = padTrippedConfirmed();
         watchTrip(tripped, mo);
         if (g_updateOn) {
-            g_idleWhy = helperUpdateRefusal(mo, power);
+            g_idleWhy = helperUpdateRefusal(motionRuns(mo), otaInFlight());
             if (const std::optional<barnacle::SendStep> st = g_sender.tick(now, g_idleWhy == nullptr, g_reading.fresh))
                 onUpdateStep(*st, now);
         }

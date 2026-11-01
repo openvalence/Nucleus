@@ -322,6 +322,7 @@ TEST_CASE("sender table: each action leads only where it belongs") {
             CAPTURE(bl::sendStateName(SendState(s)));
             CAPTURE(bl::sendEventName(SendEvent(e)));
             switch (c.act) {
+                case SendAct::start:      CHECK(c.to == SendState::beginning); break;
                 case SendAct::begin:      CHECK(c.to == SendState::beginning); break;
                 case SendAct::chunk:      CHECK(c.to == SendState::sending); break;
                 case SendAct::end:        CHECK(c.to == SendState::ending); break;
@@ -336,11 +337,17 @@ TEST_CASE("sender table: each action leads only where it belongs") {
         }
 }
 
-TEST_CASE("sender table: only waiting starts a transfer, and only on idle") {
+TEST_CASE("sender table: only waiting starts a transfer, only on idle, and only start (the unhome) does") {
     for (size_t s = 0; s < bl::kSendStates; ++s)
         for (size_t e = 0; e < bl::kSendEvents; ++e) {
             const auto c = bl::sendCell(SendState(s), SendEvent(e));
-            if (!c.legal || c.to != SendState::beginning || SendState(s) == SendState::beginning) continue;
+            if (!c.legal) continue;
+            CAPTURE(bl::sendStateName(SendState(s)));
+            CAPTURE(bl::sendEventName(SendEvent(e)));
+            const bool entersTransfer = c.to == SendState::beginning && SendState(s) != SendState::beginning;
+            CHECK(entersTransfer == (c.act == SendAct::start));
+            if (c.act == SendAct::begin) CHECK(SendState(s) == SendState::beginning);
+            if (!entersTransfer) continue;
             CHECK(SendState(s) == SendState::waiting);
             CHECK(SendEvent(e) == SendEvent::idle);
         }
@@ -465,6 +472,35 @@ TEST_CASE("a whole image goes across, verifies, restarts on trial and is kept") 
     CHECK(r.tx.ignored() == 0);
 }
 
+namespace {
+size_t countAct(const std::vector<bl::SendStep>& steps, SendAct a) {
+    return size_t(std::count_if(steps.begin(), steps.end(), [=](const bl::SendStep& s) { return s.act == a; }));
+}
+}  // namespace
+
+TEST_CASE("an attempt's first BEGIN is start, the caller's unhome; a resent BEGIN is begin and unhomes nothing") {
+    Rig r(makeImage(4000, 2));
+    r.dropToHelper = [](uint32_t n) { return n < 2; };   // the first BEGIN and its first resend lost
+    r.ident(bl::IdentDigest{}, false);
+    r.runUntil([&] { return r.tx.state() == SendState::restarting; }, 20000);
+    REQUIRE(r.tx.state() == SendState::restarting);
+    CHECK(countAct(r.steps, SendAct::start) == 1);
+    CHECK(countAct(r.steps, SendAct::begin) == 2);
+    CHECK(r.sink.written == r.image);
+    CHECK(r.tx.tries() >= 1);
+}
+
+TEST_CASE("start and begin send the same BEGIN frame") {
+    Rig r(makeImage(4000, 2));
+    std::array<uint8_t, bl::kMaxWire> a{};
+    std::array<uint8_t, bl::kMaxWire> b{};
+    const size_t na = r.tx.frameFor(SendAct::start, 7, a);
+    const size_t nb = r.tx.frameFor(SendAct::begin, 7, b);
+    REQUIRE(na > 0);
+    CHECK(na == nb);
+    CHECK(a == b);
+}
+
 TEST_CASE("lost frames in both directions are resent until the image is whole") {
     Rig r(makeImage(20000, 3));
     r.dropToHelper = [](uint32_t n) { return n % 7 == 3; };
@@ -523,6 +559,8 @@ TEST_CASE("the machine leaving idle mid-transfer aborts it; the helper keeps its
     CHECK(r.sink.written == r.image);
     CHECK(r.sink.begins == 2);
     CHECK(r.tx.attempts() == 0);
+    // Each attempt unhomes again as it starts.
+    CHECK(countAct(r.steps, SendAct::start) == 2);
 }
 
 TEST_CASE("a silent helper costs kMaxTries sends, then the attempt fails with ABORT; three attempts and it gives up") {
