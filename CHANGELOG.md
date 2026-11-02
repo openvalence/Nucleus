@@ -2,6 +2,22 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. Release images are published as prereleases on the web flasher (https://openvalence.org/flash/); versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.84 (2026-11-01)
+
+### For users
+
+- **Long log lines no longer lose their ends.** The machine keeps the first 103 characters of each log line. About 25 lines are shorter now or split in two, so the next step and the readings at the end stay visible.
+- **One name per thing in log lines and refusals.** "max travel" replaces "rail limit" and "max_rail" (Phosphor labels the setting Max travel), "motor power trip" replaces "EN node trip", "Wi-Fi join" replaces "wifi join", and "J7 thermistor" replaces THERM. Two window lines say "is past max travel" (was "lies past rail limit"). A log filter or script that matches the old words needs the new ones.
+- **The catalog does not change.** Phosphor keeps its cached copy.
+
+### Technical
+
+- **The 103-byte message limit** (`kMsgBytes`, `lib/geiger`), now a rule in `.claude/rules/strings.md`. Split into two calls: the helper's rest-current home refusal, update gave-up, legacy helper, update ready, update stopped, update failed, never-heard and link-lost lines, the stray TRIP anomaly, the census (`BarnacleLink.cpp`); PAIR hold demote (`ValenceDevice.cpp`); STREAM ARRIVALS and LATE PLAN REFUSED (`MotionArbiter.cpp`); motor switch FAULTED (`ValenceMotorSwitch.cpp`); the PD contract line (`ValencePdSource.cpp`); the archive boot line (`ValenceDiag.cpp`); the OTA routes line (`ValenceOta.cpp`); the board I/O task start failure (`ValenceBoardIo.cpp`). Shortened in place: helper update started, TRIP disagreement, helper lost during a home cycle, the motion stream lead-cap line, LATE PLAN, the motor alarm at power-on (was DRV_ALM asserted), HOME hold not taken, CONFIG MODE (gesture). Lengths measured with realistic values; a `%s` at its longest source string.
+- **Names:** the window NACK detail reads "window past max travel" (22 B); the setup-field list says "max travel" (`StoredState.h kSetupFieldNames`). `ValenceProvisioning` log text says Wi-Fi and WebSocket; the `wifi` tag and `wifi=` keys stay.
+- **Not changed:** "override latched: return first" (Valence `hub_impl.hpp` and this firmware): the rewrite "override on" reads no better beside "e-stop latched", so `valence.pin` stays. The three ceiling-override descs stay: their opening clause is Phosphor's label (`format.js descLabel`) and the catalog has no per-field label key (an RFC).
+- **References updated:** `test_valence_device` (the homed and window log lines, the window detail), `test_serial_provisioning` (the join line).
+- FIRMWARE_VERSION 0.1.84; the catalog etag does not move (no catalog string changed); helper firmware stays v5.
+
 ## 0.1.83 (2026-11-01)
 
 ### For users

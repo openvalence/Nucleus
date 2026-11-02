@@ -51,8 +51,8 @@ bool boardIoBegin() {
     if (xTaskCreatePinnedToCore(&taskMain, "BoardIo", kBoardIoTaskStackBytes, nullptr, 3, &g_task, 0) !=
         pdPASS) {
         g_task = nullptr;
-        GLOGE(kTag, "BoardIo task did not start: e-stop unread (release refused), no status pixel, "
-                    "fan off, HOME and PAIR unread");
+        GLOGE(kTag, "board I/O task did not start: e-stop unread (release refused), HOME and PAIR unread");
+        GLOGE(kTag, "no board I/O task: no status pixel, fan off");
         return false;
     }
     return true;

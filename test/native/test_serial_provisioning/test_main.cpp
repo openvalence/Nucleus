@@ -774,7 +774,7 @@ TEST_CASE("desk: a join that worked echoes the SSID to its sender, true for the 
 
     CHECK(contains(rig->at().wire.sentByHub, kSsid));   // the ECHO, to the sender only
     CHECK_FALSE(contains(rig->at().wire.sentByHub, kPass));
-    CHECK(logged("joined wifi, address 192.168.1.50"));
+    CHECK(logged("joined Wi-Fi, address 192.168.1.50"));
     CHECK_FALSE(logged(kSsid));
     CHECK_FALSE(logged(kPass));
 }

@@ -160,8 +160,8 @@ void serveReads(bool linked) {
 
 void reportAlarm() {
     if (g_lines.raisedAtArming())
-        GLOGE(kTag, "DRV_ALM asserted as the drive came up: the drive is in alarm, or its WR is "
-                    "normally closed (0x07 odd); the hub latches ESTOP");
+        GLOGE(kTag, "motor alarm at power-on: in alarm, or its WR is normally closed (0x07 odd); "
+                    "the machine latches ESTOP");
     else
         GLOGE(kTag, "motor alarm: the motor raised an alarm and halted; the machine latches ESTOP");
 }

@@ -379,8 +379,8 @@ bool diagBegin() {
 
     geiger::logger().addSink(g_ar);
     g_espConsole.store(esp_log_set_vprintf(&espLogHook), std::memory_order_relaxed);
-    GLOGI(kTag, "archive %u B in PSRAM, %u slots; boot %lu after %s, %lu prior breadcrumbs (LP RAM %s, HP SRAM %s)",
-          unsigned(sizeof(Archive)), unsigned(kSlots),
+    GLOGI(kTag, "archive %u B in PSRAM, %u slots", unsigned(sizeof(Archive)), unsigned(kSlots));
+    GLOGI(kTag, "boot %lu after %s, %lu prior breadcrumbs (LP RAM %s, HP SRAM %s)",
           static_cast<unsigned long>(g_ar->_bootSeq), resetName(esp_reset_reason()),
           static_cast<unsigned long>(g_ar->_prevCount), lpValid ? "held" : "lost", hpValid ? "held" : "lost");
     return true;

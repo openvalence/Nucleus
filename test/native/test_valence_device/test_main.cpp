@@ -1585,7 +1585,7 @@ TEST_CASE("VD-HOME-4: a completed cycle's rail lands in max_rail through config-
     CHECK(rig->hub->cfgGen() == uint16_t(gen + 1));                             // RFC-011, once
     CHECK(storedF32(*rig, kBlobMaxRail) == doctest::Approx(612.4f));
     CHECK((persistBitsOver(*rig, 2500) & kPersistConfig) != 0);
-    CHECK(logged("HOME: homed. Usable rail 612.4 mm between the safety margins, rail limit 612.4 mm"));
+    CHECK(logged("HOME: homed. Usable rail 612.4 mm between the safety margins, max travel 612.4 mm"));
 
     // The same rail again: the measurement republishes, the setting and
     // cfg_gen hold.
@@ -1601,7 +1601,7 @@ TEST_CASE("VD-HOME-5: a rail past max_rail's bounds is stored clamped; measured_
     CHECK(rig->device.config().max_rail == ceiling::rail_mm);
     CHECK(stateF32(*rig, ch::machine_config, 24) == ceiling::rail_mm);
     CHECK(stateF32(*rig, ch::machine_config, 33) == doctest::Approx(2600.0f));
-    CHECK(logged("HOME: homed. Usable rail 2600.0 mm between the safety margins, rail limit 2000.0 mm"));
+    CHECK(logged("HOME: homed. Usable rail 2600.0 mm between the safety margins, max travel 2000.0 mm"));
 }
 
 // Field 2026-10-30: a full home measured 292.1 mm, then "classic start
@@ -1749,7 +1749,7 @@ TEST_CASE("VD-HOME-9: a max_rail write holds the window inside it; a window writ
     rig->step();
     REQUIRE(rig->del.nacks.size() == 1);
     CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
-    CHECK(rig->del.nacks[0].detail == "window past rail limit");
+    CHECK(rig->del.nacks[0].detail == "window past max travel");
     win.count = 3;
     win.fields[2] = IntentValueField{8, IntentValue::ofF32(80.9f)};
     REQUIRE(rig->client->sendIntent(ch::config_set, win).has_value());
@@ -1783,7 +1783,7 @@ TEST_CASE("VD-HOME-9: a max_rail write holds the window inside it; a window writ
     REQUIRE(rig->del.nacks.size() == 2);
     CHECK(stateF32(*rig, ch::machine_config, 0) == 149.0f);
     CHECK(stateF32(*rig, ch::machine_config, 4) == 150.0f);
-    CHECK(logged("window 200.0..240.0 mm lies past rail limit 150.0 mm: held at 149.0..150.0 mm, set the window again"));
+    CHECK(logged("window 200.0..240.0 mm is past max travel 150.0 mm: held at 149.0..150.0 mm, set the window again"));
 }
 
 // bd val-ku3: the catalog declares 0x4100 motion-anomaly; every anomaly the

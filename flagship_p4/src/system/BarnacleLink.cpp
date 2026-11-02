@@ -234,9 +234,10 @@ void logUpdateStep(const barnacle::SendStep& s, uint32_t now) {
         case SendState::listen:
             break;
         case SendState::legacy:
-            GLOGW(kTag, "helper firmware v%u cannot take updates over the link: flash helper firmware v%u once over "
-                        "the R+D board's USB (pio run -d barnacle_shim -t upload); the helper works as before",
-                  unsigned(g_reading.slow.shim_version), mine);
+            GLOGW(kTag, "helper firmware v%u cannot take updates over the link; the helper works as before",
+                  unsigned(g_reading.slow.shim_version));
+            GLOGW(kTag, "flash helper firmware v%u once over the R+D board's USB: pio run -d barnacle_shim -t upload",
+                  mine);
             break;
         case SendState::current:
             if (s.act == SendAct::done && g_sender.startedMs())
@@ -248,19 +249,20 @@ void logUpdateStep(const barnacle::SendStep& s, uint32_t now) {
                 GLOGI(kTag, "helper firmware v%u matches the copy this machine carries", helperVersion());
             break;
         case SendState::waiting:
-            if (s.act == SendAct::abort)
-                GLOGW(kTag, "helper update stopped at %u %%: %s; the helper keeps v%u, and the update starts over "
-                            "once that stops",
-                      percentSent(), g_idleWhy != nullptr ? g_idleWhy : "motion started", helperVersion());
+            if (s.act == SendAct::abort) {
+                GLOGW(kTag, "helper update stopped at %u %%: %s", percentSent(),
+                      g_idleWhy != nullptr ? g_idleWhy : "motion started");
+                GLOGW(kTag, "the helper keeps v%u; the update starts over once that ends", helperVersion());
+            }
             else if (s.ev == SendEvent::backoff_over)
                 GLOGI(kTag, "helper update: retrying (attempt %lu of %lu)",
                       static_cast<unsigned long>(g_sender.attempts() + 1),
                       static_cast<unsigned long>(barnacle::kMaxAttempts));
-            else
-                GLOGW(kTag, "helper firmware v%u ready to install (the helper runs v%u): installs over the link "
-                            "when no motion runs, takes at least %u s and unhomes the machine; %s",
-                      mine, helperVersion(), wireSeconds(),
-                      g_idleWhy != nullptr ? g_idleWhy : "starting now");
+            else {
+                GLOGW(kTag, "helper firmware v%u ready (the helper runs v%u): installs when no motion runs, "
+                            "takes at least %u s", mine, helperVersion(), wireSeconds());
+                GLOGW(kTag, "helper update unhomes the machine; %s", g_idleWhy != nullptr ? g_idleWhy : "starting now");
+            }
             break;
         case SendState::held:
             GLOGW(kTag, "the helper runs unconfirmed firmware v%u: its update waits until the helper confirms or "
@@ -269,8 +271,8 @@ void logUpdateStep(const barnacle::SendStep& s, uint32_t now) {
             break;
         case SendState::beginning:
             g_progressQuarter = 0;
-            GLOGW(kTag, "helper update started: v%u to v%u, %u KB in %lu chunks; the machine is unhomed, so home "
-                        "it again once the update finishes",
+            GLOGW(kTag, "helper update started: v%u to v%u, %u KB in %lu chunks; machine unhomed: home it "
+                        "after the update",
                   helperVersion(), mine, unsigned(g_sender.imageBytes() / 1024),
                   static_cast<unsigned long>(g_sender.chunks()));
             break;
@@ -286,17 +288,18 @@ void logUpdateStep(const barnacle::SendStep& s, uint32_t now) {
             GLOGI(kTag, "helper firmware runs unconfirmed: confirming the link so the helper keeps it");
             break;
         case SendState::failed:
+            GLOGE(kTag, "helper update failed: %s", failReason(s));
             if (g_sender.attempts() < barnacle::kMaxAttempts)
-                GLOGE(kTag, "helper update failed: %s; it keeps v%u, trying again in %lu s", failReason(s),
-                      helperVersion(), static_cast<unsigned long>(barnacle::kRetryBackoffMs / 1000));
+                GLOGE(kTag, "the helper keeps v%u; next try in %lu s", helperVersion(),
+                      static_cast<unsigned long>(barnacle::kRetryBackoffMs / 1000));
             else
-                GLOGE(kTag, "helper update failed: %s; it keeps v%u", failReason(s), helperVersion());
+                GLOGE(kTag, "the helper keeps v%u", helperVersion());
             break;
         case SendState::gave_up:
-            GLOGE(kTag, "helper update stopped after %lu failed attempts: the helper keeps v%u and works as "
-                        "before; reboot the machine to try again, or flash the helper firmware over the R+D "
-                        "board's USB",
+            GLOGE(kTag, "helper update stopped after %lu failed attempts: the helper keeps v%u and works as before",
                   static_cast<unsigned long>(g_sender.attempts()), helperVersion());
+            GLOGE(kTag, "helper update: reboot the machine to try again, or flash the helper firmware over the "
+                        "R+D board's USB");
             break;
     }
 }
@@ -387,11 +390,11 @@ void judgeFreshness(uint32_t now) {
     g_reading.age_ms = g_reading.ever ? now - g_lastOkMs : 0;
     if (!g_reading.ever && !g_neverLogged && now - g_startMs >= kNeverHeardMs) {
         g_neverLogged = true;
-        GLOGE(kTag, "no frame from the helper in %lu ms (bytes seen: %s): motor current, voltage and "
-                    "S2 unread, home refused; check J8 pin 9 to pad 19 and the shim",
+        GLOGE(kTag, "no frame from the helper in %lu ms (bytes seen: %s): motor current, voltage and S2 unread",
               static_cast<unsigned long>(kNeverHeardMs),
               (g_decoder.stats().crc + g_decoder.stats().malformed + g_decoder.stats().overrun) != 0
                   ? "yes, none valid" : "none");
+        GLOGE(kTag, "home refused until the helper answers: check J8 pin 9 to pad 19 and the shim");
     }
     if (fresh == g_wasFresh) return;
     g_wasFresh = fresh;
@@ -416,19 +419,21 @@ void judgeFreshness(uint32_t now) {
     g_seq.reset();
     g_rest.reset();
     g_reading.rest_ma = barnacle::kNoCurrent;
-    GLOGE(kTag, "helper link LOST: no valid frame for %lu ms (crc %lu, malformed %lu, overrun %lu): "
-                "motor current, voltage and S2 unread, home refused",
+    GLOGE(kTag, "helper link LOST: no valid frame for %lu ms (crc %lu, malformed %lu, overrun %lu)",
           static_cast<unsigned long>(barnacle::kHelperStaleMs), static_cast<unsigned long>(rx.crc),
           static_cast<unsigned long>(rx.malformed), static_cast<unsigned long>(rx.overrun));
+    GLOGE(kTag, "without the helper: motor current, voltage and S2 unread, home refused");
     if (g_mode == barnacle::Mode::homing)
-        GLOGE(kTag, "helper lost during a home cycle: its stall sense is gone, the home fails unhomed");
+        GLOGE(kTag, "helper lost during a home cycle: stall detection is gone, the home fails and the machine "
+                    "stays unhomed");
 }
 
 void watchTrip(bool tripped, const MotionCensus& mo) {
-    if (g_strayWatch.sample(tripped, g_mode))
-        GLOGW(kTag, "ANOMALY: TRIP while %s at %.3f mm, but the helper's trip is active only for homing; "
-                    "nothing stops: if it repeats, check J8 pin 7 and the shim version",
+    if (g_strayWatch.sample(tripped, g_mode)) {
+        GLOGW(kTag, "ANOMALY: TRIP while %s at %.3f mm; the helper's trip is for homing only, motion continues",
               barnacle::modeName(g_mode), double(mo.position_mm));
+        GLOGW(kTag, "TRIP outside homing: if it repeats, check J8 pin 7 and the shim version");
+    }
     // The pad against the helper's own report: a wrong J8 pin 7 crimp or a
     // dead Q4 shows here first.
     const bool helperSays = (g_reading.status.flags & barnacle::kFlagTrip) != 0;
@@ -437,7 +442,7 @@ void watchTrip(bool tripped, const MotionCensus& mo) {
         return;
     }
     if (++g_disagree == kTripDisagreePasses)
-        GLOGE(kTag, "TRIP reads %s at the P4, the helper reports %s: check J8 pin 7 to pad 7 and the trip circuit (Q4)",
+        GLOGE(kTag, "TRIP reads %s at the P4 but %s at the helper: check J8 pin 7 to pad 7 and the trip circuit (Q4)",
               tripped ? "tripped" : "clear", helperSays ? "tripped" : "clear");
 }
 
@@ -470,12 +475,13 @@ void census(uint32_t now) {
     if (int32_t(now - g_nextCensusMs) < 0) return;
     g_nextCensusMs = now + kCensusEveryMs;
     const barnacle::RxStats& rx = g_decoder.stats();
-    GLOGI(kTag, "%s mode=%s upd=%s frames=%lu crc=%lu malformed=%lu version=%lu overrun=%lu lost=%lu "
-                "restarts=%lu I=%d V=%u mV trips=%u p4bad=%u",
+    // Two lines: one would pass kMsgBytes (geiger_core.hpp).
+    GLOGI(kTag, "%s mode=%s upd=%s frames=%lu crc=%lu malformed=%lu version=%lu",
           g_reading.fresh ? "fresh" : "STALE", barnacle::modeName(g_mode),
           g_updateOn ? barnacle::sendStateName(g_sender.state()) : "off",
           static_cast<unsigned long>(rx.frames), static_cast<unsigned long>(rx.crc),
-          static_cast<unsigned long>(rx.malformed), static_cast<unsigned long>(rx.version),
+          static_cast<unsigned long>(rx.malformed), static_cast<unsigned long>(rx.version));
+    GLOGI(kTag, "overrun=%lu lost=%lu restarts=%lu I=%d V=%u mV trips=%u p4bad=%u",
           static_cast<unsigned long>(rx.overrun), static_cast<unsigned long>(g_seq.lost()),
           static_cast<unsigned long>(g_reading.restarts), int(g_reading.status.current_ma),
           unsigned(g_reading.status.motor_mv), unsigned(g_reading.slow.trips),
@@ -553,10 +559,9 @@ public:
             return Probe::undriven;
         }
         if (!barnacle::restCurrentSane(h.rest_ma, kHomeTripMa)) {
-            GLOGE(kTag, "home refused: the motor reads %d mA before moving, at least half the %u mA home trip, so "
-                        "the home would stall where it stands; the helper's 0 A zero is off: power-cycle the R+D "
-                        "board with the motor at rest",
+            GLOGE(kTag, "home refused: motor reads %d mA at rest, at least half the %u mA home trip: the home would stall",
                   int(h.rest_ma), unsigned(kHomeTripMa));
+            GLOGE(kTag, "the helper's 0 A zero is off: power-cycle the R+D board with the motor at rest");
             return Probe::undriven;
         }
         g_homeRestMa.store(h.rest_ma, std::memory_order_relaxed);
@@ -630,10 +635,11 @@ bool driveLinkBegin() {
         GLOGI(kTag, "helper firmware copy: v%u, %u B, SHA-256 %02x%02x%02x%02x", unsigned(BARNACLE_SHIM_VERSION),
               unsigned(g_sender.imageBytes()), g_sender.digest()[0], g_sender.digest()[1], g_sender.digest()[2],
               g_sender.digest()[3]);
-    else if (g_uartUp)
-        GLOGE(kTag, "helper firmware copy in this image failed its check (%u B, expected %u): the helper is "
-                    "not updated this boot; rebuild the barnacle image",
+    else if (g_uartUp) {
+        GLOGE(kTag, "helper firmware copy in this image failed its check (%u B, expected %u)",
               unsigned(g_sender.imageBytes()), unsigned(BARNACLE_SHIM_BYTES));
+        GLOGE(kTag, "the helper is not updated this boot: rebuild the barnacle image");
+    }
     if (xTaskCreatePinnedToCore(&taskMain, "DriveLnk", kDriveLinkTaskStackBytes, nullptr, 2, &g_task, 0) !=
         pdPASS) {
         g_task = nullptr;

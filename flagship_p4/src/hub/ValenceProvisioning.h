@@ -228,7 +228,7 @@ inline void Provisioning::windowKnockDispatched(uint32_t sessionId, uint32_t now
     const HubSession* s = sessionById(sessionId);
     if (s == nullptr || s->role != AccessLevel::configure) return;
     presenceApproved(sessionId, nowMs);
-    GLOGI(detail::kProvisioningTag, "session %08lx approved in the pairing window at configure level: one wifi join within %lu s",
+    GLOGI(detail::kProvisioningTag, "session %08lx approved in the pairing window at configure level: one Wi-Fi join within %lu s",
           static_cast<unsigned long>(sessionId), static_cast<unsigned long>(limits::pairing_window_default_s));
 }
 
@@ -397,7 +397,7 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
     if (!_station.beginJoin(ssid(), pass())) {
         wipe();
         nack(link, NackCode::NETWORK_JOIN_FAILED, in.intent_id, h->seq, failureDetail(JoinFailure::station_down));
-        GLOGW(detail::kProvisioningTag, "wifi join refused: Wi-Fi is not ready to join");
+        GLOGW(detail::kProvisioningTag, "Wi-Fi join refused: Wi-Fi is not ready to join");
         return true;
     }
     if (presence) _presenceSession = 0;   // single use, a failed join included
@@ -407,7 +407,7 @@ inline bool Provisioning::offer(std::span<const std::byte> frame, ITransport& li
     _attempt.seq = h->seq;
     _attempt.startedMs = nowMs;
     _running = true;
-    GLOGI(detail::kProvisioningTag, "wifi join from session %08lx: joining",
+    GLOGI(detail::kProvisioningTag, "Wi-Fi join from session %08lx: joining",
           static_cast<unsigned long>(sessionId));
     return true;
 }
@@ -426,7 +426,7 @@ inline void Provisioning::tick() {
         wipe();
         const std::string_view why = failureDetail(out->why);
         if (link != nullptr) nack(*link, NackCode::NETWORK_JOIN_FAILED, _attempt.intentId, _attempt.seq, why);
-        GLOGW(detail::kProvisioningTag, "wifi join failed: %.*s; the saved list stays",
+        GLOGW(detail::kProvisioningTag, "Wi-Fi join failed: %.*s; the saved list stays",
               int(why.size()), why.data());
         return;
     }
@@ -450,7 +450,7 @@ inline void Provisioning::tick() {
     // Encoded before the wipe: the ECHO carries the SSID.
     echo(link, _attempt.sessionId, _attempt.intentId, applied);
     wipe();
-    GLOGI(detail::kProvisioningTag, "joined wifi, address %u.%u.%u.%u, websocket port %u, saved network %u",
+    GLOGI(detail::kProvisioningTag, "joined Wi-Fi, address %u.%u.%u.%u, WebSocket port %u, saved network %u",
           unsigned(out->ipv4 >> 24), unsigned((out->ipv4 >> 16) & 0xFF), unsigned((out->ipv4 >> 8) & 0xFF),
           unsigned(out->ipv4 & 0xFF), unsigned(_wsPort), unsigned(slot));
 }

@@ -130,8 +130,8 @@ void buttonsService(uint32_t nowMs) {
         return;
     }
     if (nowMs - g_holdParkedAtMs < kHoldFallbackMs) return;
-    GLOGE(kTag, "HOME hold not taken by the hub in %lu ms: hub not running, cutting motor power "
-                "and restarting without a GOODBYE",
+    GLOGE(kTag, "HOME hold not taken in %lu ms: hub not running, cutting motor power and restarting "
+                "without a GOODBYE",
           static_cast<unsigned long>(kHoldFallbackMs));
     motionEstop();
     esp_restart();

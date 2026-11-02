@@ -168,8 +168,8 @@ void fanService(uint32_t nowMs) {
 
     if (celsius && c.sensor != g_lastSensor) {
         g_lastSensor = c.sensor;
-        if (c.sensor) GLOGI(kTag, "THERM reads %.1f C", double(*celsius));
-        else GLOGW(kTag, "THERM unreadable (%.2f V: J7 open, shorted or out of window): fan set to %.0f%%",
+        if (c.sensor) GLOGI(kTag, "J7 thermistor reads %.1f C", double(*celsius));
+        else GLOGW(kTag, "thermistor unreadable (%.2f V: J7 open, shorted or out of window): fan set to %.0f%%",
                    double(volts.value_or(thermal::kNaN)), double(thermal::kNoSensorFraction * 100.0f));
     }
     if (!c.fitted && g_lastFitted)

@@ -79,7 +79,7 @@ inline constexpr uint8_t kSetupRequiredMask = 0xFF;
 // The setup fields by bit, in plain words: a refusal names what is still owed
 // (health-for-DIYers: every degradation says what to do).
 inline constexpr std::array<std::string_view, 8> kSetupFieldNames{
-    "window min", "window max", "jog speed", "jog accel", "input speed", "input accel", "input jerk", "max rail"};
+    "window min", "window max", "jog speed", "jog accel", "input speed", "input accel", "input jerk", "max travel"};
 static_assert(kSetupRequiredMask >> kSetupFieldNames.size() == 0, "every required bit has a name");
 
 // The required setup fields `written` lacks, key order, comma separated, into

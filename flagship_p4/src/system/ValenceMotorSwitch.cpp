@@ -199,7 +199,7 @@ void thermBegin() {
         unit != g_adcUnit || adc_oneshot_config_channel(g_adc, g_chTherm, &chan) != ESP_OK ||
         !caliFor(unit, g_chTherm, &g_caliTherm)) {
         g_caliTherm = nullptr;
-        GLOGW(kTag, "THERM G%d not readable on the switch's analog input unit: the fan runs without a temperature",
+        GLOGW(kTag, "J7 thermistor (G%d) not readable on the switch's analog input unit: the fan runs without a temperature",
               BOARD_GPIO_THERM);
     }
 }
@@ -256,7 +256,7 @@ void logMonitorCause() {
         if (f & bit) GLOGE(kTag, "motor power trip: board monitor %s fault%s", sv_fault_name(bit),
                            (s.faults_live & bit) ? "" : " (latched, cleared since)");
     }
-    if (s.cut_live) GLOGE(kTag, "EN node trip: board monitor is cutting the input stage (cut 0x%02x)",
+    if (s.cut_live) GLOGE(kTag, "motor power trip: board monitor is cutting the input stage (cut 0x%02x)",
                           unsigned(s.cut_live));
 }
 
@@ -268,10 +268,9 @@ void logTransition(State is, Fault f, const Readings& r) {
               static_cast<unsigned long>(motorswitch::kPrechargeUs / 1000), double(r.imon_a),
               double(r.motor_v));
     } else if (is == State::faulted) {
-        GLOGE(kTag, "motor switch FAULTED, power latched off until release: %s "
-                    "(FLT %s, EN node %.2f V, IMON %.3f A, MOTOR_V+ %.1f V)",
-              motorswitch::faultName(f), r.fault_line ? "low" : "high", double(r.en_node_v),
-              double(r.imon_a), double(r.motor_v));
+        GLOGE(kTag, "motor switch FAULTED, power latched off until release: %s", motorswitch::faultName(f));
+        GLOGE(kTag, "motor switch readings: fault line %s, EN node %.2f V, current %.3f A, motor voltage %.1f V",
+              r.fault_line ? "low" : "high", double(r.en_node_v), double(r.imon_a), double(r.motor_v));
     }
 }
 

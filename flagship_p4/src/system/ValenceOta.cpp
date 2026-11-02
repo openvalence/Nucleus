@@ -263,7 +263,7 @@ esp_err_t handlePost(httpd_req_t* req) {
     char body[176];
     snprintf(body, sizeof(body),
              "ok slot=%s bytes=%u seconds=%.1f\n"
-             "rebooting; the new image reverts unless its hub and WiFi come up\n",
+             "rebooting; the new image reverts unless its hub and Wi-Fi come up\n",
              target->label, unsigned(got), secs);
     const esp_err_t sent = reply(req, "200 OK", "text/plain", body);
     xTaskCreate(rebootTask, "otaReboot", 3072, nullptr, 5, nullptr);
@@ -286,9 +286,9 @@ bool otaBegin() {
             return false;
         }
     }
-    GLOGI(kTag, "POST /ota/arm, GET /ota/arm, POST /ota on :80 (PAIR double press%s), running %s%s",
-          NUCLEUS_BENCH_NO_MOTOR ? " or the bench token" : "", otaRunningSlot(),
-          otaPendingVerify() ? " (PENDING_VERIFY: not confirmed yet)" : "");
+    GLOGI(kTag, "POST /ota/arm, GET /ota/arm, POST /ota on :80 (PAIR double press%s)",
+          NUCLEUS_BENCH_NO_MOTOR ? " or the bench token" : "");
+    GLOGI(kTag, "running %s%s", otaRunningSlot(), otaPendingVerify() ? " (PENDING_VERIFY: not confirmed yet)" : "");
     return true;
 }
 

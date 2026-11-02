@@ -1137,13 +1137,14 @@ void MotionArbiter::retimeSegment(const MotionIntent& in, float p, bool starved,
 void MotionArbiter::noteArrival(uint64_t start_us, uint64_t now_us) {
     ArriveCensus& c = _arrive;
     if (c.n > 0 && now_us - c.since_us >= ArriveCensus::kWindowUs) {
-        GLOGI(kTag, "STREAM ARRIVALS: %lu segments in %lu ms, start lead min %ld ms, <0 %lu <10 %lu <20 %lu <40 %lu "
-                    "<60 %lu >=60 %lu, longest gap %lu ms",
+        // Two lines: one would pass kMsgBytes (geiger_core.hpp).
+        GLOGI(kTag, "STREAM ARRIVALS: %lu segments in %lu ms, start lead min %ld ms, longest gap %lu ms",
               static_cast<unsigned long>(c.n), static_cast<unsigned long>((c.last_us - c.since_us) / 1000),
-              static_cast<long>(c.min_ms), static_cast<unsigned long>(c.bins[0]), static_cast<unsigned long>(c.bins[1]),
+              static_cast<long>(c.min_ms), static_cast<unsigned long>(c.gap_max_us / 1000));
+        GLOGI(kTag, "STREAM ARRIVALS by start lead (ms): <0 %lu <10 %lu <20 %lu <40 %lu <60 %lu >=60 %lu",
+              static_cast<unsigned long>(c.bins[0]), static_cast<unsigned long>(c.bins[1]),
               static_cast<unsigned long>(c.bins[2]), static_cast<unsigned long>(c.bins[3]),
-              static_cast<unsigned long>(c.bins[4]), static_cast<unsigned long>(c.bins[5]),
-              static_cast<unsigned long>(c.gap_max_us / 1000));
+              static_cast<unsigned long>(c.bins[4]), static_cast<unsigned long>(c.bins[5]));
         c = ArriveCensus{};
     }
     const int32_t lead_ms = int32_t((int64_t(start_us) - int64_t(now_us)) / 1000);
@@ -1877,8 +1878,8 @@ void MotionArbiter::handover(PlanStrip& s, bool from_rest, uint64_t now_us) {
             ++_late_plans;
             _late_plan_max_mm = std::fmax(_late_plan_max_mm, std::fabs(gap.p));
             GLOGW_EVERY_MS(1000, kTag,
-                           "LATE PLAN: %.3f mm, %.1f mm/s off the trajectory in flight, joined over %.1f ms "
-                           "(largest %.3f mm)",
+                           "LATE PLAN: %.3f mm, %.1f mm/s off the trajectory in flight, joined in %.1f ms "
+                           "(max %.3f mm)",
                            double(gap.p), double(gap.v), double(end - t_h) * 1e-3, double(_late_plan_max_mm));
         }
         return;
@@ -1904,9 +1905,9 @@ void MotionArbiter::handover(PlanStrip& s, bool from_rest, uint64_t now_us) {
     s.p_mm.fill(p_rest);
     _osc_head = 0.0f;
     ++_plans_refused;
-    GLOGW(kTag, "LATE PLAN REFUSED: %.3f mm, %.1f mm/s off the trajectory in flight, no connector holds the set; "
-                "stopping at %.2f mm",
+    GLOGW(kTag, "LATE PLAN REFUSED: %.3f mm, %.1f mm/s off the trajectory in flight; stopping at %.2f mm",
           double(gap.p), double(gap.v), double(p_rest));
+    GLOGW(kTag, "late plan refused: no connector holds the set");
 }
 
 float MotionArbiter::connAt(uint64_t t, float plan_mm) const {

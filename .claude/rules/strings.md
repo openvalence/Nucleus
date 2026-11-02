@@ -56,7 +56,10 @@ By kind:
   Every format specifier (`%s %u %d %08lx %.1f`, a `PRIu32` splice) stays,
   same count, same order, same meaning. `key=value` pieces and tags stay as
   they are. A line reporting a problem names what the user can do when the
-  source shows it. Short.
+  source shows it. Short. Geiger keeps 103 bytes of each message
+  (`kMsgBytes`, `lib/geiger`) and cuts the rest silently: every fact must
+  fit, measured with realistic values (a `%s` at its longest source string).
+  A line that cannot fit splits into two lines; it never drops a fact.
 - **Catalog `desc` / `label`** (every client renders them verbatim): one
   Blender-tooltip fragment, about 4 to 12 words. Controls start with the
   verb and name the object and the effect ("Reverse the machine's travel
@@ -92,6 +95,11 @@ Hard constraints on every change:
 - **Machine-parsed text stays** unless every parser changes in the same
   commit: a test or tool matching a fragment, a regex, Phosphor's Log
   filters, the diagnostics footer `next=<seq>` (logging-leds.md).
+- **A desc's opening clause can be a label.** The catalog has no per-field
+  label key, so a field with no role label shows its desc's opening clause
+  as its label in Phosphor (`src/model/format.js` `descLabel`: 2 to 3 words
+  before the first `.,;:`, at most 30 characters). A rewrite keeps that
+  clause until catalog fields carry their own label (an RFC).
 - **Wire strings are protocol bytes** (transport.md T11): a catalog string
   change moves the etag on purpose and says so in the commit; frozen
   artifacts never change (C-6); a released wire string that breaks C-11 is

@@ -732,7 +732,7 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
         g_box->hub->setPresenceDefaultRole(AccessLevel::configure);
         g_box->hub->openPresenceWindow();
         GLOGW(kTag, "CONFIG MODE (gesture): BLE + USB serial, no WebSocket; "
-                    "pairing open %lu s, the first knock gets configure",
+                    "pairing open %lu s, first knock gets configure",
               static_cast<unsigned long>(limits::pairing_window_default_s));
     } else if (route == linkmode::Boot::config_policy && !tb.claimable) {
         // SPEC 12.3: policy config mode opens no window at boot; a PAIR press

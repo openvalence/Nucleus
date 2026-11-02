@@ -210,10 +210,11 @@ void logBoot() {
         return;
     }
     const pd::Profile p = pd::profileFor(c);
-    GLOGI(kTag, "TPS26750 at 0x%02x (APP): %.1f V %.2f A %s #%u (%.0f W%s), bus %.1f V, motion budget %.0f W%s",
+    GLOGI(kTag, "TPS26750 at 0x%02x (APP): %.1f V %.2f A %s #%u (%.0f W%s)",
           unsigned(pd::kAddress), double(c.mv) * 1e-3, double(c.ma) * 1e-3, pd::supplyName(c.supply),
-          unsigned(c.position), double(c.watts()), c.mismatch ? ", capability mismatch" : "",
-          double(p.bus_mv) * 1e-3, double(p.budget_w), p.buck ? ", 48 V build" : "");
+          unsigned(c.position), double(c.watts()), c.mismatch ? ", capability mismatch" : "");
+    GLOGI(kTag, "bus %.1f V, motion budget %.0f W%s", double(p.bus_mv) * 1e-3, double(p.budget_w),
+          p.buck ? ", 48 V build" : "");
 }
 
 void failBoot(esp_err_t e, const char* what) {

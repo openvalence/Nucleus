@@ -634,7 +634,7 @@ void BoardStation::run() {
             _out = attempt(_req.ssidView(), _req.passView(), limits::provision_join_timeout_ms, kProvisionTries);
             if (_out.joined) _joined.assign(_req.ssidView(), _req.passView());
             _doneSeq.store(seq, std::memory_order_release);
-            GLOGI(kTag, "wifi join %s; join task stack %lu B free of %lu", _out.joined ? "done" : "failed",
+            GLOGI(kTag, "Wi-Fi join %s; join task stack %lu B free of %lu", _out.joined ? "done" : "failed",
                   static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)),
                   static_cast<unsigned long>(kTaskStackBytes));
             // Joined: the hub stores it and offers the list back, and
@@ -660,7 +660,7 @@ INetStation& stationNets() { return g_station; }
 
 bool stationBegin(bool joinSaved) {
     const bool ok = g_station.begin(joinSaved);
-    if (!ok) GLOGE(kTag, "wifi join task not started: no joins");
+    if (!ok) GLOGE(kTag, "Wi-Fi join task not started: no joins");
     return ok;
 }
 

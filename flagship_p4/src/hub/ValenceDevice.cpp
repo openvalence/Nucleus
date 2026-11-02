@@ -694,10 +694,10 @@ Ret ValenceDevice::applyConfig(const IntentValueMap& requested, bool& cfgChanged
     // value and is refused; any other write collapses such a window, logged.
     if (next.window_min >= next.max_rail && (f1 != nullptr || f2 != nullptr))
         return refuse(NackCode::INVALID_VALUE,
-                      measured && next.window_min >= stroke ? kDetailPastStroke : "window past rail limit");
+                      measured && next.window_min >= stroke ? kDetailPastStroke : "window past max travel");
     const StoredConfig asked = next;
     if (holdWindowInRail(next))
-        GLOGW(kTag, "window %.1f..%.1f mm lies past rail limit %.1f mm: held at %.1f..%.1f mm, set the window again",
+        GLOGW(kTag, "window %.1f..%.1f mm is past max travel %.1f mm: held at %.1f..%.1f mm, set the window again",
               double(asked.window_min), double(asked.window_max), double(next.max_rail), double(next.window_min),
               double(next.window_max));
 
@@ -746,12 +746,12 @@ void ValenceDevice::adoptMeasuredRail(float rail_mm) {
     m.fields[0] = IntentValueField{8, IntentValue::ofF32(rail_mm)};
     bool changed = false;
     if (!durable(applyConfig(m, changed))) {
-        GLOGW(kTag, "HOME: homed, rail measured %.1f mm, but the rail limit refused it", double(rail_mm));
+        GLOGW(kTag, "HOME: homed, rail measured %.1f mm, but storing it as max travel was refused", double(rail_mm));
         return;
     }
     _cfgDirty = true;
     _cfgGenOwed |= changed;
-    GLOGW(kTag, "HOME: homed. Usable rail %.1f mm between the safety margins, rail limit %.1f mm",
+    GLOGW(kTag, "HOME: homed. Usable rail %.1f mm between the safety margins, max travel %.1f mm",
           double(rail_mm), double(_cfg.max_rail));
 }
 
@@ -1873,8 +1873,8 @@ void ValenceDevice::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
     }
     if (farMoved) {
         GLOGW_EVERY_MS(2000, kTag,
-                       "motion stream: a bundle of %u sample(s) stamped past the lead cap moved earlier whole "
-                       "(missed CLOCK resync on the client?)", unsigned(n));
+                       "motion stream: %u-sample bundle past the lead cap moved earlier whole "
+                       "(client missed a CLOCK resync?)", unsigned(n));
     }
 }
 
@@ -2071,7 +2071,7 @@ std::expected<void, stored::ConfigReject> ValenceDevice::adoptConfigBlob(std::sp
     _cfgDirty = false;
     // A blob written before the window was held inside max_rail (bd val-8yv).
     if (holdWindowInRail(_cfg))
-        GLOGW(kTag, "stored window lies past max_rail %.1f mm: held at %.1f..%.1f mm, set the window again",
+        GLOGW(kTag, "stored window is past max travel %.1f mm: held at %.1f..%.1f mm, set the window again",
               double(_cfg.max_rail), double(_cfg.window_min), double(_cfg.window_max));
     // The engine adopts through the live write's own door, never a side path.
     motionSetTuning(_tune);
@@ -2276,10 +2276,10 @@ void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
             const Hub::DemoteCount d = _hub->demoteAllToWatch();
             _pairFlash = PairLook::demoted;
             _pairFlashUntilMs = nowMs + kPairFlashMs;
-            GLOGW(kTag, "PAIR hold %lu s: DEMOTED every client to watch: %u stored tokens, %u live sessions; "
-                        "/uitoken vouches for nobody until a configure owner is approved",
+            GLOGW(kTag, "PAIR hold %lu s: DEMOTED every client to watch (%u stored tokens, %u live sessions)",
                   static_cast<unsigned long>(button::kDemoteHoldMs / 1000), unsigned(d.tokens),
                   unsigned(d.sessions));
+            GLOGW(kTag, "/uitoken vouches for nobody until a configure owner is approved");
             return;
         }
         case button::PairGesture::config: {
