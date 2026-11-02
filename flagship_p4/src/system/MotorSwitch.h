@@ -119,7 +119,7 @@ constexpr const char* faultName(Fault f) {
     switch (f) {
         case Fault::none:       return "none";
         case Fault::fault_line: return "MSW_FLT_N low";
-        case Fault::en_node:    return "motor power trip";
+        case Fault::en_node:    return "tripped by a hardware kill";
         case Fault::inrush:     return "inrush over ceiling";
         case Fault::precharge:  return "MOTOR_V+ did not rise";
         case Fault::motor_v:    return "MOTOR_V+ lost while on";

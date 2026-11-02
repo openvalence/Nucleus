@@ -1472,8 +1472,10 @@ Ret ValenceDevice::refuseNotANumber(uint16_t channel_id, uint8_t key) {
 
 Ret ValenceDevice::refuseUnpowered(const char* what) {
     const MotorSwitchStatus sw = motorSwitchStatus();
-    GLOGW_EVERY_MS(1000, kTag, "%s refused INTERLOCK: motor power is off (switch %s, last fault: %s)",
-                   what, motorswitch::stateName(sw.state), motorswitch::faultName(sw.last_fault));
+    GLOGW_EVERY_MS(1000, kTag, "%s refused INTERLOCK: motor power is off (switch %s)", what,
+                   motorswitch::stateName(sw.state));
+    GLOGW_EVERY_MS(1000, kTag, "%s refused: last motor switch fault: %s", what,
+                   motorswitch::faultName(sw.last_fault));
     if (sw.state == motorswitch::State::faulted)
         std::snprintf(_nackDetail.data(), _nackDetail.size(), "motor power off: %s",
                       motorswitch::faultName(sw.last_fault));

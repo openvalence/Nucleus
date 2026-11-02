@@ -2,6 +2,23 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. Release images are published as prereleases on the web flasher (https://openvalence.org/flash/); versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.86 (2026-11-02)
+
+### For users
+
+- **Some Phosphor labels read as words again.** The fields read "Curve smoothness", "Forced-home stroke length", "Row 0 signal" to "Row 6 signal", "Secured rows", "Saved rows" and "Slot 0 signal" to "Slot 3 signal". The 0.1.85 release images predate this fix, so 0.1.86 is the first release image with it.
+- **The motor power refusal names the cause once.** A move refused after a hardware kill reads "motor power off: tripped by a hardware kill" (was "motor power off: motor power trip"). The motor switch fault lines in the log use the same words. A log filter or script that matches "motor power trip" in those lines needs the new words.
+- **The motor power refusal in the log is two lines.** The first line names the refused action and the switch state. The second line names the last motor switch fault. Before, the line was cut at 103 characters and lost the end of the fault name.
+- **Phosphor fetches the machine's catalog again once after an update from a 0.1.85 release image.** The new descriptions are part of the catalog, so its version tag changes.
+
+### Technical
+
+- **A build of its own for 45d4d42.** The 0.1.85 release images were built from fa2ef94; 45d4d42 (catalog descs, the restored labels, the etag move) landed after them at the same FIRMWARE_VERSION. 0.1.86 carries both, so one version names one build.
+- `MotorSwitch.h faultName(Fault::en_node)` reads "tripped by a hardware kill" (26 B), in the words of `refusalName(Refusal::en_node)`. The INTERLOCK NACK detail is "motor power off: tripped by a hardware kill" (43 B, under the 48 B limit); the FAULTED and latching-ESTOP log lines take the same name. The four "motor power trip:" board monitor lines stay: they name the trip event.
+- `ValenceDevice::refuseUnpowered` logs two lines, each rate-limited: "%s refused INTERLOCK: motor power is off (switch %s)" and "%s refused: last motor switch fault: %s". The old single line measured 109 B at its worst ("advanced start", precharging, "MOTOR_V+ lost while on"), past geiger's 103; the new lines measure 73 and 75 B at their worst, 90 and 92 B with the limiter's "(suppressed 999)" suffix.
+- `test_valence_device` VD-02 asserts the hardware-kill detail and its length.
+- FIRMWARE_VERSION 0.1.86; no catalog string changed since 45d4d42; helper firmware stays v5.
+
 ## 0.1.85 (2026-11-02)
 
 ### For users

@@ -480,14 +480,21 @@ TEST_CASE("VD-02: a move refused for motor power carries the reason on the NACK"
     CHECK(rig->del.nacks[1].detail == "motor power off: MOTOR_V+ did not rise");
     CHECK(rig->del.nacks[1].detail.size() <= limits::nack_detail_max_bytes);
 
+    g_switch.last_fault = motorswitch::Fault::en_node;
+    REQUIRE(rig->client->sendIntent(ch::move, moveTo(10.0f)).has_value());
+    rig->step();
+    REQUIRE(rig->del.nacks.size() == 3);
+    CHECK(rig->del.nacks[2].detail == "motor power off: tripped by a hardware kill");
+    CHECK(rig->del.nacks[2].detail.size() <= limits::nack_detail_max_bytes);
+
     // A later refusal that gives no reason must not carry the stale one.
     g_census.motor_on = g_census.power_gate = true;
     g_census.homed = false;
     REQUIRE(rig->client->sendIntent(ch::move, moveTo(10.0f)).has_value());
     rig->step();
-    REQUIRE(rig->del.nacks.size() == 3);
-    CHECK(rig->del.nacks[2].code == NackCode::NOT_HOMED);
-    CHECK(rig->del.nacks[2].detail.empty());
+    REQUIRE(rig->del.nacks.size() == 4);
+    CHECK(rig->del.nacks[3].code == NackCode::NOT_HOMED);
+    CHECK(rig->del.nacks[3].detail.empty());
 }
 
 // ---- RFC-095: the dwells on the wire --------------------------------------------
