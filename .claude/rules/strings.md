@@ -80,6 +80,13 @@ By kind:
   wrong name per the list above, or a British spelling. Headings stay short.
 - **CHANGELOG "For users"**: what changed for the person at the machine, in
   the log-line and UI terms above; no file names or bead ids.
+- **Instructions** (guide steps, flashing and bring-up procedures, release
+  notes, test checklists, README how-tos): standard technical English, the
+  ASD-STE100 writing rules. Numbered steps; one instruction per sentence, in
+  the imperative and the active voice; procedural sentences at most 20 words,
+  descriptive ones at most 25; one topic per paragraph; keep the articles; a
+  word keeps one meaning across the page; a warning or caution comes before
+  the step it applies to and says the hazard and its result.
 
 Hard constraints on every change:
 - **Machine-parsed text stays** unless every parser changes in the same
