@@ -7,12 +7,14 @@ Newest first. Each entry has two parts: what you will notice, and what changed i
 ### For users
 
 - **Motor power words replace "EN node".** The motor switch lines read "trip line" for the voltage on the line that cuts motor power. The fault and the matching refusal read "motor power trip" and "a hardware kill holds motor power tripped". A log filter or script that matches "EN node" needs the new words.
-- **The catalog does not change.** Phosphor keeps its cached copy.
+- **Some Phosphor labels read as words again.** A field without a standard label takes its label from the start of its description. Some showed their raw names or a piece of their description. Now they read "Curve smoothness" (was Smoothness), "Forced-home stroke length" (was Stroke), "Row 0 signal" to "Row 6 signal" (was Rssi0 to Rssi6) and "Secured rows" and "Saved rows" (was "Bit i"). The saved Wi-Fi networks read "Slot 0 signal" to "Slot 3 signal" (was "-128 not heard").
+- **Phosphor fetches the machine's catalog again once after this update.** The descriptions are part of the catalog, so its version tag changes.
 
 ### Technical
 
 - `MotorSwitch.h` `faultName(Fault::en_node)` and `refusalName(Refusal::en_node)`; the fault name also reaches the INTERLOCK NACK detail (33 B, under the 48 B limit), the refusal name only log lines; four `ValenceMotorSwitch.cpp` log lines (readings, enable refused, pre-charge started, ready), each under 103 bytes with realistic values. Code identifiers (`en_node`, `en_node_v`, `BOARD_GPIO_EN_NODE`) stay; Neutrino shares the header. No test or parser matched the old text.
-- FIRMWARE_VERSION 0.1.85; the catalog etag does not move; helper firmware stays v5.
+- Catalog descs (`ValenceCatalog.h`): a role-less field's opening clause is its Phosphor label (`format.js descLabel`, 2 to 3 words, at most 30 characters; `strings.md` interim rule until a per-field label RFC lands). Restored: kinetic-planner smoothness, the home intent's stroke, visible-networks rssi0-6, secured and saved; networks rssi0-3 now name their slot. `tools/kinetic-lab/lab.js` mirrors the smoothness desc.
+- FIRMWARE_VERSION 0.1.85; the catalog etag moves (T11: desc bytes changed); helper firmware stays v5.
 
 ## 0.1.84 (2026-11-01)
 

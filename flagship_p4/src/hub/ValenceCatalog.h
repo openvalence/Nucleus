@@ -674,9 +674,13 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                       .desc = "Saved networks"});
     c.addLayoutField({.name = "live", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .desc = "Slot the hub is joined through; 255 none"});
-    for (const char* name : {"rssi0", "rssi1", "rssi2", "rssi3"})
+    // A desc's opening clause is the field's Phosphor label (strings.md), so each slot names itself.
+    for (const auto& [name, desc] : {std::pair{"rssi0", "Slot 0 signal; -128 not heard"},
+                                     std::pair{"rssi1", "Slot 1 signal; -128 not heard"},
+                                     std::pair{"rssi2", "Slot 2 signal; -128 not heard"},
+                                     std::pair{"rssi3", "Slot 3 signal; -128 not heard"}})
         c.addLayoutField({.name = name, .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f,
-                          .desc = "-128 not heard"});
+                          .desc = desc});
 
     // ---- "network-names" -- STATE, configure (RFC-116) ----------------------
     // The saved SSIDs in list order, for configure sessions only: the entry's
@@ -717,12 +721,18 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
         c.addLayoutField({.name = "count", .type = PackedFieldType::u8, .unit = "count", .scale = 1.0f,
                           .desc = "Networks in this list; later rows empty"});
         c.addLayoutField({.name = "secured", .type = PackedFieldType::bitfield8, .unit = "", .scale = 1.0f,
-                          .desc = "Bit i: row i needs a password"});
+                          .desc = "Secured rows: bit i, row i needs a password"});
         c.addLayoutField({.name = "saved", .type = PackedFieldType::bitfield8, .unit = "", .scale = 1.0f,
-                          .desc = "Bit i: row i is a saved network"});
-        for (const char* f : {"rssi0", "rssi1", "rssi2", "rssi3", "rssi4", "rssi5", "rssi6"})
+                          .desc = "Saved rows: bit i, row i is a saved network"});
+        for (const auto& [f, desc] : {std::pair{"rssi0", "Row 0 signal; -128 for rows past the count"},
+                                      std::pair{"rssi1", "Row 1 signal; -128 for rows past the count"},
+                                      std::pair{"rssi2", "Row 2 signal; -128 for rows past the count"},
+                                      std::pair{"rssi3", "Row 3 signal; -128 for rows past the count"},
+                                      std::pair{"rssi4", "Row 4 signal; -128 for rows past the count"},
+                                      std::pair{"rssi5", "Row 5 signal; -128 for rows past the count"},
+                                      std::pair{"rssi6", "Row 6 signal; -128 for rows past the count"}})
             c.addLayoutField({.name = f, .type = PackedFieldType::i8, .unit = "dBm", .scale = 1.0f,
-                              .desc = "-128 for rows past the count"});
+                              .desc = desc});
         for (const char* f : {"ssid0", "ssid1", "ssid2", "ssid3", "ssid4", "ssid5", "ssid6"})
             c.addLayoutField({.name = f, .type = PackedFieldType::str32, .unit = "", .scale = 1.0f});
     }
@@ -1728,7 +1738,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
     c.addLayoutField({.name = "smoothness", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofFloat(factory::smoothness), .group = card::curve,
-                      .desc = "Set the curve from crisp (0) to smooth (1)",
+                      .desc = "Curve smoothness, crisp (0) to smooth (1)",
                       .step = 0.05f, .settingKey = 4, .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "handle_floor", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.05f, .max = 0.33f,
@@ -2350,7 +2360,7 @@ inline bool buildValenceCatalog(valence::Catalog32& c, DeviceFeatures feat = {})
                             AccessLevel::configure}); // 2 force_home: asserts the stroke; RELEASES THE E-STOP LATCH
     c.addSchemaField({.key = 2, .name = "stroke", .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 2000.0f,
-                      .desc = "Set the stroke length a forced home uses",
+                      .desc = "Forced-home stroke length",
                       .access = AccessLevel::configure, .hasAccess = true});
     };
 
