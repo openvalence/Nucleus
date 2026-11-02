@@ -70,7 +70,7 @@ void setLocked(State s) {
 // ---- the motor switch door: the motion gate ----------------------------------------
 
 bool motorSwitchBegin() {
-    GLOGI(kTag, "no motor switch on this board: the E-stop breaks the servo supply, the gate only "
+    GLOGI(kTag, "no motor switch on this board: the E-stop breaks the motor supply, the gate only "
                 "parks the emitter");
     return true;
 }
@@ -103,7 +103,7 @@ motorswitch::Refusal motorSwitchRequestEnable() {
         motionSetMotorPowered(false);
         return Refusal::none;
     }
-    if (!was) GLOGI(kTag, "motion gate OPEN: the servo supply is the E-stop's, not switched here");
+    if (!was) GLOGI(kTag, "motion gate OPEN: the motor supply is the E-stop's, not switched here");
     return Refusal::none;
 }
 
@@ -142,7 +142,7 @@ uint32_t motorSwitchStackFree() { return 0; }   // no task
 // ---- the E-stop input door: none fitted --------------------------------------------
 
 void estopInputBegin() {
-    GLOGI("estop", "no E-stop input on this board: the hardware E-stop breaks the servo supply");
+    GLOGI("estop", "no E-stop input on this board: the hardware E-stop breaks the motor supply");
 }
 
 void estopInputService(uint32_t) {}

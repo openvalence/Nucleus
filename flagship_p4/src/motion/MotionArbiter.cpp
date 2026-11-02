@@ -216,7 +216,7 @@ ArbAct MotionArbiter::apply(ArbEvent ev, const char* cause, uint64_t now_us) {
     }
     ++_arb_log_n;
     if (_arb_log_lost != 0) {
-        GLOGI(kTag, "MODE: %s -%s-> %s (%s; %lu changes before it unlogged)", kArbModeNames[size_t(from)],
+        GLOGI(kTag, "MODE: %s -%s-> %s (%s; %lu earlier changes not logged)", kArbModeNames[size_t(from)],
               kArbEventNames[size_t(ev)], kArbModeNames[size_t(to)], cause, static_cast<unsigned long>(_arb_log_lost));
         _arb_log_lost = 0;
     } else {
@@ -282,7 +282,7 @@ void MotionArbiter::estop(bool on) {
     // A power cut leaves the carriage limp wherever it coasted: the position
     // reference is gone. A halt keeps power, so it keeps home.
     if (_cuts_power) _homed = false;
-    GLOGW(kTag, "ESTOP: emitter parked at %.3f mm%s", double(positionMm()),
+    GLOGW(kTag, "ESTOP: carriage parked at %.3f mm%s", double(positionMm()),
           _cuts_power ? ", unhomed" : "");
 }
 
@@ -312,7 +312,7 @@ void MotionArbiter::setMotorPowered(bool on) {
     // A loss, not a boot: the abandoned plan is reset once power returns.
     _power_settled.store(false);
     unhome();
-    GLOGW(kTag, "MOTOR POWER LOST: emitter parked at %.3f mm, unhomed", double(positionMm()));
+    GLOGW(kTag, "MOTOR POWER LOST: carriage parked at %.3f mm, unhomed", double(positionMm()));
 }
 
 void MotionArbiter::unhome() {
@@ -355,12 +355,12 @@ ReturnStart MotionArbiter::returnToPause() {
     // position, which planTick() records at rest even while unpowered.
     const float dist = std::fabs(positionMm() - _pause_pos_mm.load());
     if (dist > kMmPerStep) {
-        GLOGW(kTag, "RETURN refused: motor power off, %.2f mm from the paused position", double(dist));
+        GLOGW(kTag, "return to paused position refused: motor power off, %.2f mm away", double(dist));
         return ReturnStart::unpowered;
     }
     _override.store(false);
     _returns.fetch_add(1);
-    GLOGI(kTag, "RETURN: already at the paused position, override off, PAUSE holds");
+    GLOGI(kTag, "return to paused position: already there, override off, pause holds");
     return ReturnStart::arrived;
 }
 
@@ -496,8 +496,8 @@ float MotionArbiter::forceHome(float stroke_mm) {
     // The engine reseeds itself at rest on the next accepted intent; nothing
     // here may call into it, this runs on the hub task. The e-stop latch is
     // NOT touched: the hub's release path drops it (estop(false)), into PAUSE.
-    GLOGW(kTag, "FORCE HOME: homed asserted at 0.0 mm, stroke %.1f mm "
-                "-- no homing cycle ran (RFC-025)", double(stroke));
+    GLOGW(kTag, "FORCE HOME: marked homed at 0.0 mm, stroke %.1f mm, "
+                "no homing cycle ran (RFC-025)", double(stroke));
     return stroke;
 }
 
@@ -2284,7 +2284,7 @@ void MotionArbiter::homeUnload(const char* why, uint64_t now_us) {
     _seek_v = 0.0f;
     _unload_why = why;
     const float back_mm = float(_leg_dir * (_emitter.count() - _leg_armed_at)) * kMmPerStep;
-    GLOGW(kTag, "HOME: %s; unloading the drive: back to where the sense armed, %.1f mm", why, double(back_mm));
+    GLOGW(kTag, "HOME: %s; unloading the motor: back to where the sense armed, %.1f mm", why, double(back_mm));
     // Its own deadline: a dead emitter never reaches the count.
     _home_deadline_us = now_us + uint64_t(std::fabs(back_mm) / _home_v * 1e6f) + kHomeTimeoutMarginUs;
     homeLeg(ArbEvent::HomeUnload, float(_leg_armed_at - _origin) * kMmPerStep, _home_v, false, now_us);
@@ -2457,7 +2457,7 @@ void MotionArbiter::homeContact(bool touch, int32_t hit, uint64_t now_us) {
     if (_home_leg == 1) return homeMeasure(now_us);
     homeOrigin(_home_datum[0], homeStopAt(0), now_us);
     _home_leg = 1;
-    GLOGI(kTag, "HOME: home datum taken, approaching the far end");
+    GLOGI(kTag, "HOME: home position recorded, approaching the far end");
     homeSeek(false, false, ArbEvent::HomeDatum, now_us);   // still pressed on the home stop
 }
 

@@ -143,7 +143,7 @@ KeyLoad loadKey(const char* key, std::span<std::byte> scratch) {
     }
     if (err == ESP_ERR_NVS_NOT_FOUND) return {};
     if (err == ESP_OK) return {KeyLoadStatus::Loaded, scratch.first(len)};
-    GLOGW(kTag, "stored %s unreadable: %s (scratch %u B)", key, esp_err_to_name(err),
+    GLOGW(kTag, "stored %s unreadable: %s (read buffer %u B)", key, esp_err_to_name(err),
           unsigned(scratch.size()));
     return {KeyLoadStatus::Failed, {}};
 }
@@ -166,7 +166,7 @@ bool saveBlob(const char* key, std::span<const std::byte> blob) {
     }
     nvs_handle_t h;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) {
-        GLOGW(kTag, "persist %s: nvs_open failed", key);
+        GLOGW(kTag, "persist %s: could not open settings storage", key);
         return false;
     }
     // The write is TIMED because it is a flash write on the hub task: this
@@ -279,7 +279,7 @@ void noteSavesPending(uint32_t nowMs) {
         g_holdSinceMs = std::max<uint32_t>(nowMs, 1);
         GLOGI(kTag, "flash writes held: saved in RAM, written at rest");
     } else if (!holding && g_holdSinceMs != 0) {
-        GLOGI(kTag, "flash hold released after %lu ms",
+        GLOGI(kTag, "flash writes resumed after %lu ms",
               static_cast<unsigned long>(nowMs - g_holdSinceMs));
         g_holdSinceMs = 0;
     }
@@ -319,7 +319,7 @@ uint64_t loadOrMintInstanceId() {
         } while (id == 0);
         nvs_set_u64(h, "hub_iid", id);
         nvs_commit(h);
-        GLOGI(kTag, "minted hub_instance_id %08lx%08lx",
+        GLOGI(kTag, "created hub_instance_id %08lx%08lx",
               static_cast<unsigned long>(id >> 32), static_cast<unsigned long>(id & 0xFFFFFFFFu));
     }
     nvs_close(h);
@@ -333,7 +333,7 @@ constexpr const char* kNvsNextKey = "next";
 void saveNext(linkmode::Next next) {
     nvs_handle_t h;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) {
-        GLOGW(kTag, "next-boot flag not written: nvs_open failed");
+        GLOGW(kTag, "next-boot flag not written: storage open failed");
         return;
     }
     esp_err_t err = nvs_set_u8(h, kNvsNextKey, uint8_t(next));
@@ -355,7 +355,7 @@ void saveNext(linkmode::Next next) {
     g_persistDue |= g_box->device.takePendingPersist();
     if (g_persistDue != 0) persistDue();
     if (g_box->trust.flush(g_box->hub->pairing(), g_nvs, nowMs) & kTrustLedgerFailed)
-        GLOGW(kTag, "trust ledger change not persisted before the reboot");
+        GLOGW(kTag, "paired-device list change not saved before the reboot");
     otaBuy(false, true);
     g_box->port.goodbyeAll(NackCode::REBOOTING);
     g_box->serial.goodbye(NackCode::REBOOTING);
@@ -480,7 +480,7 @@ void hubTask(void*) {
     // ESP_TASK_WDT_PANIC this loop going quiet IS that reset. Non-fatal if the
     // subscribe fails: an unwatched hub still runs.
     if (esp_task_wdt_add(nullptr) != ESP_OK)
-        GLOGW(kTag, "task watchdog subscribe failed: a hung hub will not self-reset");
+        GLOGW(kTag, "watchdog setup failed: a hung hub will not reset itself");
     TickType_t last = xTaskGetTickCount();
     PhaseClock phase;
     for (;;) {
@@ -638,7 +638,7 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
     // runtime. The TASK STACK below stays internal on purpose.
     void* mem = heap_caps_malloc(sizeof(HubBox), MALLOC_CAP_SPIRAM);
     if (mem == nullptr) {
-        GLOGE(kTag, "PSRAM alloc of %u bytes for the hub failed", unsigned(sizeof(HubBox)));
+        GLOGE(kTag, "could not reserve %u bytes of external RAM for the hub", unsigned(sizeof(HubBox)));
         geiger::drainToSinks();
         return false;
     }
@@ -647,7 +647,7 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
     g_box->device.bindTokenGate(&g_box->minter);
 
     if (!buildBootCatalog(g_box->catalog, linkmode::isConfig(route))) {
-        GLOGE(kTag, "catalog build overflowed a Catalog32 pool");
+        GLOGE(kTag, "catalog build overflowed a memory pool");
         geiger::drainToSinks();
         return false;
     }
@@ -664,13 +664,13 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
         const auto adopted = g_box->device.adoptConfigBlob(blob, storedGen);
         haveStored = adopted.has_value();
         if (!haveStored)
-            GLOGW(kTag, "stored config rejected: %s (%u B) -- factory values stand",
+            GLOGW(kTag, "stored config rejected: %s (%u B), factory values in use",
                   stored::configRejectName(adopted.error()), unsigned(blob.size()));
     }
     blob = loadBlob(kNvsPresetsKey, scratch);
     if (!blob.empty()) {
-        if (g_box->device.adoptPresetsBlob(blob)) GLOGI(kTag, "pattern presets adopted from NVS");
-        else GLOGW(kTag, "stored presets rejected (magic/version/size/name) -- store starts empty");
+        if (g_box->device.adoptPresetsBlob(blob)) GLOGI(kTag, "pattern presets loaded from storage");
+        else GLOGW(kTag, "stored presets rejected (header, version, size or name), presets start empty");
     }
 
     // The arbiter's window and ceilings ARE the stored config: pushed before
@@ -684,10 +684,10 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
     // terminates by wrapping and costs one increment per step, nothing more.
     if (haveStored) {
         while (g_box->hub->cfgGen() != storedGen) g_box->hub->bumpConfigGeneration();
-        GLOGI(kTag, "config adopted from NVS, cfg_gen=%u", unsigned(storedGen));
+        GLOGI(kTag, "config loaded from storage, cfg_gen=%u", unsigned(storedGen));
     }
     if (g_box->hub->catalogEncodedBytes() == 0) {
-        GLOGE(kTag, "catalog encoded to ZERO bytes -- it did not fit the hub scratch (%u B)",
+        GLOGE(kTag, "catalog encoded to 0 bytes: it did not fit the hub buffer (%u B)",
               unsigned(valence::Hub::catalogScratchCapacity()));
         geiger::drainToSinks();
         return false;
@@ -721,9 +721,9 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
     g_ledgerBoot.rejected = tb.ledgerRejected;
     g_ledgerBoot.paired = unsigned(tb.paired);
     if (tb.ledgerRejected)
-        GLOGE(kTag, "stored trust ledger unreadable or rejected: no pairings; "
+        GLOGE(kTag, "stored paired-device list unreadable or rejected: no pairings; "
                     "the power-cycle gesture opens pairing");
-    else GLOGI(kTag, "trust ledger: %u paired%s", unsigned(tb.paired), tb.ledgerLoaded ? "" : " (none stored)");
+    else GLOGI(kTag, "paired devices: %u%s", unsigned(tb.paired), tb.ledgerLoaded ? "" : " (none stored)");
     if (!tb.counterSaved) GLOGW(kTag, "pairing gesture counter not saved: this boot does not count");
     if (route == linkmode::Boot::config_gesture) {
         // SPEC 12.3 config-mode exception, the gesture entry only: the
@@ -731,13 +731,13 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
         // the press re-opens it.
         g_box->hub->setPresenceDefaultRole(AccessLevel::configure);
         g_box->hub->openPresenceWindow();
-        GLOGW(kTag, "CONFIG MODE (gesture, SPEC 13.4.1): BLE + USB serial, no WebSocket; "
+        GLOGW(kTag, "CONFIG MODE (gesture): BLE + USB serial, no WebSocket; "
                     "pairing open %lu s, the first knock gets configure",
               static_cast<unsigned long>(limits::pairing_window_default_s));
     } else if (route == linkmode::Boot::config_policy && !tb.claimable) {
         // SPEC 12.3: policy config mode opens no window at boot; a PAIR press
         // approves the one configure ask instead.
-        GLOGW(kTag, "CONFIG MODE (policy, SPEC 13.4.1): BLE + USB serial, no WebSocket; "
+        GLOGW(kTag, "CONFIG MODE (policy): BLE + USB serial, no WebSocket; "
                     "a PAIR press approves one configure request");
     } else if (tb.openWindow()) {
         g_box->hub->openPresenceWindow();
@@ -760,7 +760,7 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
     GLOGI(kTag, "catalog etag: %02x%02x%02x%02x%02x%02x%02x%02x",
           unsigned(etag[0]), unsigned(etag[1]), unsigned(etag[2]), unsigned(etag[3]),
           unsigned(etag[4]), unsigned(etag[5]), unsigned(etag[6]), unsigned(etag[7]));
-    GLOGI(kTag, "hub box %u B in PSRAM, boot_id=%08lx, %s",
+    GLOGI(kTag, "hub memory %u B in PSRAM, boot_id=%08lx, %s",
           unsigned(sizeof(HubBox)), static_cast<unsigned long>(g_box->hub->bootId()),
           FIRMWARE_VERSION);
 
@@ -787,7 +787,7 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
     // mode or without radios.
     const bool ws = route == linkmode::Boot::normal;
     if (ws && !g_box->port.begin(&*g_box->hub, kWsPort)) {
-        GLOGE(kTag, "WS port failed to start on :%u", unsigned(kWsPort));
+        GLOGE(kTag, "WebSocket port failed to start on :%u", unsigned(kWsPort));
         geiger::drainToSinks();
         return false;
     }
@@ -795,7 +795,7 @@ bool hubBegin(linkmode::Boot route, bool autoEntry) {
     // Non-fatal: a hub with no /uitoken still serves every watch-tier client
     // and every paired one. Losing the mint costs the browser onramp, not the
     // machine.
-    if (!g_box->minter.attachRoutes()) GLOGW(kTag, "/uitoken unavailable");
+    if (!g_box->minter.attachRoutes()) GLOGW(kTag, "browser access token unavailable (/uitoken): browser access is off");
     // Non-fatal: a typed address always works (SPEC 13.7). After the WS port,
     // so no reply names an endpoint that is not listening.
     if (ws) g_box->discovery.begin(uint16_t(udp_discovery::port), VALENCE_HUB_NAME, FIRMWARE_MAJOR_MINOR, kWsPort);

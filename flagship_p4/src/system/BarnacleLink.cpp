@@ -351,7 +351,7 @@ void onFrame(const barnacle::Frame& f, uint32_t now) {
         }
         if (none != g_noCurrent) {
             g_noCurrent = none;
-            if (none) GLOGE(kTag, "the helper reads no motor current (no ADC on IO36, or no 0 A zero measured in idle yet): home refused");
+            if (none) GLOGE(kTag, "the helper reads no motor current (no ADC on IO36, or no 0 A zero measured at idle yet): home refused");
             else      GLOGW(kTag, "the helper reads motor current again");
         }
     } else if (const std::optional<barnacle::Slow> s = barnacle::asSlow(f)) {
@@ -426,7 +426,7 @@ void judgeFreshness(uint32_t now) {
 
 void watchTrip(bool tripped, const MotionCensus& mo) {
     if (g_strayWatch.sample(tripped, g_mode))
-        GLOGW(kTag, "ANOMALY: TRIP while %s at %.3f mm, but the helper's trip is armed only for homing; "
+        GLOGW(kTag, "ANOMALY: TRIP while %s at %.3f mm, but the helper's trip is active only for homing; "
                     "nothing stops: if it repeats, check J8 pin 7 and the shim version",
               barnacle::modeName(g_mode), double(mo.position_mm));
     // The pad against the helper's own report: a wrong J8 pin 7 crimp or a
@@ -437,7 +437,7 @@ void watchTrip(bool tripped, const MotionCensus& mo) {
         return;
     }
     if (++g_disagree == kTripDisagreePasses)
-        GLOGE(kTag, "TRIP reads %s at the P4, the helper reports %s: check J8 pin 7 to pad 7 and Q4",
+        GLOGE(kTag, "TRIP reads %s at the P4, the helper reports %s: check J8 pin 7 to pad 7 and the trip circuit (Q4)",
               tripped ? "tripped" : "clear", helperSays ? "tripped" : "clear");
 }
 
@@ -549,13 +549,13 @@ public:
             return Probe::undriven;
         }
         if (h.rest_ma == barnacle::kNoCurrent) {
-            GLOGE(kTag, "home refused: the helper's current is too new for a rest reading; retry the home");
+            GLOGE(kTag, "home refused: the helper's rest current is not measured yet; retry the home");
             return Probe::undriven;
         }
         if (!barnacle::restCurrentSane(h.rest_ma, kHomeTripMa)) {
             GLOGE(kTag, "home refused: the motor reads %d mA before moving, at least half the %u mA home trip, so "
                         "the home would stall where it stands; the helper's 0 A zero is off: power-cycle the R+D "
-                        "board with the motor still",
+                        "board with the motor at rest",
                   int(h.rest_ma), unsigned(kHomeTripMa));
             return Probe::undriven;
         }
@@ -565,7 +565,7 @@ public:
         const bool tripped = padTripped();
         const bool helperSays = (h.status.flags & barnacle::kFlagTrip) != 0;
         if (tripped != helperSays) {
-            GLOGE(kTag, "home refused: TRIP reads %s, the helper reports %s (J8 pin 7 or Q4)",
+            GLOGE(kTag, "home refused: TRIP reads %s, the helper reports %s (J8 pin 7 or the trip circuit, Q4)",
                   tripped ? "tripped" : "clear", helperSays ? "tripped" : "clear");
             return Probe::undriven;
         }
@@ -588,12 +588,12 @@ public:
         gpio_set_intr_type(kTripPad, GPIO_INTR_NEGEDGE);
         const esp_err_t svc = gpio_install_isr_service(0);
         if (svc != ESP_OK && svc != ESP_ERR_INVALID_STATE) {
-            GLOGE(kTag, "LPG%d: GPIO ISR service failed (%s): home refused", BOARD_GPIO_TRIP,
+            GLOGE(kTag, "TRIP pin LPG%d: GPIO interrupt service failed (%s): home refused", BOARD_GPIO_TRIP,
                   esp_err_to_name(svc));
             return;
         }
         if (gpio_isr_handler_add(kTripPad, &onTrip, nullptr) != ESP_OK || gpio_intr_enable(kTripPad) != ESP_OK) {
-            GLOGE(kTag, "LPG%d: falling-edge interrupt not armed: home refused", BOARD_GPIO_TRIP);
+            GLOGE(kTag, "TRIP pin LPG%d: falling-edge interrupt not enabled: home refused", BOARD_GPIO_TRIP);
             return;
         }
         _ready = true;

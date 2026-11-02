@@ -42,7 +42,7 @@ httpd_handle_t http80() {
 
     const esp_err_t err = httpd_start(&g_srv, &cfg);
     if (err != ESP_OK) {
-        GLOGE(kTag, "httpd_start on :80 failed: %d", int(err));
+        GLOGE(kTag, "operator surface failed to start on :80: error %d", int(err));
         g_srv = nullptr;
         return nullptr;
     }

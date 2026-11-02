@@ -53,7 +53,7 @@ ISerialPipe* usbSerialPipeBegin() {
         return nullptr;
     }
     usb_serial_jtag_vfs_use_driver();
-    GLOGI(detail::kSerialTag, "USB serial binding on the console CDC: %lu B TX ring, %lu B RX ring",
+    GLOGI(detail::kSerialTag, "USB serial attached to the console: %lu B transmit buffer, %lu B receive buffer",
           static_cast<unsigned long>(kTxRingBytes), static_cast<unsigned long>(kRxRingBytes));
     return &g_pipe;
 }

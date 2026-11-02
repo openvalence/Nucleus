@@ -1045,7 +1045,7 @@ TEST_CASE("VD-STORE-2: a verb missing its slot or name is refused; a field the v
         rig->step();
         REQUIRE(rig->del.nacks.size() == 1);
         CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
-        CHECK(rig->del.nacks[0].detail == "slot required");
+        CHECK(rig->del.nacks[0].detail == "choose a preset slot");
     }
     for (const uint8_t op : {store_ops::save, store_ops::rename}) {
         rig->del.nacks.clear();
@@ -1054,7 +1054,7 @@ TEST_CASE("VD-STORE-2: a verb missing its slot or name is refused; a field the v
         rig->step();
         REQUIRE(rig->del.nacks.size() == 1);
         CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
-        CHECK(rig->del.nacks[0].detail == "name required");
+        CHECK(rig->del.nacks[0].detail == "enter a preset name");
     }
 
     rig->del.nacks.clear();
@@ -1097,18 +1097,18 @@ TEST_CASE("VD-STORE-3: an import stores the document's payload unread; its addre
     };
 
     import(5, "warm", presetItem(buf, 6, "warm", kPresetKind, PatternPresetStore::kPayloadBytes, true));
-    refused("item slot or name differs");
+    refused("preset file is for another slot or name");
     import(5, "warm", presetItem(buf, 5, "cold", kPresetKind, PatternPresetStore::kPayloadBytes, true));
-    refused("item slot or name differs");
+    refused("preset file is for another slot or name");
     import(5, "warm", presetItem(buf, 5, "warm", "pattern.other", PatternPresetStore::kPayloadBytes, true));
-    refused("item kind");
+    refused("file is not a pattern preset");
     import(5, "warm", presetItem(buf, 5, "warm", kPresetKind, PatternPresetStore::kPayloadBytes - 1, false));
-    refused("item size");
+    refused("preset data size differs");
     {
         auto item = presetItem(buf, 5, "warm", kPresetKind, PatternPresetStore::kPayloadBytes, true);
         buf[item.size() - 1] ^= std::byte{0x01};   // the digest is the document's last member
         import(5, "warm", item);
-        refused("item digest");
+        refused("preset data not fully verified");
     }
 
     const auto item = presetItem(buf, 5, "warm", kPresetKind, PatternPresetStore::kPayloadBytes, false);
@@ -1451,9 +1451,9 @@ TEST_CASE("VD-HOME-1: home op 1 refusals carry the arbiter's reason; a sense-les
         NackCode code;
         const char* detail;
     };
-    for (const Row row : {Row{HomeStart::no_sense, NackCode::UNSUPPORTED_OP, "no home sense on this board"},
-                          Row{HomeStart::undriven, NackCode::INTERLOCK, "home sense not driven: sensor unwired or down"},
-                          Row{HomeStart::sense_high, NackCode::INTERLOCK, "home sense already reads a stall"}}) {
+    for (const Row row : {Row{HomeStart::no_sense, NackCode::UNSUPPORTED_OP, "no home sensor on this board"},
+                          Row{HomeStart::undriven, NackCode::INTERLOCK, "home sensor unwired or down"},
+                          Row{HomeStart::sense_high, NackCode::INTERLOCK, "home sensor already reads a stall"}}) {
         auto rig = std::make_unique<Rig>();
         g_homeAnswer = row.answer;
         REQUIRE(rig->client->sendIntent(ch::home, homeOp1()).has_value());
@@ -1585,7 +1585,7 @@ TEST_CASE("VD-HOME-4: a completed cycle's rail lands in max_rail through config-
     CHECK(rig->hub->cfgGen() == uint16_t(gen + 1));                             // RFC-011, once
     CHECK(storedF32(*rig, kBlobMaxRail) == doctest::Approx(612.4f));
     CHECK((persistBitsOver(*rig, 2500) & kPersistConfig) != 0);
-    CHECK(logged("HOME: homed. Usable rail 612.4 mm between the safety margins, max_rail 612.4 mm"));
+    CHECK(logged("HOME: homed. Usable rail 612.4 mm between the safety margins, rail limit 612.4 mm"));
 
     // The same rail again: the measurement republishes, the setting and
     // cfg_gen hold.
@@ -1601,7 +1601,7 @@ TEST_CASE("VD-HOME-5: a rail past max_rail's bounds is stored clamped; measured_
     CHECK(rig->device.config().max_rail == ceiling::rail_mm);
     CHECK(stateF32(*rig, ch::machine_config, 24) == ceiling::rail_mm);
     CHECK(stateF32(*rig, ch::machine_config, 33) == doctest::Approx(2600.0f));
-    CHECK(logged("HOME: homed. Usable rail 2600.0 mm between the safety margins, max_rail 2000.0 mm"));
+    CHECK(logged("HOME: homed. Usable rail 2600.0 mm between the safety margins, rail limit 2000.0 mm"));
 }
 
 // Field 2026-10-30: a full home measured 292.1 mm, then "classic start
@@ -1749,7 +1749,7 @@ TEST_CASE("VD-HOME-9: a max_rail write holds the window inside it; a window writ
     rig->step();
     REQUIRE(rig->del.nacks.size() == 1);
     CHECK(rig->del.nacks[0].code == NackCode::INVALID_VALUE);
-    CHECK(rig->del.nacks[0].detail == "window past max_rail");
+    CHECK(rig->del.nacks[0].detail == "window past rail limit");
     win.count = 3;
     win.fields[2] = IntentValueField{8, IntentValue::ofF32(80.9f)};
     REQUIRE(rig->client->sendIntent(ch::config_set, win).has_value());
@@ -1783,7 +1783,7 @@ TEST_CASE("VD-HOME-9: a max_rail write holds the window inside it; a window writ
     REQUIRE(rig->del.nacks.size() == 2);
     CHECK(stateF32(*rig, ch::machine_config, 0) == 149.0f);
     CHECK(stateF32(*rig, ch::machine_config, 4) == 150.0f);
-    CHECK(logged("window 200.0..240.0 mm lies past max_rail 150.0 mm: held at 149.0..150.0 mm, set the window again"));
+    CHECK(logged("window 200.0..240.0 mm lies past rail limit 150.0 mm: held at 149.0..150.0 mm, set the window again"));
 }
 
 // bd val-ku3: the catalog declares 0x4100 motion-anomaly; every anomaly the

@@ -235,7 +235,7 @@ TEST_CASE("absent: a silent 0x21 is a DC-input build, motor power allowed, the a
     const pd::Assessment a = pd::assess(absent(), kSet950);
     CHECK(a.verdict == Verdict::absent);
     CHECK(a.motorAllowed());
-    CHECK(text(a) == "no PD daughterboard (0x21 silent): DC input");
+    CHECK(text(a) == "no PD daughterboard at 0x21 (no reply): DC input");
 }
 
 TEST_CASE("presence: a bus error, a stranger at 0x21 or a controller not in APP refuses") {
@@ -275,7 +275,7 @@ TEST_CASE("self-check: absent PASSES naming the absence, an over-budget contract
     sc::judgePdSource(t, pd::assess(absent(), kSet950));
     CHECK(t.entry(sc::Check::pd_source).result == sc::Result::pass);
     CHECK(std::string(t.entry(sc::Check::pd_source).reason.data()) ==
-          "no PD daughterboard (0x21 silent): DC input");
+          "no PD daughterboard at 0x21 (no reply): DC input");
     sc::judgePdSource(t, pd::assess(ready(kPdoFixed28, kRdoFixed28), kSet950));
     CHECK(t.entry(sc::Check::pd_source).result == sc::Result::fail);
     sc::judgePdSource(t, pd::assess(ready(kPdoFixed36, kRdoFixed36), kSet950));

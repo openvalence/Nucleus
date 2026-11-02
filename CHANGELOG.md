@@ -2,6 +2,23 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. Release images are published as prereleases on the web flasher (https://openvalence.org/flash/); versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.83 (2026-11-01)
+
+### For users
+
+- **Log lines, refusals and setting descriptions use plain words.** About 220 messages name things the way you see them: the motor instead of the drive or servo, the carriage instead of the emitter, a Wi-Fi join instead of `wifi_join`. Every number, unit and next step stays. A log filter or script that matches the old words needs the new ones.
+- **Phosphor fetches the machine's catalog again once after this update.** The setting descriptions are part of the catalog, so the catalog's version tag changes.
+- **A few Phosphor labels change.** A field without a standard label takes its label from the start of its description: "Requested position" (was "Asked position"), "Oscillations per second" (was "Cycles a second"), "Motion plans computed", "Motor ramp".
+
+### Technical
+
+- **String pass, the operator-approved sweep** (2026-11-01, `.claude/rules/strings.md`): 218 Nucleus rows applied. By kind: 48 catalog `desc` strings (`ValenceCatalog.h`), 130 `GLOG*` lines, 14 boot `printf` lines (`main.cpp`), 13 NACK `detail` strings, 6 HTTP reasons (`ValenceOta.cpp`, status lines unchanged), 5 `snprintf` reasons (self-check rows, the not-a-number detail), 2 `failBoot` labels (`ValencePdSource.cpp`). Format specifiers keep their count and order.
+- **T11: the catalog etag moves on purpose.** The `desc` strings are wire bytes; no test or tool pins the firmware catalog's etag.
+- **Valence 1bb7b35:** the trial-op refusal reads "use commit or revert" (`hub_impl.hpp` and its `localhub.js` mirror); `valence.pin` 4127e70 -> 1bb7b35.
+- **References updated:** `test_valence_device` (the window, preset and home-sensor details, the homed and window log lines), `test_serial_provisioning` (the join log line), `test_barnacle_link`, `test_pd_source`, the `test_crash_ring` fixture, the `tools/kinetic-lab/lab.js` titles, and Neutrino's `SimMotorSwitch.cpp` copies of the motor power ON and pre-charge lines.
+- **Skipped (9 rows):** the three ceiling-override descs ("Jerk ceiling override, 0 for automatic" and its speed and acceleration twins): their leading clause is Phosphor's label (`format.js descLabel`), and the verb-first rewrite would drop it to the wire name. "override latched: return first": Valence `hub_impl.hpp` sends the same text for the same INTERLOCK, and the two stay one text. "THERM reads %.1f C": the writer was unsure which sensor THERM names. Four lines that the rewrite pushes past geiger's 103-byte message (`kMsgBytes`), which would cut their last facts: the helper lost during a home cycle, the board I/O task start failure, DRV_ALM asserted at power-up, and motor switch FAULTED. `PdSource.h describe()` takes the log line's wording ("no PD daughterboard at 0x21 (no reply): DC input"), because two rows edited it differently.
+- FIRMWARE_VERSION 0.1.83; helper firmware stays v5.
+
 ## 0.1.82 (2026-11-01)
 
 ### For users

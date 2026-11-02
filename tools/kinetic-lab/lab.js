@@ -95,9 +95,9 @@ const MACHINE = [
   { key: 'jmax', label: 'input jerk', unit: 'mm/s³', min: 0, step: 100000 },
 ];
 const TUNE = [
-  { key: 'smoothness', label: 'smoothness', unit: 'share', min: 0, max: 1, step: 0.05, title: 'Crisp at 0, smooth at 1' },
+  { key: 'smoothness', label: 'smoothness', unit: 'share', min: 0, max: 1, step: 0.05, title: 'Set the curve from crisp (0) to smooth (1)' },
   { key: 'handle_floor', label: 'handle floor', unit: 'share', min: 0.05, max: 0.33, step: 0.01, title: 'Shortest handle the fit may use' },
-  { key: 'trim_max', label: 'max trim', unit: 'share', min: 0.1, max: 1, step: 0.05, title: 'Farthest a knot moves to fit the ceilings' },
+  { key: 'trim_max', label: 'max trim', unit: 'share', min: 0.1, max: 1, step: 0.05, title: 'Farthest a curve point moves to fit the limits' },
   { key: 'react_us', label: 'react', unit: 'µs', min: 0, step: 500, title: 'the reaction horizon: a knot arriving mid-motion re-plans from this far ahead' },
   { key: 'chase_dense_us', label: 'chase dense', unit: 'µs', min: 0, step: 1000 },
   { key: 'vmax_ovr', label: 'vmax override', unit: 'w/s', min: 0, step: 0.1, title: 'window units per second; 0 derives from the mm limits' },

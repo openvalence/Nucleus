@@ -86,7 +86,7 @@ bool ValenceUiTokenMinter::attachRoutes() {
     if (srv == nullptr) return false;
     httpd_uri_t ut{"/uitoken", HTTP_GET, handleGet, nullptr};
     if (httpd_register_uri_handler(srv, &ut) != ESP_OK) {
-        GLOGE(kTag, "route registration failed");
+        GLOGE(kTag, "/uitoken route registration failed");
         return false;
     }
     GLOGI(kTag, "GET /uitoken on :80 (no CORS headers, by design; %lu ms TTL, control tier)",

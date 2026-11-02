@@ -371,7 +371,7 @@ inline void describe(std::span<char> out, const Assessment& a) {
     int n = 0;
     switch (a.verdict) {
         case Verdict::absent:
-            n = std::snprintf(out.data(), out.size(), "no PD daughterboard (0x21 silent): DC input");
+            n = std::snprintf(out.data(), out.size(), "no PD daughterboard at 0x21 (no reply): DC input");
             break;
         case Verdict::bus_error:
             n = std::snprintf(out.data(), out.size(), "Qwiic bus error 0x%lx at 0x21: PD source unknown",

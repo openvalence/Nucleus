@@ -582,7 +582,7 @@ TEST_CASE("the self-check's helper row: never heard, stale and no slow frame fai
     h.slow.boots = 2;
     h.status.motor_mv = 36100;
     CHECK_FALSE(valence::describeHelper(h, out));   // no 0 A zero yet: no current, no gate
-    CHECK(std::string(out.data()) == "helper v1 boot 2: 36.1 V, no current: no ADC or 0 A zero");
+    CHECK(std::string(out.data()) == "helper v1 boot 2: 36.1 V, no current: no sensor or not zeroed");
     h.status.current_ma = 250;
     CHECK(valence::describeHelper(h, out));
     CHECK(std::string(out.data()) == "helper v1 boot 2: 36.1 V, 250 mA provisional");

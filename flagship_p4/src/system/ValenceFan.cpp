@@ -140,17 +140,17 @@ constexpr const char* modeName(thermal::FanMode m) {
 
 bool fanBegin() {
     if (!ledcBegin()) {
-        GLOGE(kTag, "LEDC on G%d failed: the fan stays off", BOARD_GPIO_FAN_PWM);
+        GLOGE(kTag, "fan PWM output on G%d failed: the fan stays off", BOARD_GPIO_FAN_PWM);
         return false;
     }
     if (!tachBegin()) {
         writeDuty(0.0f);
-        GLOGE(kTag, "PCNT tach on G%d failed: the fan stays off", BOARD_GPIO_FAN_TACH);
+        GLOGE(kTag, "fan tach counter on G%d failed: the fan stays off", BOARD_GPIO_FAN_TACH);
         return false;
     }
     g_lastCountUs = uint64_t(esp_timer_get_time());
     g_ok = true;
-    GLOGI(kTag, "fan host up: PWM G%d at %lu Hz, tach G%d", BOARD_GPIO_FAN_PWM,
+    GLOGI(kTag, "fan up: PWM G%d at %lu Hz, tach G%d", BOARD_GPIO_FAN_PWM,
           static_cast<unsigned long>(kPwmHz), BOARD_GPIO_FAN_TACH);
     return true;
 }
@@ -169,15 +169,15 @@ void fanService(uint32_t nowMs) {
     if (celsius && c.sensor != g_lastSensor) {
         g_lastSensor = c.sensor;
         if (c.sensor) GLOGI(kTag, "THERM reads %.1f C", double(*celsius));
-        else GLOGW(kTag, "THERM unreadable (%.2f V: J7 open, shorted or out of window): fan demand %.0f%%",
+        else GLOGW(kTag, "THERM unreadable (%.2f V: J7 open, shorted or out of window): fan set to %.0f%%",
                    double(volts.value_or(thermal::kNaN)), double(thermal::kNoSensorFraction * 100.0f));
     }
     if (!c.fitted && g_lastFitted)
-        GLOGW(kTag, "no fan fitted: no tach pulse in the %lu ms kick; FAN_PWM off for this boot",
+        GLOGW(kTag, "no fan fitted: no speed pulses in the %lu ms full-duty start; fan output off for this boot",
               static_cast<unsigned long>(thermal::kKickMs));
     g_lastFitted = c.fitted;
     if (c.tach && !g_lastTach)
-        GLOGI(kTag, "tach seen: top speed %.0f rpm, closing the loop on RPM", double(g_policy.topRpm()));
+        GLOGI(kTag, "fan speed signal seen: top speed %.0f rpm, now regulating fan speed", double(g_policy.topRpm()));
     g_lastTach = c.tach;
     if (c.stalled)
         GLOGW_EVERY_MS(60000, kTag, "stalled: no tach pulses for %lu ms, kicking at full duty",

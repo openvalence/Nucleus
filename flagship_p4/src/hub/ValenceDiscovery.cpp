@@ -82,7 +82,7 @@ bool ValenceDiscoveryPort::begin(uint16_t port, std::string_view hubName, std::s
         return false;
     }
     _sock = s;
-    GLOGI(kTag, "answering DISCOVER_PROBE on UDP :%u", unsigned(port));
+    GLOGI(kTag, "answering discovery probes on UDP :%u", unsigned(port));
     return true;
 }
 

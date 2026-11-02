@@ -61,7 +61,7 @@ void writeBackHp() { (void)esp_cache_msync(&g_crashHp, sizeof(g_crashHp), ESP_CA
 // restart (esp_hosted's on a transport failure) leaves its caller's name.
 void onRestart() {
     char t[crashring::kLastBytes];
-    snprintf(t, sizeof(t), "esp_restart from task %s at %lu ms", pcTaskGetName(nullptr),
+    snprintf(t, sizeof(t), "restart from task %s at %lu ms", pcTaskGetName(nullptr),
              static_cast<unsigned long>(esp_timer_get_time() / 1000));
     diagLastWords(t);
 }
@@ -375,7 +375,7 @@ bool diagBegin() {
     crashring::arm(g_crashHp, g_ar->_bootSeq);
     writeBackHp();
     if (esp_register_shutdown_handler(&onRestart) != ESP_OK)
-        GLOGW(kTag, "no restart hook: an esp_restart will not name its caller");
+        GLOGW(kTag, "restart hook not registered: a restart will not name its caller");
 
     geiger::logger().addSink(g_ar);
     g_espConsole.store(esp_log_set_vprintf(&espLogHook), std::memory_order_relaxed);
@@ -393,7 +393,7 @@ bool diagAttachRoutes() {
     // and a new subsystem gets a route by logging under a new tag.
     httpd_uri_t u{"/diag*", HTTP_GET, handleGet, nullptr};
     if (httpd_register_uri_handler(srv, &u) != ESP_OK) {
-        GLOGE(kTag, "route registration failed");
+        GLOGE(kTag, "/diag route registration failed");
         return false;
     }
     GLOGI(kTag, "GET /diag[/<tag>][?from=<seq>] on :80");

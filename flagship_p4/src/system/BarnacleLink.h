@@ -174,7 +174,7 @@ constexpr bool helperRestarted(const barnacle::Slow& was, const barnacle::Slow& 
 // into `out`.
 inline bool describeHelper(const HelperReading& h, std::span<char> out) {
     if (!h.ever) {
-        std::snprintf(out.data(), out.size(), "no frame from the WROOM helper on J8 pin 9");
+        std::snprintf(out.data(), out.size(), "no frame from the helper on J8 pin 9");
         return false;
     }
     if (!h.fresh) {
@@ -189,7 +189,7 @@ inline bool describeHelper(const HelperReading& h, std::span<char> out) {
     const bool zeroed = h.status.current_ma != barnacle::kNoCurrent;
     std::array<char, 40> current{};
     if (!zeroed)
-        std::snprintf(current.data(), current.size(), "no current: no ADC or 0 A zero");
+        std::snprintf(current.data(), current.size(), "no current: no sensor or not zeroed");
     else
         std::snprintf(current.data(), current.size(), "%d %s", int(h.status.current_ma),
                       (h.status.flags & barnacle::kFlagCalibrated) != 0 ? "mA" : "mA provisional");

@@ -434,7 +434,7 @@ size_t BoardStation::scanOrder(std::span<uint8_t, net::SavedNetworks::kCapacity>
     for (size_t i = 0; i < _mine.count(); ++i)
         packed |= (uint64_t(_mine.id(i)) | uint64_t(uint8_t(rssi[i])) << 8) << (16 * i);
     _heard.store(packed, std::memory_order_release);
-    GLOGI(kTag, "scan: %u BSSIDs; saved slots seen %d %d %d %d dBm", unsigned(n), int(rssi[0]), int(rssi[1]),
+    GLOGI(kTag, "scan: %u access points; saved networks seen %d %d %d %d dBm", unsigned(n), int(rssi[0]), int(rssi[1]),
           int(rssi[2]), int(rssi[3]));
     return k;
 }
@@ -506,15 +506,15 @@ bool BoardStation::pickerScan(uint32_t seq) {
         esp_wifi_scan_stop();
         esp_wifi_clear_ap_list();
         const bool joinCut = requestPending();
-        GLOGI(kTag, "picker scan %s", joinCut ? "stopped for wifi_join"
-                                      : (bits & kScanStop) ? "stopped: motion" : "did not finish");
+        GLOGI(kTag, "picker scan %s", joinCut ? "stopped for a join request"
+                                      : (bits & kScanStop) ? "stopped: machine moving" : "did not finish");
         return joinCut;
     }
     uint16_t n = kScanRecords;
     if (esp_wifi_scan_get_ap_records(&n, _records) != ESP_OK) n = 0;
     const size_t k = sightings(n, heard);
     offerHeard(std::span<const net::Sighting>(heard.data(), k));
-    GLOGD(kTag, "picker scan: %u BSSIDs, %u listed", unsigned(n), unsigned(k));
+    GLOGD(kTag, "picker scan: %u access points, %u listed", unsigned(n), unsigned(k));
     return false;
 }
 
@@ -557,7 +557,7 @@ JoinOutcome BoardStation::attempt(std::string_view ssid, std::string_view pass, 
                     // esp_netif keeps the address in network order; cbor_keys
                     // 47 is the host value with the first octet high.
                     out.ipv4 = __builtin_bswap32(_ip.load(std::memory_order_acquire));
-                    GLOGI(kTag, "via ..%02x:%02x ch %u rssi %d dBm", ap.bssid[4], ap.bssid[5], unsigned(ap.primary),
+                    GLOGI(kTag, "joined via access point ..%02x:%02x, channel %u, signal %d dBm", ap.bssid[4], ap.bssid[5], unsigned(ap.primary),
                           int(ap.rssi));
                     _linkRssi.store(ap.rssi, std::memory_order_relaxed);
                 }
@@ -610,10 +610,10 @@ bool BoardStation::joinSaved() {
         if (r.joined) {
             _joined.assign(_mine.ssid(i), _mine.passphrase(i));
             reportLive(_mine.id(i));
-            GLOGI(kTag, "joined slot %u, %u saved", unsigned(i), unsigned(n));
+            GLOGI(kTag, "joined saved network %u, %u saved", unsigned(i), unsigned(n));
             return true;
         }
-        GLOGW(kTag, "slot %u did not join, %u saved: %s", unsigned(i), unsigned(n),
+        GLOGW(kTag, "saved network %u did not join, %u saved: %s", unsigned(i), unsigned(n),
               r.why == JoinFailure::auth ? "authentication failed"
               : r.why == JoinFailure::not_found ? "not found" : "timed out");
     }
@@ -634,7 +634,7 @@ void BoardStation::run() {
             _out = attempt(_req.ssidView(), _req.passView(), limits::provision_join_timeout_ms, kProvisionTries);
             if (_out.joined) _joined.assign(_req.ssidView(), _req.passView());
             _doneSeq.store(seq, std::memory_order_release);
-            GLOGI(kTag, "wifi_join %s; Station stack %lu B free of %lu", _out.joined ? "done" : "failed",
+            GLOGI(kTag, "wifi join %s; join task stack %lu B free of %lu", _out.joined ? "done" : "failed",
                   static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)),
                   static_cast<unsigned long>(kTaskStackBytes));
             // Joined: the hub stores it and offers the list back, and
@@ -660,7 +660,7 @@ INetStation& stationNets() { return g_station; }
 
 bool stationBegin(bool joinSaved) {
     const bool ok = g_station.begin(joinSaved);
-    if (!ok) GLOGE(kTag, "Station task not started: no joins");
+    if (!ok) GLOGE(kTag, "wifi join task not started: no joins");
     return ok;
 }
 

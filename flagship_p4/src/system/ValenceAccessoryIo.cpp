@@ -134,7 +134,7 @@ i2c_master_bus_handle_t openQwiic() {
     bus.flags.enable_internal_pullup = 1;
     i2c_master_bus_handle_t h = nullptr;
     if (i2c_new_master_bus(&bus, &h) != ESP_OK) {
-        GLOGE(kTag, "Qwiic I2C bus would not open on SDA G%d, SCL G%d (both HP ports taken?)",
+        GLOGE(kTag, "Qwiic I2C bus would not open on SDA G%d, SCL G%d (both I2C ports in use?)",
               BOARD_GPIO_QWIIC_SDA, BOARD_GPIO_QWIIC_SCL);
         return nullptr;
     }
@@ -218,7 +218,7 @@ bool accessoryIoBegin() {
               BOARD_GPIO_PUMP_PWM, BOARD_GPIO_EXT_PWM, static_cast<unsigned long>(kPwmHz),
               BOARD_GPIO_AUX1, BOARD_GPIO_AUX2);
     else
-        GLOGE(kTag, "LEDC timer %d (pump G%d, EXT PWM G%d) failed: both PWMs stay off",
+        GLOGE(kTag, "PWM timer %d (pump G%d, EXT PWM G%d) failed: both PWMs stay off",
               int(kLedcTimer), BOARD_GPIO_PUMP_PWM, BOARD_GPIO_EXT_PWM);
     return pwm;
 }

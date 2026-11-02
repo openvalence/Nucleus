@@ -339,11 +339,11 @@ esp_err_t ValenceWsPort::wsHandler(httpd_req_t* req) {
                                                           std::memory_order_acq_rel)) {
                 g_port->_slots[i].bind(req->handle, fd);
                 g_port->_wantAttach[i].store(true, std::memory_order_release);
-                GLOGI(kTag, "fd %d -> slot %u", fd, unsigned(i));
+                GLOGI(kTag, "websocket client on fd %d assigned to slot %u", fd, unsigned(i));
                 return ESP_OK;
             }
         }
-        GLOGW(kTag, "all %u slots busy -- refusing fd %d", unsigned(kSlots), fd);
+        GLOGW(kTag, "all %u websocket slots busy, refused fd %d", unsigned(kSlots), fd);
         httpd_sess_trigger_close(req->handle, fd);
         return ESP_FAIL;
     }
@@ -432,7 +432,7 @@ bool ValenceWsPort::begin(valence::Hub* hub, uint16_t port) {
 
     esp_err_t err = httpd_start(&_srv, &cfg);
     if (err != ESP_OK) {
-        GLOGE(kTag, "httpd_start on :%u failed: %d", unsigned(port), int(err));
+        GLOGE(kTag, "websocket server failed to start on :%u (error %d)", unsigned(port), int(err));
         return false;
     }
 
@@ -443,7 +443,7 @@ bool ValenceWsPort::begin(valence::Hub* hub, uint16_t port) {
     httpd_uri_t named{"/valence", HTTP_GET, wsHandler, nullptr, true, true, "valence.v1"};
     if (httpd_register_uri_handler(_srv, &root) != ESP_OK ||
         httpd_register_uri_handler(_srv, &named) != ESP_OK) {
-        GLOGE(kTag, "WS URI registration failed");
+        GLOGE(kTag, "websocket URI registration failed");
         return false;
     }
     GLOGI(kTag, "listening on :%u at / and /valence (subprotocol valence.v1), %u slots",
@@ -463,7 +463,7 @@ void ValenceWsPort::loop(uint32_t nowMs) {
             if (_hub->attachTransport(s)) {
                 _attached[i] = true;
             } else {
-                GLOGW(kTag, "hub has no session slot for ws slot %u -- closing", unsigned(i));
+                GLOGW(kTag, "no session available for websocket slot %u, closing", unsigned(i));
                 s.close();
             }
         }
@@ -480,7 +480,7 @@ void ValenceWsPort::loop(uint32_t nowMs) {
                 _attached[i] = false;
             }
             _inUse[i].store(false, std::memory_order_release);
-            GLOGI(kTag, "slot %u released", unsigned(i));
+            GLOGI(kTag, "websocket slot %u released", unsigned(i));
             continue;
         }
 
@@ -498,7 +498,7 @@ void ValenceWsPort::loop(uint32_t nowMs) {
         if (s.closeRequested()) continue;
 
         if (s.idleOut(nowMs)) {
-            GLOGW(kTag, "slot %u silent >%lums -- reaping", unsigned(i),
+            GLOGW(kTag, "websocket slot %u silent for over %lums, closing", unsigned(i),
                   static_cast<unsigned long>(ValenceWsTransport::kIdleReapMs));
             s.close();
             continue;
@@ -507,7 +507,7 @@ void ValenceWsPort::loop(uint32_t nowMs) {
         // A control frame waiting kCtrlStallMs is the one case where a client
         // really is stranded waiting on a reply that will never come.
         if (s.stalledOut(nowMs)) {
-            GLOGW(kTag, "slot %u control stalled >%lums -- disconnecting", unsigned(i),
+            GLOGW(kTag, "websocket slot %u: control message waiting over %lums, disconnecting", unsigned(i),
                   static_cast<unsigned long>(ValenceWsTransport::kCtrlStallMs));
             s.close();
         }

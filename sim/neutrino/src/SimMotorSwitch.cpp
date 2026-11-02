@@ -91,7 +91,7 @@ void simMotorSwitchTick(uint64_t now_us) {
     const Readings r = readings(now_us);
     if (g_sw.step(r, now_us)) {
         if (g_sw.state() == State::on) {
-            GLOGI(kTag, "motor power ON after %lu ms pre-charge: IMON %.3f A, MOTOR_V+ %.1f V",
+            GLOGI(kTag, "motor power ON after %lu ms pre-charge: current %.3f A, motor voltage %.1f V",
                   static_cast<unsigned long>(motorswitch::kPrechargeUs / 1000), double(r.imon_a),
                   double(r.motor_v));
         } else {
@@ -122,7 +122,7 @@ motorswitch::Refusal motorSwitchRequestEnable() {
         GLOGE(kTag, "enable refused: %s", motorswitch::refusalName(why));
     } else if (was != State::precharging && g_sw.state() == State::precharging) {
         g_windowStartUs = now;
-        GLOGI(kTag, "pre-charge: PRECHARGE_EN high for %lu ms",
+        GLOGI(kTag, "pre-charge started for %lu ms",
               static_cast<unsigned long>(motorswitch::kPrechargeUs / 1000));
     }
     return why;

@@ -65,7 +65,7 @@ TEST_CASE("CR-03: a line longer than a crumb truncates and still dedupes") {
 TEST_CASE("CR-04: the LP copy wins, the HP copy stands in, garbage is no copy") {
     Ring lp = armed(16);
     Ring hp = armed(16);
-    add(hp, "W ota rebooting into the new slot");
+    add(hp, "W ota rebooting to run the new firmware");
     CHECK(pick(lp, hp) == &lp);
 
     std::memset(&lp, 0x5A, sizeof(lp));   // the LP RAM a system reset leaves

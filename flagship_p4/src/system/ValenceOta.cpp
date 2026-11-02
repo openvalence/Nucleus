@@ -127,20 +127,20 @@ esp_err_t fail(httpd_req_t* req, const char* status, const char* why) {
 // successful flash. One short-lived task, one delay, one restart.
 void rebootTask(void*) {
     vTaskDelay(pdMS_TO_TICKS(600));
-    GLOGW(kTag, "rebooting into the new slot");
+    GLOGW(kTag, "rebooting to run the new firmware");
     vTaskDelay(pdMS_TO_TICKS(50));
     esp_restart();
 }
 
 esp_err_t handleArm(httpd_req_t* req) {
-    if (otaInFlight()) return fail(req, "409 Conflict", "an update is already in flight");
+    if (otaInFlight()) return fail(req, "409 Conflict", "an update is already running");
     if (const char* why = idleRefusalNow()) return fail(req, "409 Conflict", why);
     uint32_t id = 0;
     while (id == 0) id = esp_random();
     portENTER_CRITICAL(&g_armLock);
     const bool armed = g_arm.arm(id, nowMs());
     portEXIT_CRITICAL(&g_armLock);
-    if (!armed) return fail(req, "409 Conflict", "another update request is waiting for its PAIR double press");
+    if (!armed) return fail(req, "409 Conflict", "another update request is waiting for a PAIR double press");
     GLOGW(kTag, "update request %08lx: double-press PAIR within %lu s", static_cast<unsigned long>(id),
           static_cast<unsigned long>(ota::kArmWindowMs / 1000));
     char body[48];
@@ -166,7 +166,7 @@ esp_err_t refuseClaimed(httpd_req_t* req, const char* status, const char* why) {
 }
 
 esp_err_t handlePost(httpd_req_t* req) {
-    if (g_inFlight.exchange(true)) return fail(req, "409 Conflict", "an update is already in flight");
+    if (g_inFlight.exchange(true)) return fail(req, "409 Conflict", "an update is already running");
     if (const char* why = idleRefusalNow()) return refuseClaimed(req, "409 Conflict", why);
     const bool bench = benchTokenOk(req);
     if (!bench) {
@@ -180,14 +180,14 @@ esp_err_t handlePost(httpd_req_t* req) {
     }
 
     const size_t total = size_t(req->content_len);
-    if (total < kMinImageBytes) return refuseClaimed(req, "400 Bad Request", "body too short to be an app image");
+    if (total < kMinImageBytes) return refuseClaimed(req, "400 Bad Request", "file too small to be firmware");
 
     const esp_partition_t* target = esp_ota_get_next_update_partition(nullptr);
     if (target == nullptr) return refuseClaimed(req, "500 Internal Server Error", "no spare OTA slot");
-    if (total > target->size) return refuseClaimed(req, "400 Bad Request", "image larger than the target slot");
+    if (total > target->size) return refuseClaimed(req, "400 Bad Request", "image larger than the update slot");
 
     auto* buf = static_cast<uint8_t*>(heap_caps_malloc(kChunkBytes, MALLOC_CAP_INTERNAL));
-    if (buf == nullptr) return refuseClaimed(req, "503 Service Unavailable", "no internal buffer");
+    if (buf == nullptr) return refuseClaimed(req, "503 Service Unavailable", "out of memory");
 
     // The board gate reads the head before esp_ota_begin erases anything
     // (OtaArm.h imageFit()). kMinImageBytes > kChunkBytes, so no read here
@@ -288,7 +288,7 @@ bool otaBegin() {
     }
     GLOGI(kTag, "POST /ota/arm, GET /ota/arm, POST /ota on :80 (PAIR double press%s), running %s%s",
           NUCLEUS_BENCH_NO_MOTOR ? " or the bench token" : "", otaRunningSlot(),
-          otaPendingVerify() ? " (PENDING_VERIFY: not bought yet)" : "");
+          otaPendingVerify() ? " (PENDING_VERIFY: not confirmed yet)" : "");
     return true;
 }
 
@@ -296,11 +296,11 @@ void otaBuy(bool live, bool atRest) {
     portENTER_CRITICAL(&g_buyLock);
     const ota::Buy b = g_buy.take(live, atRest);
     portEXIT_CRITICAL(&g_buyLock);
-    if (b == ota::Buy::held) GLOGW(kTag, "image buy held: motion runs, it lands at the first rest");
+    if (b == ota::Buy::held) GLOGW(kTag, "image confirm held: motion runs, it completes at the first rest");
     if (b != ota::Buy::now) return;
     const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-    if (err == ESP_OK) GLOGW(kTag, "image bought: %s is now the boot slot", otaRunningSlot());
-    else GLOGE(kTag, "mark_app_valid failed: %s", esp_err_to_name(err));
+    if (err == ESP_OK) GLOGW(kTag, "image confirmed: %s is now the boot slot", otaRunningSlot());
+    else GLOGE(kTag, "image confirmation failed: %s", esp_err_to_name(err));
 }
 
 bool otaBuyHeld() {

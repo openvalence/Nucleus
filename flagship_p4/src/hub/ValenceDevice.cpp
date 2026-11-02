@@ -694,10 +694,10 @@ Ret ValenceDevice::applyConfig(const IntentValueMap& requested, bool& cfgChanged
     // value and is refused; any other write collapses such a window, logged.
     if (next.window_min >= next.max_rail && (f1 != nullptr || f2 != nullptr))
         return refuse(NackCode::INVALID_VALUE,
-                      measured && next.window_min >= stroke ? kDetailPastStroke : "window past max_rail");
+                      measured && next.window_min >= stroke ? kDetailPastStroke : "window past rail limit");
     const StoredConfig asked = next;
     if (holdWindowInRail(next))
-        GLOGW(kTag, "window %.1f..%.1f mm lies past max_rail %.1f mm: held at %.1f..%.1f mm, set the window again",
+        GLOGW(kTag, "window %.1f..%.1f mm lies past rail limit %.1f mm: held at %.1f..%.1f mm, set the window again",
               double(asked.window_min), double(asked.window_max), double(next.max_rail), double(next.window_min),
               double(next.window_max));
 
@@ -746,12 +746,12 @@ void ValenceDevice::adoptMeasuredRail(float rail_mm) {
     m.fields[0] = IntentValueField{8, IntentValue::ofF32(rail_mm)};
     bool changed = false;
     if (!durable(applyConfig(m, changed))) {
-        GLOGW(kTag, "HOME: homed, rail measured %.1f mm, but max_rail refused it", double(rail_mm));
+        GLOGW(kTag, "HOME: homed, rail measured %.1f mm, but the rail limit refused it", double(rail_mm));
         return;
     }
     _cfgDirty = true;
     _cfgGenOwed |= changed;
-    GLOGW(kTag, "HOME: homed. Usable rail %.1f mm between the safety margins, max_rail %.1f mm",
+    GLOGW(kTag, "HOME: homed. Usable rail %.1f mm between the safety margins, rail limit %.1f mm",
           double(rail_mm), double(_cfg.max_rail));
 }
 
@@ -1071,13 +1071,13 @@ Ret ValenceDevice::applyPresets(const IntentValueMap& requested) {
         if (*slotV < 0.0f || *slotV >= float(PatternPresetStore::kCapacity)) return Ret::err(NackCode::INVALID_VALUE);
         slot = uint8_t(wholeIn(*slotV, 0.0f, float(PatternPresetStore::kCapacity - 1)));
     } else if (verb != store_ops::save) {
-        return refuse(NackCode::INVALID_VALUE, "slot required");
+        return refuse(NackCode::INVALID_VALUE, "choose a preset slot");
     }
     const auto* nameF = findField(requested, 3);
     const bool hasName = nameF && nameF->value.kind == IntentValue::Kind::Tstr;
     const std::string_view name = hasName ? nameF->value.tstr_val : std::string_view{};
     if (!hasName && (verb == store_ops::save || verb == store_ops::rename))
-        return refuse(NackCode::INVALID_VALUE, "name required");
+        return refuse(NackCode::INVALID_VALUE, "enter a preset name");
     const auto* itemF = verb == store_ops::save ? findField(requested, 4) : nullptr;
 
     switch (verb) {
@@ -1088,13 +1088,13 @@ Ret ValenceDevice::applyPresets(const IntentValueMap& requested) {
             if (itemF) {
                 if (itemF->value.kind != IntentValue::Kind::Bstr) return refuse(NackCode::INVALID_VALUE, "item");
                 const auto doc = decodeStoreItem(itemF->value.bstr_val);
-                if (!doc) return refuse(NackCode::INVALID_VALUE, "item malformed");
+                if (!doc) return refuse(NackCode::INVALID_VALUE, "preset file cannot be read");
                 if (doc.value().slot != *slot || doc.value().name != name)
-                    return refuse(NackCode::INVALID_VALUE, "item slot or name differs");
-                if (doc.value().kind != std::string_view(kPresetKind)) return refuse(NackCode::INVALID_VALUE, "item kind");
-                if (doc.value().payload.size() != payload.size()) return refuse(NackCode::INVALID_VALUE, "item size");
+                    return refuse(NackCode::INVALID_VALUE, "preset file is for another slot or name");
+                if (doc.value().kind != std::string_view(kPresetKind)) return refuse(NackCode::INVALID_VALUE, "file is not a pattern preset");
+                if (doc.value().payload.size() != payload.size()) return refuse(NackCode::INVALID_VALUE, "preset data size differs");
                 if (storeItemDoneStatus(doc.value()) != BlobDoneStatus::VerifiedComplete)
-                    return refuse(NackCode::INVALID_VALUE, "item digest");
+                    return refuse(NackCode::INVALID_VALUE, "preset data not fully verified");
                 std::memcpy(payload.data(), doc.value().payload.data(), payload.size());
             }
             if (!_presets.save(*slot, name, payload)) return Ret::err(NackCode::INVALID_VALUE);
@@ -1425,7 +1425,7 @@ Ret ValenceDevice::applyMove(const IntentValueMap& requested) {
     // The mark is the count before the submit, so a move the planner takes at
     // once still reads as taken; it is stored only once the submit lands, so
     // a refused move leaves the last submitted move's mark (sourceQuiet()).
-    if (!motionSubmit(in)) return refuse(NackCode::INTERLOCK, "motion path refused the intent");
+    if (!motionSubmit(in)) return refuse(NackCode::INTERLOCK, "the machine refused the move");
     _jogMark = c.intents + c.rejected;
 
     // Ground truth: echo the post-clamp position, against the SAME bounds the
@@ -1463,7 +1463,7 @@ Ret ValenceDevice::refuseNotANumber(uint16_t channel_id, uint8_t key) {
         for (const SchemaField& f : _catalog->schemaFields(*e))
             if (f.key == key) name = f.name;
     if (name.empty())
-        std::snprintf(_nackDetail.data(), _nackDetail.size(), "key %u: not a number", unsigned(key));
+        std::snprintf(_nackDetail.data(), _nackDetail.size(), "field %u: not a number", unsigned(key));
     else
         std::snprintf(_nackDetail.data(), _nackDetail.size(), "%.*s: not a number", int(name.size()),
                       name.data());
@@ -1588,11 +1588,11 @@ Ret ValenceDevice::applySafety(const IntentValueMap& requested) {
             // accepted first and is braked. The generator keeps its settings
             // and parks on the census's paused bit, so resume re-arms it.
             motionPause(true);
-            GLOGW(kTag, "PAUSE: every source suspended, braking to rest");
+            GLOGW(kTag, "PAUSE: all motion suspended, braking to rest");
             break;
         case safety_ops::resume:
             motionPause(false);
-            GLOGI(kTag, "RESUME: sources re-armed");
+            GLOGI(kTag, "RESUME: motion allowed again");
             break;
         default:
             return Ret::err(NackCode::UNSUPPORTED_OP);
@@ -1629,7 +1629,7 @@ Ret ValenceDevice::applyHome(const IntentValueMap& requested) {
             if (c.estop) return refuse(NackCode::ESTOP_ACTIVE, kDetailEstop);
             // Under PAUSE an owning source is suspended (SPEC 11.1 admits the
             // home verb there); outside it, an owner is driving the rail.
-            if (railOwned() && !c.paused) return refuse(NackCode::SOURCE_CONFLICT, "a source owns the rail");
+            if (railOwned() && !c.paused) return refuse(NackCode::SOURCE_CONFLICT, "rail busy: pause first");
             const bool overrideOn = _hub != nullptr &&
                                     (_hub->safetyModes() & safety_mode_bits::OVERRIDE) != 0;
             if (overrideOn || _returnPending) return refuse(NackCode::INTERLOCK, "override latched: return first");
@@ -1648,11 +1648,11 @@ Ret ValenceDevice::applyHome(const IntentValueMap& requested) {
                 case HomeStart::no_sense:
                     GLOGW_EVERY_MS(60000, kTag, "home op 1 refused: no home sense on this board "
                                    "-- force_home (op 2) on a motorless rig");
-                    return refuse(NackCode::UNSUPPORTED_OP, "no home sense on this board");
+                    return refuse(NackCode::UNSUPPORTED_OP, "no home sensor on this board");
                 case HomeStart::undriven:
-                    return refuse(NackCode::INTERLOCK, "home sense not driven: sensor unwired or down");
+                    return refuse(NackCode::INTERLOCK, "home sensor unwired or down");
                 case HomeStart::sense_high:
-                    return refuse(NackCode::INTERLOCK, "home sense already reads a stall");
+                    return refuse(NackCode::INTERLOCK, "home sensor already reads a stall");
                 case HomeStart::estop:
                     return refuse(NackCode::ESTOP_ACTIVE, kDetailEstop);
                 case HomeStart::unpowered:
@@ -2301,7 +2301,7 @@ void ValenceDevice::servicePair(button::PairGesture g, uint32_t nowMs) {
             return;
         }
         case button::PairGesture::extra:
-            GLOGW(kTag, "PAIR: 3 or more presses: no gesture");
+            GLOGW(kTag, "PAIR button: 3 or more presses, ignored");
             return;
         default:
             return;
@@ -2324,7 +2324,7 @@ void ValenceDevice::approveAsk(const char* gesture, uint32_t nowMs) {
     if (r == A::approved) {
         _pairFlashUntilMs = nowMs;
         _presenceSession = asker;
-        GLOGW(kTag, "%s: the pending configure request approved at configure", gesture);
+        GLOGW(kTag, "%s: approved the pending configure request", gesture);
         return;
     }
     _pairFlash = PairLook::refused;
@@ -2351,7 +2351,7 @@ void ValenceDevice::homeFromButton() {
 // PAUSE's brake without PAUSE's latch: the hub's safety word moves once,
 // to ESTOP, when the brake is done (serviceButtons()).
 void ValenceDevice::beginReboot(uint32_t nowMs) {
-    GLOGW(kTag, "HOME hold: graceful reboot: braking, then ESTOP, GOODBYE REBOOTING, NVS flush, restart");
+    GLOGW(kTag, "HOME hold: graceful reboot: braking, then ESTOP, telling clients, saving settings, restart");
     motionPause(true);
     _reboot = Reboot::braking;
     _rebootBrakeUntilMs = nowMs + kRebootBrakeMs;
@@ -2375,8 +2375,8 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     if (_clearLatch) {
         _clearLatch = false;
         if (_hub->estopLatched()) {
-            if (_hub->releaseEstop()) GLOGW(kTag, "ESTOP released by force_home: PAUSE, resume to run");
-            else GLOGW(kTag, "force_home could not release the ESTOP latch: %s", _nackDetail.data());
+            if (_hub->releaseEstop()) GLOGW(kTag, "ESTOP released by a forced home: PAUSE, resume to run");
+            else GLOGW(kTag, "forced home could not release the ESTOP latch: %s", _nackDetail.data());
         }
     }
     if (_homeDone) {
@@ -2427,7 +2427,7 @@ uint8_t ValenceDevice::tick(uint32_t nowMs) {
     // the motor switch fault above: cause fault, the hub its own initiator at
     // its highest tier. A latch already held keeps its own cause.
     if (driveAlarmTake() && !_hub->estopLatched()) {
-        GLOGE(kTag, "drive alarm (DRV_ALM): latching ESTOP, cause fault");
+        GLOGE(kTag, "motor alarm (DRV_ALM): latching ESTOP, cause fault");
         _hub->latchEstop(safety_causes::fault, uint8_t(AccessLevel::configure));
     }
     // The motion plane, from ONE census so no two channels disagree about the

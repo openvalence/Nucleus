@@ -242,7 +242,7 @@ bool glowBegin() {
 #else
     if (ok) GLOGI(kTag, "status pixel on G%d: GRBW, brightness %u/255", BOARD_GPIO_LED_DATA,
                   unsigned(kBrightness));
-    else    GLOGE(kTag, "status pixel RMT channel on G%d failed: the LED stays dark",
+    else    GLOGE(kTag, "status pixel failed to start on G%d: the LED stays dark",
                   BOARD_GPIO_LED_DATA);
 #endif
     return ok;

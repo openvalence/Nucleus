@@ -91,21 +91,21 @@ public:
             // Already installed by another driver is not an error here.
             const esp_err_t svc = gpio_install_isr_service(0);
             if (svc != ESP_OK && svc != ESP_ERR_INVALID_STATE) {
-                GLOGE(kTag, "G%d: GPIO ISR service failed (%s): home refused", BOARD_GPIO_HOME_SENSE,
+                GLOGE(kTag, "G%d: GPIO interrupt service failed (%s): homing refused", BOARD_GPIO_HOME_SENSE,
                       esp_err_to_name(svc));
                 return;
             }
             if (gpio_isr_handler_add(pad(), &onRise, nullptr) != ESP_OK ||
                 gpio_intr_enable(pad()) != ESP_OK) {
-                GLOGE(kTag, "G%d: rising-edge interrupt not armed: home refused", BOARD_GPIO_HOME_SENSE);
+                GLOGE(kTag, "G%d: rising-edge interrupt not armed: homing refused", BOARD_GPIO_HOME_SENSE);
                 return;
             }
             _ready = true;
-            GLOGI(kTag, "home sense on G%d: active high, pull-down, a rise confirmed %lu us on (reads %d)",
+            GLOGI(kTag, "home sensor on G%d: active high, pull-down, rise confirmed after %lu us high (reads %d)",
                   BOARD_GPIO_HOME_SENSE, static_cast<unsigned long>(kHomeSenseDebounceUs),
                   gpio_get_level(pad()));
         } else {
-            GLOGI(kTag, "no home sense on this board: home op 1 refuses");
+            GLOGI(kTag, "no home sensor on this board: homing (op 1) refused");
         }
     }
 

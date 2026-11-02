@@ -159,7 +159,7 @@ esp_err_t refresh(pd::Reading& r) {
             g_armTried = true;
             g_irqArmed = armIrq();
             if (!g_irqArmed)
-                GLOGW(kTag, "INT_MASK1 did not take: PD_INT stays quiet, the contract is polled every %lu ms",
+                GLOGW(kTag, "power delivery interrupt not enabled: the contract is polled every %lu ms",
                       static_cast<unsigned long>(kPollEveryMs));
         }
         e = readContract(next.contract);
@@ -210,7 +210,7 @@ void logBoot() {
         return;
     }
     const pd::Profile p = pd::profileFor(c);
-    GLOGI(kTag, "TPS26750 at 0x%02x (APP): %.1f V %.2f A %s #%u (%.0f W%s), +BUS %.1f V, motion budget %.0f W%s",
+    GLOGI(kTag, "TPS26750 at 0x%02x (APP): %.1f V %.2f A %s #%u (%.0f W%s), bus %.1f V, motion budget %.0f W%s",
           unsigned(pd::kAddress), double(c.mv) * 1e-3, double(c.ma) * 1e-3, pd::supplyName(c.supply),
           unsigned(c.position), double(c.watts()), c.mismatch ? ", capability mismatch" : "",
           double(p.bus_mv) * 1e-3, double(p.budget_w), p.buck ? ", 48 V build" : "");
@@ -238,7 +238,7 @@ bool pdSourceBegin() {
     if (bus == nullptr) {
         failBoot(ESP_ERR_INVALID_STATE, "Qwiic bus not open");
     } else if ((e = i2c_master_probe(bus, pd::kAddress, kTimeoutMs)) == ESP_ERR_NOT_FOUND) {
-        GLOGI(kTag, "no PD daughterboard (0x%02x silent): DC input", unsigned(pd::kAddress));
+        GLOGI(kTag, "no PD daughterboard at 0x%02x (no reply): DC input", unsigned(pd::kAddress));
     } else if (e != ESP_OK) {
         failBoot(e, "Qwiic probe failed");
     } else {
@@ -248,18 +248,18 @@ bool pdSourceBegin() {
         dev.scl_speed_hz = kSclHz;
         if ((e = i2c_master_bus_add_device(bus, &dev, &g_dev)) != ESP_OK) {
             g_dev = nullptr;
-            failBoot(e, "device add failed");
+            failBoot(e, "PD chip attach failed");
         } else if ((e = readMode(g_owned)) == ESP_ERR_INVALID_SIZE) {
             g_owned.presence = pd::Presence::foreign;   // ACKed, but no TI block came back
             g_owned.mode_text = {'?', '?', '?', '?', '\0'};
         } else if (e != ESP_OK) {
-            failBoot(e, "MODE unreadable");
+            failBoot(e, "PD chip mode unreadable");
         } else if (g_owned.presence != pd::Presence::foreign) {
             // A TPS26750, so writes are safe. Pending events (Plug Insert sets
             // at reset) are cleared BEFORE the contract read: an event after
             // the read holds PD_INT for the first service.
             pd::IntBits ev{};
-            if (takeEvents(ev) != ESP_OK) GLOGW(kTag, "INT_EVENT1 not cleared at boot");
+            if (takeEvents(ev) != ESP_OK) GLOGW(kTag, "PD interrupt flags not cleared at boot");
             if ((e = refresh(g_owned)) != ESP_OK) failBoot(e, "contract unreadable");
             else logBoot();
         }

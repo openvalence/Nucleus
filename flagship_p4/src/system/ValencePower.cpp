@@ -95,7 +95,7 @@ bool powerBegin() {
     mon.scl_speed_hz = kSclHz;
     if (i2c_master_bus_add_device(g_bus, &mon, &g_monitorDev) != ESP_OK) {
         g_monitorDev = nullptr;
-        GLOGE(kTag, "board monitor device add failed");
+        GLOGE(kTag, "could not attach the board monitor to the bus");
     } else {
         // Before any other task runs: the status pixel's +5V gate
         // (ValenceGlow.cpp) starts from the monitor's reading.
@@ -113,7 +113,7 @@ bool powerBegin() {
     dev.device_address = kAddress;
     dev.scl_speed_hz = kSclHz;
     if (i2c_master_bus_add_device(g_bus, &dev, &g_dev) != ESP_OK) {
-        GLOGE(kTag, "I2C device add failed");
+        GLOGE(kTag, "could not attach the power monitor to the I2C bus");
         return false;
     }
 
@@ -134,11 +134,11 @@ bool powerBegin() {
     g_chip = chip;
     powerTakeAlerts();   // start with the latch clear
 
-    GLOGI(kTag, "%s at 0x%02x (id 0x%04x), %.3f mA/LSB, SOVL %.1f A, BOVL %.1f V",
+    GLOGI(kTag, "%s at 0x%02x (id 0x%04x), %.3f mA per step, over-current limit %.1f A, over-voltage limit %.1f V",
           powerChipName(chip), unsigned(kAddress), unsigned(id.device),
           double(g_scale.current_lsb_a * 1000.0f), double(kShuntOverAmps), double(kBusOverVolts));
     if (const auto r = powerRead())
-        GLOGI(kTag, "bus %.2f V, current %.3f A, die %.1f C", double(r->bus_v),
+        GLOGI(kTag, "bus %.2f V, current %.3f A, chip temperature %.1f C", double(r->bus_v),
               double(r->current_a), double(r->die_c));
     return true;
 }

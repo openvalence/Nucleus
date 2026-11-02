@@ -125,7 +125,7 @@ bool uartBegin() {
                            UART_PIN_NO_CHANGE);
     if (err == ESP_OK) err = gpio_pullup_en(pin(BOARD_GPIO_RS485_RX));
     if (err != ESP_OK) {
-        GLOGE(kTag, "UART%d RS485 setup failed (%s): no drive link this boot; DE held low",
+        GLOGE(kTag, "UART%d RS485 setup failed (%s): no motor link this boot; DE held low",
               int(kUart), esp_err_to_name(err));
         return false;
     }
@@ -163,7 +163,7 @@ void reportAlarm() {
         GLOGE(kTag, "DRV_ALM asserted as the drive came up: the drive is in alarm, or its WR is "
                     "normally closed (0x07 odd); the hub latches ESTOP");
     else
-        GLOGE(kTag, "DRV_ALM: the drive raised an alarm and halted; the hub latches ESTOP");
+        GLOGE(kTag, "motor alarm: the motor raised an alarm and halted; the machine latches ESTOP");
 }
 
 void reportLink(const aim::Snapshot& was, const aim::Snapshot& is) {
@@ -179,9 +179,9 @@ void reportLink(const aim::Snapshot& was, const aim::Snapshot& is) {
     }
     if (is.alarmCodeKnown && (!was.alarmCodeKnown || is.alarmCode != was.alarmCode)) {
         if (is.alarmCode != 0)
-            GLOGW(kTag, "drive alarm code 0x%02x (%s)", unsigned(is.alarmCode), aim::alarmName(is.alarmCode));
+            GLOGW(kTag, "motor alarm code 0x%02x (%s)", unsigned(is.alarmCode), aim::alarmName(is.alarmCode));
         else if (was.alarmCodeKnown)
-            GLOGI(kTag, "drive alarm code cleared");
+            GLOGI(kTag, "motor alarm code cleared");
     }
 }
 
@@ -264,13 +264,13 @@ bool driveLinkBegin() {
     if (xTaskCreatePinnedToCore(&taskMain, "DriveLnk", kDriveLinkTaskStackBytes, nullptr, 2, &g_task, 0) !=
         pdPASS) {
         g_task = nullptr;
-        GLOGE(kTag, "drive-link task did not start: DRV_ALM and DRV_RDY unwatched, no drive link");
+        GLOGE(kTag, "motor link task did not start: motor alarm and ready inputs unwatched, no motor link");
         return false;
     }
     if (!kBuilt)
-        GLOGI(kTag, "drive link not in this build: DRV_ALM and DRV_RDY watched, DE held low");
+        GLOGI(kTag, "motor link not in this build: motor alarm and ready inputs watched, DE held low");
     else if (g_uartUp)
-        GLOGI(kTag, "drive link on UART%d, TX G%d RX G%d DE G%d: probing once motor power settles",
+        GLOGI(kTag, "motor link on UART%d, TX G%d RX G%d DE G%d: probing once motor power settles",
               int(kUart), BOARD_GPIO_RS485_TX, BOARD_GPIO_RS485_RX, BOARD_GPIO_RS485_DE);
     return true;
 }

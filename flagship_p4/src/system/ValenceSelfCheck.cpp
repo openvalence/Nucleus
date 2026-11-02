@@ -268,10 +268,10 @@ void logEntry(Check c) {
 void logSummary() {
     const SelfCheckSummary s = selfCheckSummary();
     if (s.allowed && kBarnacle) {
-        GLOGI(kTag, "motion gate OPEN: every check this board has passed, %u absent on the R+D board",
+        GLOGI(kTag, "motor power ALLOWED: every check this board has passed, %u absent on the R+D board",
               unsigned(g_table.count(Verdict::absent)));
     } else if (s.allowed) {
-        GLOGI(kTag, "motor power ALLOWED: every pre-enable check passed, the enable sequence runs");
+        GLOGI(kTag, "motor power ALLOWED: every check passed, the enable sequence runs");
     } else if (s.failed > 0) {
         GLOGE(kTag, "motor power held OFF: %u failed, %u skipped; first: %s",
               unsigned(s.failed), unsigned(s.skipped), s.first);

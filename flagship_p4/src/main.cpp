@@ -103,7 +103,7 @@ static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
             g_wifi_down_us = esp_timer_get_time();
             const uint32_t n = g_wifi_drops.load(std::memory_order_relaxed) + 1;
             g_wifi_drops.store(n, std::memory_order_relaxed);
-            GLOGW("wifi", "DROP #%lu: %s (%u), rssi %d dBm", static_cast<unsigned long>(n),
+            GLOGW("wifi", "connection lost (drop #%lu): %s (%u), rssi %d dBm", static_cast<unsigned long>(n),
                   wifi_reason_name(d->reason), unsigned(d->reason), int(d->rssi));
         } else {
             GLOGW_EVERY_MS(5000, "wifi", "join failed: %s (%u)", wifi_reason_name(d->reason), unsigned(d->reason));
@@ -125,7 +125,7 @@ static void wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
             // is the AP holding inbound frames to a beacon.
             wifi_ps_type_t ps = WIFI_PS_MIN_MODEM;
             const esp_err_t pe = esp_wifi_get_ps(&ps);
-            GLOGI("wifi", "joined, ip %s, power save %d (%s)", g_ip, int(ps), esp_err_to_name(pe));
+            GLOGI("wifi", "joined, ip %s, power save mode %d (query result: %s)", g_ip, int(ps), esp_err_to_name(pe));
         }
     }
 }
@@ -146,7 +146,7 @@ static bool nvs_up() {
 static bool wifi_up(bool joinSaved, bool radios) {
     esp_err_t err;
     if ((err = esp_netif_init()) != ESP_OK)                  { printf("esp_netif_init: %s\n", esp_err_to_name(err)); return false; }
-    if ((err = esp_event_loop_create_default()) != ESP_OK)   { printf("event loop: %s\n", esp_err_to_name(err)); return false; }
+    if ((err = esp_event_loop_create_default()) != ESP_OK)   { printf("event loop create failed: %s\n", esp_err_to_name(err)); return false; }
     esp_netif_create_default_wifi_sta();
 
     // esp_hosted 2.x does not self-start under esp_wifi_init: bring the SDIO
@@ -154,14 +154,14 @@ static bool wifi_up(bool joinSaved, bool radios) {
     // version line is the evidence the C6 carries the hosted slave image.
     const int64_t t0 = esp_timer_get_time();
     int rc = esp_hosted_init();
-    printf("esp_hosted_init: %d in %.0f ms\n", rc, (esp_timer_get_time() - t0) / 1000.0);
+    printf("C6 link init: %d in %.0f ms\n", rc, (esp_timer_get_time() - t0) / 1000.0);
     if (rc != 0) return false;
     rc = esp_hosted_connect_to_slave();
-    printf("esp_hosted_connect_to_slave: %d at %.0f ms\n", rc, (esp_timer_get_time() - t0) / 1000.0);
+    printf("C6 link connect: %d at %.0f ms\n", rc, (esp_timer_get_time() - t0) / 1000.0);
     if (rc != 0) return false;
     esp_hosted_coprocessor_fwver_t ver = {};
     rc = esp_hosted_get_coprocessor_fwversion(&ver);
-    printf("C6 slave firmware: rc=%d version %u.%u.%u\n", rc, unsigned(ver.major1), unsigned(ver.minor1), unsigned(ver.patch1));
+    printf("C6 firmware: rc=%d version %u.%u.%u\n", rc, unsigned(ver.major1), unsigned(ver.minor1), unsigned(ver.patch1));
     g_hosted_ok = (rc == 0);
 
     // The saved list (RFC-116) and the task that joins from it, before the
@@ -170,13 +170,13 @@ static bool wifi_up(bool joinSaved, bool radios) {
     printf("saved networks: %u\n", unsigned(valence::stationBootList().count()));
     g_have_credentials = valence::stationBootList().count() > 0;
     if (!radios) {
-        printf("radios OFF (stored setting): USB serial only\n");
+        printf("Wi-Fi and BLE off (stored setting): USB serial only\n");
         return true;
     }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     err = esp_wifi_init(&cfg);
-    printf("esp_wifi_init (remoted to the C6): %s at %.0f ms\n",
+    printf("Wi-Fi init on the C6: %s at %.0f ms\n",
            esp_err_to_name(err), (esp_timer_get_time() - t0) / 1000.0);
     if (err != ESP_OK) return false;
 
@@ -197,7 +197,7 @@ static bool wifi_up(bool joinSaved, bool radios) {
     // problem and gets hunted there. Measured both ways on the bench; the
     // numbers live on bd val-091.11.
     if ((err = esp_wifi_set_ps(WIFI_PS_NONE)) != ESP_OK)
-        GLOGW("wifi", "wifi_set_ps(NONE): %s -- inbound frames will wait for DTIM", esp_err_to_name(err));
+        GLOGW("wifi", "Wi-Fi power save off failed: %s, inbound frames wait for DTIM", esp_err_to_name(err));
     return true;
 }
 
@@ -224,7 +224,7 @@ static bool pairHeldAtBoot() {
 static bool start_lp_core() {
     esp_err_t err = ulp_lp_core_load_binary(ulp_main_bin_start,
                                             size_t(ulp_main_bin_end - ulp_main_bin_start));
-    if (err != ESP_OK) { printf("ulp_lp_core_load_binary failed: %s\n", esp_err_to_name(err)); return false; }
+    if (err != ESP_OK) { printf("LP core load failed: %s\n", esp_err_to_name(err)); return false; }
 
     // Steer BEFORE run so the first edge is already on cadence. The LP core
     // parks on step == 0, so ordering is a nicety, not a race.
@@ -242,7 +242,7 @@ static bool start_lp_core() {
     ulp_lp_core_cfg_t cfg = {};
     cfg.wakeup_source = ULP_LP_CORE_WAKEUP_SOURCE_HP_CPU;   // start once, never sleep
     err = ulp_lp_core_run(&cfg);
-    if (err != ESP_OK) { printf("ulp_lp_core_run failed: %s\n", esp_err_to_name(err)); return false; }
+    if (err != ESP_OK) { printf("LP core start failed: %s\n", esp_err_to_name(err)); return false; }
     return true;
 }
 
@@ -340,16 +340,16 @@ extern "C" void app_main() {
     // motor-rail entries read its state, and the switch needs the power
     // monitor above for its ALERT re-arm and MOTOR_V+. It enables nothing
     // until the self-check's verdict below says so.
-    if (!valence::motorSwitchBegin()) printf("--- motor switch host FAILED: motor power stays off ---\n");
+    if (!valence::motorSwitchBegin()) printf("--- motor switch FAILED to start: motor power stays off ---\n");
 
     // The status pixel, the fan and the HOME button, early so the boot
     // rainbow covers the rest of the boot. AFTER the motor switch: THERM is
     // sampled on its ADC poll.
-    if (!valence::boardIoBegin()) printf("--- BoardIo task FAILED: no status pixel, fan off ---\n");
+    if (!valence::boardIoBegin()) printf("--- board I/O task FAILED: no status pixel, fan off ---\n");
 
     // DRV_ALM and DRV_RDY from here on, the drive's Modbus probe once motor
     // power settles. AFTER the motor switch: its task reads the switch.
-    if (!valence::driveLinkBegin()) printf("--- drive-link task FAILED: DRV_ALM unwatched ---\n");
+    if (!valence::driveLinkBegin()) printf("--- motor link task FAILED: DRV_ALM not watched ---\n");
 
     const bool lp_ok = start_lp_core();
     if (lp_ok) report_lp();
@@ -367,7 +367,7 @@ extern "C" void app_main() {
     const bool gesture = valence::linkmode::decideBoot(boot) == valence::linkmode::Boot::config_gesture;
     boot.radiosOff = !gesture && nvs_ok && valence::hubStoredRadiosOff();
 
-    printf("\n--- network: esp_hosted over SDIO to the C6 ---\n");
+    printf("\n--- network: the C6 radio, linked over SDIO ---\n");
     const bool wifi_ok = nvs_ok && wifi_up(!gesture, !boot.radiosOff);
     if (!wifi_ok) printf("--- network FAILED to start ---\n");
     boot.haveCredentials = g_have_credentials;
@@ -378,7 +378,7 @@ extern "C" void app_main() {
     // the arbiter is their sole writer.
     // BEFORE the hub, and that order is load-bearing: the hub's boot publish of
     // every motion STATE channel reads motionCensus().
-    printf("\n--- motion path (arbiter + kinetic + LP emitter) ---\n");
+    printf("\n--- motion path (motion control, Kinetic planner, LP core) ---\n");
     const bool motion_ok = valence::motionBegin();
     if (!motion_ok) printf("--- motion path FAILED to start ---\n");
 
@@ -405,7 +405,7 @@ extern "C" void app_main() {
     // log bridge so its verdict reaches the wire (0x0008) through the hub
     // task's drain. Its verdict is the motor switch's gate: a pass runs the
     // enable sequence now, anything else holds motor power off for the boot.
-    if (!valence::logBridgeBegin()) printf("--- log bridge FAILED: Geiger sink table full ---\n");
+    if (!valence::logBridgeBegin()) printf("--- log bridge FAILED: log listener table full ---\n");
     valence::SelfCheckFacts facts;
     facts.lpEdges = ulp_g_edges;
     facts.hostLink = g_hosted_ok;

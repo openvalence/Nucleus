@@ -160,12 +160,12 @@ bool adcBegin() {
     adc_unit_t unitImon{};
     adc_unit_t unitEn{};
     if (adc_oneshot_io_to_channel(BOARD_GPIO_MSW_IMON, &unitImon, &g_chImon) != ESP_OK) {
-        GLOGE(kTag, "G%d is not an ADC pad: motor power can never enable", BOARD_GPIO_MSW_IMON);
+        GLOGE(kTag, "G%d is not an analog input pin: motor power can never enable", BOARD_GPIO_MSW_IMON);
         return false;
     }
     if (kHasEnNode && (adc_oneshot_io_to_channel(BOARD_GPIO_EN_NODE, &unitEn, &g_chEn) != ESP_OK ||
                        unitImon != unitEn)) {
-        GLOGE(kTag, "G%d/G%d are not one ADC unit: motor power can never enable",
+        GLOGE(kTag, "G%d/G%d are not on one analog input unit: motor power can never enable",
               BOARD_GPIO_MSW_IMON, BOARD_GPIO_EN_NODE);
         return false;
     }
@@ -173,7 +173,7 @@ bool adcBegin() {
     adc_oneshot_unit_init_cfg_t unit{};
     unit.unit_id = unitImon;
     if (adc_oneshot_new_unit(&unit, &g_adc) != ESP_OK) {
-        GLOGE(kTag, "ADC unit %d init failed: motor power can never enable", int(unitImon) + 1);
+        GLOGE(kTag, "analog input unit %d failed to start: motor power can never enable", int(unitImon) + 1);
         return false;
     }
     adc_oneshot_chan_cfg_t chan{};
@@ -182,7 +182,7 @@ bool adcBegin() {
     if (adc_oneshot_config_channel(g_adc, g_chImon, &chan) != ESP_OK ||
         (kHasEnNode && adc_oneshot_config_channel(g_adc, g_chEn, &chan) != ESP_OK) ||
         !caliFor(unitImon, g_chImon, &g_caliImon) || (kHasEnNode && !caliFor(unitImon, g_chEn, &g_caliEn))) {
-        GLOGE(kTag, "ADC channel or calibration setup failed: motor power can never enable");
+        GLOGE(kTag, "analog input channel or calibration setup failed: motor power can never enable");
         return false;
     }
     return true;
@@ -199,7 +199,7 @@ void thermBegin() {
         unit != g_adcUnit || adc_oneshot_config_channel(g_adc, g_chTherm, &chan) != ESP_OK ||
         !caliFor(unit, g_chTherm, &g_caliTherm)) {
         g_caliTherm = nullptr;
-        GLOGW(kTag, "THERM G%d not readable on the switch's ADC unit: the fan runs without a temperature",
+        GLOGW(kTag, "THERM G%d not readable on the switch's analog input unit: the fan runs without a temperature",
               BOARD_GPIO_THERM);
     }
 }
@@ -244,16 +244,16 @@ void logMonitorCause() {
     std::array<uint8_t, SV_STATUS_LEN> b{};
     SvStatus s{};
     if (boardMonitorRead(SV_REG_STATUS, b) != ESP_OK || sv_status_decode(b.data(), b.size(), &s) != SV_OK) {
-        GLOGW(kTag, "EN node trip: board monitor STATUS unreadable, cause not named");
+        GLOGW(kTag, "motor power trip: board monitor status unreadable, cause not named");
         return;
     }
     const uint16_t f = uint16_t((s.faults_live | s.faults_latched) & SV_FAULT_MASK);
     if (f == 0 && s.cut_live == 0) {
-        GLOGW(kTag, "EN node trip: board monitor reports no fault (E-stop, bus OVP or INA ALERT)");
+        GLOGW(kTag, "motor power trip: board monitor reports no fault (E-stop, bus overvoltage or INA ALERT)");
         return;
     }
     for (uint16_t bit = 1; bit != 0 && bit <= SV_FAULT_MASK; bit = uint16_t(bit << 1)) {
-        if (f & bit) GLOGE(kTag, "EN node trip: board monitor %s fault%s", sv_fault_name(bit),
+        if (f & bit) GLOGE(kTag, "motor power trip: board monitor %s fault%s", sv_fault_name(bit),
                            (s.faults_live & bit) ? "" : " (latched, cleared since)");
     }
     if (s.cut_live) GLOGE(kTag, "EN node trip: board monitor is cutting the input stage (cut 0x%02x)",
@@ -264,7 +264,7 @@ void logMonitorCause() {
 
 void logTransition(State is, Fault f, const Readings& r) {
     if (is == State::on) {
-        GLOGI(kTag, "motor power ON after %lu ms pre-charge: IMON %.3f A, MOTOR_V+ %.1f V",
+        GLOGI(kTag, "motor power ON after %lu ms pre-charge: current %.3f A, motor voltage %.1f V",
               static_cast<unsigned long>(motorswitch::kPrechargeUs / 1000), double(r.imon_a),
               double(r.motor_v));
     } else if (is == State::faulted) {
@@ -285,13 +285,13 @@ void serviceEnable() {
     // The board monitor's latched faults hold FAULT_N, so the EN node, until
     // CLEAR_LATCHED; it clears only those whose condition is gone.
     if (const esp_err_t err = boardMonitorCommand(SV_CMD_CLEAR_LATCHED, 0); err != ESP_OK)
-        GLOGW(kTag, "re-arm: board monitor CLEAR_LATCHED not sent (%s)", esp_err_to_name(err));
+        GLOGW(kTag, "enable: latched-fault clear not sent to board monitor (%s)", esp_err_to_name(err));
     // The INA's latched ALERT holds the EN node down until DIAG_ALRT is read
     // (ValencePower.h): that read plus this sequence's MOTOR_EN toggle is the
     // re-arm, never one alone.
     if (const std::optional<uint16_t> flags = powerTakeAlerts()) {
         if (*flags & (ina2xx::kFlagShuntOver | ina2xx::kFlagBusOver)) {
-            GLOGW(kTag, "re-arm: power monitor had latched%s%s (DIAG_ALRT 0x%04x)",
+            GLOGW(kTag, "enable: power monitor had latched%s%s (alert register 0x%04x)",
                   (*flags & ina2xx::kFlagShuntOver) ? " shunt over-current" : "",
                   (*flags & ina2xx::kFlagBusOver) ? " bus over-voltage" : "", unsigned(*flags));
         }
@@ -320,10 +320,10 @@ void serviceEnable() {
     if (dropped) {
         GLOGW(kTag, "enable dropped: a power cut followed the request");
     } else if (why != Refusal::none) {
-        GLOGE(kTag, "enable refused: %s (FLT %s, EN node %.2f V)", motorswitch::refusalName(why),
+        GLOGE(kTag, "enable refused: %s (fault line %s, EN node %.2f V)", motorswitch::refusalName(why),
               r.fault_line ? "low" : "high", double(r.en_node_v));
     } else if (started) {
-        GLOGI(kTag, "pre-charge: PRECHARGE_EN high for %lu ms (EN node %.2f V)",
+        GLOGI(kTag, "pre-charge started for %lu ms (EN node %.2f V)",
               static_cast<unsigned long>(motorswitch::kPrechargeUs / 1000), double(r.en_node_v));
     }
 }
@@ -397,7 +397,7 @@ bool motorSwitchBegin() {
         GLOGE(kTag, "switch task did not start: motor power stays off");
         return false;
     }
-    GLOGI(kTag, "motor switch host up: FLT %s, EN node %.2f V, IMON %.3f A%s",
+    GLOGI(kTag, "motor switch ready: fault line %s, EN node %.2f V, current %.3f A%s",
           r.fault_line ? "low" : "high", double(r.en_node_v), double(r.imon_a),
           adcOk ? "" : " (ADC down: enable refused)");
     return true;
