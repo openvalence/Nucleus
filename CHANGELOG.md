@@ -2,6 +2,18 @@
 
 Newest first. Each entry has two parts: what you will notice, and what changed in the code. Release images are published as prereleases on the web flasher (https://openvalence.org/flash/); versions are the `FIRMWARE_VERSION` builds (`flagship_p4/src/hub/valence_config.h`), with `-p4hub` on release images and `-p4hub-bench` on bench images.
 
+## 0.1.85 (2026-11-02)
+
+### For users
+
+- **Motor power words replace "EN node".** The motor switch lines read "trip line" for the voltage on the line that cuts motor power. The fault and the matching refusal read "motor power trip" and "a hardware kill holds motor power tripped". A log filter or script that matches "EN node" needs the new words.
+- **The catalog does not change.** Phosphor keeps its cached copy.
+
+### Technical
+
+- `MotorSwitch.h` `faultName(Fault::en_node)` and `refusalName(Refusal::en_node)`; the fault name also reaches the INTERLOCK NACK detail (33 B, under the 48 B limit), the refusal name only log lines; four `ValenceMotorSwitch.cpp` log lines (readings, enable refused, pre-charge started, ready), each under 103 bytes with realistic values. Code identifiers (`en_node`, `en_node_v`, `BOARD_GPIO_EN_NODE`) stay; Neutrino shares the header. No test or parser matched the old text.
+- FIRMWARE_VERSION 0.1.85; the catalog etag does not move; helper firmware stays v5.
+
 ## 0.1.84 (2026-11-01)
 
 ### For users

@@ -269,7 +269,7 @@ void logTransition(State is, Fault f, const Readings& r) {
               double(r.motor_v));
     } else if (is == State::faulted) {
         GLOGE(kTag, "motor switch FAULTED, power latched off until release: %s", motorswitch::faultName(f));
-        GLOGE(kTag, "motor switch readings: fault line %s, EN node %.2f V, current %.3f A, motor voltage %.1f V",
+        GLOGE(kTag, "motor switch readings: fault line %s, trip line %.2f V, current %.3f A, motor voltage %.1f V",
               r.fault_line ? "low" : "high", double(r.en_node_v), double(r.imon_a), double(r.motor_v));
     }
 }
@@ -319,10 +319,10 @@ void serviceEnable() {
     if (dropped) {
         GLOGW(kTag, "enable dropped: a power cut followed the request");
     } else if (why != Refusal::none) {
-        GLOGE(kTag, "enable refused: %s (fault line %s, EN node %.2f V)", motorswitch::refusalName(why),
+        GLOGE(kTag, "enable refused: %s (fault line %s, trip line %.2f V)", motorswitch::refusalName(why),
               r.fault_line ? "low" : "high", double(r.en_node_v));
     } else if (started) {
-        GLOGI(kTag, "pre-charge started for %lu ms (EN node %.2f V)",
+        GLOGI(kTag, "pre-charge started for %lu ms (trip line %.2f V)",
               static_cast<unsigned long>(motorswitch::kPrechargeUs / 1000), double(r.en_node_v));
     }
 }
@@ -396,7 +396,7 @@ bool motorSwitchBegin() {
         GLOGE(kTag, "switch task did not start: motor power stays off");
         return false;
     }
-    GLOGI(kTag, "motor switch ready: fault line %s, EN node %.2f V, current %.3f A%s",
+    GLOGI(kTag, "motor switch ready: fault line %s, trip line %.2f V, current %.3f A%s",
           r.fault_line ? "low" : "high", double(r.en_node_v), double(r.imon_a),
           adcOk ? "" : " (ADC down: enable refused)");
     return true;

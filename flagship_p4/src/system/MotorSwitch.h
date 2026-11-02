@@ -119,7 +119,7 @@ constexpr const char* faultName(Fault f) {
     switch (f) {
         case Fault::none:       return "none";
         case Fault::fault_line: return "MSW_FLT_N low";
-        case Fault::en_node:    return "EN node low";
+        case Fault::en_node:    return "motor power trip";
         case Fault::inrush:     return "inrush over ceiling";
         case Fault::precharge:  return "MOTOR_V+ did not rise";
         case Fault::motor_v:    return "MOTOR_V+ lost while on";
@@ -132,7 +132,7 @@ constexpr const char* refusalName(Refusal r) {
         case Refusal::none:       return "accepted";
         case Refusal::self_check: return "the boot self-check holds motor power off";
         case Refusal::fault_line: return "MSW_FLT_N still low";
-        case Refusal::en_node:    return "a hardware kill holds the EN node down";
+        case Refusal::en_node:    return "a hardware kill holds motor power tripped";
         case Refusal::host_down:  return "the motor switch host is not running";
         case Refusal::source:     return "the PD contract cannot carry the ceilings";
     }
